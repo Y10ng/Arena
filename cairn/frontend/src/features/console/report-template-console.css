@@ -1,0 +1,117 @@
+.report-templates-console .master-detail__master {
+  min-width: 19rem;
+}
+
+.report-template-create,
+.report-template-detail,
+.report-template-editor {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.report-template-create {
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.report-template-list {
+  max-height: 32rem;
+  overflow-y: auto;
+}
+
+.report-template-heading,
+.report-template-provenance {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.report-template-heading h2,
+.report-template-heading p {
+  margin: 0;
+}
+
+.report-template-heading p {
+  margin-top: var(--space-1);
+  color: var(--text-muted);
+}
+
+.report-template-version-layout {
+  display: grid;
+  grid-template-columns: minmax(12rem, 16rem) minmax(0, 1fr);
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.report-template-versions {
+  display: grid;
+  align-content: start;
+  gap: var(--space-2);
+}
+
+.report-template-version-item {
+  width: 100%;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-1);
+  background: var(--surface-raised);
+  color: var(--text);
+  text-align: left;
+}
+
+.report-template-version-item:hover,
+.report-template-version-item.active {
+  border-color: var(--accent);
+  background: var(--surface-selected);
+}
+
+.report-template-version-item span,
+.report-template-version-item small,
+.report-template-provenance {
+  color: var(--text-muted);
+}
+
+.report-template-version-item span,
+.report-template-version-item small,
+.report-template-provenance code {
+  overflow-wrap: anywhere;
+}
+
+.report-template-provenance {
+  flex-wrap: wrap;
+  font-size: var(--text-sm);
+}
+
+.report-template-provenance span {
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .report-template-version-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .report-template-versions {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .report-template-versions .master-subhead,
+  .report-template-versions .ui-alert,
+  .report-template-versions > .text-faint {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 640px) {
+  .report-template-heading,
+  .report-template-provenance {
+    flex-direction: column;
+  }
+
+  .report-template-versions {
+    grid-template-columns: 1fr;
+  }
+}

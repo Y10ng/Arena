@@ -1,0 +1,63 @@
+server: "http://127.0.0.1:8000"
+dispatcher_id: "arena-local"
+
+runtime:
+  interval: 3
+  max_workers: 8
+  max_running_projects: 3
+  max_project_workers: 4
+  healthcheck_timeout: 30
+  prompt_group: "goal-driven-v1"
+  # 同一 TaskRun 跨阶段复用；完整收尾后定向关闭。已有配置缺省仍为 legacy。
+  playwright_session_policy: "task"
+
+tasks:
+  bootstrap:
+    timeout: 600
+    conclude_timeout: 300
+  reason:
+    timeout: 600
+    max_intents: 3
+  explore:
+    timeout: 900
+    conclude_timeout: 300
+  report:
+    timeout: 600
+
+container:
+  image: "arena-worker:local"
+  allowed_images: []
+  network_mode: "host"
+  # 留空时使用 Docker 默认 resolver；仅填写部署方批准并实测可达的 DNS IP。
+  dns: []
+  completed_action: "stop"
+  execution_profile: "shared_local"
+  cap_add: []
+
+providers: []
+models: []
+images: []
+execution_profiles:
+  - id: "default"
+    image_ref: "default"
+    network_policy: "host"
+    cap_add: []
+    isolation: "shared_container"
+    completed_action: "stop"
+  - id: "network"
+    image_ref: "default"
+    network_policy: "host"
+    cap_add: []
+    isolation: "shared_container"
+    completed_action: "stop"
+  - id: "restricted"
+    image_ref: "default"
+    network_policy: "host"
+    cap_add: []
+    isolation: "shared_container"
+    completed_action: "stop"
+    mem_limit: "1536m"
+    memswap_limit: "1536m"
+    pids_limit: 256
+common_env: {}
+workers: []

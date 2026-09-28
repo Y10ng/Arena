@@ -1,0 +1,53 @@
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "vue-tsc -b",
+    "lint": "eslint .",
+    "format:check": "prettier --check package.json index.html vite.config.ts vitest.config.ts vitest.component.config.ts playwright.config.ts eslint.config.js src/api/client.ts src/api/client.test.ts src/api/types.ts src/api/types/audit.ts src/api/types/injection_payloads.ts src/api/types/projects.ts src/components/ToastHost.vue src/components/ToastHost.component.test.ts src/components/ui src/components/patterns/index.ts src/components/patterns/ConfirmAction.vue src/components/patterns/ConfirmAction.component.test.ts src/components/patterns/DataTable.vue src/components/patterns/DataTable.component.test.ts src/components/patterns/ErrorState.vue src/components/patterns/ErrorState.component.test.ts src/components/patterns/FilterBar.vue src/components/patterns/FilterBar.component.test.ts src/components/patterns/MasterDetail.vue src/components/patterns/MasterDetail.component.test.ts src/components/patterns/TextEditor.vue src/components/patterns/TextEditor.component.test.ts src/design-system src/features/auth/LoginPage.vue src/features/auth/ChangePasswordPage.vue src/features/auth/AuthPages.component.test.ts src/features/console/TimeoutConsole.vue src/features/console/TimeoutConsole.component.test.ts src/features/console/WorkersConsole.vue src/features/console/WorkersConsole.component.test.ts src/features/console/PromptGroupsConsole.vue src/features/console/prompt-console.css src/features/console/PromptGroupsConsole.component.test.ts src/features/console/ScenariosConsole.vue src/features/console/useScenariosConsole.ts src/features/console/runtime-console.css src/features/console/ScenariosConsole.component.test.ts src/features/runs/RunsPage.vue src/features/runs/RunsPage-layout.css src/features/runs/RunsPage-terminal.css src/features/runs/RunsPage.component.test.ts src/features/runs/runTypes.ts src/features/runs/runTerminalModel.ts src/features/runs/runTerminalModel.test.ts src/features/runs/useRunsPage.ts src/features/runs/useRunsPage.component.test.ts src/features/vulnerabilities src/features/reports src/features/graph/GraphPage.vue src/features/graph/GraphPage.css src/features/graph/GraphPage.component.test.ts src/features/graph/GraphDetailsDrawer.vue src/features/graph/GraphPage-drawers.css src/features/graph/graphTypes.ts src/features/graph/useGraphSelection.ts src/features/graph/useGraphFullscreen.ts src/features/graph/GraphDetailsDrawer.component.test.ts src/features/graph/useGraphFullscreen.component.test.ts src/features/overview/Overview.vue src/features/overview/Overview.css src/features/coverage src/features/findings src/features/targets src/features/artifacts src/features/provenance src/features/hints src/features/audit src/features/models/TenantModelsPage.vue src/features/models/tenantModelsPage.css src/features/models/TenantModelsPage.component.test.ts src/features/projects/ProjectWorkspace.vue src/features/projects/ProjectWorkspace.css src/features/projects/ProjectWorkspace.component.test.ts src/features/projects/workspaceStatus.test.ts src/features/projects/Projects.vue src/features/projects/Projects.css src/features/projects/Projects-list.css src/features/projects/Projects-dialogs.css src/features/projects/Projects.component.test.ts src/features/projects/useProjectsPage.ts src/features/payloads src/layouts/FrontLayout.vue src/layouts/FrontLayout-shell.css src/layouts/FrontLayout-palette.css src/layouts/FrontLayout.component.test.ts src/features/workers/TenantWorkersPage.vue src/features/workers/tenantWorkersPage.css src/features/workers/TenantWorkersPage.component.test.ts src/stores/ui.ts src/migration e2e",
+    "test": "npm run test:unit",
+    "test:unit": "vitest run --config vitest.config.ts",
+    "test:component": "vitest run --config vitest.component.config.ts --passWithNoTests",
+    "test:e2e": "playwright test",
+    "test:a11y": "playwright test --grep @a11y",
+    "build": "npm run build:server",
+    "build:verify": "npm run typecheck && vite build --mode verify",
+    "build:server": "npm run typecheck && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@dagrejs/dagre": "^3.0.0",
+    "@lucide/vue": "^1.17.0",
+    "@tanstack/vue-query": "^5.101.0",
+    "markdown-it": "^14.2.0",
+    "monaco-editor": "^0.55.1",
+    "pinia": "^3.0.4",
+    "reka-ui": "^2.10.3",
+    "vue": "^3.5.34",
+    "vue-router": "^4.6.4"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.62.1",
+    "@types/dagre": "^0.7.54",
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^24.12.3",
+    "@vitejs/plugin-vue": "^6.0.6",
+    "@vue/eslint-config-typescript": "^14.9.0",
+    "@vue/test-utils": "^2.4.11",
+    "@vue/tsconfig": "^0.9.1",
+    "eslint": "^10.8.1",
+    "eslint-plugin-vue": "^10.10.0",
+    "jsdom": "^30.0.1",
+    "prettier": "^3.9.6",
+    "typescript": "~6.0.2",
+    "typescript-eslint": "^8.67.0",
+    "vite": "^8.0.12",
+    "vitest": "^4.1.8",
+    "vue-tsc": "^3.2.8"
+  }
+}

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Arena</title>
+    <script>
+      // 首屏前应用主题，避免深浅色闪烁。与 stores/ui.ts 共用 'cairn.theme' key。
+      ;(function () {
+        try {
+          var t = localStorage.getItem('cairn.theme') === 'dark' ? 'dark' : 'light'
+          document.documentElement.setAttribute('data-theme', t)
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'light')
+        }
+      })()
+    </script>
+    <script type="module" crossorigin src="/static/assets/index-Cs4xjMyJ.js"></script>
+    <link rel="modulepreload" crossorigin href="/static/assets/chunk-DK3Fl9T5.js">
+    <link rel="modulepreload" crossorigin href="/static/assets/_plugin-vue_export-helper-8XQ_v4NW.js">
+    <link rel="modulepreload" crossorigin href="/static/assets/ui-UQosyfyy.js">
+    <link rel="modulepreload" crossorigin href="/static/assets/createLucideIcon-D4qcfBfr.js">
+    <link rel="modulepreload" crossorigin href="/static/assets/client-cOy48mLa.js">
+    <link rel="modulepreload" crossorigin href="/static/assets/pinia-B77hrhIH.js">
+    <link rel="stylesheet" crossorigin href="/static/assets/ui-icQ48IYn.css">
+    <link rel="stylesheet" crossorigin href="/static/assets/index-DnQZAvSd.css">
+  </head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>

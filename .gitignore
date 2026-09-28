@@ -1,0 +1,84 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+.venv/
+venv/
+env/
+.python-version
+
+# ===== Node / 前端 =====
+node_modules/
+/cairn/frontend/.build/
+/cairn/frontend/playwright-report/
+/cairn/frontend/test-results/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 注意:前端构建产物 cairn/src/cairn/server/static/assets 保留提交,
+# 服务端直接读取 static 目录部署。
+
+# ===== 下载的二进制 / 大文件 =====
+container/chrome-linux64.zip
+container/chrome-linux64/
+*.zip
+*.zip.sha256
+/dist/
+/runtime/
+
+# 本机部署配置和密钥
+/dispatch.yaml
+/.env
+/.env.*
+!/.env.example
+/container/.env
+/container/.env.*
+!/container/.env.example
+/container/.codex/
+/container/pi-agent/.env
+/container/pi-agent/.env.*
+!/container/pi-agent/.env.example
+/container/pi-agent/runtime/
+/container/pi-agent/dist/
+/CONTEXT.md
+/RELEASE-MANIFEST.json
+
+# ===== 运行日志 / 输出 =====
+nohup.out
+*.log
+
+# ===== 数据库 / 运行时数据(按需放开)=====
+*.sqlite
+*.sqlite3
+*.db
+/datas/cairn/artifacts/
+/datas/cairn/prompts/
+/datas/cairn/project-resources/
+/datas/cairn/advisory-library-content/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ===== 编辑器 / IDE =====
+/.claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 临时文件 =====
+*.tmp
+*.bak
+.cache/

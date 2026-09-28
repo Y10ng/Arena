@@ -1,0 +1,353 @@
+:root {
+  color-scheme: dark;
+
+  /* Graphite 基础色阶：界面层次主要依靠明度与细边框。 */
+  --color-canvas: #0b0c0e;
+  --color-surface: #111317;
+  --color-surface-raised: #17191e;
+  --color-surface-inset: #08090b;
+  --color-surface-hover: #1d2026;
+  --color-surface-selected: #242831;
+  --color-surface-disabled: #15171b;
+  --color-overlay: rgb(0 0 0 / 58%);
+
+  --color-border-subtle: #202329;
+  --color-border: #2a2e35;
+  --color-border-strong: #3b4049;
+
+  --color-text: #f2f3f5;
+  --color-text-secondary: #a8adb7;
+  --color-text-tertiary: #7d838e;
+  --color-text-disabled: #555b65;
+  --color-text-inverse: #0b0c0e;
+  --color-link: #9fc4dc;
+  --color-link-hover: #c5dfef;
+
+  --color-accent: #e7e9ed;
+  --color-accent-hover: #ffffff;
+  --color-accent-soft: rgb(231 233 237 / 10%);
+  --color-accent-contrast: #101216;
+
+  /* 状态色仅用于反馈，不作为大面积品牌装饰。 */
+  --color-success: #71b991;
+  --color-info: #78a9c7;
+  --color-warning: #c8a96a;
+  --color-danger: #d17b7b;
+  --color-intent: #9c92bd;
+  --color-success-soft: rgb(113 185 145 / 12%);
+  --color-info-soft: rgb(120 169 199 / 12%);
+  --color-warning-soft: rgb(200 169 106 / 12%);
+  --color-danger-soft: rgb(209 123 123 / 12%);
+
+  /* 漏洞严重度保持固定语义顺序，并为深浅主题分别选择可辨识色阶。 */
+  --color-severity-critical: #d95f64;
+  --color-severity-high: #e8874f;
+  --color-severity-medium: #c9a227;
+  --color-severity-low: #4c91c7;
+  --color-severity-info: #8994a3;
+
+  --font-sans:
+    ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei',
+    'Noto Sans CJK SC', 'Source Han Sans SC', sans-serif;
+  --font-mono:
+    ui-monospace, 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Noto Sans Mono CJK SC', monospace;
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 18px;
+  --text-2xl: 22px;
+  --text-3xl: 28px;
+  --font-normal: 400;
+  --font-medium: 500;
+  --font-semibold: 600;
+  --font-bold: 700;
+  --leading-tight: 1.25;
+  --leading-snug: 1.4;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+  --tracking-tight: -0.01em;
+  --tracking-wide: 0.02em;
+
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 40px;
+  --space-8: 48px;
+  --space-10: 64px;
+
+  --radius-none: 0;
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 7px;
+  --radius-xl: 9px;
+  --radius-2xl: 12px;
+  --radius-full: 999px;
+  --control-height-xs: 24px;
+  --control-height-sm: 28px;
+  --control-height: 32px;
+  --control-height-lg: 38px;
+  --control-height-xl: 44px;
+
+  --shadow-xs: 0 1px 1px rgb(0 0 0 / 18%);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 24%);
+  --shadow-md: 0 8px 24px rgb(0 0 0 / 28%);
+  --shadow-pop: 0 16px 40px rgb(0 0 0 / 38%), 0 0 0 1px rgb(255 255 255 / 3%);
+  --shadow-modal: 0 24px 72px rgb(0 0 0 / 48%), 0 0 0 1px rgb(255 255 255 / 4%);
+  --ring: 0 0 0 1px var(--color-canvas), 0 0 0 3px rgb(231 233 237 / 28%);
+
+  /* Shell、内容区与浮层尺寸统一由语义变量控制。 */
+  --layout-sidebar-width: 248px;
+  --layout-sidebar-collapsed-width: 56px;
+  --layout-topbar-height: 48px;
+  --layout-workspace-tabs-height: 36px;
+  --layout-content-max: 1440px;
+  --layout-content-narrow: 960px;
+  --overlay-dialog-sm: 420px;
+  --overlay-dialog-md: 560px;
+  --overlay-dialog-lg: 760px;
+  --overlay-drawer-sm: 360px;
+  --overlay-drawer-md: 480px;
+  --overlay-drawer-lg: 860px;
+  --overlay-toast-width: 380px;
+
+  /* 普通浮层低于模态框；Portal 子浮层必须高于全屏模态框。 */
+  --z-base: 0;
+  --z-sticky: 10;
+  --z-sidebar-overlay: 20;
+  --z-dropdown: 30;
+  --z-popover: 40;
+  --z-modal: 50;
+  --z-toast: 60;
+  --z-command-palette: 70;
+  --z-fullscreen: 80;
+  --z-overlay-child: 90;
+
+  --dur-instant: 60ms;
+  --dur-fast: 100ms;
+  --dur: 160ms;
+  --dur-slow: 220ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+  --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+
+  /* CSS media query 暂不能可靠引用变量，这些值作为全项目断点规范。 */
+  --breakpoint-mobile: 640px;
+  --breakpoint-tablet: 900px;
+  --breakpoint-desktop: 1200px;
+  --breakpoint-wide: 1440px;
+
+  /* 兼容现有页面：旧名称统一指向语义 token。 */
+  --bg-base: var(--color-canvas);
+  --bg-surface: var(--color-surface);
+  --bg-elevated: var(--color-surface-raised);
+  --bg-inset: var(--color-surface-inset);
+  --surface-raised: var(--color-surface-raised);
+  --surface-hover: var(--color-surface-hover);
+  --surface-selected: var(--color-surface-selected);
+  --surface-disabled: var(--color-surface-disabled);
+  --glass-bg: rgb(11 12 14 / 88%);
+
+  --border-faint: var(--color-border-subtle);
+  --border-subtle: var(--color-border-subtle);
+  --border: var(--color-border);
+  --border-color: var(--color-border);
+  --border-strong: var(--color-border-strong);
+
+  --text: var(--color-text);
+  --text-muted: var(--color-text-secondary);
+  --text-secondary: var(--color-text-secondary);
+  --text-faint: var(--color-text-tertiary);
+  --text-disabled: var(--color-text-disabled);
+  --link: var(--color-link);
+  --link-hover: var(--color-link-hover);
+
+  --accent: var(--color-accent);
+  --accent-hover: var(--color-accent-hover);
+  --accent-dim: var(--color-accent-soft);
+  --accent-rgb: 231, 233, 237;
+  --success: var(--color-success);
+  --success-soft: var(--color-success-soft);
+  --success-border: color-mix(in srgb, var(--color-success) 32%, transparent);
+  --info: var(--color-info);
+  --info-soft: var(--color-info-soft);
+  --info-border: color-mix(in srgb, var(--color-info) 32%, transparent);
+  --warn: var(--color-warning);
+  --warning: var(--color-warning);
+  --warning-soft: var(--color-warning-soft);
+  --warning-border: color-mix(in srgb, var(--color-warning) 32%, transparent);
+  --danger: var(--color-danger);
+  --danger-soft: var(--color-danger-soft);
+  --danger-border: color-mix(in srgb, var(--color-danger) 32%, transparent);
+  --danger-rgb: 209, 123, 123;
+  --intent: var(--color-intent);
+  --severity-critical: var(--color-severity-critical);
+  --severity-high: var(--color-severity-high);
+  --severity-medium: var(--color-severity-medium);
+  --severity-low: var(--color-severity-low);
+  --severity-info: var(--color-severity-info);
+  --console-accent: var(--color-warning);
+  --console-accent-dim: rgb(200 169 106 / 12%);
+  --mono: var(--font-mono);
+
+  /* 图谱继续使用独立语义变量，避免全局 primitive 改写其表现规则。 */
+  --graph-page-bg: var(--color-canvas);
+  --graph-canvas-bg: #0d0f12;
+  --graph-canvas-grid: rgb(126 157 184 / 18%);
+  --graph-canvas-grid-strong: rgb(126 157 184 / 12%);
+  --graph-canvas-wash-top: rgb(255 255 255 / 1.5%);
+  --graph-canvas-wash-bottom: rgb(0 0 0 / 18%);
+  --graph-overlay-bg: rgb(17 19 23 / 86%);
+  --graph-node-bg: rgb(23 25 30 / 96%);
+  --graph-node-border: #343943;
+  --graph-node-shadow: 0 10px 30px rgb(0 0 0 / 28%), 0 1px 2px rgb(0 0 0 / 32%);
+  --graph-node-shadow-hover: 0 16px 38px rgb(0 0 0 / 36%), 0 2px 5px rgb(0 0 0 / 32%);
+  --graph-node-selected-ring: rgb(231 233 237 / 38%);
+  --graph-node-running-ring: rgb(57 135 229 / 42%);
+  --graph-node-critical-ring: rgb(209 123 123 / 42%);
+  --graph-kind-origin: #3987e5;
+  --graph-kind-origin-soft: rgb(57 135 229 / 16%);
+  --graph-kind-goal: #008300;
+  --graph-kind-goal-soft: rgb(0 131 0 / 16%);
+  --graph-kind-fact: #d55181;
+  --graph-kind-fact-soft: rgb(213 81 129 / 16%);
+  --graph-kind-pending: #c98500;
+  --graph-kind-pending-soft: rgb(201 133 0 / 16%);
+  --graph-kind-pending-group: #199e70;
+  --graph-kind-pending-group-soft: rgb(25 158 112 / 16%);
+  --graph-kind-reason: #d95926;
+  --graph-kind-reason-soft: rgb(217 89 38 / 16%);
+  --graph-edge-muted: #59606b;
+  --graph-edge-trunk: #8d83ee;
+  --graph-edge-active: #5e9ef0;
+  --graph-edge-selected: var(--color-accent);
+  --graph-edge-critical: var(--color-danger);
+  --graph-edge-join: var(--color-intent);
+  --graph-edge-reason: #c67be8;
+  --graph-edge-reason-input: #b178d2;
+  --graph-edge-reason-output: #e08b62;
+  --graph-reason-border: var(--graph-kind-reason);
+  --graph-reason-soft: var(--graph-kind-reason-soft);
+  --graph-badge-bg: var(--color-surface-raised);
+  --graph-badge-border: var(--color-border-strong);
+  --graph-badge-text: var(--color-text-secondary);
+  --graph-minimap-bg: rgb(17 19 23 / 90%);
+  --graph-minimap-viewport: rgb(231 233 237 / 16%);
+  --graph-minimap-viewport-border: rgb(231 233 237 / 58%);
+}
+
+[data-theme='light'] {
+  color-scheme: light;
+
+  --color-canvas: #f6f7f9;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-surface-inset: #f7f8fa;
+  --color-surface-hover: #f2f4f7;
+  --color-surface-selected: #e9edf3;
+  --color-surface-disabled: #f3f4f6;
+  --color-overlay: rgb(15 23 42 / 28%);
+
+  --color-border-subtle: #eceff3;
+  --color-border: #dfe3e8;
+  --color-border-strong: #c8ced6;
+
+  --color-text: #171a1f;
+  --color-text-secondary: #4b5563;
+  --color-text-tertiary: #6b7280;
+  --color-text-disabled: #a4abb5;
+  --color-text-inverse: #ffffff;
+  --color-link: #315f7b;
+  --color-link-hover: #173f58;
+
+  --color-accent: #1f2937;
+  --color-accent-hover: #111827;
+  --color-accent-soft: rgb(31 41 55 / 7%);
+  --color-accent-contrast: #ffffff;
+
+  --color-success: #397556;
+  --color-info: #426f8a;
+  --color-warning: #846725;
+  --color-danger: #a34848;
+  --color-intent: #655a87;
+  --color-success-soft: rgb(57 117 86 / 10%);
+  --color-info-soft: rgb(66 111 138 / 10%);
+  --color-warning-soft: rgb(132 103 37 / 10%);
+  --color-danger-soft: rgb(163 72 72 / 10%);
+
+  --color-severity-critical: #b43f46;
+  --color-severity-high: #b85c2c;
+  --color-severity-medium: #8a6a00;
+  --color-severity-low: #326f9e;
+  --color-severity-info: #5f6b7a;
+
+  --glass-bg: rgb(255 255 255 / 92%);
+  --accent-rgb: 31, 41, 55;
+  --danger-rgb: 163, 72, 72;
+  --console-accent-dim: rgb(132 103 37 / 10%);
+  --shadow-xs: 0 1px 2px rgb(15 23 42 / 4%);
+  --shadow-sm: 0 2px 8px rgb(15 23 42 / 6%);
+  --shadow-md: 0 12px 32px rgb(15 23 42 / 9%);
+  --shadow-pop: 0 18px 48px rgb(15 23 42 / 12%), 0 0 0 1px rgb(15 23 42 / 4%);
+  --shadow-modal: 0 28px 80px rgb(15 23 42 / 16%), 0 0 0 1px rgb(15 23 42 / 5%);
+  --ring: 0 0 0 1px var(--color-surface), 0 0 0 3px rgb(31 41 55 / 18%);
+
+  --graph-page-bg: var(--color-canvas);
+  --graph-canvas-bg: #f7f7f5;
+  --graph-canvas-grid: rgb(66 111 138 / 16%);
+  --graph-canvas-grid-strong: rgb(66 111 138 / 10%);
+  --graph-canvas-wash-top: rgb(255 255 255 / 35%);
+  --graph-canvas-wash-bottom: rgb(23 24 22 / 3%);
+  --graph-overlay-bg: rgb(255 255 255 / 88%);
+  --graph-node-bg: rgb(255 255 255 / 97%);
+  --graph-node-border: #d8dde5;
+  --graph-node-shadow: 0 10px 28px rgb(15 23 42 / 9%), 0 1px 2px rgb(15 23 42 / 8%);
+  --graph-node-shadow-hover: 0 16px 36px rgb(15 23 42 / 14%), 0 2px 5px rgb(15 23 42 / 8%);
+  --graph-node-selected-ring: rgb(31 41 55 / 28%);
+  --graph-node-running-ring: rgb(42 120 214 / 34%);
+  --graph-node-critical-ring: rgb(163 72 72 / 34%);
+  --graph-kind-origin: #2a78d6;
+  --graph-kind-origin-soft: rgb(42 120 214 / 11%);
+  --graph-kind-goal: #008300;
+  --graph-kind-goal-soft: rgb(0 131 0 / 10%);
+  --graph-kind-fact: #e87ba4;
+  --graph-kind-fact-soft: rgb(232 123 164 / 13%);
+  --graph-kind-pending: #eda100;
+  --graph-kind-pending-soft: rgb(237 161 0 / 14%);
+  --graph-kind-pending-group: #1baf7a;
+  --graph-kind-pending-group-soft: rgb(27 175 122 / 12%);
+  --graph-kind-reason: #eb6834;
+  --graph-kind-reason-soft: rgb(235 104 52 / 12%);
+  --graph-edge-muted: #a0a49c;
+  --graph-edge-trunk: #655a87;
+  --graph-edge-active: #2a78d6;
+  --graph-edge-selected: #1f2937;
+  --graph-edge-critical: #a34848;
+  --graph-edge-join: #655a87;
+  --graph-edge-reason: #8051a8;
+  --graph-edge-reason-input: #8051a8;
+  --graph-edge-reason-output: #b85c2c;
+  --graph-reason-border: var(--graph-kind-reason);
+  --graph-reason-soft: var(--graph-kind-reason-soft);
+  --graph-badge-bg: var(--color-surface-raised);
+  --graph-badge-border: var(--color-border-strong);
+  --graph-badge-text: var(--color-text-secondary);
+  --graph-minimap-bg: rgb(255 255 255 / 92%);
+  --graph-minimap-viewport: rgb(31 41 55 / 8%);
+  --graph-minimap-viewport-border: rgb(31 41 55 / 42%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-instant: 1ms;
+    --dur-fast: 1ms;
+    --dur: 1ms;
+    --dur-slow: 1ms;
+  }
+}

@@ -1,0 +1,77 @@
+.tenant-workers-page .worker-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.tenant-workers-page .worker-card {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast),
+    border-color var(--dur-fast),
+    box-shadow var(--dur-fast);
+}
+
+.tenant-workers-page .worker-card:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-elevated);
+}
+
+.tenant-workers-page .worker-card.active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.tenant-workers-page .worker-card:disabled {
+  cursor: wait;
+  opacity: 0.64;
+}
+
+.tenant-workers-page .worker-name,
+.tenant-workers-page .worker-model {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tenant-workers-page .task-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-right: var(--space-4);
+  padding-block: var(--space-1);
+}
+
+.tenant-workers-page fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.tenant-workers-page .toggle-field {
+  justify-content: end;
+}
+
+@media (max-width: 640px) {
+  .tenant-workers-page .toggle-field {
+    justify-content: start;
+  }
+
+  .tenant-workers-page .task-check {
+    width: 100%;
+    margin-right: 0;
+  }
+}

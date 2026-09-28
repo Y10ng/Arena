@@ -1,0 +1,4088 @@
+{
+  "assessment_protocol": "cairn-assessment-v2",
+  "phase_result_kinds": {
+    "bootstrap_conclude": "bootstrap_conclude_result",
+    "bootstrap_execute": "bootstrap_result",
+    "explore_conclude": "explore_conclude_result",
+    "explore_execute": "explore_result",
+    "reason_execute": "reason_result",
+    "report_execute": "report_result",
+    "verifier_conclude": "verifier_conclude_result",
+    "verifier_execute": "verifier_result"
+  },
+  "request_protocol": "cairn-agent-request-v1",
+  "result_protocol": "cairn-agent-result-v1",
+  "submit_result_schemas": {
+    "bootstrap_conclude": {
+      "$defs": {
+        "ApplicableTest": {
+          "additionalProperties": false,
+          "properties": {
+            "applicability_basis": {
+              "minLength": 1,
+              "title": "Applicability Basis",
+              "type": "string"
+            },
+            "completion_criteria": {
+              "minLength": 1,
+              "title": "Completion Criteria",
+              "type": "string"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "test_family": {
+              "enum": [
+                "configuration",
+                "known_vulnerability",
+                "authentication",
+                "authorization",
+                "session",
+                "injection",
+                "data_exposure",
+                "ssrf",
+                "file_handling",
+                "business_logic",
+                "concurrency"
+              ],
+              "title": "Test Family",
+              "type": "string"
+            }
+          },
+          "required": [
+            "test_family",
+            "applicability_basis",
+            "completion_criteria"
+          ],
+          "title": "ApplicableTest",
+          "type": "object"
+        },
+        "ArtifactDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "handle": {
+              "minLength": 1,
+              "title": "Handle",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "log",
+                "file",
+                "report",
+                "screenshot",
+                "patch",
+                "raw_output"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "path": {
+              "pattern": "^/",
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "handle",
+            "kind",
+            "path"
+          ],
+          "title": "ArtifactDeclaration",
+          "type": "object"
+        },
+        "AssessmentEvidenceRef": {
+          "additionalProperties": false,
+          "description": "上传前可使用句柄，服务端写入前必须解析为项目内 Artifact ID。",
+          "oneOf": [
+            {
+              "properties": {
+                "artifact_handle": {
+                  "type": "null"
+                },
+                "artifact_id": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "artifact_id"
+              ]
+            },
+            {
+              "properties": {
+                "artifact_handle": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "artifact_id": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "artifact_handle"
+              ]
+            }
+          ],
+          "properties": {
+            "artifact_handle": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Handle"
+            },
+            "artifact_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Id"
+            },
+            "pointer": {
+              "default": "",
+              "title": "Pointer",
+              "type": "string"
+            },
+            "verifier_run_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Verifier Run Id"
+            }
+          },
+          "title": "AssessmentEvidenceRef",
+          "type": "object"
+        },
+        "AssetIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "host": {
+              "minLength": 1,
+              "title": "Host",
+              "type": "string"
+            },
+            "port": {
+              "anyOf": [
+                {
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Port"
+            },
+            "protocol": {
+              "default": "",
+              "title": "Protocol",
+              "type": "string"
+            }
+          },
+          "required": [
+            "host"
+          ],
+          "title": "AssetIdentity",
+          "type": "object"
+        },
+        "CompleteResult": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "minLength": 1,
+              "title": "Description",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            }
+          },
+          "required": [
+            "description"
+          ],
+          "title": "CompleteResult",
+          "type": "object"
+        },
+        "EntrypointIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "locus": {
+              "default": "",
+              "title": "Locus",
+              "type": "string"
+            },
+            "method": {
+              "default": "",
+              "title": "Method",
+              "type": "string"
+            },
+            "route": {
+              "default": "",
+              "title": "Route",
+              "type": "string"
+            }
+          },
+          "title": "EntrypointIdentity",
+          "type": "object"
+        },
+        "FactResult": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "minLength": 1,
+              "title": "Description",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "vulnerability": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Finding"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "description"
+          ],
+          "title": "FactResult",
+          "type": "object"
+        },
+        "Finding": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "default": 0.5,
+              "maximum": 1,
+              "minimum": 0,
+              "title": "Confidence",
+              "type": "number"
+            },
+            "identity": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/VulnerabilityIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "packet_artifact_handle": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Packet Artifact Handle"
+            },
+            "remediation": {
+              "default": "",
+              "title": "Remediation",
+              "type": "string"
+            },
+            "repro_request": {
+              "default": "",
+              "title": "Repro Request",
+              "type": "string"
+            },
+            "repro_response": {
+              "default": "",
+              "title": "Repro Response",
+              "type": "string"
+            },
+            "severity": {
+              "enum": [
+                "critical",
+                "high",
+                "medium",
+                "low",
+                "info"
+              ],
+              "title": "Severity",
+              "type": "string"
+            },
+            "target": {
+              "default": "",
+              "title": "Target",
+              "type": "string"
+            },
+            "title": {
+              "minLength": 1,
+              "title": "Title",
+              "type": "string"
+            },
+            "vuln_type": {
+              "default": "",
+              "title": "Vuln Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "severity"
+          ],
+          "title": "Finding",
+          "type": "object"
+        },
+        "ScopeDisposition": {
+          "additionalProperties": false,
+          "properties": {
+            "disposition_kind": {
+              "enum": [
+                "no_in_scope_targets",
+                "no_reachable_surfaces"
+              ],
+              "title": "Disposition Kind",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "minItems": 1,
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "reason": {
+              "minLength": 1,
+              "title": "Reason",
+              "type": "string"
+            },
+            "target_ids": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Target Ids",
+              "type": "array"
+            }
+          },
+          "required": [
+            "disposition_kind",
+            "target_ids",
+            "reason",
+            "evidence_refs"
+          ],
+          "title": "ScopeDisposition",
+          "type": "object"
+        },
+        "SurfaceResult": {
+          "additionalProperties": false,
+          "properties": {
+            "applicable_tests": {
+              "items": {
+                "$ref": "#/$defs/ApplicableTest"
+              },
+              "title": "Applicable Tests",
+              "type": "array"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "surface_key": {
+              "minLength": 1,
+              "title": "Surface Key",
+              "type": "string"
+            },
+            "surface_kind": {
+              "enum": [
+                "endpoint",
+                "service",
+                "host",
+                "role",
+                "path",
+                "param",
+                "flow_state"
+              ],
+              "title": "Surface Kind",
+              "type": "string"
+            },
+            "traits": {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "title": "Traits",
+              "type": "object"
+            }
+          },
+          "required": [
+            "surface_kind",
+            "surface_key"
+          ],
+          "title": "SurfaceResult",
+          "type": "object"
+        },
+        "VectorIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "object_type": {
+              "default": "",
+              "title": "Object Type",
+              "type": "string"
+            },
+            "parameter": {
+              "default": "",
+              "title": "Parameter",
+              "type": "string"
+            },
+            "source_role": {
+              "default": "",
+              "title": "Source Role",
+              "type": "string"
+            },
+            "state": {
+              "default": "",
+              "title": "State",
+              "type": "string"
+            },
+            "target_role": {
+              "default": "",
+              "title": "Target Role",
+              "type": "string"
+            },
+            "variant": {
+              "default": "",
+              "title": "Variant",
+              "type": "string"
+            }
+          },
+          "title": "VectorIdentity",
+          "type": "object"
+        },
+        "VulnerabilityIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetIdentity"
+            },
+            "entrypoint": {
+              "$ref": "#/$defs/EntrypointIdentity"
+            },
+            "vector": {
+              "$ref": "#/$defs/VectorIdentity"
+            },
+            "vulnerability_class": {
+              "minLength": 1,
+              "title": "Vulnerability Class",
+              "type": "string"
+            }
+          },
+          "required": [
+            "vulnerability_class",
+            "asset",
+            "entrypoint"
+          ],
+          "title": "VulnerabilityIdentity",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "not": {
+              "required": [
+                "data"
+              ]
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "if": {
+            "properties": {
+              "accepted": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "data"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "data": {
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "required": [
+                  "coverage_scope_disposition"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "discovered_surfaces": {
+                    "maxItems": 0
+                  }
+                }
+              }
+            }
+          ],
+          "properties": {
+            "complete": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CompleteResult"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "coverage_scope_disposition": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ScopeDisposition"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "discovered_surfaces": {
+              "items": {
+                "$ref": "#/$defs/SurfaceResult"
+              },
+              "title": "Discovered Surfaces",
+              "type": "array"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "fact": {
+              "$ref": "#/$defs/FactResult"
+            }
+          },
+          "required": [
+            "fact"
+          ],
+          "title": "BootstrapConcludeData",
+          "type": "object"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "type": "object"
+    },
+    "bootstrap_execute": {
+      "$defs": {
+        "ApplicableTest": {
+          "additionalProperties": false,
+          "properties": {
+            "applicability_basis": {
+              "minLength": 1,
+              "title": "Applicability Basis",
+              "type": "string"
+            },
+            "completion_criteria": {
+              "minLength": 1,
+              "title": "Completion Criteria",
+              "type": "string"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "test_family": {
+              "enum": [
+                "configuration",
+                "known_vulnerability",
+                "authentication",
+                "authorization",
+                "session",
+                "injection",
+                "data_exposure",
+                "ssrf",
+                "file_handling",
+                "business_logic",
+                "concurrency"
+              ],
+              "title": "Test Family",
+              "type": "string"
+            }
+          },
+          "required": [
+            "test_family",
+            "applicability_basis",
+            "completion_criteria"
+          ],
+          "title": "ApplicableTest",
+          "type": "object"
+        },
+        "ArtifactDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "handle": {
+              "minLength": 1,
+              "title": "Handle",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "log",
+                "file",
+                "report",
+                "screenshot",
+                "patch",
+                "raw_output"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "path": {
+              "pattern": "^/",
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "handle",
+            "kind",
+            "path"
+          ],
+          "title": "ArtifactDeclaration",
+          "type": "object"
+        },
+        "AssessmentEvidenceRef": {
+          "additionalProperties": false,
+          "description": "上传前可使用句柄，服务端写入前必须解析为项目内 Artifact ID。",
+          "oneOf": [
+            {
+              "properties": {
+                "artifact_handle": {
+                  "type": "null"
+                },
+                "artifact_id": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "artifact_id"
+              ]
+            },
+            {
+              "properties": {
+                "artifact_handle": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "artifact_id": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "artifact_handle"
+              ]
+            }
+          ],
+          "properties": {
+            "artifact_handle": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Handle"
+            },
+            "artifact_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Id"
+            },
+            "pointer": {
+              "default": "",
+              "title": "Pointer",
+              "type": "string"
+            },
+            "verifier_run_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Verifier Run Id"
+            }
+          },
+          "title": "AssessmentEvidenceRef",
+          "type": "object"
+        },
+        "AssetIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "host": {
+              "minLength": 1,
+              "title": "Host",
+              "type": "string"
+            },
+            "port": {
+              "anyOf": [
+                {
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Port"
+            },
+            "protocol": {
+              "default": "",
+              "title": "Protocol",
+              "type": "string"
+            }
+          },
+          "required": [
+            "host"
+          ],
+          "title": "AssetIdentity",
+          "type": "object"
+        },
+        "CompleteResult": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "minLength": 1,
+              "title": "Description",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            }
+          },
+          "required": [
+            "description"
+          ],
+          "title": "CompleteResult",
+          "type": "object"
+        },
+        "EntrypointIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "locus": {
+              "default": "",
+              "title": "Locus",
+              "type": "string"
+            },
+            "method": {
+              "default": "",
+              "title": "Method",
+              "type": "string"
+            },
+            "route": {
+              "default": "",
+              "title": "Route",
+              "type": "string"
+            }
+          },
+          "title": "EntrypointIdentity",
+          "type": "object"
+        },
+        "FactResult": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "minLength": 1,
+              "title": "Description",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "vulnerability": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Finding"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "description"
+          ],
+          "title": "FactResult",
+          "type": "object"
+        },
+        "Finding": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "default": 0.5,
+              "maximum": 1,
+              "minimum": 0,
+              "title": "Confidence",
+              "type": "number"
+            },
+            "identity": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/VulnerabilityIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "packet_artifact_handle": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Packet Artifact Handle"
+            },
+            "remediation": {
+              "default": "",
+              "title": "Remediation",
+              "type": "string"
+            },
+            "repro_request": {
+              "default": "",
+              "title": "Repro Request",
+              "type": "string"
+            },
+            "repro_response": {
+              "default": "",
+              "title": "Repro Response",
+              "type": "string"
+            },
+            "severity": {
+              "enum": [
+                "critical",
+                "high",
+                "medium",
+                "low",
+                "info"
+              ],
+              "title": "Severity",
+              "type": "string"
+            },
+            "target": {
+              "default": "",
+              "title": "Target",
+              "type": "string"
+            },
+            "title": {
+              "minLength": 1,
+              "title": "Title",
+              "type": "string"
+            },
+            "vuln_type": {
+              "default": "",
+              "title": "Vuln Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "severity"
+          ],
+          "title": "Finding",
+          "type": "object"
+        },
+        "ScopeDisposition": {
+          "additionalProperties": false,
+          "properties": {
+            "disposition_kind": {
+              "enum": [
+                "no_in_scope_targets",
+                "no_reachable_surfaces"
+              ],
+              "title": "Disposition Kind",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "minItems": 1,
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "reason": {
+              "minLength": 1,
+              "title": "Reason",
+              "type": "string"
+            },
+            "target_ids": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Target Ids",
+              "type": "array"
+            }
+          },
+          "required": [
+            "disposition_kind",
+            "target_ids",
+            "reason",
+            "evidence_refs"
+          ],
+          "title": "ScopeDisposition",
+          "type": "object"
+        },
+        "SurfaceResult": {
+          "additionalProperties": false,
+          "properties": {
+            "applicable_tests": {
+              "items": {
+                "$ref": "#/$defs/ApplicableTest"
+              },
+              "title": "Applicable Tests",
+              "type": "array"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "surface_key": {
+              "minLength": 1,
+              "title": "Surface Key",
+              "type": "string"
+            },
+            "surface_kind": {
+              "enum": [
+                "endpoint",
+                "service",
+                "host",
+                "role",
+                "path",
+                "param",
+                "flow_state"
+              ],
+              "title": "Surface Kind",
+              "type": "string"
+            },
+            "traits": {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "title": "Traits",
+              "type": "object"
+            }
+          },
+          "required": [
+            "surface_kind",
+            "surface_key"
+          ],
+          "title": "SurfaceResult",
+          "type": "object"
+        },
+        "VectorIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "object_type": {
+              "default": "",
+              "title": "Object Type",
+              "type": "string"
+            },
+            "parameter": {
+              "default": "",
+              "title": "Parameter",
+              "type": "string"
+            },
+            "source_role": {
+              "default": "",
+              "title": "Source Role",
+              "type": "string"
+            },
+            "state": {
+              "default": "",
+              "title": "State",
+              "type": "string"
+            },
+            "target_role": {
+              "default": "",
+              "title": "Target Role",
+              "type": "string"
+            },
+            "variant": {
+              "default": "",
+              "title": "Variant",
+              "type": "string"
+            }
+          },
+          "title": "VectorIdentity",
+          "type": "object"
+        },
+        "VulnerabilityIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetIdentity"
+            },
+            "entrypoint": {
+              "$ref": "#/$defs/EntrypointIdentity"
+            },
+            "vector": {
+              "$ref": "#/$defs/VectorIdentity"
+            },
+            "vulnerability_class": {
+              "minLength": 1,
+              "title": "Vulnerability Class",
+              "type": "string"
+            }
+          },
+          "required": [
+            "vulnerability_class",
+            "asset",
+            "entrypoint"
+          ],
+          "title": "VulnerabilityIdentity",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "not": {
+              "required": [
+                "data"
+              ]
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "if": {
+            "properties": {
+              "accepted": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "data"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "data": {
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "required": [
+                  "coverage_scope_disposition"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "discovered_surfaces": {
+                    "maxItems": 0
+                  }
+                }
+              }
+            }
+          ],
+          "properties": {
+            "complete": {
+              "$ref": "#/$defs/CompleteResult"
+            },
+            "coverage_scope_disposition": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ScopeDisposition"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "discovered_surfaces": {
+              "items": {
+                "$ref": "#/$defs/SurfaceResult"
+              },
+              "title": "Discovered Surfaces",
+              "type": "array"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "fact": {
+              "$ref": "#/$defs/FactResult"
+            }
+          },
+          "required": [
+            "fact",
+            "complete"
+          ],
+          "title": "BootstrapData",
+          "type": "object"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "type": "object"
+    },
+    "explore_conclude": {
+      "$defs": {
+        "ApplicableTest": {
+          "additionalProperties": false,
+          "properties": {
+            "applicability_basis": {
+              "minLength": 1,
+              "title": "Applicability Basis",
+              "type": "string"
+            },
+            "completion_criteria": {
+              "minLength": 1,
+              "title": "Completion Criteria",
+              "type": "string"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "test_family": {
+              "enum": [
+                "configuration",
+                "known_vulnerability",
+                "authentication",
+                "authorization",
+                "session",
+                "injection",
+                "data_exposure",
+                "ssrf",
+                "file_handling",
+                "business_logic",
+                "concurrency"
+              ],
+              "title": "Test Family",
+              "type": "string"
+            }
+          },
+          "required": [
+            "test_family",
+            "applicability_basis",
+            "completion_criteria"
+          ],
+          "title": "ApplicableTest",
+          "type": "object"
+        },
+        "ArtifactDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "handle": {
+              "minLength": 1,
+              "title": "Handle",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "log",
+                "file",
+                "report",
+                "screenshot",
+                "patch",
+                "raw_output"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "path": {
+              "pattern": "^/",
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "handle",
+            "kind",
+            "path"
+          ],
+          "title": "ArtifactDeclaration",
+          "type": "object"
+        },
+        "AssessmentEvidenceRef": {
+          "additionalProperties": false,
+          "description": "上传前可使用句柄，服务端写入前必须解析为项目内 Artifact ID。",
+          "oneOf": [
+            {
+              "properties": {
+                "artifact_handle": {
+                  "type": "null"
+                },
+                "artifact_id": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "artifact_id"
+              ]
+            },
+            {
+              "properties": {
+                "artifact_handle": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "artifact_id": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "artifact_handle"
+              ]
+            }
+          ],
+          "properties": {
+            "artifact_handle": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Handle"
+            },
+            "artifact_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Id"
+            },
+            "pointer": {
+              "default": "",
+              "title": "Pointer",
+              "type": "string"
+            },
+            "verifier_run_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Verifier Run Id"
+            }
+          },
+          "title": "AssessmentEvidenceRef",
+          "type": "object"
+        },
+        "AssetIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "host": {
+              "minLength": 1,
+              "title": "Host",
+              "type": "string"
+            },
+            "port": {
+              "anyOf": [
+                {
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Port"
+            },
+            "protocol": {
+              "default": "",
+              "title": "Protocol",
+              "type": "string"
+            }
+          },
+          "required": [
+            "host"
+          ],
+          "title": "AssetIdentity",
+          "type": "object"
+        },
+        "CoverageResult": {
+          "additionalProperties": false,
+          "properties": {
+            "attempted_strategies": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Attempted Strategies",
+              "type": "array"
+            },
+            "baseline": {
+              "default": "",
+              "title": "Baseline",
+              "type": "string"
+            },
+            "blocker_code": {
+              "default": "",
+              "title": "Blocker Code",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "limitation_details": {
+              "default": "",
+              "title": "Limitation Details",
+              "type": "string"
+            },
+            "limitation_reason": {
+              "default": "",
+              "title": "Limitation Reason",
+              "type": "string"
+            },
+            "outcome": {
+              "enum": [
+                "tested_no_finding",
+                "finding",
+                "temporarily_blocked",
+                "permanently_unreachable",
+                "out_of_scope",
+                "not_applicable"
+              ],
+              "title": "Outcome",
+              "type": "string"
+            },
+            "slot_key": {
+              "minLength": 1,
+              "title": "Slot Key",
+              "type": "string"
+            },
+            "strategy_key": {
+              "default": "",
+              "title": "Strategy Key",
+              "type": "string"
+            },
+            "surface_key": {
+              "minLength": 1,
+              "title": "Surface Key",
+              "type": "string"
+            },
+            "test_family": {
+              "enum": [
+                "configuration",
+                "known_vulnerability",
+                "authentication",
+                "authorization",
+                "session",
+                "injection",
+                "data_exposure",
+                "ssrf",
+                "file_handling",
+                "business_logic",
+                "concurrency"
+              ],
+              "title": "Test Family",
+              "type": "string"
+            },
+            "variants": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Variants",
+              "type": "array"
+            }
+          },
+          "required": [
+            "slot_key",
+            "surface_key",
+            "test_family",
+            "outcome"
+          ],
+          "title": "CoverageResult",
+          "type": "object"
+        },
+        "EntrypointIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "locus": {
+              "default": "",
+              "title": "Locus",
+              "type": "string"
+            },
+            "method": {
+              "default": "",
+              "title": "Method",
+              "type": "string"
+            },
+            "route": {
+              "default": "",
+              "title": "Route",
+              "type": "string"
+            }
+          },
+          "title": "EntrypointIdentity",
+          "type": "object"
+        },
+        "ExperimentRecord": {
+          "additionalProperties": false,
+          "properties": {
+            "attempted_strategies": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Attempted Strategies",
+              "type": "array"
+            },
+            "baseline": {
+              "default": "",
+              "title": "Baseline",
+              "type": "string"
+            },
+            "blocker_code": {
+              "default": "",
+              "title": "Blocker Code",
+              "type": "string"
+            },
+            "controls": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Controls",
+              "type": "array"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "hypothesis": {
+              "minLength": 1,
+              "title": "Hypothesis",
+              "type": "string"
+            },
+            "impact": {
+              "default": "",
+              "title": "Impact",
+              "type": "string"
+            },
+            "kind": {
+              "const": "experiment",
+              "default": "experiment",
+              "title": "Kind",
+              "type": "string"
+            },
+            "limitation_details": {
+              "default": "",
+              "title": "Limitation Details",
+              "type": "string"
+            },
+            "limitation_reason": {
+              "default": "",
+              "title": "Limitation Reason",
+              "type": "string"
+            },
+            "limitations": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Limitations",
+              "type": "array"
+            },
+            "observations": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Observations",
+              "type": "array"
+            },
+            "outcome": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "tested_no_finding",
+                    "finding",
+                    "temporarily_blocked",
+                    "permanently_unreachable",
+                    "out_of_scope",
+                    "not_applicable",
+                    "observation"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Outcome"
+            },
+            "preconditions": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Preconditions",
+              "type": "array"
+            },
+            "variants": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Variants",
+              "type": "array"
+            },
+            "version": {
+              "const": 1,
+              "default": 1,
+              "title": "Version",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "hypothesis"
+          ],
+          "title": "ExperimentRecord",
+          "type": "object"
+        },
+        "FactResult": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "minLength": 1,
+              "title": "Description",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "vulnerability": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Finding"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "description"
+          ],
+          "title": "FactResult",
+          "type": "object"
+        },
+        "Finding": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "default": 0.5,
+              "maximum": 1,
+              "minimum": 0,
+              "title": "Confidence",
+              "type": "number"
+            },
+            "identity": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/VulnerabilityIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "packet_artifact_handle": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Packet Artifact Handle"
+            },
+            "remediation": {
+              "default": "",
+              "title": "Remediation",
+              "type": "string"
+            },
+            "repro_request": {
+              "default": "",
+              "title": "Repro Request",
+              "type": "string"
+            },
+            "repro_response": {
+              "default": "",
+              "title": "Repro Response",
+              "type": "string"
+            },
+            "severity": {
+              "enum": [
+                "critical",
+                "high",
+                "medium",
+                "low",
+                "info"
+              ],
+              "title": "Severity",
+              "type": "string"
+            },
+            "target": {
+              "default": "",
+              "title": "Target",
+              "type": "string"
+            },
+            "title": {
+              "minLength": 1,
+              "title": "Title",
+              "type": "string"
+            },
+            "vuln_type": {
+              "default": "",
+              "title": "Vuln Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "severity"
+          ],
+          "title": "Finding",
+          "type": "object"
+        },
+        "SurfaceResult": {
+          "additionalProperties": false,
+          "properties": {
+            "applicable_tests": {
+              "items": {
+                "$ref": "#/$defs/ApplicableTest"
+              },
+              "title": "Applicable Tests",
+              "type": "array"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "surface_key": {
+              "minLength": 1,
+              "title": "Surface Key",
+              "type": "string"
+            },
+            "surface_kind": {
+              "enum": [
+                "endpoint",
+                "service",
+                "host",
+                "role",
+                "path",
+                "param",
+                "flow_state"
+              ],
+              "title": "Surface Kind",
+              "type": "string"
+            },
+            "traits": {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "title": "Traits",
+              "type": "object"
+            }
+          },
+          "required": [
+            "surface_kind",
+            "surface_key"
+          ],
+          "title": "SurfaceResult",
+          "type": "object"
+        },
+        "VectorIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "object_type": {
+              "default": "",
+              "title": "Object Type",
+              "type": "string"
+            },
+            "parameter": {
+              "default": "",
+              "title": "Parameter",
+              "type": "string"
+            },
+            "source_role": {
+              "default": "",
+              "title": "Source Role",
+              "type": "string"
+            },
+            "state": {
+              "default": "",
+              "title": "State",
+              "type": "string"
+            },
+            "target_role": {
+              "default": "",
+              "title": "Target Role",
+              "type": "string"
+            },
+            "variant": {
+              "default": "",
+              "title": "Variant",
+              "type": "string"
+            }
+          },
+          "title": "VectorIdentity",
+          "type": "object"
+        },
+        "VulnerabilityIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetIdentity"
+            },
+            "entrypoint": {
+              "$ref": "#/$defs/EntrypointIdentity"
+            },
+            "vector": {
+              "$ref": "#/$defs/VectorIdentity"
+            },
+            "vulnerability_class": {
+              "minLength": 1,
+              "title": "Vulnerability Class",
+              "type": "string"
+            }
+          },
+          "required": [
+            "vulnerability_class",
+            "asset",
+            "entrypoint"
+          ],
+          "title": "VulnerabilityIdentity",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "not": {
+              "required": [
+                "data"
+              ]
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "if": {
+            "properties": {
+              "accepted": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "data"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "assessment_record": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExperimentRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "coverage_result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CoverageResult"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "discovered_surfaces": {
+              "items": {
+                "$ref": "#/$defs/SurfaceResult"
+              },
+              "title": "Discovered Surfaces",
+              "type": "array"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "fact": {
+              "$ref": "#/$defs/FactResult"
+            }
+          },
+          "required": [
+            "fact"
+          ],
+          "title": "ExploreData",
+          "type": "object"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "type": "object"
+    },
+    "explore_execute": {
+      "$defs": {
+        "ApplicableTest": {
+          "additionalProperties": false,
+          "properties": {
+            "applicability_basis": {
+              "minLength": 1,
+              "title": "Applicability Basis",
+              "type": "string"
+            },
+            "completion_criteria": {
+              "minLength": 1,
+              "title": "Completion Criteria",
+              "type": "string"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "test_family": {
+              "enum": [
+                "configuration",
+                "known_vulnerability",
+                "authentication",
+                "authorization",
+                "session",
+                "injection",
+                "data_exposure",
+                "ssrf",
+                "file_handling",
+                "business_logic",
+                "concurrency"
+              ],
+              "title": "Test Family",
+              "type": "string"
+            }
+          },
+          "required": [
+            "test_family",
+            "applicability_basis",
+            "completion_criteria"
+          ],
+          "title": "ApplicableTest",
+          "type": "object"
+        },
+        "ArtifactDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "handle": {
+              "minLength": 1,
+              "title": "Handle",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "log",
+                "file",
+                "report",
+                "screenshot",
+                "patch",
+                "raw_output"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "path": {
+              "pattern": "^/",
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "handle",
+            "kind",
+            "path"
+          ],
+          "title": "ArtifactDeclaration",
+          "type": "object"
+        },
+        "AssessmentEvidenceRef": {
+          "additionalProperties": false,
+          "description": "上传前可使用句柄，服务端写入前必须解析为项目内 Artifact ID。",
+          "oneOf": [
+            {
+              "properties": {
+                "artifact_handle": {
+                  "type": "null"
+                },
+                "artifact_id": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "artifact_id"
+              ]
+            },
+            {
+              "properties": {
+                "artifact_handle": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "artifact_id": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "artifact_handle"
+              ]
+            }
+          ],
+          "properties": {
+            "artifact_handle": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Handle"
+            },
+            "artifact_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Id"
+            },
+            "pointer": {
+              "default": "",
+              "title": "Pointer",
+              "type": "string"
+            },
+            "verifier_run_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Verifier Run Id"
+            }
+          },
+          "title": "AssessmentEvidenceRef",
+          "type": "object"
+        },
+        "AssetIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "host": {
+              "minLength": 1,
+              "title": "Host",
+              "type": "string"
+            },
+            "port": {
+              "anyOf": [
+                {
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Port"
+            },
+            "protocol": {
+              "default": "",
+              "title": "Protocol",
+              "type": "string"
+            }
+          },
+          "required": [
+            "host"
+          ],
+          "title": "AssetIdentity",
+          "type": "object"
+        },
+        "CoverageResult": {
+          "additionalProperties": false,
+          "properties": {
+            "attempted_strategies": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Attempted Strategies",
+              "type": "array"
+            },
+            "baseline": {
+              "default": "",
+              "title": "Baseline",
+              "type": "string"
+            },
+            "blocker_code": {
+              "default": "",
+              "title": "Blocker Code",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "limitation_details": {
+              "default": "",
+              "title": "Limitation Details",
+              "type": "string"
+            },
+            "limitation_reason": {
+              "default": "",
+              "title": "Limitation Reason",
+              "type": "string"
+            },
+            "outcome": {
+              "enum": [
+                "tested_no_finding",
+                "finding",
+                "temporarily_blocked",
+                "permanently_unreachable",
+                "out_of_scope",
+                "not_applicable"
+              ],
+              "title": "Outcome",
+              "type": "string"
+            },
+            "slot_key": {
+              "minLength": 1,
+              "title": "Slot Key",
+              "type": "string"
+            },
+            "strategy_key": {
+              "default": "",
+              "title": "Strategy Key",
+              "type": "string"
+            },
+            "surface_key": {
+              "minLength": 1,
+              "title": "Surface Key",
+              "type": "string"
+            },
+            "test_family": {
+              "enum": [
+                "configuration",
+                "known_vulnerability",
+                "authentication",
+                "authorization",
+                "session",
+                "injection",
+                "data_exposure",
+                "ssrf",
+                "file_handling",
+                "business_logic",
+                "concurrency"
+              ],
+              "title": "Test Family",
+              "type": "string"
+            },
+            "variants": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Variants",
+              "type": "array"
+            }
+          },
+          "required": [
+            "slot_key",
+            "surface_key",
+            "test_family",
+            "outcome"
+          ],
+          "title": "CoverageResult",
+          "type": "object"
+        },
+        "EntrypointIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "locus": {
+              "default": "",
+              "title": "Locus",
+              "type": "string"
+            },
+            "method": {
+              "default": "",
+              "title": "Method",
+              "type": "string"
+            },
+            "route": {
+              "default": "",
+              "title": "Route",
+              "type": "string"
+            }
+          },
+          "title": "EntrypointIdentity",
+          "type": "object"
+        },
+        "ExperimentRecord": {
+          "additionalProperties": false,
+          "properties": {
+            "attempted_strategies": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Attempted Strategies",
+              "type": "array"
+            },
+            "baseline": {
+              "default": "",
+              "title": "Baseline",
+              "type": "string"
+            },
+            "blocker_code": {
+              "default": "",
+              "title": "Blocker Code",
+              "type": "string"
+            },
+            "controls": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Controls",
+              "type": "array"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "hypothesis": {
+              "minLength": 1,
+              "title": "Hypothesis",
+              "type": "string"
+            },
+            "impact": {
+              "default": "",
+              "title": "Impact",
+              "type": "string"
+            },
+            "kind": {
+              "const": "experiment",
+              "default": "experiment",
+              "title": "Kind",
+              "type": "string"
+            },
+            "limitation_details": {
+              "default": "",
+              "title": "Limitation Details",
+              "type": "string"
+            },
+            "limitation_reason": {
+              "default": "",
+              "title": "Limitation Reason",
+              "type": "string"
+            },
+            "limitations": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Limitations",
+              "type": "array"
+            },
+            "observations": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Observations",
+              "type": "array"
+            },
+            "outcome": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "tested_no_finding",
+                    "finding",
+                    "temporarily_blocked",
+                    "permanently_unreachable",
+                    "out_of_scope",
+                    "not_applicable",
+                    "observation"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Outcome"
+            },
+            "preconditions": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Preconditions",
+              "type": "array"
+            },
+            "variants": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Variants",
+              "type": "array"
+            },
+            "version": {
+              "const": 1,
+              "default": 1,
+              "title": "Version",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "hypothesis"
+          ],
+          "title": "ExperimentRecord",
+          "type": "object"
+        },
+        "FactResult": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "minLength": 1,
+              "title": "Description",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "vulnerability": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Finding"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "description"
+          ],
+          "title": "FactResult",
+          "type": "object"
+        },
+        "Finding": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "default": 0.5,
+              "maximum": 1,
+              "minimum": 0,
+              "title": "Confidence",
+              "type": "number"
+            },
+            "identity": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/VulnerabilityIdentity"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "packet_artifact_handle": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Packet Artifact Handle"
+            },
+            "remediation": {
+              "default": "",
+              "title": "Remediation",
+              "type": "string"
+            },
+            "repro_request": {
+              "default": "",
+              "title": "Repro Request",
+              "type": "string"
+            },
+            "repro_response": {
+              "default": "",
+              "title": "Repro Response",
+              "type": "string"
+            },
+            "severity": {
+              "enum": [
+                "critical",
+                "high",
+                "medium",
+                "low",
+                "info"
+              ],
+              "title": "Severity",
+              "type": "string"
+            },
+            "target": {
+              "default": "",
+              "title": "Target",
+              "type": "string"
+            },
+            "title": {
+              "minLength": 1,
+              "title": "Title",
+              "type": "string"
+            },
+            "vuln_type": {
+              "default": "",
+              "title": "Vuln Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "severity"
+          ],
+          "title": "Finding",
+          "type": "object"
+        },
+        "SurfaceResult": {
+          "additionalProperties": false,
+          "properties": {
+            "applicable_tests": {
+              "items": {
+                "$ref": "#/$defs/ApplicableTest"
+              },
+              "title": "Applicable Tests",
+              "type": "array"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "surface_key": {
+              "minLength": 1,
+              "title": "Surface Key",
+              "type": "string"
+            },
+            "surface_kind": {
+              "enum": [
+                "endpoint",
+                "service",
+                "host",
+                "role",
+                "path",
+                "param",
+                "flow_state"
+              ],
+              "title": "Surface Kind",
+              "type": "string"
+            },
+            "traits": {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "title": "Traits",
+              "type": "object"
+            }
+          },
+          "required": [
+            "surface_kind",
+            "surface_key"
+          ],
+          "title": "SurfaceResult",
+          "type": "object"
+        },
+        "VectorIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "object_type": {
+              "default": "",
+              "title": "Object Type",
+              "type": "string"
+            },
+            "parameter": {
+              "default": "",
+              "title": "Parameter",
+              "type": "string"
+            },
+            "source_role": {
+              "default": "",
+              "title": "Source Role",
+              "type": "string"
+            },
+            "state": {
+              "default": "",
+              "title": "State",
+              "type": "string"
+            },
+            "target_role": {
+              "default": "",
+              "title": "Target Role",
+              "type": "string"
+            },
+            "variant": {
+              "default": "",
+              "title": "Variant",
+              "type": "string"
+            }
+          },
+          "title": "VectorIdentity",
+          "type": "object"
+        },
+        "VulnerabilityIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/AssetIdentity"
+            },
+            "entrypoint": {
+              "$ref": "#/$defs/EntrypointIdentity"
+            },
+            "vector": {
+              "$ref": "#/$defs/VectorIdentity"
+            },
+            "vulnerability_class": {
+              "minLength": 1,
+              "title": "Vulnerability Class",
+              "type": "string"
+            }
+          },
+          "required": [
+            "vulnerability_class",
+            "asset",
+            "entrypoint"
+          ],
+          "title": "VulnerabilityIdentity",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "not": {
+              "required": [
+                "data"
+              ]
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "if": {
+            "properties": {
+              "accepted": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "data"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "assessment_record": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ExperimentRecord"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "coverage_result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CoverageResult"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "discovered_surfaces": {
+              "items": {
+                "$ref": "#/$defs/SurfaceResult"
+              },
+              "title": "Discovered Surfaces",
+              "type": "array"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "fact": {
+              "$ref": "#/$defs/FactResult"
+            }
+          },
+          "required": [
+            "fact"
+          ],
+          "title": "ExploreData",
+          "type": "object"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "type": "object"
+    },
+    "reason_execute": {
+      "$defs": {
+        "ApplicableTest": {
+          "additionalProperties": false,
+          "properties": {
+            "applicability_basis": {
+              "minLength": 1,
+              "title": "Applicability Basis",
+              "type": "string"
+            },
+            "completion_criteria": {
+              "minLength": 1,
+              "title": "Completion Criteria",
+              "type": "string"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "test_family": {
+              "enum": [
+                "configuration",
+                "known_vulnerability",
+                "authentication",
+                "authorization",
+                "session",
+                "injection",
+                "data_exposure",
+                "ssrf",
+                "file_handling",
+                "business_logic",
+                "concurrency"
+              ],
+              "title": "Test Family",
+              "type": "string"
+            }
+          },
+          "required": [
+            "test_family",
+            "applicability_basis",
+            "completion_criteria"
+          ],
+          "title": "ApplicableTest",
+          "type": "object"
+        },
+        "ArtifactDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "handle": {
+              "minLength": 1,
+              "title": "Handle",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "log",
+                "file",
+                "report",
+                "screenshot",
+                "patch",
+                "raw_output"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "path": {
+              "pattern": "^/",
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "handle",
+            "kind",
+            "path"
+          ],
+          "title": "ArtifactDeclaration",
+          "type": "object"
+        },
+        "AssessmentEvidenceRef": {
+          "additionalProperties": false,
+          "description": "上传前可使用句柄，服务端写入前必须解析为项目内 Artifact ID。",
+          "oneOf": [
+            {
+              "properties": {
+                "artifact_handle": {
+                  "type": "null"
+                },
+                "artifact_id": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "artifact_id"
+              ]
+            },
+            {
+              "properties": {
+                "artifact_handle": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "artifact_id": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "artifact_handle"
+              ]
+            }
+          ],
+          "properties": {
+            "artifact_handle": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Handle"
+            },
+            "artifact_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Id"
+            },
+            "pointer": {
+              "default": "",
+              "title": "Pointer",
+              "type": "string"
+            },
+            "verifier_run_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Verifier Run Id"
+            }
+          },
+          "title": "AssessmentEvidenceRef",
+          "type": "object"
+        },
+        "CompleteResult": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "minLength": 1,
+              "title": "Description",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "from": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "From",
+              "type": "array"
+            }
+          },
+          "required": [
+            "description"
+          ],
+          "title": "CompleteResult",
+          "type": "object"
+        },
+        "DepthReviewDecision": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "minLength": 1,
+              "title": "Description",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "minItems": 1,
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "input_digest": {
+              "pattern": "^[a-f0-9]{64}$",
+              "title": "Input Digest",
+              "type": "string"
+            },
+            "selected": {
+              "items": {
+                "$ref": "#/$defs/DepthSelection"
+              },
+              "maxItems": 3,
+              "title": "Selected",
+              "type": "array"
+            }
+          },
+          "required": [
+            "input_digest",
+            "description",
+            "evidence_refs",
+            "selected"
+          ],
+          "title": "DepthReviewDecision",
+          "type": "object"
+        },
+        "DepthSelection": {
+          "additionalProperties": false,
+          "properties": {
+            "baseline": {
+              "minLength": 1,
+              "title": "Baseline",
+              "type": "string"
+            },
+            "controls": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "minItems": 1,
+              "title": "Controls",
+              "type": "array"
+            },
+            "description": {
+              "minLength": 1,
+              "title": "Description",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "minItems": 1,
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "from": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "minItems": 1,
+              "title": "From",
+              "type": "array"
+            },
+            "hypothesis": {
+              "minLength": 1,
+              "title": "Hypothesis",
+              "type": "string"
+            },
+            "impact": {
+              "default": "",
+              "title": "Impact",
+              "type": "string"
+            },
+            "limitations": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Limitations",
+              "type": "array"
+            },
+            "preconditions": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Preconditions",
+              "type": "array"
+            },
+            "slot_key": {
+              "minLength": 1,
+              "title": "Slot Key",
+              "type": "string"
+            },
+            "strategy_key": {
+              "pattern": "^[a-z0-9][a-z0-9._:-]{0,127}$",
+              "title": "Strategy Key",
+              "type": "string"
+            },
+            "variants": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "minItems": 1,
+              "title": "Variants",
+              "type": "array"
+            }
+          },
+          "required": [
+            "from",
+            "description",
+            "slot_key",
+            "strategy_key",
+            "hypothesis",
+            "baseline",
+            "variants",
+            "controls",
+            "evidence_refs"
+          ],
+          "title": "DepthSelection",
+          "type": "object"
+        },
+        "IntentDecision": {
+          "additionalProperties": false,
+          "properties": {
+            "depends_on": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Depends On"
+            },
+            "description": {
+              "minLength": 1,
+              "title": "Description",
+              "type": "string"
+            },
+            "from": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "minItems": 1,
+              "title": "From",
+              "type": "array"
+            },
+            "priority": {
+              "default": 1,
+              "enum": [
+                0,
+                1,
+                2
+              ],
+              "title": "Priority",
+              "type": "integer"
+            },
+            "slot_key": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Slot Key"
+            },
+            "strategy_key": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-z0-9][a-z0-9._:-]{0,127}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Strategy Key"
+            }
+          },
+          "required": [
+            "from",
+            "description"
+          ],
+          "title": "IntentDecision",
+          "type": "object"
+        },
+        "RejectedOption": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "minLength": 1,
+              "title": "Description",
+              "type": "string"
+            },
+            "reason": {
+              "minLength": 1,
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "description",
+            "reason"
+          ],
+          "title": "RejectedOption",
+          "type": "object"
+        },
+        "SurfaceResult": {
+          "additionalProperties": false,
+          "properties": {
+            "applicable_tests": {
+              "items": {
+                "$ref": "#/$defs/ApplicableTest"
+              },
+              "title": "Applicable Tests",
+              "type": "array"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "surface_key": {
+              "minLength": 1,
+              "title": "Surface Key",
+              "type": "string"
+            },
+            "surface_kind": {
+              "enum": [
+                "endpoint",
+                "service",
+                "host",
+                "role",
+                "path",
+                "param",
+                "flow_state"
+              ],
+              "title": "Surface Kind",
+              "type": "string"
+            },
+            "traits": {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ]
+              },
+              "title": "Traits",
+              "type": "object"
+            }
+          },
+          "required": [
+            "surface_kind",
+            "surface_key"
+          ],
+          "title": "SurfaceResult",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "not": {
+              "required": [
+                "data"
+              ]
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "if": {
+            "properties": {
+              "accepted": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "data"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "abandon": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Abandon",
+              "type": "array"
+            },
+            "blocked_by": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Blocked By",
+              "type": "array"
+            },
+            "complete": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/CompleteResult"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "confidence": {
+              "anyOf": [
+                {
+                  "maximum": 1,
+                  "minimum": 0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Confidence"
+            },
+            "depends_on_targets": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Depends On Targets",
+              "type": "array"
+            },
+            "depth_review": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/DepthReviewDecision"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "discovered_surfaces": {
+              "items": {
+                "$ref": "#/$defs/SurfaceResult"
+              },
+              "title": "Discovered Surfaces",
+              "type": "array"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "intents": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/$defs/IntentDecision"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Intents"
+            },
+            "rationale": {
+              "default": "",
+              "title": "Rationale",
+              "type": "string"
+            },
+            "rejected_options": {
+              "items": {
+                "$ref": "#/$defs/RejectedOption"
+              },
+              "title": "Rejected Options",
+              "type": "array"
+            }
+          },
+          "required": [],
+          "title": "ReasonData",
+          "type": "object"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "type": "object"
+    },
+    "report_execute": {
+      "$defs": {
+        "ArtifactDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "handle": {
+              "minLength": 1,
+              "title": "Handle",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "log",
+                "file",
+                "report",
+                "screenshot",
+                "patch",
+                "raw_output"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "path": {
+              "pattern": "^/",
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "handle",
+            "kind",
+            "path"
+          ],
+          "title": "ArtifactDeclaration",
+          "type": "object"
+        },
+        "ReportFinding": {
+          "additionalProperties": false,
+          "properties": {
+            "impact": {
+              "default": "",
+              "title": "Impact",
+              "type": "string"
+            },
+            "limitations": {
+              "default": "",
+              "title": "Limitations",
+              "type": "string"
+            },
+            "regression_steps": {
+              "minLength": 1,
+              "title": "Regression Steps",
+              "type": "string"
+            },
+            "remediation": {
+              "minLength": 1,
+              "title": "Remediation",
+              "type": "string"
+            },
+            "repro_steps": {
+              "minLength": 1,
+              "title": "Repro Steps",
+              "type": "string"
+            },
+            "root_cause": {
+              "default": "",
+              "title": "Root Cause",
+              "type": "string"
+            },
+            "vulnerability_id": {
+              "minLength": 1,
+              "title": "Vulnerability Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "vulnerability_id",
+            "repro_steps",
+            "remediation",
+            "regression_steps"
+          ],
+          "title": "ReportFinding",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "not": {
+              "required": [
+                "data"
+              ]
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "if": {
+            "properties": {
+              "accepted": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "data"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "executive_summary": {
+              "maxLength": 20000,
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Executive Summary",
+              "type": "string"
+            },
+            "findings": {
+              "items": {
+                "$ref": "#/$defs/ReportFinding"
+              },
+              "title": "Findings",
+              "type": "array"
+            },
+            "limitations": {
+              "default": "",
+              "title": "Limitations",
+              "type": "string"
+            }
+          },
+          "required": [
+            "executive_summary",
+            "findings"
+          ],
+          "title": "ReportData",
+          "type": "object"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "type": "object"
+    },
+    "verifier_conclude": {
+      "$defs": {
+        "ArtifactDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "handle": {
+              "minLength": 1,
+              "title": "Handle",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "log",
+                "file",
+                "report",
+                "screenshot",
+                "patch",
+                "raw_output"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "path": {
+              "pattern": "^/",
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "handle",
+            "kind",
+            "path"
+          ],
+          "title": "ArtifactDeclaration",
+          "type": "object"
+        },
+        "AssessmentEvidenceRef": {
+          "additionalProperties": false,
+          "description": "上传前可使用句柄，服务端写入前必须解析为项目内 Artifact ID。",
+          "oneOf": [
+            {
+              "properties": {
+                "artifact_handle": {
+                  "type": "null"
+                },
+                "artifact_id": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "artifact_id"
+              ]
+            },
+            {
+              "properties": {
+                "artifact_handle": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "artifact_id": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "artifact_handle"
+              ]
+            }
+          ],
+          "properties": {
+            "artifact_handle": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Handle"
+            },
+            "artifact_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Id"
+            },
+            "pointer": {
+              "default": "",
+              "title": "Pointer",
+              "type": "string"
+            },
+            "verifier_run_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Verifier Run Id"
+            }
+          },
+          "title": "AssessmentEvidenceRef",
+          "type": "object"
+        },
+        "VerificationResult": {
+          "additionalProperties": false,
+          "properties": {
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "minItems": 1,
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "notes": {
+              "default": "",
+              "title": "Notes",
+              "type": "string"
+            },
+            "observation_id": {
+              "minLength": 1,
+              "title": "Observation Id",
+              "type": "string"
+            },
+            "outcome": {
+              "enum": [
+                "confirmed",
+                "not_reproduced",
+                "environment_changed",
+                "insufficient_evidence"
+              ],
+              "title": "Outcome",
+              "type": "string"
+            }
+          },
+          "required": [
+            "observation_id",
+            "outcome",
+            "evidence_refs"
+          ],
+          "title": "VerificationResult",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "not": {
+              "required": [
+                "data"
+              ]
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "if": {
+            "properties": {
+              "accepted": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "data"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "minLength": 1,
+              "title": "Description",
+              "type": "string"
+            },
+            "verification_result": {
+              "$ref": "#/$defs/VerificationResult"
+            }
+          },
+          "required": [
+            "description",
+            "verification_result"
+          ],
+          "title": "VerifierData",
+          "type": "object"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "type": "object"
+    },
+    "verifier_execute": {
+      "$defs": {
+        "ArtifactDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "handle": {
+              "minLength": 1,
+              "title": "Handle",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "log",
+                "file",
+                "report",
+                "screenshot",
+                "patch",
+                "raw_output"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "path": {
+              "pattern": "^/",
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "handle",
+            "kind",
+            "path"
+          ],
+          "title": "ArtifactDeclaration",
+          "type": "object"
+        },
+        "AssessmentEvidenceRef": {
+          "additionalProperties": false,
+          "description": "上传前可使用句柄，服务端写入前必须解析为项目内 Artifact ID。",
+          "oneOf": [
+            {
+              "properties": {
+                "artifact_handle": {
+                  "type": "null"
+                },
+                "artifact_id": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "artifact_id"
+              ]
+            },
+            {
+              "properties": {
+                "artifact_handle": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "artifact_id": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "artifact_handle"
+              ]
+            }
+          ],
+          "properties": {
+            "artifact_handle": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Handle"
+            },
+            "artifact_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Id"
+            },
+            "pointer": {
+              "default": "",
+              "title": "Pointer",
+              "type": "string"
+            },
+            "verifier_run_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Verifier Run Id"
+            }
+          },
+          "title": "AssessmentEvidenceRef",
+          "type": "object"
+        },
+        "VerificationResult": {
+          "additionalProperties": false,
+          "properties": {
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "minItems": 1,
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "notes": {
+              "default": "",
+              "title": "Notes",
+              "type": "string"
+            },
+            "observation_id": {
+              "minLength": 1,
+              "title": "Observation Id",
+              "type": "string"
+            },
+            "outcome": {
+              "enum": [
+                "confirmed",
+                "not_reproduced",
+                "environment_changed",
+                "insufficient_evidence"
+              ],
+              "title": "Outcome",
+              "type": "string"
+            }
+          },
+          "required": [
+            "observation_id",
+            "outcome",
+            "evidence_refs"
+          ],
+          "title": "VerificationResult",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "not": {
+              "required": [
+                "data"
+              ]
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "if": {
+            "properties": {
+              "accepted": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "data"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "data": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "minLength": 1,
+              "title": "Description",
+              "type": "string"
+            },
+            "verification_result": {
+              "$ref": "#/$defs/VerificationResult"
+            }
+          },
+          "required": [
+            "description",
+            "verification_result"
+          ],
+          "title": "VerifierData",
+          "type": "object"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "type": "object"
+    }
+  }
+}

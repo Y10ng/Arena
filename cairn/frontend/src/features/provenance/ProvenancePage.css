@@ -1,0 +1,514 @@
+.provenance-page {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  gap: var(--space-5);
+  overflow: hidden;
+  padding: var(--space-5);
+}
+
+.provenance-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.provenance-header h1,
+.provenance-header p,
+.provenance-findings-card h2,
+.provenance-chain-card h2,
+.provenance-summary h2,
+.provenance-summary p,
+.provenance-run-header h2,
+.provenance-run-header p {
+  margin: 0;
+}
+
+.provenance-header p,
+.provenance-summary p,
+.provenance-run-header p {
+  color: var(--text-muted);
+}
+
+.provenance-controls {
+  display: grid;
+  grid-template-columns: minmax(16rem, 22rem) minmax(0, 1fr);
+  align-items: end;
+  gap: var(--space-4);
+}
+
+.provenance-controls--workspace {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.provenance-project-field,
+.provenance-filter-bar {
+  min-width: 0;
+}
+
+.provenance-filter-bar {
+  align-self: end;
+}
+
+.provenance-layout {
+  --master-detail-master-width: minmax(18rem, 22rem);
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.provenance-findings-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.provenance-findings-card h2,
+.provenance-chain-card h2 {
+  font-size: var(--text-base);
+}
+
+.provenance-findings {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  overflow: auto;
+  padding-right: var(--space-1);
+}
+
+.provenance-finding {
+  height: 6.5rem;
+  min-height: 6.5rem;
+  padding-block: var(--space-3);
+  text-align: left;
+  white-space: normal;
+}
+
+.provenance-finding :deep(.ui-button__content) {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: stretch;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.provenance-finding__title {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.provenance-finding.active,
+.provenance-observation.active,
+.provenance-runs .active {
+  border-color: var(--accent);
+  background: var(--surface-selected);
+}
+
+.provenance-finding__top,
+.provenance-summary__title,
+.provenance-run-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.provenance-finding__meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provenance-detail {
+  display: flex;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: var(--space-5);
+  overflow: auto;
+  padding-right: var(--space-1);
+}
+
+.provenance-summary,
+.provenance-chain-card,
+.provenance-run-card {
+  flex-shrink: 0;
+}
+
+.provenance-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.provenance-summary__title > div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.provenance-summary__title h2 {
+  overflow-wrap: anywhere;
+}
+
+.provenance-warning {
+  margin-top: var(--space-1);
+}
+
+.provenance-chain-card {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.provenance-chain-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-height: 20rem;
+}
+
+.provenance-chain-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+  padding: var(--space-5);
+}
+
+.provenance-chain-section + .provenance-chain-section {
+  border-left: 1px solid var(--border-faint);
+}
+
+.provenance-observations,
+.provenance-verifications,
+.provenance-runs,
+.provenance-evidence,
+.provenance-evidence section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.provenance-observation,
+.provenance-verification,
+.provenance-run-option,
+.provenance-evidence button {
+  height: auto;
+  min-height: 2.75rem;
+  padding-block: var(--space-2);
+  white-space: normal;
+}
+
+.provenance-observation :deep(.ui-button__content),
+.provenance-verification :deep(.ui-button__content),
+.provenance-run-option :deep(.ui-button__content) {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto minmax(6rem, auto);
+  align-items: center;
+  gap: var(--space-3);
+  text-align: left;
+}
+
+.provenance-observation code,
+.provenance-run-option code,
+.provenance-verification code {
+  justify-self: end;
+  overflow-wrap: anywhere;
+}
+
+.provenance-verifications {
+  margin-top: auto;
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-faint);
+}
+
+.provenance-verifications h3,
+.provenance-evidence h3 {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.provenance-empty-note {
+  padding-block: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.provenance-run-card {
+  display: flex;
+  flex-direction: column;
+  height: 42rem;
+  min-height: 32rem;
+  overflow: hidden;
+}
+
+.provenance-run-header {
+  flex: 0 0 auto;
+  padding: var(--space-5);
+  border-bottom: 1px solid var(--border-faint);
+}
+
+.provenance-run-header > div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.provenance-run-header p {
+  overflow-wrap: anywhere;
+}
+
+.provenance-tabs {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.provenance-tabs :deep(.ui-tabs__list) {
+  flex: 0 0 auto;
+}
+
+.provenance-tabs :deep(.ui-tabs__content) {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.provenance-timeline,
+.provenance-terminal,
+.provenance-evidence {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.provenance-timeline {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-4);
+}
+
+.provenance-event {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border-faint);
+}
+
+.provenance-event summary {
+  display: grid;
+  grid-template-columns: minmax(9rem, auto) auto minmax(10rem, 0.65fr) auto minmax(12rem, 1fr);
+  align-items: center;
+  gap: var(--space-3) var(--space-4);
+  cursor: pointer;
+  padding: var(--space-4);
+}
+
+.provenance-event summary:hover {
+  background: var(--surface-hover);
+}
+
+.provenance-event time,
+.provenance-event summary > span:last-child {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.provenance-json {
+  margin: 0;
+  overflow: auto;
+  padding: var(--space-4);
+  border-top: 1px solid var(--border-faint);
+  background: var(--bg-inset);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.provenance-terminal,
+.provenance-evidence {
+  padding: var(--space-5);
+}
+
+.provenance-output-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.provenance-terminal__screen {
+  min-height: 20rem;
+  overflow: auto;
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.provenance-evidence {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-6);
+}
+
+.provenance-evidence button :deep(.ui-button__content) {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(6rem, auto) minmax(0, 1fr);
+  gap: var(--space-3);
+  text-align: left;
+}
+
+.provenance-evidence button span,
+.provenance-evidence button code {
+  overflow-wrap: anywhere;
+}
+
+.provenance-record {
+  display: grid;
+  grid-template-columns: minmax(8rem, auto) minmax(0, 1fr);
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--border-faint);
+}
+
+.provenance-record code,
+.provenance-record span {
+  overflow-wrap: anywhere;
+}
+
+.provenance-loading {
+  display: grid;
+  gap: var(--space-3);
+}
+
+@media (max-width: 1100px) {
+  .provenance-chain-grid,
+  .provenance-evidence {
+    grid-template-columns: 1fr;
+  }
+
+  .provenance-chain-section + .provenance-chain-section {
+    border-top: 1px solid var(--border-faint);
+    border-left: 0;
+  }
+
+  .provenance-event summary {
+    grid-template-columns: auto 1fr auto;
+  }
+
+  .provenance-event summary > span:last-child,
+  .provenance-event summary > strong {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 768px) {
+  .provenance-page {
+    height: auto;
+    overflow: visible;
+  }
+
+  .provenance-controls {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: stretch;
+  }
+
+  .provenance-layout {
+    flex: none;
+    overflow: visible;
+  }
+
+  .provenance-findings-card,
+  .provenance-detail {
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .provenance-detail {
+    padding-right: 0;
+  }
+
+  .provenance-findings {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+    overflow: visible;
+    padding-right: 0;
+  }
+
+  .provenance-run-card {
+    height: 38rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .provenance-page {
+    gap: var(--space-4);
+    padding: var(--space-3);
+  }
+
+  .provenance-summary__title,
+  .provenance-run-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .provenance-chain-section {
+    padding: var(--space-4);
+  }
+
+  .provenance-observation :deep(.ui-button__content),
+  .provenance-verification :deep(.ui-button__content),
+  .provenance-run-option :deep(.ui-button__content),
+  .provenance-evidence button :deep(.ui-button__content) {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .provenance-observation code,
+  .provenance-verification code,
+  .provenance-run-option code,
+  .provenance-evidence button span {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  .provenance-event summary {
+    grid-template-columns: 1fr auto;
+    gap: var(--space-2) var(--space-3);
+  }
+
+  .provenance-run-card {
+    height: 34rem;
+    min-height: 30rem;
+  }
+}

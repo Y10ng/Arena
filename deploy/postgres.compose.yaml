@@ -1,0 +1,21 @@
+services:
+  arena-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cairn
+      POSTGRES_USER: cairn
+      POSTGRES_PASSWORD: ${CAIRN_POSTGRES_PASSWORD:?Set CAIRN_POSTGRES_PASSWORD in runtime/postgres.env}
+    ports:
+      - "127.0.0.1:${CAIRN_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - arena_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 3s
+    restart: unless-stopped
+
+volumes:
+  arena_postgres_data:

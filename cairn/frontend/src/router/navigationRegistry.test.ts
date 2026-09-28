@@ -1,0 +1,100 @@
+// @vitest-environment jsdom
+import { describe, expect, it } from 'vitest'
+import { routePageInventory } from '@/migration/componentMigration'
+import router from './index'
+import {
+  breadcrumbsFromRegistry,
+  commandItemsFromRegistry,
+  navigationRegistry,
+  productionRouteNames,
+  sidebarNavigation,
+} from './navigationRegistry'
+
+const sorted = (values: readonly string[]) => [...values].sort()
+
+describe('navigation registry', () => {
+  it('covers production router and migration inventory names exactly once', () => {
+    const routerNames = router
+      .getRoutes()
+      .map((route) => route.name)
+      .filter((name): name is string => typeof name === 'string')
+    const inventoryNames = routePageInventory.map((page) => page.routeName)
+    const registryNames = navigationRegistry.map((item) => item.routeName)
+
+    expect(new Set(registryNames).size).toBe(registryNames.length)
+    expect(sorted(registryNames)).toEqual(sorted(productionRouteNames))
+    expect(sorted(registryNames)).toEqual(sorted(routerNames))
+    expect(sorted(registryNames)).toEqual(sorted(inventoryNames))
+  })
+
+  it('keeps tenant and super-admin navigation visibility aligned with route meta', () => {
+    const privilegedRegistryNames = navigationRegistry
+      .filter((item) => item.role === 'super-admin')
+      .map((item) => item.routeName)
+      .sort()
+    const privilegedRouterNames = router
+      .getRoutes()
+      .filter((route) => route.meta.superAdmin === true)
+      .map((route) => String(route.name))
+      .sort()
+    expect(privilegedRegistryNames).toEqual(privilegedRouterNames)
+
+    expect(sidebarNavigation('system', false).map((item) => item.routeName)).toEqual([
+      'ConsoleModels',
+      'ConsoleWorkers',
+    ])
+    expect(sidebarNavigation('scenario', false)).toEqual([])
+    expect(sidebarNavigation('standalone', false)).toEqual([])
+
+    const tenantCommands = commandItemsFromRegistry(false)
+    expect(tenantCommands.some((item) => item.id === 'go:Monitoring')).toBe(false)
+    expect(tenantCommands.some((item) => item.id === 'go:ConsoleUsers')).toBe(false)
+    expect(tenantCommands.some((item) => item.id === 'go:ConsoleModels')).toBe(true)
+
+    const adminCommands = commandItemsFromRegistry(true)
+    expect(adminCommands.some((item) => item.id === 'go:Monitoring')).toBe(true)
+    expect(adminCommands.some((item) => item.id === 'go:ConsoleUsers')).toBe(true)
+  })
+
+  it('adds workspace commands only with project context and uses named destinations', () => {
+    expect(commandItemsFromRegistry(true).some((item) => item.id === 'go:WorkspaceRuns')).toBe(
+      false,
+    )
+
+    const commands = commandItemsFromRegistry(true, 'project-a')
+    const runs = commands.find((item) => item.id === 'go:WorkspaceRuns')
+    expect(runs?.to).toEqual({ name: 'WorkspaceRuns', params: { id: 'project-a' } })
+  })
+
+  it('builds semantic breadcrumb ancestors for front, workspace, console, and status routes', () => {
+    expect(breadcrumbsFromRegistry('Findings').map((crumb) => crumb.text)).toEqual([
+      'Arena',
+      '成果列表',
+    ])
+    expect(
+      breadcrumbsFromRegistry('WorkspaceProvenance', 'project-a', 'Project A').map(
+        (crumb) => crumb.text,
+      ),
+    ).toEqual(['Arena', '任务管理', 'Project A', '溯源分析'])
+    expect(
+      breadcrumbsFromRegistry('WorkspaceGraph', 'project-a').map((crumb) => crumb.text),
+    ).toEqual(['Arena', '任务管理', 'project-a'])
+    expect(breadcrumbsFromRegistry('ConsoleDispatcher').map((crumb) => crumb.text)).toEqual([
+      'Arena',
+      '系统管理',
+      'Dispatcher',
+    ])
+    expect(breadcrumbsFromRegistry('Monitoring').map((crumb) => crumb.text)).toEqual([
+      'Arena',
+      '监控',
+    ])
+    expect(breadcrumbsFromRegistry('Forbidden').map((crumb) => crumb.text)).toEqual([
+      'Arena',
+      '无权访问',
+    ])
+    expect(breadcrumbsFromRegistry('NotFound').map((crumb) => crumb.text)).toEqual([
+      'Arena',
+      '页面不存在',
+    ])
+  })
+})

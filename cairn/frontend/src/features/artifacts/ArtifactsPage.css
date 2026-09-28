@@ -1,0 +1,327 @@
+.artifacts-page {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  grid-template-columns: minmax(360px, 42%) minmax(0, 1fr);
+  gap: var(--space-4);
+  overflow: hidden;
+}
+
+.artifacts-list-card,
+.artifact-preview-card {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.artifacts-list-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.artifacts-list-header--actions {
+  justify-content: flex-end;
+}
+
+.artifact-preview-header h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-lg);
+  font-weight: var(--font-semibold);
+  line-height: var(--leading-tight);
+}
+
+.artifacts-filter-bar {
+  flex: 0 0 auto;
+}
+
+.artifacts-search-field {
+  min-width: min(240px, 100%);
+  flex: 1 1 240px;
+}
+
+.artifacts-kind-field {
+  min-width: 180px;
+  flex: 0 0 180px;
+}
+
+.artifacts-list-skeleton {
+  display: grid;
+  gap: var(--space-3);
+  padding-block: var(--space-2);
+}
+
+.artifacts-background-error {
+  flex: 0 0 auto;
+}
+
+.artifacts-list-card :deep(.data-table__scroll) {
+  min-height: 0;
+  overflow: auto;
+}
+
+.artifacts-list-card :deep(.data-table) {
+  min-width: 680px;
+}
+
+.artifact-file-name {
+  max-width: 240px;
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-weight: var(--font-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-mono,
+.artifact-sha,
+.artifact-time {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.artifact-muted,
+.artifact-time {
+  color: var(--text-faint);
+}
+
+.artifact-preview-card {
+  gap: 0;
+}
+
+.artifact-preview-empty {
+  margin: auto;
+  max-width: 560px;
+}
+
+.artifact-preview-header {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.artifact-preview-title {
+  min-width: 0;
+}
+
+.artifact-preview-title h2 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-preview-meta {
+  min-width: 0;
+  margin-top: var(--space-2);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.artifact-preview-meta strong {
+  color: var(--text);
+}
+
+.artifact-sha {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.artifact-download-link {
+  min-height: var(--control-height-sm);
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding-inline: var(--space-3);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-surface);
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  line-height: var(--leading-tight);
+  text-decoration: none;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.artifact-download-link:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+
+.artifact-download-link:focus-visible {
+  box-shadow: var(--ring);
+  outline: none;
+}
+
+.artifact-preview-alert {
+  margin: var(--space-3) var(--space-4) 0;
+  flex: 0 0 auto;
+}
+
+.artifact-window-alert :deep(.ui-alert__body) {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.artifact-window-alert :deep(.ui-alert__actions) {
+  margin: 0;
+}
+
+.artifact-preview-body {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: var(--space-4);
+  display: flex;
+  overflow: hidden;
+}
+
+.artifact-preview-loading,
+.artifact-preview-body > :deep(.ui-empty-state) {
+  margin: auto;
+}
+
+.artifact-preview-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-muted);
+}
+
+.artifact-text-preview,
+.artifact-image-preview {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--bg-inset);
+}
+
+.artifact-text-preview {
+  display: flex;
+}
+
+.artifact-text-preview > :deep(*) {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.artifact-rendered-report {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: var(--space-4);
+  overflow: auto;
+}
+
+.artifact-image-preview {
+  padding: var(--space-4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+}
+
+.artifact-screenshot {
+  max-width: 100%;
+  max-height: 100%;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-pop);
+}
+
+@media (max-width: 900px) {
+  .artifacts-page {
+    height: auto;
+    min-height: 100%;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(520px, 70vh);
+    overflow: visible;
+  }
+
+  .artifacts-list-card {
+    height: auto;
+    max-height: 620px;
+  }
+
+  .artifact-preview-card {
+    min-height: 520px;
+  }
+}
+
+@media (max-width: 640px) {
+  .artifacts-page {
+    gap: var(--space-3);
+    grid-template-rows: auto minmax(460px, 72vh);
+  }
+
+  .artifact-preview-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .artifacts-list-header :deep(.ui-tabs__list) {
+    width: 100%;
+  }
+
+  .artifacts-list-header :deep(.ui-tabs__trigger) {
+    flex: 1 1 0;
+  }
+
+  .artifacts-search-field,
+  .artifacts-kind-field,
+  .artifact-download-link {
+    width: 100%;
+  }
+
+  .artifact-preview-header,
+  .artifact-preview-body {
+    padding: var(--space-3);
+  }
+
+  .artifact-preview-alert {
+    margin: var(--space-3) var(--space-3) 0;
+  }
+
+  .artifact-preview-meta {
+    align-items: flex-start;
+  }
+
+  .artifact-sha {
+    max-width: 100%;
+  }
+
+  .artifact-image-preview {
+    padding: var(--space-2);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .artifact-download-link {
+    transition: none;
+  }
+}

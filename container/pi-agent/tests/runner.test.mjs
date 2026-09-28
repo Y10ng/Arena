@@ -1,0 +1,416 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile, writeFile, access, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { createRequestBashToolDefinition, runRequest } from '../dist/runner.js';
+import { parseRequest, PHASE_RESULT_KINDS } from '../dist/protocol.js';
+import { acquireSession } from '../dist/session.js';
+import { fixture, ok, submissionSchema } from './fixtures.mjs';
+
+for (const protocol of ['anthropic-messages', 'openai-chat-completions', 'openai-responses']) {
+  for (const auth of ['authorization-bearer', 'x-api-key']) test(`published SDK ${protocol}: exact endpoint, ${auth}, submit and audit`, async (t) => {
+    const { request, calls, suffix } = await fixture(t, protocol);
+    request.model.auth_header = auth;
+    const audit = [];
+    const result = await runRequest(parseRequest(request), { audit: (event) => audit.push(event) });
+    assert.equal(result.status, 'succeeded', JSON.stringify(result));
+    assert.deepEqual(result.result, { protocol: 'cairn-assessment-v2', accepted: true, kind: 'explore_result', data: { status: 'ok' } });
+    assert.match(result.submission_id, /^[a-f0-9]{64}$/);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].path, '/tenant/prefix' + suffix);
+    assert.equal(calls[0].headers['x-fixture-header'], 'fixture-header-value');
+    assert.equal(calls[0].headers.authorization, auth === 'authorization-bearer' ? 'Bearer fixture-secret-key' : undefined);
+    assert.equal(calls[0].headers['x-api-key'], auth === 'x-api-key' ? 'fixture-secret-key' : undefined);
+    const toolStart = audit.find((e) => e.event === 'tool_execution_start' && e.tool_name === 'submit_result');
+    const toolEnd = audit.find((e) => e.event === 'tool_execution_end' && e.is_error === false);
+    assert.ok(toolStart.tool_call_id);
+    assert.equal(toolEnd.tool_call_id, toolStart.tool_call_id);
+    assert.ok(!JSON.stringify(audit).includes('fixture-secret-key'));
+    assert.ok(!JSON.stringify(audit).includes('fixture-header-value'));
+    assert.equal(result.usage.input_tokens, 10);
+  });
+}
+
+test('Anthropic request preserves the complete submit_result schema after provider conversion', async (t) => {
+  const schema = {
+    type: 'object',
+    properties: {
+      accepted: { type: 'boolean' },
+      data: { type: 'object', properties: { vulnerability: { type: ['object', 'null'] } }, required: ['vulnerability'], additionalProperties: false },
+      reason: { type: 'string' },
+    },
+    required: ['accepted'], additionalProperties: false,
+    if: { properties: { accepted: { const: true } }, required: ['accepted'] },
+    then: { required: ['data'], not: { required: ['reason'] } },
+    else: { required: ['reason'], not: { required: ['data'] } },
+    $defs: { unused: { type: 'string' } },
+  };
+  const valid = { accepted: true, data: { vulnerability: null } };
+  const { request, calls } = await fixture(t, 'anthropic-messages', [
+    { tools: [{ name: 'submit_result', args: { ...valid, reason: 'unexpected' } }] },
+    { tools: [{ name: 'submit_result', args: { accepted: true, data: { vulnerability: 'invalid' } } }] },
+    { tools: [{ name: 'submit_result', args: valid }] },
+  ]);
+  request.result_schema = schema;
+  const result = await runRequest(request);
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  assert.equal(calls.length, 3);
+  for (const call of calls) {
+    const submit = call.body.tools.find((tool) => tool.name === 'submit_result');
+    assert.deepEqual(submit.input_schema, schema);
+    assert.match(submit.description, /local candidate/);
+    assert.ok(call.body.tools.some((tool) => tool.name === 'register_artifact'));
+  }
+});
+
+test('text is not JSON fallback; repair is same session and removes target tools', async (t) => {
+  const { request, calls } = await fixture(t, 'openai-chat-completions', [{ text: '```json\n{"accepted":true,"data":{"status":"ok"}}\n```' }, ok]);
+  request.phase = 'explore_execute';
+  const audit = [];
+  const result = await runRequest(request, { audit: (e) => audit.push(e) });
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0].body.tools.some((tool) => tool.function.name === 'bash'));
+  assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+  assert.equal(audit.filter((e) => e.event === 'result_repair').length, 1);
+  assert.equal(new Set(audit.map((e) => e.session)).size, 1);
+});
+
+test('strict tool arguments reject coercion and allow at most two repair rounds', async (t) => {
+  const { request, calls } = await fixture(t, 'openai-chat-completions', [{ tools: [{ name: 'submit_result', args: { accepted: 'true', data: { status: 'ok' } } }] }]);
+  const result = await runRequest(request);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error.code, 'submission_invalid');
+  assert.equal(calls.length, 3);
+});
+
+test('invalid submission followed by bash in the same SDK batch cannot act on target', async (t) => {
+  const { request, calls, cwd } = await fixture(t, 'openai-chat-completions', [{ tools: [
+    { name: 'submit_result', args: { accepted: true, data: {} } },
+    { name: 'bash', args: { command: 'touch should-not-exist' } },
+  ] }, ok]);
+  request.phase = 'explore_execute';
+  const result = await runRequest(request);
+  assert.equal(result.status, 'failed', JSON.stringify(result));
+  assert.equal(result.error.code, 'tool_permission');
+  assert.equal(result.error.repair_rounds, 0);
+  assert.equal(calls.length, 1);
+  await assert.rejects(access(join(cwd, 'should-not-exist')));
+});
+
+test('no submission fails rather than extracting prose after repairs', async (t) => {
+  const { request, calls } = await fixture(t, 'openai-chat-completions', [{ text: JSON.stringify(ok.tools[0].args) }]);
+  const result = await runRequest(request);
+  assert.equal(result.status, 'failed');
+  assert.equal(calls.length, 3);
+  assert.equal(result.result, null);
+});
+
+test('cancel during provider stream cannot start repairs or succeed', async (t) => {
+  const { request, calls } = await fixture(t, 'openai-chat-completions', [{ hang: true }]);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 120);
+  t.after(() => clearTimeout(timer));
+  const result = await runRequest(request, { signal: controller.signal });
+  assert.equal(result.status, 'cancelled', JSON.stringify(result));
+  assert.equal(result.result, null);
+  assert.equal(result.error.code, 'cancelled');
+  assert.equal(calls.length, 1);
+});
+
+test('deadline aborts without a repair or success', async (t) => {
+  const { request, calls } = await fixture(t, 'openai-chat-completions', [{ hang: true }]);
+  request.timeout_seconds = 0.1;
+  const result = await runRequest(request);
+  assert.equal(result.status, 'cancelled');
+  assert.equal(result.error.code, 'deadline_exceeded');
+  assert.equal(calls.length, 1);
+});
+
+test('bash timeout cap defaults strictly and effective timeout uses every finite minimum', async (t) => {
+  const { request, cwd } = await fixture(t);
+  assert.equal(parseRequest(request).bash_tool_timeout_seconds, 120);
+  for (const value of [0, -1, 1.5, 3601, Number.POSITIVE_INFINITY, '120']) {
+    assert.throws(() => parseRequest({ ...request, bash_tool_timeout_seconds: value }), { code: 'invalid_request', path: 'bash_tool_timeout_seconds' });
+  }
+
+  const observedTimeout = async ({ timeout, cap = 120, remaining = 300 }) => {
+    let observed;
+    const operations = {
+      async exec(_command, _cwd, options) {
+        observed = options.timeout;
+        return { exitCode: 0 };
+      },
+    };
+    const tool = createRequestBashToolDefinition(cwd, cap, () => remaining, operations);
+    await tool.execute('bash-timeout', { command: 'true', ...(timeout === undefined ? {} : { timeout }) });
+    return observed;
+  };
+
+  assert.equal(await observedTimeout({}), 120);
+  assert.equal(await observedTimeout({ timeout: 7200 }), 120);
+  assert.equal(await observedTimeout({ timeout: 7 }), 7);
+  assert.equal(await observedTimeout({ timeout: 7, remaining: 3 }), 3);
+  assert.equal(await observedTimeout({ timeout: 0, cap: 9, remaining: 20 }), 9);
+});
+
+test('local bash timeout is returned to the model so it can submit a bounded result', async (t) => {
+  const { request, calls } = await fixture(t, 'openai-chat-completions', [
+    { tools: [{ name: 'bash', args: { command: 'node -e "setTimeout(() => {}, 1000)"', timeout: 0.05 } }] },
+    ok,
+  ]);
+  request.phase = 'explore_execute';
+  const result = await runRequest(parseRequest(request));
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  assert.equal(calls.length, 2);
+  assert.match(JSON.stringify(calls[1].body), /Command timed out after 0\.05 seconds/);
+});
+
+test('exploration soft deadline enters readonly conclusion within the original deadline', async (t) => {
+  const { request, calls } = await fixture(t, 'openai-chat-completions', [{ hang: true }, ok]);
+  request.timeout_seconds = 1;
+  request.conclude_timeout_seconds = 0.6;
+  const audit = [];
+  const started = performance.now();
+  const result = await runRequest(parseRequest(request), { audit: (event) => audit.push(event) });
+  const elapsed = performance.now() - started;
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0].body.tools.some((tool) => tool.function.name === 'bash'));
+  assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+  assert.match(JSON.stringify(calls[1].body), /exploration window has ended/i);
+  assert.ok(audit.some((event) => event.event === 'exploration_deadline'));
+  assert.ok(audit.some((event) => event.event === 'readonly_conclusion'));
+  assert.ok(elapsed < 1000, `readonly conclusion exceeded the original deadline: ${elapsed}ms`);
+});
+
+test('authorized bash crossing the soft deadline is stopped without poisoning readonly delivery', async (t) => {
+  const script = "setInterval(()=>{},1000)";
+  const { request, calls, cwd } = await fixture(t, 'openai-chat-completions', [
+    { tools: [{ name: 'bash', args: { command: `printf '%s' "$$" > soft-deadline.pid; exec node -e ${JSON.stringify(script)}` } }] },
+    ok,
+  ]);
+  request.phase = 'explore_execute';
+  request.timeout_seconds = 1.5;
+  request.conclude_timeout_seconds = 1;
+  const audit = [];
+  const result = await runRequest(parseRequest(request), { audit: (event) => audit.push(event) });
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+  assert.equal(audit.some((event) => event.event === 'result_repair'), false);
+  assert.ok(!JSON.stringify({ result, audit }).includes('tool_permission'));
+  const start = audit.findIndex((event) => event.event === 'tool_execution_start' && event.tool_name === 'bash');
+  const cutoff = audit.findIndex((event) => event.event === 'exploration_deadline');
+  const end = audit.findIndex((event) => event.event === 'tool_execution_end' && event.tool_name === 'bash');
+  const conclusion = audit.findIndex((event) => event.event === 'readonly_conclusion');
+  assert.ok(start >= 0 && start < cutoff && cutoff < end && end < conclusion, JSON.stringify(audit));
+  const pid = Number(await readFile(join(cwd, 'soft-deadline.pid'), 'utf8'));
+  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+  let running = true;
+  for (let attempt = 0; attempt < 50 && running; attempt += 1) {
+    try { process.kill(pid, 0); await new Promise((resolve) => setTimeout(resolve, 20)); }
+    catch (error) { if (error.code === 'ESRCH') running = false; else throw error; }
+  }
+  assert.equal(running, false, `soft-deadline process ${pid} survived the active tool abort`);
+});
+
+test('new target action after the soft deadline stays blocked', async (t) => {
+  const script = "const fs=require('node:fs');fs.writeFileSync('soft-deadline-started',String(process.pid));setInterval(()=>{},1000)";
+  const { request, calls, cwd } = await fixture(t, 'openai-chat-completions', [
+    { tools: [{ name: 'bash', args: { command: `node -e ${JSON.stringify(script)}` } }] },
+    { tools: [{ name: 'bash', args: { command: 'touch forbidden-after-soft-deadline' } }] },
+  ]);
+  request.phase = 'explore_execute';
+  request.timeout_seconds = 1.5;
+  request.conclude_timeout_seconds = 1;
+  const result = await runRequest(parseRequest(request));
+  assert.equal(result.status, 'failed', JSON.stringify(result));
+  assert.equal(result.error.code, 'tool_permission');
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+  await access(join(cwd, 'soft-deadline-started'));
+  const pid = Number(await readFile(join(cwd, 'soft-deadline-started'), 'utf8'));
+  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+  await assert.rejects(access(join(cwd, 'forbidden-after-soft-deadline')));
+});
+
+test('bounded SDK bash timeout terminates the spawned process group', async (t) => {
+  const { cwd } = await fixture(t);
+  const pidPath = join(cwd, 'bash-descendant.pid');
+  const script = "setInterval(()=>{},1000)";
+  const command = `node -e ${JSON.stringify(script)} & child=$!; printf '%s' "$child" > bash-descendant.pid; wait "$child"`;
+  const tool = createRequestBashToolDefinition(cwd, 0.2, () => 10);
+  await assert.rejects(tool.execute('bash-process-group', { command }), /Command timed out after 0\.2 seconds/);
+  const pid = Number(await readFile(pidPath, 'utf8'));
+  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+  let running = true;
+  for (let attempt = 0; attempt < 50 && running; attempt += 1) {
+    try { process.kill(pid, 0); await new Promise((resolve) => setTimeout(resolve, 20)); }
+    catch (error) { if (error.code === 'ESRCH') running = false; else throw error; }
+  }
+  assert.equal(running, false, `descendant process ${pid} survived the SDK timeout`);
+});
+
+test('single writer, explicit resume, project ownership and corrupt transcript fail closed', async (t) => {
+  const { request, calls, freshCandidateCapture } = await fixture(t);
+  const physical = (overrides = {}) => ({ ...request, ...overrides, capabilities: { ...request.capabilities, candidate_capture: freshCandidateCapture() } });
+  const lease = await acquireSession(request);
+  await assert.rejects(acquireSession({ ...request, resume: true, task_run_id: 'task-next', continuation: { source_task_run_id: 'task-test', execution_generation: 1 } }), { code: 'session_locked' });
+  await lease.finish();
+  request.session = `pi:${crypto.randomUUID()}`;
+  let result = await runRequest(request);
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  result = await runRequest(physical({ resume: true, task_run_id: 'task-continuation', continuation: { source_task_run_id: 'task-test', execution_generation: 1 } }));
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  result = await runRequest(physical());
+  assert.equal(result.error.code, 'session_exists');
+  result = await runRequest(physical({ project_id: 'other-project', resume: true, task_run_id: 'task-next', continuation: { source_task_run_id: 'task-continuation', execution_generation: 2 } }));
+  assert.equal(result.error.code, 'session_ownership');
+  const file = join(request.session_root, request.session.slice(3), 'session.jsonl');
+  await writeFile(file, (await readFile(file, 'utf8')) + '{bad');
+  result = await runRequest(physical({ resume: true, task_run_id: 'task-next', continuation: { source_task_run_id: 'task-continuation', execution_generation: 2 } }));
+  assert.equal(result.error.code, 'session_corrupt');
+  assert.equal(calls.length, 2);
+});
+
+test('resume verifies phase family and original execution binding without new exploration', async (t) => {
+  const { request, calls, freshCandidateCapture } = await fixture(t);
+  const physical = (source) => ({ ...source, capabilities: { ...source.capabilities, candidate_capture: freshCandidateCapture() } });
+  request.phase = 'explore_execute';
+  request.binding = { slot_key: 'cell-1', surface_key: 'surface-1', test_family: 'authorization' };
+  assert.equal((await runRequest(request)).status, 'succeeded');
+  const delivery = { ...request, resume: true, conclude_only: true, task_run_id: 'delivery-run' };
+  assert.equal((await runRequest(physical(delivery))).status, 'succeeded');
+  assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+  assert.equal((await runRequest(physical({ ...delivery, phase: 'report_execute' }))).error?.code, 'session_ownership');
+  assert.equal((await runRequest(physical({ ...delivery, binding: { ...request.binding, slot_key: 'cell-other' } }))).error?.code, 'session_ownership');
+  assert.equal(calls.length, 2);
+  const path = join(request.session_root, request.session.slice(3), 'manifest.json');
+  const manifest = JSON.parse(await readFile(path, 'utf8'));
+  assert.equal(manifest.last_task_run_id, 'delivery-run');
+  delete manifest.binding_sha256;
+  await writeFile(path, JSON.stringify(manifest));
+  assert.equal((await runRequest(physical(delivery))).error?.code, 'session_ownership');
+  assert.equal(calls.length, 2);
+});
+
+test('missing and legacy sessions never reopen as new', async (t) => {
+  const { request, calls } = await fixture(t);
+  const result = await runRequest({ ...request, resume: true, task_run_id: 'task-next', continuation: { source_task_run_id: 'task-test', execution_generation: 1 } });
+  assert.equal(result.error.code, 'session_corrupt');
+  assert.equal(calls.length, 0);
+  assert.throws(() => parseRequest({ ...request, session: 'claude-old' }), { code: 'invalid_request' });
+});
+
+test('cooperative abort preserves original conversation for a new Run and binding', async (t) => {
+  const prior = 'Prior observation from the original assistant turn';
+  const { request, calls, freshCandidateCapture } = await fixture(t, 'openai-chat-completions', [
+    { text: prior }, { hang: true }, ok, ok,
+  ]);
+  request.binding = { allowed_fact_ids: ['origin'] };
+  const controller = new AbortController();
+  const interrupted = await runRequest(parseRequest(request), {
+    signal: controller.signal,
+    audit: (event) => { if (event.event === 'result_repair') setTimeout(() => controller.abort(), 60); },
+  });
+  assert.equal(interrupted.status, 'cancelled', JSON.stringify(interrupted));
+  assert.equal(calls.length, 2);
+  const directory = join(request.session_root, request.session.slice(3));
+  const firstManifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'));
+  const originalTranscript = await readFile(join(directory, 'session.jsonl'), 'utf8');
+  assert.match(originalTranscript, /Prior observation from the original assistant turn/);
+  const continuation = {
+    ...request, task_run_id: 'task-next', resume: true, prompt: 'Continue the unfinished work.',
+    binding: { allowed_fact_ids: ['origin', 'accepted-new-fact'] },
+    continuation: { source_task_run_id: 'task-test', execution_generation: 1 },
+    capabilities: { ...request.capabilities, candidate_capture: freshCandidateCapture() },
+  };
+  assert.throws(() => parseRequest({ ...continuation, continuation: undefined }), { code: 'invalid_request', path: 'continuation' });
+  assert.throws(() => parseRequest({ ...continuation, continuation: { source_task_run_id: 'task-next', execution_generation: 1 } }), { code: 'invalid_request', path: 'continuation.source_task_run_id' });
+  assert.throws(() => parseRequest({ ...continuation, continuation: { source_task_run_id: 'task-test', execution_generation: -1 } }), { code: 'invalid_request', path: 'continuation.execution_generation' });
+  assert.throws(() => parseRequest({ ...continuation, conclude_only: true }), { code: 'invalid_request', path: 'continuation' });
+  assert.equal((await runRequest({ ...continuation, continuation: { source_task_run_id: 'wrong-run', execution_generation: 1 } })).error?.code, 'session_ownership');
+  const writer = await acquireSession({ ...request, resume: true, conclude_only: true });
+  assert.equal((await runRequest(continuation)).error?.code, 'session_locked');
+  await writer.finish();
+  const next = await runRequest(parseRequest(continuation));
+  assert.equal(next.status, 'succeeded', JSON.stringify(next));
+  assert.equal(next.task_run_id, 'task-next');
+  assert.equal(calls.length, 3);
+  assert.match(JSON.stringify(calls[2].body.messages), /Prior observation from the original assistant turn/);
+  assert.match(JSON.stringify(calls[2].body.messages), /Continue the unfinished work/);
+  assert.ok(calls[2].body.tools.some((tool) => tool.function.name === 'bash'));
+  const secondManifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8'));
+  assert.equal(secondManifest.binding_sha256, firstManifest.binding_sha256);
+  assert.notEqual(secondManifest.current_binding_sha256, firstManifest.binding_sha256);
+  assert.equal(secondManifest.last_task_run_id, 'task-next');
+  const transcript = await readFile(join(directory, 'session.jsonl'), 'utf8');
+  assert.ok(transcript.startsWith(originalTranscript));
+  assert.match(transcript, /cairn_execution_segment_v1/);
+  assert.match(transcript, /"source_task_run_id":"task-test"/);
+  assert.equal((await runRequest({ ...continuation, task_run_id: 'task-third', continuation: { source_task_run_id: 'wrong-run', execution_generation: 2 }, capabilities: { ...continuation.capabilities, candidate_capture: freshCandidateCapture() } })).error?.code, 'session_ownership');
+  await writeFile(join(directory, 'session.jsonl'), transcript + '{bad');
+  assert.equal((await runRequest({ ...continuation, task_run_id: 'task-third', continuation: { source_task_run_id: 'task-next', execution_generation: 2 }, capabilities: { ...continuation.capabilities, candidate_capture: freshCandidateCapture() } })).error?.code, 'session_corrupt');
+  assert.equal(calls.length, 3);
+});
+
+test('structured Reason binding crosses the request parser as an opaque object', async (t) => {
+  const { request } = await fixture(t);
+  const structured = {
+    version: 1,
+    assessment_phase: 'baseline',
+    issued_at: '2026-09-19T08:00:00Z',
+    eligible_cells: [{ slot_key: 'cell:authorization', strategy: { mode: 'any' } }],
+    digest: 'a'.repeat(64),
+  };
+  const parsed = parseRequest({
+    ...request,
+    phase: 'reason_execute',
+    binding: { max_intents: 1, structured_intent_binding: structured },
+  });
+  assert.deepEqual(parsed.binding.structured_intent_binding, structured);
+  for (const invalid of [null, [], 'invalid', 42, false]) {
+    assert.throws(
+      () => parseRequest({ ...request, binding: { structured_intent_binding: invalid } }),
+      { code: 'invalid_request', path: 'binding.structured_intent_binding' },
+    );
+  }
+});
+
+test('conflicting submissions in same batch fail; repeated identical submissions are idempotent', async (t) => {
+  const { request } = await fixture(t, 'openai-chat-completions', [{ tools: [ok.tools[0], { name: 'submit_result', args: { accepted: false, reason: 'blocked' } }] }]);
+  const result = await runRequest(request);
+  assert.equal(result.status, 'failed', JSON.stringify(result));
+  assert.equal(result.error.code, 'submission_conflict');
+});
+
+test('large assistant output stays out of audit and unknown usage remains null', async (t) => {
+  const { request } = await fixture(t, 'openai-chat-completions', [{ ...ok, text: 'x'.repeat(1024 * 1024), noUsage: true }]);
+  const audit = [];
+  const result = await runRequest(request, { audit: (e) => audit.push(e) });
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  assert.equal(result.usage, null);
+  assert.ok(JSON.stringify(audit).length < 10000);
+});
+
+test('unsupported endpoint and unknown phase are rejected without a request', async (t) => {
+  const { request, calls } = await fixture(t);
+  request.model.inference_endpoint += '?key=secret';
+  const result = await runRequest(request);
+  assert.equal(result.error.code, 'unsupported_model_config');
+  assert.equal(calls.length, 0);
+  assert.throws(() => parseRequest({ ...request, phase: 'explore' }), { code: 'invalid_request', path: 'phase' });
+  assert.throws(() => parseRequest({ ...request, phase: 'healthcheck' }), { code: 'invalid_request', path: 'phase' });
+});
+
+for (const status of [401, 429, 503]) test(`provider ${status} has bounded retries and no result repair`, async (t) => {
+  const { request, calls } = await fixture(t, 'openai-chat-completions', [{ status, error: 'fixture-secret-key should not be echoed' }]);
+  const audit = [];
+  const result = await runRequest(request, { audit: (e) => audit.push(e) });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error.code, status === 401 ? 'provider_auth' : status === 429 ? 'provider_rate_limit' : 'provider_error');
+  assert.ok(calls.length <= 2);
+  assert.ok(!audit.some((e) => e.event === 'result_repair'));
+  assert.ok(!JSON.stringify(result).includes('fixture-secret-key'));
+});

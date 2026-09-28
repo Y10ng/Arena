@@ -1,0 +1,75 @@
+.prompt-create-row {
+  grid-template-columns: minmax(0, 1fr) minmax(92px, 120px) auto;
+}
+
+.prompt-file-tabs {
+  min-width: 0;
+}
+
+.prompt-file-tabs .ui-tabs__list {
+  width: 100%;
+}
+
+.prompt-file-tabs .ui-tabs__trigger {
+  min-width: 180px;
+  justify-content: flex-start;
+}
+
+.prompt-file-tab-label {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.prompt-file-tab-label .mono {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.prompt-file-category-label {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  font-weight: var(--font-semibold);
+}
+
+.token-count {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.token-count--invalid {
+  color: var(--danger);
+}
+
+.prompt-file-panel {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.prompt-validation-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  background-color: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  font-size: 11px;
+}
+
+.validation-ok {
+  color: var(--success);
+  font-weight: 700;
+}
+
+.validation-bad {
+  color: var(--danger);
+  font-weight: 700;
+}
