@@ -603,8 +603,8 @@ describe('FrontLayout overlay migration', () => {
   })
 
   it('renders semantic breadcrumb ancestors and updates only the project text after loading', async () => {
-    mocks.route.name = 'WorkspaceProvenance'
-    mocks.route.path = '/projects/project-a/provenance'
+    mocks.route.name = 'WorkspaceRuns'
+    mocks.route.path = '/projects/project-a/runs'
     mocks.route.params = { id: 'project-a' }
     const wrapper = mountLayout()
 
@@ -617,7 +617,7 @@ describe('FrontLayout overlay migration', () => {
       'project-a',
     ])
     expect(breadcrumb.findAll('[aria-current="page"]')).toHaveLength(1)
-    expect(breadcrumb.get('[aria-current="page"]').text()).toBe('溯源分析')
+    expect(breadcrumb.get('[aria-current="page"]').text()).toBe('运行日志')
     expect(
       breadcrumb
         .findAll('.separator')

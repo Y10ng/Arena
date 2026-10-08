@@ -18,6 +18,8 @@ from cairn.assessment_contracts import (
     goal_driven_decision_input_digest,
 )
 from cairn.dispatcher.protocol.client import ApiResult
+from cairn.dispatcher.worker_protocol.submission import build_submit_result_schema
+from cairn.server.schemas.candidates import canonical_value_sha256
 from cairn.dispatcher.tasks import report
 from cairn.server import db
 from cairn.server.auth import RequestPrincipal
@@ -566,6 +568,145 @@ def _flow(conn, project_id, outcome):
                 assert coverage["untested"][0]["reason"] == "user_stopped"
                 assert "tested_no_finding" not in markdown
     return packet, markdown, artifact
+
+
+@pytest.mark.parametrize("mutation", ["valid", "missing", "foreign", "duplicate", "object"])
+def test_goal_driven_reason_delivery_registration_binds_project_intent_ids(conn, mutation):
+    project_id = "synthetic-reason-binding"
+    intent = _seed(conn, project_id)
+    project_reason.claim_project_reason_record(
+        project_id, ReasonClaimRequest(worker="reviewer", trigger="graph_changed")
+    )
+    run = audit_task_runs.create_task_run_record(
+        project_id,
+        CreateTaskRunRequest(task_type="reason", worker_name="reviewer", worker_type="pi", status="running"),
+        principal=TEST_DISPATCHER,
+    )
+    binding = {
+        "allowed_fact_ids": ["origin"], "allowed_intent_ids": [intent.id],
+        "max_intents": 3, "decision_input_digest": "a" * 64,
+    }
+    schema_digest = canonical_value_sha256(build_submit_result_schema("reason_execute", binding))
+    if mutation == "missing":
+        binding.pop("allowed_intent_ids")
+    elif mutation == "foreign":
+        binding["allowed_intent_ids"] = ["i-foreign"]
+    elif mutation == "duplicate":
+        binding["allowed_intent_ids"] *= 2
+    elif mutation == "object":
+        binding["allowed_intent_ids"] = [{"description": "synthetic invalid"}]
+    snapshot = {
+        "session_id": "pi:11111111-1111-4111-8111-111111111111",
+        "phase": "reason_execute", "deadline_at": "2098-01-01T00:00:00Z",
+        "container_id": "original-container", "model_binding_sha256": "a" * 64,
+        "result_schema_sha256": schema_digest,
+        "binding": binding, "inputs": {"open_intent_ids": [intent.id]},
+    }
+    request = UpdateTaskRunRequest(
+        session_id=snapshot["session_id"], runtime_context={"execution_delivery": snapshot},
+    )
+    if mutation == "valid":
+        result = audit_task_runs.update_task_run_record(
+            project_id, run.id, request, principal=TEST_DISPATCHER,
+        )
+        assert result.runtime_context["execution_delivery"] == snapshot
+    else:
+        with pytest.raises(HTTPException) as exc:
+            audit_task_runs.update_task_run_record(
+                project_id, run.id, request, principal=TEST_DISPATCHER,
+            )
+        assert exc.value.status_code == 422
+        stored = conn.execute(
+            "SELECT runtime_context_json FROM task_runs WHERE project_id=? AND id=?",
+            (project_id, run.id),
+        ).fetchone()
+        assert "execution_delivery" not in json.loads(stored[0] or "{}")
+
+
+@pytest.mark.parametrize("outcome", ["finding", "tested_no_finding"])
+def test_goal_driven_conclude_accepts_evidence_without_universal_comparison(conn, outcome):
+    project_id = "synthetic-experiment"
+    intent = _seed(conn, project_id)
+    run = _start(conn, project_id, intent.id, "discoverer")
+    artifact = _artifact(project_id, run.id, "Synthetic observation")
+    evidence = {"artifact_id": artifact.id}
+    record = {
+        "hypothesis": "Synthetic authorization boundary",
+        "outcome": outcome,
+        "observations": ["Synthetic observation"],
+        "evidence_refs": [evidence],
+    }
+    vulnerability = None
+    if outcome == "finding":
+        vulnerability = {
+            "title": "Synthetic boundary finding", "severity": "high",
+            "vuln_type": "IDOR", "target": "GET https://flow.invalid/item",
+            "repro_request": "GET /item HTTP/1.1",
+            "repro_response": "HTTP/1.1 200 OK",
+            "identity": {
+                "vulnerability_class": "IDOR",
+                "asset": {"protocol": "https", "host": "flow.invalid"},
+                "entrypoint": {"method": "GET", "route": "/item"},
+                "vector": {"parameter": "id"},
+            },
+        }
+    result = intents_router.conclude(project_id, intent.id, ConcludeRequest(
+        worker="discoverer", task_run_id=run.id, description="Synthetic observation",
+        evidence=[evidence], assessment_record=record, vulnerability=vulnerability,
+    ))
+    assert result.fact.assessment_record["baseline"] == ""
+    assert result.fact.assessment_record["variants"] == []
+    assert result.fact.assessment_record["controls"] == []
+    if outcome == "finding":
+        assert conn.execute("SELECT status FROM vulnerabilities WHERE project_id=?", (project_id,)).fetchone()[0] == "new"
+
+
+@pytest.mark.parametrize("invalid", [
+    "observations", "evidence", "foreign_artifact", "identity", "reproduction",
+])
+def test_goal_driven_conclude_rejects_incomplete_or_foreign_proof(conn, invalid):
+    project_id = "synthetic-experiment"
+    intent = _seed(conn, project_id)
+    run = _start(conn, project_id, intent.id, "discoverer")
+    artifact = _artifact(project_id, run.id, "Synthetic observation")
+    evidence = {"artifact_id": artifact.id}
+    if invalid == "foreign_artifact":
+        other_intent = _seed(conn, "synthetic-other")
+        other_run = _start(conn, "synthetic-other", other_intent.id, "other")
+        _artifact("synthetic-other", other_run.id, "Foreign synthetic first artifact")
+        evidence = {"artifact_id": _artifact("synthetic-other", other_run.id, "Foreign synthetic data").id}
+    record = {
+        "hypothesis": "Synthetic authorization boundary", "outcome": "finding",
+        "observations": ["Synthetic observation"], "evidence_refs": [evidence],
+    }
+    vulnerability = {
+        "title": "Synthetic boundary finding", "severity": "high",
+        "vuln_type": "IDOR", "target": "GET https://flow.invalid/item",
+        "repro_request": "GET /item HTTP/1.1", "repro_response": "HTTP/1.1 200 OK",
+        "identity": {
+            "vulnerability_class": "IDOR",
+            "asset": {"protocol": "https", "host": "flow.invalid"},
+            "entrypoint": {"method": "GET", "route": "/item"},
+            "vector": {"parameter": "id"},
+        },
+    }
+    if invalid == "observations":
+        record.pop("observations")
+    elif invalid == "evidence":
+        record["evidence_refs"] = []
+    elif invalid == "identity":
+        vulnerability.pop("identity")
+    elif invalid == "reproduction":
+        vulnerability.pop("repro_request")
+        vulnerability.pop("repro_response")
+    with pytest.raises(HTTPException) as exc:
+        intents_router.conclude(project_id, intent.id, ConcludeRequest(
+            worker="discoverer", task_run_id=run.id, description="Synthetic observation",
+            evidence=[evidence], assessment_record=record, vulnerability=vulnerability,
+        ))
+    assert exc.value.status_code == 422
+    assert conn.execute("SELECT count(*) FROM facts WHERE project_id=?", (project_id,)).fetchone()[0] == 2
+    assert conn.execute("SELECT count(*) FROM vulnerabilities WHERE project_id=?", (project_id,)).fetchone()[0] == 0
 
 
 @pytest.mark.parametrize("outcome", ["finding", "normal", "blocked", "interrupted"])

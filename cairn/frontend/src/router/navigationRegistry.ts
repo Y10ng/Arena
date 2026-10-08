@@ -11,13 +11,9 @@ export const productionRouteNames = [
   'NewProject',
   'WorkspaceGraph',
   'WorkspaceRuns',
-  'WorkspaceTargets',
   'WorkspaceHints',
   'WorkspaceArtifacts',
-  'WorkspacePayloads',
-  'WorkspaceCoverage',
   'WorkspaceVulnerabilities',
-  'WorkspaceProvenance',
   'Monitoring',
   'ConsoleModels',
   'ConsoleWorkers',
@@ -41,10 +37,8 @@ export type NavigationIcon =
   | 'add'
   | 'graph'
   | 'runs'
-  | 'targets'
   | 'hints'
   | 'artifacts'
-  | 'coverage'
   | 'vulnerabilities'
   | 'monitoring'
   | 'models'
@@ -75,10 +69,7 @@ export interface NavigationRecord {
   icon: NavigationIcon
   role: NavigationRole
   breadcrumbParent?: ProductionRouteName | 'workspace-project' | 'console-root'
-  workspace?: {
-    order: number
-    tabGroup: 'exploration' | 'results'
-  }
+  workspace?: { order: number }
   sidebar?: {
     placement: SidebarPlacement
     order: number
@@ -168,7 +159,7 @@ export const navigationRegistry = [
     icon: 'graph',
     role: 'authenticated',
     breadcrumbParent: 'workspace-project',
-    workspace: { order: 10, tabGroup: 'exploration' },
+    workspace: { order: 10 },
     command: {
       kindLabel: '当前项目',
       title: '查看探索图谱',
@@ -183,7 +174,7 @@ export const navigationRegistry = [
     icon: 'runs',
     role: 'authenticated',
     breadcrumbParent: 'workspace-project',
-    workspace: { order: 20, tabGroup: 'exploration' },
+    workspace: { order: 20 },
     command: {
       kindLabel: '当前项目',
       title: '查看运行终端',
@@ -193,27 +184,12 @@ export const navigationRegistry = [
     },
   }),
   record({
-    routeName: 'WorkspaceTargets',
-    label: '授权目标',
-    icon: 'targets',
-    role: 'authenticated',
-    breadcrumbParent: 'workspace-project',
-    workspace: { order: 30, tabGroup: 'exploration' },
-    command: {
-      kindLabel: '当前项目',
-      title: '管理授权范围',
-      subtitle: '批准/拒绝发现的目标',
-      badge: 'Targets',
-      keywords: ['scope', 'approve'],
-    },
-  }),
-  record({
     routeName: 'WorkspaceHints',
     label: '人工提示',
     icon: 'hints',
     role: 'authenticated',
     breadcrumbParent: 'workspace-project',
-    workspace: { order: 40, tabGroup: 'exploration' },
+    workspace: { order: 50 },
     command: {
       kindLabel: '当前项目',
       title: '查看并添加提示',
@@ -223,42 +199,12 @@ export const navigationRegistry = [
     },
   }),
   record({
-    routeName: 'WorkspaceProvenance',
-    label: '溯源分析',
-    icon: 'provenance',
-    role: 'authenticated',
-    breadcrumbParent: 'workspace-project',
-    workspace: { order: 50, tabGroup: 'exploration' },
-    command: {
-      kindLabel: '当前项目',
-      title: '查看成果溯源',
-      subtitle: '按 Observation 追踪运行操作、日志和证据',
-      badge: 'Provenance',
-      keywords: ['provenance', 'audit', 'logs', '溯源', '操作'],
-    },
-  }),
-  record({
-    routeName: 'WorkspaceCoverage',
-    label: '覆盖与收敛',
-    icon: 'coverage',
-    role: 'authenticated',
-    breadcrumbParent: 'workspace-project',
-    workspace: { order: 60, tabGroup: 'exploration' },
-    command: {
-      kindLabel: '当前项目',
-      title: '查看覆盖与收敛',
-      subtitle: '审阅 Surface、Coverage、Blocker、验证与报告状态',
-      badge: 'Coverage',
-      keywords: ['coverage', 'surface', 'blocker', '覆盖', '收敛'],
-    },
-  }),
-  record({
     routeName: 'WorkspaceVulnerabilities',
     label: '漏洞管理',
     icon: 'vulnerabilities',
     role: 'authenticated',
     breadcrumbParent: 'workspace-project',
-    workspace: { order: 70, tabGroup: 'results' },
+    workspace: { order: 30 },
     command: {
       kindLabel: '当前项目',
       title: '查看漏洞管理',
@@ -268,27 +214,12 @@ export const navigationRegistry = [
     },
   }),
   record({
-    routeName: 'WorkspacePayloads',
-    label: 'Payload 中心',
-    icon: 'artifacts',
-    role: 'authenticated',
-    breadcrumbParent: 'workspace-project',
-    workspace: { order: 80, tabGroup: 'results' },
-    command: {
-      kindLabel: '当前项目',
-      title: '查看 Payload 中心',
-      subtitle: '审阅 AI Agent 测试的注入明文与目标直接响应',
-      badge: 'Payloads',
-      keywords: ['payload', 'prompt injection', '响应', '注入'],
-    },
-  }),
-  record({
     routeName: 'WorkspaceArtifacts',
     label: '证据资产',
     icon: 'artifacts',
     role: 'authenticated',
     breadcrumbParent: 'workspace-project',
-    workspace: { order: 90, tabGroup: 'results' },
+    workspace: { order: 40 },
     command: {
       kindLabel: '当前项目',
       title: '浏览证据文件',

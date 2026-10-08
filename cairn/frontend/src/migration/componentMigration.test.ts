@@ -135,7 +135,7 @@ describe('frontend component migration inventory', () => {
     expect(record?.migrationStatus).toBe('migrating')
     expect(record?.verification).toEqual(['component'])
     expect(record?.notes).toContain(
-      'Login、ChangePassword、ConsoleTimeout 与 Overview 已迁移 Button；TenantWorkers 已迁移 Model Select；TenantModels 已迁移 protocol、auth header 与 discovery Select；WorkspaceVulnerabilities 创建弹窗已迁移 Button、FormField、Input、Select 与 Textarea，confidence 因 Cairn Input 的 nullable numeric 契约暂保留原生 number input；Findings 已迁移带可见标签的严重度/状态 Select 与 refresh Button；WorkspaceTargets 已迁移手动添加表单、状态筛选、目标搜索与审核操作，并补齐可见标签和复选框名称；WorkspaceArtifacts 已迁移带可见标签的 kind Select、刷新、预览、Run 与复制操作；Traffic 已迁移全局项目 FormField/Select、刷新及 Run/evidence/复制 Button，工作区模式继续隐藏项目选择器；WorkspaceHints 已迁移 Button、FormField、Select 与 Textarea，保留项目级/Fact/Intent 锚点、Intent 优先和 Ctrl/Cmd+Enter 合同；其余清单页面控件仍待迁移。',
+      'Login、ChangePassword、ConsoleTimeout 与 Overview 已迁移 Button；TenantWorkers 已迁移 Model Select；TenantModels 已迁移 protocol、auth header 与 discovery Select；WorkspaceVulnerabilities 创建弹窗已迁移 Button、FormField、Input、Select 与 Textarea，confidence 因 Cairn Input 的 nullable numeric 契约暂保留原生 number input；Findings 已迁移带可见标签的严重度/状态 Select 与 refresh Button；WorkspaceArtifacts 已迁移带可见标签的 kind Select、刷新、预览、Run 与复制操作；Traffic 已迁移全局项目 FormField/Select、刷新及 Run/evidence/复制 Button，工作区模式继续隐藏项目选择器；WorkspaceHints 已迁移 Button、FormField、Select 与 Textarea，保留项目级/Fact/Intent 锚点、Intent 优先和 Ctrl/Cmd+Enter 合同；其余清单页面控件仍待迁移。',
     )
     expect(record?.notes).toContain(
       'ScenariosConsole 已迁移 Button、Input、Textarea、FormField、Select、Checkbox、Alert、Spinner 与 EmptyState；场景侧栏保留领域专用选择按钮，并保持完整列表 PUT normalization、preflight、dirty draft ownership、pending 防重复与 query invalidation 合同。',
@@ -151,7 +151,7 @@ describe('frontend component migration inventory', () => {
     )
   })
 
-  it('tracks the component-verified DataTable, FilterBar, Findings, and Targets migrations', () => {
+  it('tracks the component-verified DataTable, FilterBar, and Findings migrations', () => {
     const record = componentMigrationRecords.find(
       (candidate) => candidate.id === 'tables-and-lists',
     )
@@ -165,11 +165,11 @@ describe('frontend component migration inventory', () => {
       },
     })
     expect(record?.notes).toContain(
-      'DataTable 与 FilterBar 已完成组件验证；Findings 已升级为成果中心：漏洞管理使用跨项目扁平表格、服务端严重度/状态筛选、本地搜索/项目筛选、KPI 与复合 project/vulnerability Drawer selection；报告管理使用服务端筛选分页、复合 project/artifact 深链和 MasterDetail 安全预览；WorkspaceTargets 已迁移到同一共享模式，保留客户端状态筛选、trim 后大小写不敏感搜索、最新优先排序、筛选结果全选、跨筛选隐藏 selection、单行与批量审核、Fact/Run 导航和无分页合同，并使用 typed API、项目切换隔离、部分失败 reconcile 与页面/badge 同步；WorkspaceArtifacts 已迁移 category/kind 筛选、trim 后大小写不敏感的 basename 文件名搜索、最新优先列表、artifactId 深链 reconcile、独立预览/Run 操作及无分页、轮询合同，并修复嵌套交互行；Traffic 已迁移 Runs 与 Hook evidence 双 DataTable、全局项目 FilterBar、稳定 evidence identity 和独立详情操作，保留无搜索、分页、用户排序与 Traffic polling 合同；WorkspaceHints 已迁移被动 FilterBar 与 DataTable，保留稳定最新优先、完整正文、父级轮询以及无搜索、分页和用户排序合同；相关页面均补齐可访问表格语义；SearchField 与通用 Pagination 留待后续列表切片；本次未执行 E2E、axe、360px 实机或视觉验证。',
+      'DataTable 与 FilterBar 已完成组件验证；Findings 已升级为成果中心：漏洞管理使用跨项目扁平表格、服务端严重度/状态筛选、本地搜索/项目筛选、KPI 与复合 project/vulnerability Drawer selection；报告管理使用服务端筛选分页、复合 project/artifact 深链和 MasterDetail 安全预览；WorkspaceArtifacts 已迁移 category/kind 筛选、trim 后大小写不敏感的 basename 文件名搜索、最新优先列表、artifactId 深链 reconcile、独立预览/Run 操作及无分页、轮询合同，并修复嵌套交互行；Traffic 已迁移 Runs 与 Hook evidence 双 DataTable、全局项目 FilterBar、稳定 evidence identity 和独立详情操作，保留无搜索、分页、用户排序与 Traffic polling 合同；WorkspaceHints 已迁移被动 FilterBar 与 DataTable，保留稳定最新优先、完整正文、父级轮询以及无搜索、分页和用户排序合同；相关页面均补齐可访问表格语义；SearchField 与通用 Pagination 留待后续列表切片；本次未执行 E2E、axe、360px 实机或视觉验证。',
     )
   })
 
-  it('tracks Findings and Targets cards, badges, and async feedback adoption', () => {
+  it('tracks Findings cards, badges, and async feedback adoption', () => {
     const cardRecord = componentMigrationRecords.find(
       (candidate) => candidate.id === 'cards-badges-and-status',
     )
@@ -178,10 +178,10 @@ describe('frontend component migration inventory', () => {
     )
 
     expect(cardRecord?.notes).toContain(
-      'ConsoleTimeout 已迁移 Card，Overview 已迁移 Card、Badge 与 StatusBadge；Findings 成果中心已迁移 KPI、漏洞表格与报告审阅 Card，并使用漏洞严重度/可信度/状态领域 Badge，避免扩大全局 status 语义；WorkspaceTargets 已迁移添加、待审核与批量操作 Card，以及类型和状态 Badge；Traffic 已迁移 Runs/evidence Card、Run 生命周期 StatusBadge 与 Bash 退出码领域 Badge，退出码不复用 HTTP status 语义；WorkspaceHints 已迁移创建 Card 与 creator/anchor 领域 Badge，保留原始 creator 和 Intent 优先展示；其余清单页面仍待迁移。',
+      'ConsoleTimeout 已迁移 Card，Overview 已迁移 Card、Badge 与 StatusBadge；Findings 成果中心已迁移 KPI、漏洞表格与报告审阅 Card，并使用漏洞严重度/可信度/状态领域 Badge，避免扩大全局 status 语义；Traffic 已迁移 Runs/evidence Card、Run 生命周期 StatusBadge 与 Bash 退出码领域 Badge，退出码不复用 HTTP status 语义；WorkspaceHints 已迁移创建 Card 与 creator/anchor 领域 Badge，保留原始 creator 和 Intent 优先展示；其余清单页面仍待迁移。',
     )
     expect(asyncRecord?.notes).toContain(
-      'Skeleton 与 ErrorState 已完成组件验证；Login、ChangePassword 已迁移内联认证错误 Alert，ConsoleTimeout 已迁移加载 Spinner 与错误 Alert，Overview 已迁移加载 Alert/Spinner 与空态 EmptyState；Findings 已迁移 Skeleton、EmptyState、ErrorState/retry，并在后台刷新或失败时保留 stale rows；WorkspaceTargets 已区分初次加载、初次错误、项目空态、筛选空态、后台刷新与 stale-data 错误，并为 mutation 增加重复提交保护和部分成功反馈；WorkspaceArtifacts 已区分列表初次/stale 状态、项目/筛选空态与 preview retry，并为项目访问、head/tail preview、截图错误和过期 Toast 增加 identity guard；Traffic 已区分 Projects/Runs/Traffic 三层初次、空态、stale error 与刷新状态，并为 project/run/evidence reconcile 和 clipboard Toast 增加 identity guard；WorkspaceHints 已迁移 EmptyState，并通过 pending token、project visit generation、POST response merge 和 stale Toast/reload 抑制隔离跨项目 mutation；其余异步状态仍待迁移。',
+      'Skeleton 与 ErrorState 已完成组件验证；Login、ChangePassword 已迁移内联认证错误 Alert，ConsoleTimeout 已迁移加载 Spinner 与错误 Alert，Overview 已迁移加载 Alert/Spinner 与空态 EmptyState；Findings 已迁移 Skeleton、EmptyState、ErrorState/retry，并在后台刷新或失败时保留 stale rows；WorkspaceArtifacts 已区分列表初次/stale 状态、项目/筛选空态与 preview retry，并为项目访问、head/tail preview、截图错误和过期 Toast 增加 identity guard；Traffic 已区分 Projects/Runs/Traffic 三层初次、空态、stale error 与刷新状态，并为 project/run/evidence reconcile 和 clipboard Toast 增加 identity guard；WorkspaceHints 已迁移 EmptyState，并通过 pending token、project visit generation、POST response merge 和 stale Toast/reload 抑制隔离跨项目 mutation；其余异步状态仍待迁移。',
     )
     expect(asyncRecord?.notes).toContain(
       'ScenariosConsole、WorkersConsole、KnowledgeConsole 与 PromptGroupsConsole 已迁移加载/错误 Alert、Spinner 或编辑区 EmptyState；WorkerTemplatesPanel 已区分加载、失败与真实空态，并为删除增加 pending guard。',
@@ -325,25 +325,6 @@ describe('frontend component migration inventory', () => {
     )
     expect(notesByRecord['async-feedback']).toContain(
       'WorkspaceVulnerabilities 已区分初次加载/错误、项目/筛选空态、后台刷新与 stale-data 错误；通过 project visit、immutable query snapshot、AbortSignal 和 captured mutation identity 隔离跨项目响应，并同步 workspace list、badge 与 global Findings。',
-    )
-  })
-
-  it('tracks the WorkspaceCoverage shared components and async ownership migration', () => {
-    const notesByRecord = Object.fromEntries(
-      componentMigrationRecords.map((record) => [record.id, record.notes ?? []]),
-    )
-
-    expect(notesByRecord['buttons-and-form-controls']).toContain(
-      'WorkspaceCoverage 已迁移刷新 Button，并保留全局刷新触发、结构化协议 gating 与 Surface Manifest、Coverage Cell 聚合刷新合同；手动报告入口已迁移至 WorkspaceVulnerabilities。',
-    )
-    expect(notesByRecord['cards-badges-and-status']).toContain(
-      'WorkspaceCoverage 已迁移质量指标、收敛摘要、Coverage Cell 与 Surface observation Card，并使用质量、Coverage requirement、运行状态与结果领域 Badge；报告状态已移入独立报告领域。',
-    )
-    expect(notesByRecord['tables-and-lists']).toContain(
-      'WorkspaceCoverage 已迁移 Coverage Cell DataTable，保留权威 Cell 语义、完整文本、可访问表格和 Fact、Run、Vulnerability、Artifact 命名路由深链；页面不增加筛选、搜索、分页或用户排序。',
-    )
-    expect(notesByRecord['async-feedback']).toContain(
-      'WorkspaceCoverage 已区分 Project detail、Surface Manifest 与 Coverage Cell 的初次加载、初次错误、真实空态、后台刷新与 stale-data 错误；报告 finalization 轮询与 completed gating 已迁移到 WorkspaceVulnerabilities 的 ProjectReportDialog，并继续通过 route-matching detail、request generation 与 AbortSignal 隔离跨项目响应。',
     )
   })
 })

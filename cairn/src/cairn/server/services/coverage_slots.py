@@ -10,7 +10,7 @@ import sqlite3
 import json
 from datetime import datetime, timedelta, timezone
 
-from cairn.assessment_contracts import GOAL_DRIVEN_PROTOCOL
+from cairn.assessment_contracts import GOAL_DRIVEN_PROTOCOL, validate_goal_driven_experiment
 from cairn.server.models import CoverageSlot
 
 from .assessment_policy import (
@@ -641,6 +641,12 @@ def validate_assessment_experiment(conn, project_id: str, intent, body, slot) ->
         if record is None:
             raise HTTPException(422, "assessment_experiment_required")
 
+    if goal_driven:
+        try:
+            validate_goal_driven_experiment(record)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     if any(
         ref.artifact_handle is not None or ref.artifact_id is None
         for ref in record.evidence_refs
@@ -663,17 +669,10 @@ def validate_assessment_experiment(conn, project_id: str, intent, body, slot) ->
         raise HTTPException(422, "experiment_current_run_evidence_required")
 
     outcome = record.outcome if goal_driven else body.coverage_result.outcome
-    if goal_driven and outcome is None:
-        raise HTTPException(422, "assessment_outcome_required")
-    if outcome in {"finding", "tested_no_finding"}:
-        required_comparison = bool(
-            record.baseline and record.variants and record.observations
-        )
-        if not required_comparison or (not goal_driven and not record.controls):
-            raise HTTPException(
-                422, "experiment_comparison_and_observations_required"
-            )
-        if not goal_driven and (
+    if outcome in {"finding", "tested_no_finding"} and not goal_driven:
+        if not (record.baseline and record.variants and record.controls and record.observations):
+            raise HTTPException(422, "experiment_comparison_and_observations_required")
+        if (
             record.baseline != body.coverage_result.baseline
             or record.variants != body.coverage_result.variants
         ):
@@ -734,29 +733,10 @@ def validate_assessment_experiment(conn, project_id: str, intent, body, slot) ->
             )
             if not complete_exchange and not packet_evidence:
                 raise HTTPException(422, "finding_complete_reproduction_required")
-        elif outcome == "temporarily_blocked":
-            blocker_code = record.blocker_code.strip().lower()
-            if blocker_code in _RUNTIME_FAILURE_BLOCKER_CODES:
-                raise HTTPException(422, "runtime_failure_is_not_target_blocker")
-            if (
-                not blocker_code
-                or not record.limitation_reason
-                or not record.limitation_details
-                or not record.attempted_strategies
-            ):
-                raise HTTPException(422, "target_blocker_details_required")
-        elif outcome in {
-            "permanently_unreachable",
-            "out_of_scope",
-            "not_applicable",
-        } and (
-            not record.limitation_reason or not record.limitation_details
+        elif outcome == "temporarily_blocked" and (
+            record.blocker_code.strip().lower() in _RUNTIME_FAILURE_BLOCKER_CODES
         ):
-            raise HTTPException(422, "assessment_limitation_details_required")
-        elif outcome == "observation" and not (
-            record.observations or record.limitations
-        ):
-            raise HTTPException(422, "assessment_observation_details_required")
+            raise HTTPException(422, "runtime_failure_is_not_target_blocker")
     elif outcome == "temporarily_blocked" and not record.limitations:
         raise HTTPException(422, "blocked_experiment_limitations_required")
     return record.model_dump(by_alias=True, exclude_none=True)

@@ -209,11 +209,19 @@ function buttonByText(text: string) {
   )
 }
 
+async function selectMoreItem(wrapper: VueWrapper, label: string) {
+  await wrapper.get('button[aria-label="项目更多操作"]').trigger('click')
+  await flushPromises()
+  const item = Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(
+    (option) => option.textContent?.includes(label),
+  )
+  if (!item) throw new Error(`找不到更多菜单项：${label}`)
+  item.click()
+  await flushPromises()
+}
+
 async function openDeleteConfirmation(wrapper: VueWrapper) {
-  await wrapper.get('button[aria-label="项目工具菜单"]').trigger('click')
-  await flushPromises()
-  document.body.querySelector<HTMLElement>('[role="menuitem"]')?.click()
-  await flushPromises()
+  await selectMoreItem(wrapper, '彻底删除项目')
 }
 
 beforeEach(() => {
@@ -260,6 +268,13 @@ describe('ProjectWorkspace shared control migration', () => {
 
     expect(document.body.textContent).toContain('实时状态刷新失败')
     expect(document.body.textContent).toContain('测试项目')
+    expect(wrapper.findAll('.workspace-tabs .tab-item').map((tab) => tab.text())).toEqual([
+      '图谱',
+      '运行',
+      '漏洞',
+      '产物',
+      '提示',
+    ])
 
     workspaceStore.error = ''
     wrapper.unmount()
@@ -279,6 +294,7 @@ describe('ProjectWorkspace shared control migration', () => {
     expect(apiMock).toHaveBeenCalledOnce()
     expect(apiMock).toHaveBeenCalledWith('POST', '/projects/proj_test/pause')
     expect(pauseButton?.disabled).toBe(true)
+    expect(wrapper.get('.header-action-reasons').text()).toContain('暂停项目：正在提交项目操作。')
 
     update.resolve()
     await flushPromises()
@@ -309,7 +325,9 @@ describe('ProjectWorkspace shared control migration', () => {
     expect(document.body.textContent).toContain('不会沿用或静默延长原期限')
 
     document.body.querySelector<HTMLInputElement>('input[aria-label="授权无限期有效"]')?.click()
-    document.body.querySelector<HTMLInputElement>('input[aria-label="确认当前项目授权范围"]')?.click()
+    document.body
+      .querySelector<HTMLInputElement>('input[aria-label="确认当前项目授权范围"]')
+      ?.click()
     await flushPromises()
 
     expect(confirmButton?.disabled).toBe(false)
@@ -332,9 +350,9 @@ describe('ProjectWorkspace shared control migration', () => {
     buttonByText('查看成果')?.click()
     await flushPromises()
 
-    expect(document.body.querySelector('[data-testid="project-report-dialog"]')?.textContent).toContain(
-      '报告流程 proj_test stopped',
-    )
+    expect(
+      document.body.querySelector('[data-testid="project-report-dialog"]')?.textContent,
+    ).toContain('报告流程 proj_test stopped')
     wrapper.unmount()
   }, 15_000)
 
@@ -394,9 +412,9 @@ describe('ProjectWorkspace shared control migration', () => {
     })
     await flushPromises()
 
-    expect(document.body.querySelector('[data-testid="project-report-dialog"]')?.textContent).toContain(
-      '报告流程 proj_test stopped',
-    )
+    expect(
+      document.body.querySelector('[data-testid="project-report-dialog"]')?.textContent,
+    ).toContain('报告流程 proj_test stopped')
     expect(document.body.textContent).not.toContain('正在确认评估已静默')
     wrapper.unmount()
   }, 15_000)
@@ -440,17 +458,23 @@ describe('ProjectWorkspace shared control migration', () => {
     wrapper.unmount()
   }, 15_000)
 
-  it('opens the semantic tools menu and routes delete through ConfirmAction', async () => {
+  it('groups secondary actions and routes delete through ConfirmAction', async () => {
     const wrapper = await mountWorkspace()
-    await wrapper.get('button[aria-label="项目工具菜单"]').trigger('click')
+    await wrapper.get('button[aria-label="项目更多操作"]').trigger('click')
     await flushPromises()
 
     const menu = document.body.querySelector<HTMLElement>('[role="menu"]')
-    const deleteItem = document.body.querySelector<HTMLElement>('[role="menuitem"]')
+    const items = Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'))
     expect(menu).not.toBeNull()
-    expect(deleteItem?.textContent).toContain('彻底删除项目')
+    expect(items.map((item) => item.textContent)).toEqual([
+      'Workers',
+      '资料',
+      '导出项目配置 YAML',
+      '下载漏洞证据 ZIP（按漏洞分组）',
+      '彻底删除项目',
+    ])
 
-    deleteItem?.click()
+    items[4]?.click()
     await flushPromises()
 
     expect(document.body.querySelector('[role="menu"]')).toBeNull()
@@ -464,7 +488,7 @@ describe('ProjectWorkspace shared control migration', () => {
 
   it('offers YAML and vulnerability evidence ZIP exports', async () => {
     const wrapper = await mountWorkspace()
-    buttonByText('导出')?.click()
+    await wrapper.get('button[aria-label="项目更多操作"]').trigger('click')
     await flushPromises()
 
     const menuItems = Array.from(
@@ -485,7 +509,7 @@ describe('ProjectWorkspace shared control migration', () => {
     workspaceStore.projectDetail.project = { ...baseProject, id: 'proj/encoded' }
     await flushPromises()
 
-    buttonByText('导出')?.click()
+    await wrapper.get('button[aria-label="项目更多操作"]').trigger('click')
     await flushPromises()
     const archiveItem = Array.from(
       document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
@@ -511,7 +535,7 @@ describe('ProjectWorkspace shared control migration', () => {
     getProjectManagementOptionsMock.mockReturnValue(options.promise)
     const wrapper = await mountWorkspace()
 
-    buttonByText('Workers')?.click()
+    await selectMoreItem(wrapper, 'Workers')
     await wrapper.vm.$nextTick()
 
     const status = document.body.querySelector<HTMLElement>('[role="status"][aria-live="polite"]')
@@ -540,8 +564,7 @@ describe('ProjectWorkspace shared control migration', () => {
     updateProjectWorkersMock.mockReturnValue(save.promise)
     const wrapper = await mountWorkspace()
 
-    buttonByText('Workers')?.click()
-    await flushPromises()
+    await selectMoreItem(wrapper, 'Workers')
 
     const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')
     expect(dialog?.textContent).toContain('更新项目 Workers')
@@ -588,8 +611,7 @@ describe('ProjectWorkspace shared control migration', () => {
     })
     const wrapper = await mountWorkspace('stopped')
 
-    buttonByText('资料')?.click()
-    await flushPromises()
+    await selectMoreItem(wrapper, '资料')
 
     const note = document.body.querySelector<HTMLElement>('.resource-mutation-note')
     expect(note?.textContent).toContain('资料变更仅用于后续允许的任务')
@@ -608,8 +630,7 @@ describe('ProjectWorkspace shared control migration', () => {
     })
     const wrapper = await mountWorkspace()
 
-    buttonByText('资料')?.click()
-    await flushPromises()
+    await selectMoreItem(wrapper, '资料')
     const input = document.body.querySelectorAll<HTMLInputElement>('input[type="file"]')[0]
     Object.defineProperty(input, 'files', {
       configurable: true,
@@ -642,8 +663,7 @@ describe('ProjectWorkspace shared control migration', () => {
     commitProjectResourceBatchMock.mockReturnValue(commit.promise)
     const wrapper = await mountWorkspace()
 
-    buttonByText('资料')?.click()
-    await flushPromises()
+    await selectMoreItem(wrapper, '资料')
     const input = document.body.querySelectorAll<HTMLInputElement>('input[type="file"]')[0]
     Object.defineProperty(input, 'files', {
       configurable: true,

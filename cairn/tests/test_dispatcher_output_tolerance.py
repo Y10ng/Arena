@@ -595,7 +595,7 @@ def test_goal_driven_explore_requires_evidence_for_non_test_outcomes(record) -> 
         },
     }
 
-    with pytest.raises(ValueError, match="requires assessment_record evidence_refs"):
+    with pytest.raises(ValueError, match="assessment_record.evidence_refs is required"):
         validate_explore_payload(
             payload,
             strict_contract=True,

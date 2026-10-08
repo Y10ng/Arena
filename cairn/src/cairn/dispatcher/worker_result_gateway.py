@@ -147,7 +147,7 @@ _REQUEST_PATHS = frozenset({
     "model.inference_endpoint", "model.base_url", "model.api_key", "model.custom_headers",
     "binding", "binding.slot_key", "binding.surface_key", "binding.test_family",
     "binding.verification_observation_id", "binding.review_input_digest",
-    "binding.max_intents", "binding.allowed_fact_ids",
+    "binding.max_intents", "binding.allowed_fact_ids", "binding.allowed_intent_ids",
     "binding.structured_intent_binding", "cwd", "session_root",
 })
 _PI_FIELDS = {

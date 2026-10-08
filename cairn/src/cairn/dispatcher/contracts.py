@@ -12,6 +12,8 @@ from cairn.assessment_contracts import (
     DepthReviewDecision,
     ExperimentRecord,
     StructuredIntentBinding,
+    validate_goal_driven_experiment,
+    valid_reason_dependency,
 )
 from cairn.dispatcher.worker_protocol import validate_result_envelope
 from cairn.dispatcher.worker_protocol.submission import validate_phase_data
@@ -76,10 +78,6 @@ DEFAULT_COPY_COVERAGE_OUTCOMES = {
     "out_of_scope",
     "not_applicable",
 }
-GOAL_DRIVEN_ASSESSMENT_OUTCOMES = DEFAULT_COPY_COVERAGE_OUTCOMES | {
-    "observation",
-}
-
 # 漏洞 severity 白名单（与 server schemas VULNERABILITY_SEVERITIES 保持一致）。
 VULNERABILITY_SEVERITIES = {"critical", "high", "medium", "low", "info"}
 
@@ -784,53 +782,10 @@ def _validate_goal_driven_assessment_record(
     if not isinstance(raw, dict):
         raise PhaseContractError("assessment_record is required")
     record = ExperimentRecord.model_validate(raw)
-    outcome = record.outcome
-    if outcome not in GOAL_DRIVEN_ASSESSMENT_OUTCOMES:
-        raise PhaseContractError("assessment_record.outcome is required")
-    if not record.evidence_refs:
-        raise PhaseContractError(
-            f"{outcome} requires assessment_record evidence_refs"
-        )
-    if outcome in {"finding", "tested_no_finding"}:
-        if not record.baseline.strip() or not record.variants:
-            raise PhaseContractError(
-                f"{outcome} requires assessment_record baseline and variants"
-            )
-        if not record.observations:
-            raise PhaseContractError(
-                f"{outcome} requires assessment_record observations"
-            )
-    elif outcome == "temporarily_blocked":
-        for key, value in (
-            ("blocker_code", record.blocker_code),
-            ("limitation_reason", record.limitation_reason),
-            ("limitation_details", record.limitation_details),
-        ):
-            if not value.strip():
-                raise PhaseContractError(
-                    f"temporarily_blocked requires assessment_record {key}"
-                )
-        if not record.attempted_strategies:
-            raise PhaseContractError(
-                "temporarily_blocked requires assessment_record attempted_strategies"
-            )
-    elif outcome in {
-        "permanently_unreachable",
-        "out_of_scope",
-        "not_applicable",
-    }:
-        if not record.limitation_reason.strip() or not record.limitation_details.strip():
-            raise PhaseContractError(
-                f"{outcome} requires assessment_record limitation_reason and limitation_details"
-            )
-        if outcome == "permanently_unreachable" and not record.attempted_strategies:
-            raise PhaseContractError(
-                "permanently_unreachable requires assessment_record attempted_strategies"
-            )
-    elif not record.observations and not record.limitations:
-        raise PhaseContractError(
-            "observation requires assessment_record observations or limitations"
-        )
+    try:
+        validate_goal_driven_experiment(record)
+    except ValueError as exc:
+        raise PhaseContractError(str(exc)) from exc
     return record
 
 
@@ -1059,6 +1014,7 @@ def validate_reason_payload(
     surface_manifest: bool = False,
     structured_intent_binding: dict[str, Any] | None = None,
     goal_driven: bool = False,
+    allowed_intent_ids: list[str] | None = None,
 ) -> tuple[str, dict[str, Any] | list[dict[str, Any]] | None, list[str]]:
     accepted, data = _unwrap_result_envelope(
         payload,
@@ -1154,10 +1110,13 @@ def validate_reason_payload(
             if type(priority) is not int or priority not in {0, 1, 2}:
                 raise PhaseContractError(f"intent[{i}].priority must be 0, 1, or 2")
             intent["priority"] = priority
-            # depends_on: 可选，可以是 @N 占位符（引用同批次第 N 个）或现有 intent id。
+            # goal-driven 使用冻结的既有 ID 范围；旧阶段仍沿用原有依赖边界。
             depends_on = intent.get("depends_on")
             if depends_on is not None:
-                if not isinstance(depends_on, str) or not depends_on.strip():
+                if goal_driven and allowed_intent_ids is not None:
+                    if not valid_reason_dependency(depends_on, i, allowed_intent_ids):
+                        raise PhaseContractError(f"intent[{i}].depends_on is invalid")
+                elif not isinstance(depends_on, str) or not depends_on.strip():
                     raise PhaseContractError(f"intent[{i}].depends_on must be a non-empty string")
             # legacy 项目仍允许无 Cell Intent；普通结构化 Reason 必须选择冻结合同内的唯一 Cell。
             slot_key = intent.get("slot_key")

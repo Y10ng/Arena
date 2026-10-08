@@ -24,18 +24,13 @@
 
     <!-- Main Workspace Content -->
     <template v-else-if="project">
-      <!-- Workspace Header -->
       <header class="workspace-header">
-        <!-- Left Title Section -->
         <div class="header-left">
-          <!-- 返回项目列表 -->
           <IconButton label="返回项目列表" size="sm" variant="secondary" @click="goBackToList">
             <ArrowLeft :size="16" />
           </IconButton>
 
-          <!-- Inline Editable Title -->
           <div class="title-edit-container">
-            <Badge class="context-tag" size="sm">工作空间</Badge>
             <div v-if="isEditingTitle" class="edit-row">
               <Input
                 ref="titleInput"
@@ -73,11 +68,8 @@
           </span>
         </div>
 
-        <!-- 操作与状态分开，窄工作区按实际内容宽度换行。 -->
         <div class="header-right">
-          <Button size="sm" variant="secondary" @click="reportDialogOpen = true">
-            查看成果
-          </Button>
+          <Button size="sm" variant="secondary" @click="reportDialogOpen = true"> 查看成果 </Button>
           <Button
             v-if="lifecycleStatus === 'active'"
             size="sm"
@@ -130,76 +122,53 @@
             重新开启 (Reopen)
           </Button>
 
-          <Button
-            size="sm"
-            variant="secondary"
-            title="更新项目 Worker 绑定"
-            @click="openWorkersDialog"
-          >
-            Workers
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            title="管理项目辅助资料"
-            @click="openResourcesDialog"
-          >
-            资料 {{ projectResources.length ? `(${projectResources.length})` : '' }}
-          </Button>
-
           <DropdownMenu
-            v-model:open="isExportOpen"
-            :items="exportMenuItems"
-            @select="handleExportMenuSelect"
+            v-model:open="isMoreOpen"
+            :items="moreMenuItems"
+            @select="handleMoreMenuSelect"
           >
             <template #trigger>
-              <Button size="sm" variant="secondary" title="导出项目内容">
-                <template #icon><Download :size="12" /></template>
-                导出
+              <Button size="sm" variant="secondary" aria-label="项目更多操作">
+                <template #icon><MoreHorizontal :size="14" /></template>
+                更多
               </Button>
             </template>
-            <template #icon><Download :size="12" /></template>
-          </DropdownMenu>
-
-          <!-- Dropdown tools menu -->
-          <DropdownMenu
-            v-model:open="isToolsOpen"
-            :items="toolsMenuItems"
-            @select="handleToolsMenuSelect"
-          >
-            <template #trigger>
-              <IconButton label="项目工具菜单" size="sm" variant="secondary">
-                <MoreHorizontal :size="14" />
-              </IconButton>
+            <template #icon="{ item }">
+              <Trash2 v-if="item.value === 'delete-project'" :size="12" />
+              <Download v-else-if="item.value.startsWith('export-')" :size="12" />
+              <UsersRound v-else-if="item.value === 'workers'" :size="12" />
+              <FolderOpen v-else :size="12" />
             </template>
-            <template #icon><Trash2 :size="12" /></template>
           </DropdownMenu>
         </div>
 
-        <dl class="workspace-meta" aria-label="项目归属信息">
-          <div class="workspace-meta-item">
-            <dt>项目组</dt>
-            <dd>{{ project.group_name || '未分组' }}</dd>
-          </div>
-          <div class="workspace-meta-item">
-            <dt>场景</dt>
-            <dd>{{ getScenarioLabel(project) }}</dd>
-          </div>
-          <template v-if="authStore.isSuperAdmin">
-            <div class="workspace-meta-item">
-              <dt>Tenant</dt>
-              <dd>{{ project.tenant_name }}</dd>
-            </div>
-            <div class="workspace-meta-item workspace-meta-id">
-              <dt>Tenant ID</dt>
-              <dd class="mono" :title="project.tenant_id">{{ project.tenant_id }}</dd>
-            </div>
-            <div v-if="project.tenant_owner_login" class="workspace-meta-item">
-              <dt>所有者</dt>
-              <dd>{{ project.tenant_owner_login }}</dd>
-            </div>
-          </template>
-        </dl>
+        <div v-if="lifecycleActionWarnings.length" class="header-action-reasons" role="status">
+          <span v-for="warning in lifecycleActionWarnings" :key="warning.action">
+            {{ warning.action }}：{{ warning.reason }}
+          </span>
+        </div>
+
+        <div class="workspace-meta" aria-label="项目归属信息">
+          <span>项目组：{{ project.group_name || '未分组' }}</span>
+          <span>场景：{{ getScenarioLabel(project) }}</span>
+          <details v-if="authStore.isSuperAdmin" class="workspace-admin-meta">
+            <summary>项目信息</summary>
+            <dl>
+              <div>
+                <dt>Tenant</dt>
+                <dd>{{ project.tenant_name }}</dd>
+              </div>
+              <div>
+                <dt>Tenant ID</dt>
+                <dd class="mono">{{ project.tenant_id }}</dd>
+              </div>
+              <div v-if="project.tenant_owner_login">
+                <dt>所有者</dt>
+                <dd>{{ project.tenant_owner_login }}</dd>
+              </div>
+            </dl>
+          </details>
+        </div>
       </header>
       <Alert
         v-if="workspaceStore.error"
@@ -211,11 +180,7 @@
       </Alert>
 
       <Alert v-if="actionError" tone="danger" title="项目操作失败">{{ actionError }}</Alert>
-      <Alert
-        v-if="finishAndReportPending"
-        tone="info"
-        title="正在确认评估已静默"
-      >
+      <Alert v-if="finishAndReportPending" tone="info" title="正在确认评估已静默">
         服务端已接受结束请求。确认项目已停止或完成且没有活动运行后，将自动打开报告流程。
       </Alert>
       <ConfirmAction
@@ -306,23 +271,19 @@
         <Alert v-if="actionError" tone="danger" title="项目操作失败">{{ actionError }}</Alert>
       </ConfirmAction>
 
-      <!-- TabBar navigation：分两簇，簇间用分隔点 -->
-      <nav class="workspace-tabs">
-        <template v-for="(group, gi) in tabGroups" :key="group.label">
-          <span class="tab-group-separator" v-if="gi > 0" aria-hidden="true">·</span>
-          <router-link
-            v-for="tab in group.tabs"
-            :key="tab.routeName"
-            :to="{ name: tab.routeName, params: { id: project.id } }"
-            class="tab-item"
-            exact-active-class="active"
-          >
-            {{ tab.label }}
-            <span class="tab-badge" v-if="tab.badgeCount && tab.badgeCount.value > 0">
-              {{ tab.badgeCount.value }}
-            </span>
-          </router-link>
-        </template>
+      <nav class="workspace-tabs" aria-label="项目页面">
+        <router-link
+          v-for="tab in tabs"
+          :key="tab.routeName"
+          :to="{ name: tab.routeName, params: { id: project.id } }"
+          class="tab-item"
+          exact-active-class="active"
+        >
+          {{ tab.label }}
+          <span class="tab-badge" v-if="tab.badgeCount && tab.badgeCount.value > 0">
+            {{ tab.badgeCount.value }}
+          </span>
+        </router-link>
       </nav>
 
       <!-- Viewport area -->
@@ -527,6 +488,7 @@ import { useQuery } from '@tanstack/vue-query'
 import {
   ArrowLeft,
   Download,
+  FolderOpen,
   MoreHorizontal,
   Pause,
   Pencil,
@@ -534,6 +496,7 @@ import {
   RotateCcw,
   ShieldCheck,
   Trash2,
+  UsersRound,
 } from '@lucide/vue'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -596,7 +559,6 @@ const uiStore = useUIStore()
 const router = useRouter()
 
 const project = computed(() => workspaceStore.projectDetail?.project || null)
-const targets = computed(() => workspaceStore.projectDetail?.targets || [])
 const hints = computed(() => workspaceStore.projectDetail?.hints || [])
 const projectResources = computed(() => workspaceStore.projectDetail?.resources || [])
 const projectResourceBytes = computed(() =>
@@ -606,10 +568,7 @@ const projectResourcePaths = computed(() => projectResources.value.map((resource
 const projectLibraryBindings = computed(() => workspaceStore.projectDetail?.library_bindings || [])
 const projectId = computed(() => project.value?.id || '')
 
-const {
-  data: runtimeData,
-  unavailable: runtimeUnavailable,
-} = useProjectRuntime(projectId)
+const { data: runtimeData, unavailable: runtimeUnavailable } = useProjectRuntime(projectId)
 const lifecycleStatus = computed(() => project.value?.status || 'active')
 const projectActiveTasks = computed(() =>
   Array.isArray(runtimeData.value?.active_runs) ? runtimeData.value.active_runs : [],
@@ -663,11 +622,6 @@ const scenarioLabels = computed(() => {
   return new Map((scenariosData.value || []).map((scenario) => [scenario.key, scenario.label]))
 })
 
-// Tab Counts Setup
-const pendingTargetsCount = computed(() => {
-  return targets.value.filter((t: any) => t.status === 'discovered').length
-})
-
 const workingIntentsCount = computed(() => {
   const intents = workspaceStore.projectDetail?.intents || []
   return intents.filter((i: any) => !i.concluded_at && i.worker).length
@@ -687,38 +641,12 @@ const { data: vulnerabilitiesData } = useQuery<Vulnerability[]>({
   refetchInterval: 10000,
 })
 const vulnsCount = computed(() => (vulnerabilitiesData.value || []).length)
-const coverageAttentionCount = computed(() => {
-  const quality = project.value?.assessment_quality
-  if (!quality) return 0
-  return (
-    quality.required.unresolved_count +
-    quality.active_blocker_count +
-    quality.pending_verifier_count
-  )
-})
-
-// Tabs configuration
-// tabs 分两簇：探索过程 / 成果。视觉上用分隔点区分，眼睛更快定位。
-const tabGroups = [
-  {
-    label: '探索过程',
-    tabs: [
-      { label: '图谱', routeName: 'WorkspaceGraph' },
-      { label: '运行', routeName: 'WorkspaceRuns', badgeCount: workingIntentsCount },
-      { label: '目标', routeName: 'WorkspaceTargets', badgeCount: pendingTargetsCount },
-      { label: '提示', routeName: 'WorkspaceHints', badgeCount: hintsCount },
-      { label: '溯源', routeName: 'WorkspaceProvenance' },
-      { label: '覆盖', routeName: 'WorkspaceCoverage', badgeCount: coverageAttentionCount },
-    ],
-  },
-  {
-    label: '成果',
-    tabs: [
-      { label: '漏洞', routeName: 'WorkspaceVulnerabilities', badgeCount: vulnsCount },
-      { label: 'Payload', routeName: 'WorkspacePayloads' },
-      { label: '产物', routeName: 'WorkspaceArtifacts' },
-    ],
-  },
+const tabs = [
+  { label: '图谱', routeName: 'WorkspaceGraph' },
+  { label: '运行', routeName: 'WorkspaceRuns', badgeCount: workingIntentsCount },
+  { label: '漏洞', routeName: 'WorkspaceVulnerabilities', badgeCount: vulnsCount },
+  { label: '产物', routeName: 'WorkspaceArtifacts' },
+  { label: '提示', routeName: 'WorkspaceHints', badgeCount: hintsCount },
 ]
 
 // Inline title edit state
@@ -843,6 +771,20 @@ const disabledReason = (action: ProjectLifecycleAction) => {
       : runtimeData.value?.actions?.[action]?.reason,
   )
 }
+const lifecycleActionWarnings = computed(() => {
+  const actions: Array<{ action: ProjectLifecycleAction; label: string }> = []
+  if (lifecycleStatus.value === 'active') actions.push({ action: 'pause', label: '暂停项目' })
+  if (lifecycleStatus.value === 'paused') {
+    if (runtimeData.value?.actions?.reauthorize?.allowed)
+      actions.push({ action: 'reauthorize', label: '重新确认授权' })
+    actions.push({ action: 'resume', label: '继续项目' })
+  }
+  if (['active', 'paused'].includes(lifecycleStatus.value))
+    actions.push({ action: 'finish', label: '结束并生成报告' })
+  return actions
+    .filter(({ action }) => !canPerform(action))
+    .map(({ action, label }) => ({ action: label, reason: disabledReason(action) }))
+})
 const changeStatus = async (action: DirectProjectLifecycleAction) => {
   if (!projectId.value) return
   if (await perform(projectId.value, action)) showFinishDialog.value = false
@@ -1089,19 +1031,25 @@ const saveReopen = async () => {
   }
 }
 
-const isExportOpen = ref(false)
-const exportMenuItems: readonly DropdownMenuOption[] = [
-  { value: 'project-yaml', label: '导出项目配置 YAML' },
-  { value: 'vulnerability-evidence-archive', label: '下载漏洞证据 ZIP（按漏洞分组）' },
-]
+const isMoreOpen = ref(false)
+const moreMenuItems = computed<readonly DropdownMenuOption[]>(() => [
+  { value: 'workers', label: 'Workers' },
+  {
+    value: 'resources',
+    label: `资料${projectResources.value.length ? ` (${projectResources.value.length})` : ''}`,
+  },
+  { value: 'export-project-yaml', label: '导出项目配置 YAML', separatorBefore: true },
+  { value: 'export-vulnerability-evidence-archive', label: '下载漏洞证据 ZIP（按漏洞分组）' },
+  { value: 'delete-project', label: '彻底删除项目', separatorBefore: true, tone: 'danger' },
+])
 
-function handleExportMenuSelect(value: string) {
-  isExportOpen.value = false
-  if (value === 'project-yaml') {
-    void exportProjectYaml()
-  } else if (value === 'vulnerability-evidence-archive') {
-    downloadVulnerabilityEvidenceArchive()
-  }
+function handleMoreMenuSelect(value: string) {
+  isMoreOpen.value = false
+  if (value === 'workers') void openWorkersDialog()
+  else if (value === 'resources') void openResourcesDialog()
+  else if (value === 'export-project-yaml') void exportProjectYaml()
+  else if (value === 'export-vulnerability-evidence-archive') downloadVulnerabilityEvidenceArchive()
+  else if (value === 'delete-project') confirmDeleteProject()
 }
 
 function downloadVulnerabilityEvidenceArchive() {
@@ -1138,16 +1086,6 @@ const exportProjectYaml = async () => {
   }
 }
 
-// Dropdown Tools menu actions
-const isToolsOpen = ref(false)
-const toolsMenuItems: readonly DropdownMenuOption[] = [
-  { value: 'delete-project', label: '彻底删除项目', tone: 'danger' },
-]
-
-function handleToolsMenuSelect(value: string) {
-  if (value === 'delete-project') confirmDeleteProject()
-}
-
 // Delete project dialog
 const showDeleteDialog = ref(false)
 const deleteSaving = ref(false)
@@ -1162,7 +1100,6 @@ const handleDeleteDialogOpenChange = (open: boolean) => {
 }
 
 const confirmDeleteProject = () => {
-  isToolsOpen.value = false
   showDeleteDialog.value = true
 }
 const saveDelete = async () => {

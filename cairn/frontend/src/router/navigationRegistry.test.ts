@@ -27,6 +27,33 @@ describe('navigation registry', () => {
     expect(sorted(registryNames)).toEqual(sorted(inventoryNames))
   })
 
+  it('keeps five workspace destinations and sends retired URLs to NotFound', () => {
+    expect(
+      navigationRegistry
+        .filter((item) => item.workspace)
+        .sort((a, b) => a.workspace!.order - b.workspace!.order)
+        .map((item) => item.routeName),
+    ).toEqual([
+      'WorkspaceGraph',
+      'WorkspaceRuns',
+      'WorkspaceVulnerabilities',
+      'WorkspaceArtifacts',
+      'WorkspaceHints',
+    ])
+    for (const path of ['targets', 'provenance', 'coverage', 'payloads']) {
+      expect(router.resolve(`/projects/project-a/${path}`).name).toBe('NotFound')
+    }
+    expect(router.resolve('/projects/project-a').name).toBe('WorkspaceGraph')
+    expect(router.resolve('/projects/project-a/runs?runId=run-a').name).toBe('WorkspaceRuns')
+    expect(router.resolve('/projects/project-a/vulnerabilities?vulnId=vuln-a').name).toBe(
+      'WorkspaceVulnerabilities',
+    )
+    expect(router.resolve('/projects/project-a/artifacts?artifactId=artifact-a').name).toBe(
+      'WorkspaceArtifacts',
+    )
+    expect(router.resolve('/projects/project-a/hints').name).toBe('WorkspaceHints')
+  })
+
   it('keeps tenant and super-admin navigation visibility aligned with route meta', () => {
     const privilegedRegistryNames = navigationRegistry
       .filter((item) => item.role === 'super-admin')
@@ -72,10 +99,8 @@ describe('navigation registry', () => {
       '成果列表',
     ])
     expect(
-      breadcrumbsFromRegistry('WorkspaceProvenance', 'project-a', 'Project A').map(
-        (crumb) => crumb.text,
-      ),
-    ).toEqual(['Arena', '任务管理', 'Project A', '溯源分析'])
+      breadcrumbsFromRegistry('WorkspaceRuns', 'project-a', 'Project A').map((crumb) => crumb.text),
+    ).toEqual(['Arena', '任务管理', 'Project A', '运行日志'])
     expect(
       breadcrumbsFromRegistry('WorkspaceGraph', 'project-a').map((crumb) => crumb.text),
     ).toEqual(['Arena', '任务管理', 'project-a'])

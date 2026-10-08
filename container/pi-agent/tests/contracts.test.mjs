@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { access, readFile, writeFile, unlink, mkdir, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { Compile } from 'typebox/compile';
 import { PHASE_RESULT_KINDS } from '../dist/protocol.js';
 import { canonicalJson, runRequest } from '../dist/runner.js';
@@ -10,6 +12,95 @@ import { fixture } from './fixtures.mjs';
 
 const contracts = JSON.parse(await readFile(new URL('../contracts/submission-v1.json', import.meta.url), 'utf8'));
 const bootstrap = { accepted: true, data: { fact: { description: '观察' }, complete: { description: '完成' } } };
+
+function goalSchemas() {
+  const source = fileURLToPath(new URL('../../../cairn/src/', import.meta.url));
+  const code = `import json
+from cairn.dispatcher.worker_protocol.submission import build_submit_result_schema
+print(json.dumps({
+  'explore': build_submit_result_schema('explore_execute', {'assessment_protocol': 'goal-driven-v1'}),
+  'reason': build_submit_result_schema('reason_execute', {'allowed_fact_ids': ['f1'], 'allowed_intent_ids': ['i-closed'], 'max_intents': 2, 'decision_input_digest': 'a' * 64}),
+}))`;
+  return JSON.parse(execFileSync(process.env.PYTHON_BIN || 'python3', ['-c', code], {
+    encoding: 'utf8', env: { ...process.env, PYTHONPATH: source },
+  }));
+}
+
+const findingResult = {
+  accepted: true,
+  data: {
+    fact: { description: 'Synthetic finding' },
+    assessment_record: {
+      hypothesis: 'Synthetic access check', outcome: 'finding',
+      observations: ['Synthetic owner data observed'], evidence_refs: [{ artifact_id: 'a1' }],
+    },
+  },
+};
+
+test('goal-driven production Schema accepts missing comparisons and repairs missing observations', async (t) => {
+  const schema = goalSchemas().explore;
+  const validator = Compile(schema);
+  const first = structuredClone(findingResult);
+  first.data.assessment_record.variants = ['Synthetic variant'];
+  const third = structuredClone(findingResult);
+  const missing = structuredClone(findingResult);
+  missing.data.assessment_record.baseline = 'Synthetic baseline';
+  missing.data.assessment_record.variants = ['Synthetic variant'];
+  delete missing.data.assessment_record.observations;
+  assert.equal(validator.Check(first), true);
+  assert.equal(validator.Check(third), true);
+  assert.equal(validator.Check(missing), false);
+  const { request, calls } = await fixture(t, 'openai-chat-completions', [
+    { tools: [{ name: 'submit_result', args: missing }] },
+    { tools: [{ name: 'submit_result', args: first }] },
+  ]);
+  Object.assign(request, { phase: 'explore_execute', result_schema: schema, binding: { assessment_protocol: 'goal-driven-v1' } });
+  const audit = [];
+  const result = await runRequest(request, { audit: (event) => audit.push(event) });
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  assert.equal(calls.length, 2);
+  assert.deepEqual(result.result.data, first.data);
+  const issue = audit.find((event) => event.event === 'result_repair').issue;
+  assert.equal(issue.path, '/data/assessment_record');
+  assert.ok(issue.rules.some((rule) => rule.required?.includes('observations')));
+  assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+});
+
+test('goal-driven Reason production Schema repairs invalid name and rejects forward placeholders', async (t) => {
+  const schema = goalSchemas().reason;
+  const validator = Compile(schema);
+  const intents = [
+    { from: ['f1'], description: 'First' },
+    { from: ['f1'], description: 'Second', depends_on: '@1' },
+  ];
+  const valid = { accepted: true, data: { intents } };
+  const invalid = structuredClone(valid);
+  invalid.data.intents[1].depends_on = 'semantic-name';
+  assert.equal(validator.Check(valid), true);
+  assert.equal(validator.Check(invalid), false);
+  for (const dependency of ['@1', '@2', '@99']) {
+    const forward = structuredClone(valid);
+    forward.data.intents[0].depends_on = dependency;
+    assert.equal(validator.Check(forward), false, dependency);
+  }
+  const existing = structuredClone(valid);
+  existing.data.intents[1].depends_on = 'i-closed';
+  assert.equal(validator.Check(existing), true);
+  const { request, calls } = await fixture(t, 'openai-chat-completions', [
+    { tools: [{ name: 'submit_result', args: invalid }] },
+    { tools: [{ name: 'submit_result', args: valid }] },
+  ]);
+  Object.assign(request, {
+    phase: 'reason_execute', result_schema: schema,
+    binding: { allowed_fact_ids: ['f1'], allowed_intent_ids: ['i-closed'], max_intents: 2, decision_input_digest: 'a'.repeat(64) },
+  });
+  const audit = [];
+  const result = await runRequest(request, { audit: (event) => audit.push(event) });
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  assert.deepEqual(result.result.data, valid.data);
+  assert.equal(calls.length, 2);
+  assert.equal(audit.find((event) => event.event === 'result_repair').issue.path, '/data/intents/*/depends_on');
+});
 
 test('production submit schema carries success explanation through provider, candidate and result', async (t) => {
   const schema = contracts.submit_result_schemas.explore_execute;

@@ -239,6 +239,7 @@ def run_reason_task(
                     "structured_intent_binding"
                 ),
                 goal_driven=goal_driven_reason_execution(project),
+                allowed_intent_ids=reason_context.binding.get("allowed_intent_ids"),
             )
             return kind, (data, abandon)
 

@@ -8,11 +8,9 @@
 docker build -t arena-worker:local container
 ```
 
-若使用自定义镜像名，构建 tag 必须与 `runtime/dispatch.yaml` 中的 `container.image`、实际 `images[]` 和 execution profile 引用一致。
+镜像名可自定义，在 `runtime/dispatch.yaml` 中设置 `container.image`；默认 `images: []` 会引用该镜像。已有显式 `images[]` 时，实际执行由画像的 `image_ref` 指向注册项的 `image`，按使用的映射修改即可。
 
-源码部署还需在 `cairn/frontend` 执行 `npm ci` 和 `npm run build:server`，再在仓库根目录执行 `./deploy/install.sh` 刷新 Python 依赖。`install.sh` 不构建前端或 Worker 镜像；`start.sh` 仅在默认镜像不存在时自动构建，已有镜像只校验 pi 版本标签，不会因源码变化而重建。更新 Worker 源码或 Dockerfile 后须显式重新执行上述 `docker build`。
-
-部署 ZIP 已带前端静态资源，但不含前端源码、测试或 Worker 镜像，不是完整源码副本。`deploy/update.sh` 是已解压部署包的更新器，不同步源码仓库，也不会重建已有 Worker 镜像。完整安装与更新步骤见[部署文档](../docs/deployment-linux-zh.md)。
+完整应用安装、使用已有镜像、端口配置与更新统一见[部署指南](../docs/deployment-linux-zh.md)。这里仅说明 Worker：`start.sh` 仅在默认镜像不存在时自动构建，不会因源码变化重建已有同名镜像；更新 Worker 源码或 Dockerfile 后须显式重新执行上述 `docker build`。部署 ZIP 不含 Worker 镜像，`deploy/update.sh` 也不会刷新已有镜像。
 
 Dockerfile 从固定 Node 24.16.0 分发层提供二进制。pi builder 与最终运行镜像继承相同的 Kali/Node 基础层，builder 内执行 `npm ci`、TypeScript 编译和离线 SDK 自检，再复制 `dist` 与生产依赖；不复制宿主 `node_modules`。`.dockerignore` 排除宿主依赖、构建输出、运行目录与旧 CLI 配置。`AGENTS.md` 放在 `/opt/cairn/AGENTS.md`，由 runner 显式加载，不依赖 CLAUDE.md 自动发现。
 

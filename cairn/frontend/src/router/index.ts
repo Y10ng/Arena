@@ -5,10 +5,8 @@ import NewProject from '@/features/projects/NewProject.vue'
 import ProjectWorkspace from '@/features/projects/ProjectWorkspace.vue'
 import GraphPage from '@/features/graph/GraphPage.vue'
 import RunsPage from '@/features/runs/RunsPage.vue'
-import TargetsPage from '@/features/targets/TargetsPage.vue'
 import HintsPage from '@/features/hints/HintsPage.vue'
 import ArtifactsPage from '@/features/artifacts/ArtifactsPage.vue'
-import CoveragePage from '@/features/coverage/CoveragePage.vue'
 import ProvenancePage from '@/features/provenance/ProvenancePage.vue'
 import { useAuthStore } from '@/stores/auth'
 import { resolveAuthNavigation } from './authNavigation'
@@ -52,28 +50,12 @@ const routes = [
         children: [
           { path: '', name: 'WorkspaceGraph', component: GraphPage },
           { path: 'runs', name: 'WorkspaceRuns', component: RunsPage },
-          { path: 'targets', name: 'WorkspaceTargets', component: TargetsPage },
           { path: 'hints', name: 'WorkspaceHints', component: HintsPage },
           { path: 'artifacts', name: 'WorkspaceArtifacts', component: ArtifactsPage },
-          {
-            path: 'payloads',
-            name: 'WorkspacePayloads',
-            component: () => import('@/features/payloads/PayloadsPage.vue'),
-          },
-          { path: 'coverage', name: 'WorkspaceCoverage', component: CoveragePage },
           {
             path: 'vulnerabilities',
             name: 'WorkspaceVulnerabilities',
             component: () => import('@/features/vulnerabilities/VulnerabilitiesPage.vue'),
-          },
-          {
-            path: 'provenance',
-            name: 'WorkspaceProvenance',
-            component: ProvenancePage,
-            // 工作区模式固定当前项目，成果列表不跨项目加载。
-            props: (route: { params: { id: string } }) => ({
-              fixedProjectId: String(route.params.id),
-            }),
           },
         ],
       },

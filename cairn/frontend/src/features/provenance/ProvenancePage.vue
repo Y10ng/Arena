@@ -1,11 +1,7 @@
 <template>
   <main class="provenance-page">
-    <Card
-      padding="sm"
-      class="provenance-controls"
-      :class="{ 'provenance-controls--workspace': isWorkspaceMode }"
-    >
-      <FormField v-if="!isWorkspaceMode" label="项目" class="provenance-project-field">
+    <Card padding="sm" class="provenance-controls">
+      <FormField label="项目" class="provenance-project-field">
         <Select
           v-model="selectedProjectId"
           :options="projectOptions"
@@ -47,7 +43,7 @@
       @retry="refetchProjects()"
     />
     <EmptyState
-      v-else-if="!isWorkspaceMode && !isLoadingProjects && !projectOptions.length"
+      v-else-if="!isLoadingProjects && !projectOptions.length"
       title="暂无项目"
       description="创建项目后，可在这里选择项目并查看成果溯源。"
     />
@@ -419,7 +415,6 @@ interface VulnerabilityProvenance {
   completeness_warnings?: string[]
 }
 
-const props = defineProps<{ fixedProjectId?: string }>()
 const route = useRoute()
 const router = useRouter()
 const queryString = (value: unknown) => (typeof value === 'string' ? value : '')
@@ -434,24 +429,20 @@ const search = ref('')
 const activeView = ref(
   viewOptions.some((option) => option.value === requestedView) ? requestedView : 'timeline',
 )
-const selectedProjectId = ref(props.fixedProjectId || queryString(route.query.projectId))
+const selectedProjectId = ref(queryString(route.query.projectId))
 const selectedVulnerabilityId = ref(queryString(route.query.vulnerabilityId))
 const selectedObservationId = ref(queryString(route.query.observationId))
 const selectedRunId = ref(queryString(route.query.runId))
 const selectedOutputId = ref('')
-const isWorkspaceMode = computed(() => Boolean(props.fixedProjectId))
-
 const projectsQuery = useQuery<ProjectSummary[]>({
   queryKey: ['provenance', 'projects'],
   queryFn: ({ signal }) => api('GET', '/projects', undefined, signal),
-  enabled: computed(() => !isWorkspaceMode.value),
 })
 const projects = computed(() => projectsQuery.data.value || [])
 const projectOptions = computed(() =>
   projects.value.map((project) => ({ value: project.id, label: project.title })),
 )
 const effectiveProjectId = computed(() => {
-  if (props.fixedProjectId) return props.fixedProjectId
   if (!projectsQuery.isSuccess.value) return ''
   return projects.value.some((project) => project.id === selectedProjectId.value)
     ? selectedProjectId.value
@@ -624,27 +615,16 @@ const selectOutput = (artifactId: string) => {
 }
 
 watch(selectedProjectId, (projectId, previousProjectId) => {
-  if (isWorkspaceMode.value || projectId === previousProjectId) return
+  if (projectId === previousProjectId) return
   search.value = ''
   activeView.value = 'timeline'
   resetVulnerabilitySelection()
 })
 
 watch(
-  () => props.fixedProjectId,
-  (projectId, previousProjectId) => {
-    if (projectId === previousProjectId) return
-    selectedProjectId.value = projectId || ''
-    search.value = ''
-    activeView.value = 'timeline'
-    resetVulnerabilitySelection()
-  },
-)
-
-watch(
   [projects, () => projectsQuery.isSuccess.value],
   ([value, isSuccess]) => {
-    if (isWorkspaceMode.value || !isSuccess) return
+    if (!isSuccess) return
     if (selectedProjectId.value && !value.some((project) => project.id === selectedProjectId.value))
       selectedProjectId.value = ''
   },
@@ -701,7 +681,7 @@ watch(
     void router.replace({
       query: {
         ...route.query,
-        projectId: isWorkspaceMode.value ? undefined : effectiveProjectId.value || undefined,
+        projectId: effectiveProjectId.value || undefined,
         vulnerabilityId: selectedVulnerabilityId.value || undefined,
         observationId: selectedObservationId.value || undefined,
         runId: selectedRunId.value || undefined,
