@@ -479,8 +479,6 @@ const handleGlobalKeydown = (e: KeyboardEvent) => {
         router.push(`/projects/${pId}`)
       } else if (key === 'r') {
         router.push(`/projects/${pId}/runs`)
-      } else if (key === 't') {
-        router.push(`/projects/${pId}/targets`)
       } else if (key === 'v') {
         router.push(`/projects/${pId}/vulnerabilities`)
       } else if (key === 'h') {

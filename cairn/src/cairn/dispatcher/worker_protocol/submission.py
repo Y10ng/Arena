@@ -14,6 +14,7 @@ from cairn.assessment_contracts import (
     DepthReviewDecision,
     ExperimentRecord,
     GOAL_DRIVEN_PROTOCOL,
+    bind_goal_driven_experiment_schema,
     StructuredIntentBinding,
     Text,
 )
@@ -401,10 +402,7 @@ def _build_submit_result_schema(
                 "assessment_record",
                 ref="#/$defs/ExperimentRecord",
             )
-            experiment = definitions["ExperimentRecord"]
-            _required_non_null_field(experiment, "outcome")
-            _required_non_null_field(experiment, "evidence_refs")
-            experiment["properties"]["evidence_refs"]["minItems"] = 1
+            bind_goal_driven_experiment_schema(definitions["ExperimentRecord"])
         else:
             fixed = [key for key in ("slot_key", "surface_key", "test_family") if binding.get(key)]
             _hide_fields(definitions["CoverageResult"], fixed)
@@ -430,6 +428,30 @@ def _build_submit_result_schema(
             intents["maxItems"] = max_intents
     if phase == "reason_execute":
         _bind_structured_reason_intents(data_schema, definitions, binding)
+        allowed_intents = binding.get("allowed_intent_ids")
+        if isinstance(allowed_intents, list):
+            definitions["IntentDecision"]["properties"]["depends_on"] = {
+                "anyOf": [
+                    ({"type": "string", "enum": allowed_intents} if allowed_intents
+                     else {"not": {}}),
+                    {"type": "string", "pattern": r"^@[1-9][0-9]*$"},
+                    {"type": "null"},
+                ],
+                "description": "Existing Intent ID, or @N for an earlier item in this batch (1-based).",
+            }
+            intents_schema = _array_schema(data_schema["properties"]["intents"])
+            if intents_schema is not None and type(max_intents) is int:
+                # prefixItems 约束同批位置；通用 items 仍检查每个 Intent 的字段结构。
+                intents_schema["prefixItems"] = []
+                for index in range(max_intents):
+                    choices = [*allowed_intents, *(f"@{i + 1}" for i in range(index))]
+                    dependency_schema = (
+                        {"anyOf": [{"type": "string", "enum": choices}, {"type": "null"}]}
+                        if choices else {"type": "null"}
+                    )
+                    intents_schema["prefixItems"].append({
+                        "properties": {"depends_on": dependency_schema},
+                    })
     return {
         "type": "object",
         "additionalProperties": False,

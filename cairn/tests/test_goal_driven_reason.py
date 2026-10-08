@@ -143,6 +143,7 @@ def test_goal_driven_reason_context_binds_digest_priority_goal_and_scope():
     )
 
     assert context.binding["allowed_fact_ids"] == ["origin", "f1"]
+    assert context.binding["allowed_intent_ids"] == ["i-high", "i-running", "i-closed"]
     assert context.binding["max_intents"] == 4
     assert len(context.binding["decision_input_digest"]) == 64
     assert "review_input_digest" not in context.binding
@@ -216,6 +217,31 @@ def test_goal_driven_reason_accepts_surfaces_and_prioritized_intents_together():
     assert intents[0]["priority"] == 2
     assert intents[1]["priority"] == 1
     assert abandon == []
+
+
+@pytest.mark.parametrize(
+    ("dependency", "valid"),
+    [
+        ("i-closed", True), ("@1", True),
+        ("i-missing", False), ("semantic-name", False),
+        ("@0", False), ("@2", False), ("@99", False),
+    ],
+)
+def test_goal_driven_reason_checks_frozen_dependency_before_writes(dependency, valid):
+    payload = {
+        "protocol": "cairn-assessment-v2", "accepted": True, "kind": "reason_result",
+        "data": {"intents": [
+            {"from": ["f1"], "description": "First"},
+            {"from": ["f1"], "description": "Second", "depends_on": dependency},
+        ]},
+    }
+    kwargs = dict(open_intents_empty=True, max_intents=4, goal_driven=True,
+                  allowed_intent_ids=["i-closed"])
+    if valid:
+        assert validate_reason_payload(payload, **kwargs)[0] == "intents"
+    else:
+        with pytest.raises(ValueError, match=r"intent\[1\].depends_on is invalid"):
+            validate_reason_payload(payload, **kwargs)
 
 
 @pytest.mark.parametrize("priority", [-1, 3, True, "2"])

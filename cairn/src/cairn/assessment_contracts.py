@@ -183,6 +183,76 @@ class ExperimentRecord(AssessmentRecordModel):
     evidence_refs: list[AssessmentEvidenceRef] = Field(default_factory=list)
 
 
+# 仅 goal-driven 使用；可选对照保留原值，确定性准入只检查结论所需材料。
+GOAL_DRIVEN_OUTCOME_FIELDS = {
+    "finding": ("observations",),
+    "tested_no_finding": ("observations",),
+    "temporarily_blocked": (
+        "blocker_code", "limitation_reason", "limitation_details", "attempted_strategies",
+    ),
+    "permanently_unreachable": (
+        "limitation_reason", "limitation_details", "attempted_strategies",
+    ),
+    "out_of_scope": ("limitation_reason", "limitation_details"),
+    "not_applicable": ("limitation_reason", "limitation_details"),
+}
+
+
+def validate_goal_driven_experiment(record: ExperimentRecord) -> None:
+    """检查与目标驱动工具 Schema 相同的静态字段规则；证据归属仍由 Server 检查。"""
+    if record.outcome is None:
+        raise ValueError("assessment_record.outcome is required")
+    if not record.hypothesis.strip():
+        raise ValueError("assessment_record.hypothesis is required")
+    if not record.evidence_refs:
+        raise ValueError("assessment_record.evidence_refs is required")
+    for field in GOAL_DRIVEN_OUTCOME_FIELDS.get(record.outcome, ()):
+        value = getattr(record, field)
+        if not value or (isinstance(value, str) and not value.strip()):
+            raise ValueError(f"{record.outcome} requires assessment_record.{field}")
+    if record.outcome == "observation" and not (record.observations or record.limitations):
+        raise ValueError("observation requires assessment_record.observations or limitations")
+
+
+def bind_goal_driven_experiment_schema(schema: dict[str, Any]) -> None:
+    """从同一组 outcome 字段要求生成本地修正环使用的条件 Schema。"""
+    schema.setdefault("required", []).extend(["outcome", "evidence_refs"])
+    schema["properties"]["outcome"] = {"type": "string", "enum": [
+        *GOAL_DRIVEN_OUTCOME_FIELDS, "observation",
+    ]}
+    schema["properties"]["hypothesis"]["pattern"] = r"\S"
+    schema["properties"]["evidence_refs"]["minItems"] = 1
+    conditions = schema.setdefault("allOf", [])
+    for outcome, fields in GOAL_DRIVEN_OUTCOME_FIELDS.items():
+        conditions.append({
+            "if": {"properties": {"outcome": {"const": outcome}}, "required": ["outcome"]},
+            "then": {
+                "required": list(fields),
+                "properties": {
+                    field: ({"minItems": 1} if field in {"observations", "attempted_strategies"}
+                            else {"pattern": r"\S"})
+                    for field in fields
+                },
+            },
+        })
+    conditions.append({
+        "if": {"properties": {"outcome": {"const": "observation"}}, "required": ["outcome"]},
+        "then": {"anyOf": [
+            {"required": [field], "properties": {field: {"minItems": 1}}}
+            for field in ("observations", "limitations")
+        ]},
+    })
+
+
+def valid_reason_dependency(dependency: object, index: int, allowed_intent_ids: list[str]) -> bool:
+    """现有 ID 来自冻结快照；同批 @N 只能指向已提交的前项。"""
+    if not isinstance(dependency, str) or not dependency:
+        return False
+    if dependency.startswith("@"):
+        return dependency in {f"@{position}" for position in range(1, index + 1)}
+    return dependency in allowed_intent_ids
+
+
 class DepthSelection(AssessmentRecordModel):
     from_: list[Text] = Field(alias="from", min_length=1)
     description: Text

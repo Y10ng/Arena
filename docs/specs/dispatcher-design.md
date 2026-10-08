@@ -1,5 +1,82 @@
 # Dispatcher
 
+> 本文保留了历史执行器与旧协议设计，不代表各段均已与当前实现对齐。`proj_030` 的历史只读查证、定向实施范围及本次实施结果见下节；不要据旧 driver、失败处理或示例输出重建当前系统。
+
+## proj_030：结果交付契约与规划依赖纠偏（代码已实施；真实任务待验收）
+
+### 历史查证状态与文档归属
+
+- 下列历史取证由“分析、设计与实施交接”会话增量记录；该次会话**仅完成只读查证和设计，未修改业务代码、运行测试、构建部署或操作项目**。本次实施结果另见本节末尾，不将历史记录追溯解释为已修复或已验收。
+- `docs/analysis-design-handoff.md` 指向的 `docs/specs/goal-driven-execution-design.md` 在本轮工作区不存在。本轮使用现存的 Dispatcher 设计承载对应改动，不声称已阅读或更新缺失的原方案，不新建同义交接副本。
+- 用户只报告“创建的 proj_030 好像有问题”，尚未提供具体页面症状。本节确认该项目的实际执行失败，不声称已解释用户所有使用问题。
+- 核查分支为 `chore/arena-initial`；既有未跟踪的 `docs/analysis-design-handoff.md` 不属于本轮新增或修改。
+
+### 实际实例与历史证据
+
+只读快照时间：主机本地 `2026-09-28 22:32:36 -04:00`，对应 `2026-09-29 02:32:36 UTC`。以下进程和端点只用于本轮定位，实施前须重新核对。
+
+- 精确 `projects.id = 'proj_030'` 命中，场景为 `goal-driven-v1`，状态为 `paused`，不是项目创建失败。`tr001/bootstrap`、`tr002/reason` 已成功。
+- 实际 Server PID `2823736`、Dispatcher PID `2823875` 的 cwd 均为 `/root/桌面/Arena`；Server 使用 `8001`。实际数据库为 `127.0.0.1:55433/cairn_isolated`，容器 `cairny-isolated-postgres-142ac29cc3e9`；**不是**默认 `55432` 的另一数据库。不得因容器名含 isolated 就将本次用户实例当作可丢弃的测试副本。
+- 项目 Worker 容器为 `cairn-pi-dispatch-1498abdc625d6723-proj_030`，镜像名 `arena-worker:local`；快照时已退出，退出码 `143`。退出码不能证明是谁暂停，也不能单独证明故障首因或加载的代码版本。
+- `tr003/i002`、`tr004/i003`、`tr007/reason` 为 `provider_error`；本轮未确定上游具体原因。日志第一处明确任务失败为本地 `21:34:06` 的 `i003`，不能把后来的业务拒绝倒写为第一次模型失败的原因。
+- 三次 Explore 的最终拒绝为 `business_acceptance / phase_contract_invalid`，已有候选在本地通过校验：
+
+| Run / Intent | 已本地校验的候选 | 仅字段存在性取证 | Dispatcher 最终拒绝 |
+| --- | --- | --- | --- |
+| `tr005 / i002` | `cnd_f0e37bc026fb45d69ff4174162d19d4c` | `finding`；证据、variants、observations 非空，baseline 缺失 | `finding requires assessment_record baseline and variants` |
+| `tr006 / i003` | `cnd_2cbd2ea3ff24410c9c7b858c34d1aa92` | `finding`；证据、baseline、variants 非空，observations 缺失 | `finding requires assessment_record observations` |
+| `tr009 / i004` | `cnd_fe2f0275e0d04da48e380550fbae382c` | `finding`；证据、observations 非空，baseline、variants 缺失 | `finding requires assessment_record baseline and variants` |
+
+- 以上依据为 `task_runs`、`task_run_candidates`、`task_run_candidate_outcomes`，以及 `runtime/logs/dispatcher.log:42,46,69`。`tr006`、`tr009` 另有独立的 `submission_invalid` 候选，不能与表中的 `locally_validated` 候选混为一谈。
+- 三次 Explore 的冻结记录保存相同的 `result_schema_sha256`，但本轮未取得历史 Schema 正文，**不能声称历史 Schema 与当前生成内容已经逐字比对**。当前源码缺口和当次本地通过、后置拒绝的记录分别成立。
+- `tr008/reason` 候选本地通过，计划两条 Intent：两条 `from` 都为存在的 `f001`；第一条无依赖，成功创建 `i004`；第二条 `depends_on` 为自拟语义名称，而非实际 Intent ID 或 `@N`。项目实际只有 `i001`–`i004`，该引用不存在。日志 `:61–64` 为第二条写入 `404`、`created_intents=1/2`，最终 `business_acceptance`。这是另一条失败链，不是缺少 assessment_record。
+- `i001` 已完成，`i002/i003/i004` 已失败。相关 `candidate recovery is unresolved` 警告后仍有任务派发，三次失败 Explore 的恢复记录最终为 `stopped` 且 `container_spool_recovered=true`；不能据该警告认定持续恢复死锁。
+- 已登记 25 个 artifacts，宿主材料位于 `runtime/data/artifacts/projects/proj_030/runs/`。材料和候选留存不等于成果已接受，更不等于漏洞已确认；本轮未审核完整目标证据，不复制候选正文、目标内容、凭据或 session 到方案。
+
+复核时使用实际实例的 PostgreSQL 只读连接与 `REPEATABLE READ READ ONLY` 事务，确认 `transaction_read_only=on`，按精确项目 ID 查询白名单字段后 `ROLLBACK`。不导入业务应用触发初始化，不转储进程环境或完整 JSON，不调用可能推进生命周期的接口。
+
+### 当前实现判断与设计纠正
+
+1. **Explore 的确定性字段要求被拆成不同规范。** `assessment_contracts.py:159–183` 的 ExperimentRecord 将 baseline、variants、observations 等设为可缺省；`dispatcher/worker_protocol/submission.py:395–407` 在 goal-driven Schema 中只补强 outcome 和 evidence_refs。`container/pi-agent/src/runner.ts:195–220,262–269` 按该 Schema 本地校验，不会看到 `dispatcher/contracts.py:777–834` 的 outcome 条件。后者要求 finding/tested_no_finding 同时有 baseline、variants、observations；Server 的 `services/coverage_slots.py:620–762` 又单独实现类似条件。仅补 Prompt 或只改一处验收不能消除这个不一致。
+2. **不机械把旧后置规则全变成更严的工具 Schema。** 按 `AGENT.md`，实验结构应服务具体研究判断，不是所有成立发现或未发现结论都必须采用同一对照模板。本轮推荐在 `goal-driven-v1` 中取消 baseline/variants 的无条件必填；保留这些字段供需要对照的研究原样记录，不移除内容、不自动补造基线。finding/tested_no_finding 仍须有实际 observations 和证据；是否足以支持主张由证据及验证决定，不能以字段存在证明漏洞成立或目标安全。
+3. **Reason 的依赖协议没有在本地表达完整。** `worker_protocol/submission.py:196–202` 允许任意非空 depends_on；`tasks/reason_writes.py:382–406` 只预检 `@N` 的前向或不存在位置，对其他字符串原样提交。`server/routers/intents.py:139–144` 要求其是同项目已有 Intent，因而出现先写一条、第二条才 404。不是 Server 应当接受任意名称，也不应删除依赖来让任务立即跑。
+4. **失败处理放大了交付成本，但不应靠扩大重试白名单绕过。** `server/services/assessment_attempts.py:633–751` 不将 business_acceptance 视为可重试；`:824–922` 可将 Explore attempt 与 Intent 结为失败。已有本地修正环和原会话交付能力只处理其适用错误；不能假定后置业务拒绝会自动回传模型修正。先让本轮确定性错误进入已有本地修正闭环，不将所有业务拒绝改为 fresh 重跑或自动成功。
+
+### 本轮最小完整实施范围
+
+目标：正常研究材料不再因为隐藏的固定字段规则或无效依赖名称，在本地提交成功后才整次交付失败；减少重复探索和费用。**本轮是交付可靠性及实验表达纠偏，不宣称已经增强或验证真实漏洞发现能力。**
+
+1. **统一 goal-driven 实验记录的确定性规则。** 复用现有 ExperimentRecord 和 Schema 生成路径，用一处小而直接的规范提供 Worker 本地 Schema、Dispatcher 及 Server 对记录字段的判定；删掉被替代的重复条件，不新增验证平台、第二份实验对象或并行状态。保持 legacy phased/Coverage 的行为边界，不借机改造旧引擎。
+   - finding/tested_no_finding：保留非空 hypothesis、observations、evidence_refs；baseline/variants/controls 不作为通用准入门槛，原值保留，对照在研究语义需要时使用。
+   - blocked/limitation/observation：对齐当前需要保留的 outcome 条件，使真正缺少必要内容时在 `submit_result` 就给出字段级修正信息；不得要求这些结果伪造对照，不把 provider/runtime 失败改成目标限制。
+   - 不仅修改 Dispatcher：贯通 Server 的 `validate_assessment_experiment`。Server 继续负责当前 Run / 项目证据归属、已解析 Artifact、接受事务等依赖真实状态的判定；不把这些动态权威检查移到 Worker 假装完成。
+   - 保留 finding 的 vulnerability identity、复现材料要求、候选与确认区分及独立复核。字段完备仍不自动等于 Server 接受或 confirmed。不得复制 fact.description 自动填 observations，也不为通过校验伪造 baseline/variants。
+2. **补全 Reason 依赖的同一份约定。** 现有项目 Intent ID 从本次权威项目快照取得；同批依赖继续使用现有 `@N`，且只能引用前面的条目。将合法引用范围与位置规则用于工具 Schema/本地修正和 Dispatcher 写入前检查，普通语义名称不能通过后再逐项碰 404；合法 `@1` 在第一条被接受后解析到真实 ID。
+   - 优先复用本次调用的 binding 和冻结交付记录；如果需要传递 `allowed_intent_ids`，它只服务于本次确定性引用校验，不另建数据库状态。必须贯通 `reason_context.py`、Schema/请求边界、Server `assessment_attempts.py:119–198` 的 allowed_binding 与 goal-driven 精确键集合、冻结及续交付消费者；不能只给 binding 增加字段却被 Server 拒绝。
+   - 合法 ID 的范围不能误用 `open_intent_ids` 来替代全部可引用的既有 Intent；保留当前依赖调度语义，不把“前序已结束”新增解释为“研究前提已证实”。
+   - 保留逐项幂等回执、已接受条目及真实 partial 结果。动态竞争导致的后置拒绝仍如实处理，不吞错、不回滚已接受成果、不按 description 猜测映射名称、不自动抹掉依赖、不新建批量事务 API。
+3. **原有修正通道可实际消费反馈。** 针对本轮新表达的必要字段和依赖范围，核对 pi runner 的 Schema 编译、错误定位与有界修正路径；避免只在 Python 检查中有效。无需延长 Prompt、增加修正次数或另造 Server–模型往返协议。必要的简短提示应从实际契约出发，不要求用户学习这些内部格式。
+
+主要源码定位：`cairn/src/cairn/assessment_contracts.py`、`dispatcher/worker_protocol/submission.py`、`dispatcher/contracts.py`、`server/services/coverage_slots.py`；Reason 的 `dispatcher/tasks/reason_context.py`、`reason.py`、`reason_writes.py`、`server/services/assessment_attempts.py`；必要的 Worker 边界在 `container/pi-agent/src/protocol.ts`、`runner.ts`、`submission.ts`。路径均相对对应源码根，行号只是本轮线索。实施前查看当前实现及已有改动，不机械改满文件清单。
+
+### 直接验证、历史项目与交付边界
+
+- 使用**合成的非敏感材料、生产 Schema 生成器和实际本地 runner 校验路径**做一次定向验证；不重放 `proj_030` 的目标请求，不调用付费模型。复用现有用例位置，如 `container/pi-agent/tests/contracts.test.mjs`、`cairn/tests/test_goal_driven_reason.py` 及实际相关服务端用例，按本轮行为选择少量用例，不默认跑整个文件或套件，不新建验收框架。
+- Explore：对应三条记录的缺字段形状验证——有 observations/真实本地证据的样例不再仅因缺 baseline/variants 被拒；缺 observations 的 finding 在本地即被拒并可在同一有限修正环补充**已有**材料。完成修正后，经 Dispatcher 和真实 Server 验收函数对字段语义应一致；缺证据、无效归属或缺 finding 身份/复现材料仍拒绝。blocked/observation 不被误强制填写对照。这里的合成通过不代表历史候选已验真。
+- Reason：自拟名称依赖在写入前被本地拒绝；合法既有 ID 和第二条引用 `@1` 的情况可用；前向/不存在的 `@N` 被拒绝；修正后两条实际写入的依赖正确，既有幂等/partial 行为不被破坏。使用受控本地数据或现有测试接缝，不操作用户项目。
+- 改动冻结 binding 时，验证新请求可被实际 Server 接受，不仅是 Schema 单独通过；历史冻结快照保持原样，不改哈希、不追溯补字段、不静默使用新契约冒充旧契约。不可续交付的旧快照如实报告，不加猜测性兼容层。
+- 默认不扩大 provider_error 调查、不更换模型、不调整预算/timeout/重试、不重写调度、候选恢复、前端、权限或报告系统。日志中无关的原文输出问题不作为本轮顺手重构授权。
+- **`proj_030` 不自动恢复。** 它已有失败 Intent 和 Reason 记录；部署新代码不等于这些记录自动变成可续跑。保留 candidate、artifacts、失败、已接受的 `i004` 和所有回执，不重新解释或批量导入历史候选。实施者只读说明现有正常恢复路径的实际限制；若恢复需要另行修复产品动作、操作项目或费用授权，交回用户决定，不要求用户手改数据库或默认新建付费项目。
+- 运行相关改动后按 `docs/deployment-linux-zh.md` 及实际入口构建并交付完整系统，先重新确认 `8001` 与真实数据库归属，不能切到默认数据库或用隔离副本 ready 代替用户实例。涉及容器运行代码才重建对应 Worker 镜像，并说明已停止的旧容器是否仍持有旧版本；不能仅凭镜像 tag 更新声称该容器已加载修复。不要为部署私自删除/重建 `proj_030` 容器；如其他在途任务会受影响，先说明并取得所需操作许可。
+- 不自动恢复/重跑项目、访问目标、调用付费模型、改历史授权、清库、commit 或 push。实施完成后在本节追加“代码实现、本地验证、部署生效、真实任务验收”四种不同状态及剩余限制；完成本轮即停止。
+
+### 本次实施结果（2026-09-29）
+
+- **代码实现：已完成本次约定范围。** Goal-driven Explore 的生产 `submit_result` Schema、Dispatcher 与 Server 复用同一静态字段规则：finding/tested_no_finding 仍要求非空 hypothesis、observations 和 evidence_refs，但不再统一强制 baseline、variants、controls；其他 outcome 的必要字段同步到本地规则。Server 继续检查证据归属、漏洞身份与复现，legacy phased/Coverage 未改。Goal-driven Reason 从权威项目快照绑定全部既有 Intent ID，按位置仅允许前项 `@N`；新字段进入请求边界、Schema、写前验证、Server 精确键注册和冻结/续交付，不猜测自拟名称、不删除依赖或改动逐项 partial/幂等回执。
+- **本地验证：已通过定向合成验证，非目标验收。** Python 定向用例 186 passed；依赖写入、partial/幂等回执选定用例 10 passed（133 项中其余 123 项未选）；Worker `npm run build` 与实际 runner/生产 Schema 的 Node 用例 43 passed。合成 SQLite Server 边界验证了缺对照的记录可接受、缺观察/证据/归属/漏洞身份/复现会拒绝，Reason 新 binding 携实际 Schema hash 可注册；runner 在原有限修正环中补充已有合成观察和合法依赖。前端 `build:server` 的类型检查与打包、Worker 镜像构建及镜像内 `self-check` 均通过；最初并行构建与一次单独前端重试曾因内存不足失败，随后串行构建成功，临时 swap 已关闭并删除。未访问被测目标、调用付费模型或用 `proj_030` 做写入验证。
+- **部署生效：新建服务与未来 Worker 已就绪，不等于旧容器更新。** 按实际 `ARENA_SERVER_PORT=8001`、`127.0.0.1:55433/cairn_isolated` 安装并重启 Server/Dispatcher；Server 进程配置及只读数据库身份核对一致。`deploy/status.sh` 显示 running、HTTP ready、Dispatcher idle heartbeat；`/health` 和 UI 根路径均为 HTTP 200。新 `arena-worker:local` 镜像 ID 为 `sha256:9b9aa6dd56452f101bf8baa82b12ea7540ae901912f1408c514ad81f61c23cde`，仅未来新建容器会取用新 tag；保留的 `proj_030` 已停止容器仍指向旧镜像 `sha256:9d06091d829e329e69ec0a2e32ce3d2e911513d43e392a7b8a0cc41d09cd63ca`，未删除或替换。部署前确认无在途 TaskRun；未切换或清空数据库。
+- **真实任务验收：未进行。** `proj_030` 仍为 paused；未恢复或重跑、未重新解释历史 candidate、未更改失败 Intent、冻结快照、回执或授权，不能声称历史漏洞已确认或本次代码能使其原执行成功。既有 failed Intent 不会因正常 resume 自动重开，paused 状态也不能直接新增 Intent；历史冻结交付不自动获得新 binding。原 `provider_error` 仍未查明。若需继续真实项目，应另行决定合法恢复/新任务路径及费用授权，不要求手工改库，也不默认新建付费项目。
+
 ---
 
 ## 本质

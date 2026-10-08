@@ -119,6 +119,7 @@ def validate_delivery_registration(conn, project, run, body, snapshot):
     allowed_binding = {
         "reason": {
             "allowed_fact_ids",
+            "allowed_intent_ids",
             "max_intents",
             "review_input_digest",
             "structured_intent_binding",
@@ -176,11 +177,24 @@ def validate_delivery_registration(conn, project, run, body, snapshot):
         if goal_driven:
             if (
                 set(binding)
-                != {"allowed_fact_ids", "max_intents", "decision_input_digest"}
+                != {"allowed_fact_ids", "allowed_intent_ids", "max_intents", "decision_input_digest"}
                 or not isinstance(decision_digest, str)
                 or fullmatch(r"[a-f0-9]{64}", decision_digest) is None
             ):
                 raise HTTPException(422, "execution_delivery_invalid")
+            intent_ids = binding["allowed_intent_ids"]
+            if (
+                not isinstance(intent_ids, list)
+                or any(not isinstance(value, str) or not value or len(value) > 256 for value in intent_ids)
+                or len(set(intent_ids)) != len(intent_ids)
+            ):
+                raise HTTPException(422, "execution_delivery_invalid")
+            for intent_id in intent_ids:
+                if conn.execute(
+                    "SELECT 1 FROM intents WHERE project_id = ? AND id = ?",
+                    (project["id"], intent_id),
+                ).fetchone() is None:
+                    raise HTTPException(422, "execution_delivery_invalid")
         elif decision_digest is not None:
             raise HTTPException(422, "execution_delivery_invalid")
         expected_structured = context.get("structured_intent_binding")

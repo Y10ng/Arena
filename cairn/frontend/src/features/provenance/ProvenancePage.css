@@ -38,10 +38,6 @@
   gap: var(--space-4);
 }
 
-.provenance-controls--workspace {
-  grid-template-columns: minmax(0, 1fr);
-}
-
 .provenance-project-field,
 .provenance-filter-bar {
   min-width: 0;

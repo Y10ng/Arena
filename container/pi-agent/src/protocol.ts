@@ -82,6 +82,7 @@ export interface AgentRequest {
     review_input_digest?: string;
     max_intents?: number;
     allowed_fact_ids?: string[];
+    allowed_intent_ids?: string[];
     structured_intent_binding?: JsonObject;
   } | null;
   timeout_seconds: number;
@@ -217,6 +218,7 @@ export function parseRequest(raw: unknown): AgentRequest {
     for (const key of ["slot_key", "surface_key", "test_family", "verification_observation_id", "review_input_digest"]) assert(binding[key] === undefined || (typeof binding[key] === "string" && binding[key].length > 0), `binding.${key}`);
     assert(binding.max_intents === undefined || (Number.isInteger(binding.max_intents) && (binding.max_intents as number) >= 0), "binding.max_intents");
     assert(binding.allowed_fact_ids === undefined || (Array.isArray(binding.allowed_fact_ids) && binding.allowed_fact_ids.every((id) => typeof id === "string")), "binding.allowed_fact_ids");
+    assert(binding.allowed_intent_ids === undefined || (Array.isArray(binding.allowed_intent_ids) && binding.allowed_intent_ids.every((id) => typeof id === "string" && id.length > 0 && id.length <= 256) && new Set(binding.allowed_intent_ids).size === binding.allowed_intent_ids.length), "binding.allowed_intent_ids");
     assert(binding.structured_intent_binding === undefined || object(binding.structured_intent_binding), "binding.structured_intent_binding");
   }
   assert(object(raw.capabilities), "capabilities");

@@ -8,75 +8,33 @@ Arena 是面向本地和内部使用的自主安全探索平台。通过 **Origi
 
 - **Server / UI**：Python 服务端提供 API 和构建后的 Vue 界面。
 - **Dispatcher**：原生 Linux 进程，负责调度、容器执行和结果回收。
-- **Worker**：Docker 镜像 `arena-worker:local`，内含 pi runner、浏览器及常用 Web 测试工具。
+- **Worker**：Docker 镜像，内含 pi runner、浏览器及常用 Web 测试工具；默认名为 `arena-worker:local`，也可使用自定义镜像名。
 - **PostgreSQL**：保存账号、配置、项目与执行记录；可使用项目自带的数据库 Compose，也可连接已有 PostgreSQL。
 
 Compose 只负责数据库，不是全栈容器部署。内部 Python 包、CLI 与部分协议标识沿用 `cairn`，不影响产品名称 Arena。
 
-## 从源码安装
+## 安装与配置
 
-需要 Linux、Python 3.11+、[uv](https://docs.astral.sh/uv/)、Node.js 22.12+（建议 24 LTS）、npm、Docker daemon；使用自带数据库还需要 Docker Compose v2。软件源和容器仓库须可访问。
+完整步骤统一见 **[Linux 安装、配置与更新指南](docs/deployment-linux-zh.md)**：
 
-```bash
-git clone https://github.com/Y10ng/Arena.git
-cd Arena
+- **使用已有 Worker 镜像**：取得配套应用部署包，拉取或导入 Worker 镜像，在宿主机安装并启动应用；仍需要 Python、uv 和 Docker。
+- **从源码完整安装**：获取源码、安装 Python 依赖、构建正式前端与 Worker 镜像，再启动完整系统。
 
-./deploy/install.sh
-npm --prefix cairn/frontend ci
-npm --prefix cairn/frontend run build:server
-docker build -t arena-worker:local container/
+当前没有已核实的预构建镜像或部署包下载地址；没有配套资产时选择源码路径。两条路径共用登录、配置和维护说明，不是全栈 Docker 部署。
 
-./deploy/start.sh
-./deploy/status.sh
-```
+默认本机地址为 `http://127.0.0.1:8000`；端口、监听地址、镜像、数据库和存储位置可按需选择。临时参数、持久配置、局域网访问与重启方法见 **[修改端口和常用配置](docs/deployment-linux-zh.md#修改端口和常用配置)**。
 
-默认通过 `http://127.0.0.1:8000` 访问。默认服务监听 `0.0.0.0`；只需本机访问时使用 `./deploy/start.sh --host 127.0.0.1`。
+## 使用流程
 
-首次启动自动初始化数据库、模型凭据密钥、Dispatcher 身份和管理员。交互终端会显示一次随机管理员密码；非交互启动将其保留在仅当前用户可读的 `runtime/secrets/initial-admin-password`。登录后修改密码并删除该交付文件，不要将其提交到 Git。
+1. 登录后在 Models / Workers 界面配置模型凭据、启用 pi Worker 并绑定模型，无需再复制到 YAML。
+2. 创建项目、选择 Worker，用 Origin、Goal 描述背景、目标与实际授权范围；资料库和上传资料按需使用。
+3. 查看运行状态、事实与证据、漏洞及验证结果，按需要生成报告。
 
-> `install.sh` 只准备 Python 环境和配置；前端、Worker 镜像的构建是独立步骤。`start.sh` 会构建缺失的默认 Worker 镜像，但**不会重建已经存在的同名镜像**。
+**创建项目可能立即执行并产生模型费用，模型连通性测试也可能调用付费 API。** 服务能启动不等于模型、真实任务或漏洞发现效果已经验证。
 
-## 配置与首次使用
+日常启停、日志、源码与部署包更新、数据保留及排障均见主指南。私有配置、密钥和运行资料不应进入 Git 或发布包。
 
-1. 在界面的模型管理中填写协议、完整推理地址、Model ID 和 API Key。
-2. 在 Worker 管理中创建并启用绑定该模型的 pi Worker。
-3. 确认 Dispatcher 心跳新鲜，再创建项目并选择 Worker。
-4. 填写 Origin、Goal 和实际授权范围；资料库和项目上传资料都是可选项。
-5. 查看项目运行状态、事实与证据、漏洞及验证结果，按需要生成报告。
-
-**创建项目可能立即开始执行并产生模型费用。** 模型连通性测试也可能调用付费 API；普通构建和离线 self-check 不调用模型。服务能启动不等于具体模型、目标或漏洞发现效果已经验证。
-
-主要配置位置：
-
-| 位置 | 用途 |
-| --- | --- |
-| `runtime/arena.env` | 监听端口、外部数据库、存储路径等本机设置 |
-| `runtime/dispatch.yaml` | 镜像、并发、执行画像、任务超时 |
-| `runtime/postgres.env` | 自带数据库的密码和端口 |
-| `runtime/secrets/` | 模型凭据 keyring、Dispatcher token 等私有文件 |
-| 界面中的模型 / Worker 管理 | 数据库存储的模型凭据和 Worker 绑定 |
-
-模型和 Worker 配置不需要复制到 YAML，保存后由 Dispatcher 读取。配置、密钥、上传资料、执行记录不属于源码，不应进入新仓库或发布包。
-
-## 日常管理与更新
-
-```bash
-./deploy/start.sh
-./deploy/status.sh
-./deploy/logs.sh
-./deploy/stop.sh
-```
-
-`stop.sh` 停止应用，不删除数据或数据库卷。代码更新使用明确的停止、依赖刷新、构建和启动流程；不要把再次运行 `start.sh` 当成代码热更新，也不要用删除数据库卷解决升级问题。
-
-完整步骤见 **[Linux 安装、配置与更新指南](docs/deployment-linux-zh.md)**，包括：
-
-- 从源码和部署包安装；镜像的构建与更新；
-- 自带或外部 PostgreSQL、监听地址与代理设置；
-- 模型、Worker、并发、浏览器和存储配置；
-- 更新、日志、数据清理与常见故障。
-
-Worker 环境见 [容器说明](container/README.md)，pi 模型协议限制见 [runner 说明](container/pi-agent/README.md)。
+Worker 专属环境见 [容器说明](container/README.md)，pi 模型协议限制见 [runner 说明](container/pi-agent/README.md)。
 
 ## 开发与来源
 

@@ -35,12 +35,11 @@ const projects = [
   { id: 'project-b', title: '项目 B' },
 ]
 
-function mountPage(props: { fixedProjectId?: string } = {}) {
+function mountPage() {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   })
   return mount(ProvenancePage, {
-    props,
     attachTo: document.body,
     global: {
       plugins: [[VueQueryPlugin, { queryClient }]],
@@ -161,7 +160,8 @@ describe('ProvenancePage project selection', () => {
       },
     ])
 
-    const wrapper = mountPage({ fixedProjectId: 'project-a' })
+    route.query = { projectId: 'project-a' }
+    const wrapper = mountPage()
     await flushPromises()
 
     expect(wrapper.get('.master-detail').classes()).toContain('master-detail--fill-height')
@@ -256,7 +256,12 @@ describe('ProvenancePage project selection', () => {
         return Promise.resolve([])
       return Promise.reject(new Error(`未配置请求：${path}`))
     })
-    route.query = { projectId: 'project-a' }
+    route.query = {
+      projectId: 'project-a',
+      vulnerabilityId: 'finding-a',
+      observationId: 'observation-a',
+      runId: 'run-a',
+    }
 
     const wrapper = mountPage()
     await flushPromises()
@@ -267,26 +272,28 @@ describe('ProvenancePage project selection', () => {
     const runs = wrapper.findAll('.provenance-run-option')
     expect(observations).toHaveLength(2)
     expect(runs).toHaveLength(2)
-    expect(observations[1]?.attributes('aria-pressed')).toBe('true')
-    expect(runs[1]?.attributes('aria-pressed')).toBe('true')
-
-    await observations[0]?.trigger('click')
-    await flushPromises()
     expect(observations[0]?.attributes('aria-pressed')).toBe('true')
     expect(runs[0]?.attributes('aria-pressed')).toBe('true')
+
+    await observations[1]?.trigger('click')
+    await flushPromises()
+    expect(observations[1]?.attributes('aria-pressed')).toBe('true')
+    expect(runs[1]?.attributes('aria-pressed')).toBe('true')
     expect(mocks.replace).toHaveBeenLastCalledWith(
       expect.objectContaining({
         query: expect.objectContaining({
-          observationId: 'observation-a',
-          runId: 'run-a',
+          projectId: 'project-a',
+          vulnerabilityId: 'finding-a',
+          observationId: 'observation-b',
+          runId: 'run-b',
         }),
       }),
     )
 
-    await runs[1]?.trigger('click')
+    await runs[0]?.trigger('click')
     await flushPromises()
-    expect(observations[0]?.attributes('aria-pressed')).toBe('true')
-    expect(runs[1]?.attributes('aria-pressed')).toBe('true')
+    expect(observations[1]?.attributes('aria-pressed')).toBe('true')
+    expect(runs[0]?.attributes('aria-pressed')).toBe('true')
 
     wrapper.unmount()
   })
@@ -374,29 +381,6 @@ describe('ProvenancePage project selection', () => {
     expect(wrapper.find('.provenance-json').text()).toContain('globalThis.compromised=true')
     expect(wrapper.find('.provenance-json img').exists()).toBe(false)
     expect(document.querySelector('img[onerror]')).toBeNull()
-
-    wrapper.unmount()
-  })
-
-  it('keeps workspace mode fixed to its project without a duplicate page header', async () => {
-    const wrapper = mountPage({ fixedProjectId: 'project-a' })
-    await flushPromises()
-
-    expect(mocks.api).not.toHaveBeenCalledWith(
-      'GET',
-      '/projects',
-      undefined,
-      expect.any(AbortSignal),
-    )
-    expect(mocks.listVulnerabilities).toHaveBeenCalledWith(
-      'project-a',
-      undefined,
-      undefined,
-      expect.any(AbortSignal),
-    )
-    expect(wrapper.findComponent(Select).exists()).toBe(false)
-    expect(wrapper.find('h1').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('从成果反向追踪发现、运行操作、终端日志')
 
     wrapper.unmount()
   })

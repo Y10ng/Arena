@@ -182,6 +182,7 @@ def build_reason_prompt_context(
     if review_digest is not None:
         binding["review_input_digest"] = review_digest
     if goal_driven:
+        binding["allowed_intent_ids"] = [intent.id for intent in project.intents]
         binding["decision_input_digest"] = goal_driven_decision_input_digest(
             project
         )
