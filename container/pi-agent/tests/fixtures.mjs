@@ -33,6 +33,7 @@ export async function fixture(t, protocol = 'openai-chat-completions', script = 
       const chunk = (delta, finish = null, extra = {}) => send({ id: `chat_${calls.length}`, object: 'chat.completion.chunk', created: 1, model: 'fixture-model', choices: [{ index: 0, delta, finish_reason: finish }], ...extra });
       chunk({ role: 'assistant' });
       if (action.text) chunk({ content: action.text });
+      if (action.thinking) chunk({ reasoning_content: action.thinking });
       tools.forEach((tool, index) => {
         const parts = tool.rawArgChunks ?? [tool.rawArgs ?? JSON.stringify(tool.args)];
         parts.forEach((part, partIndex) => chunk({ tool_calls: [{ index,
@@ -40,11 +41,17 @@ export async function fixture(t, protocol = 'openai-chat-completions', script = 
           function: { ...(partIndex === 0 ? { name: tool.name } : {}), arguments: part },
         }] }));
       });
-      chunk({}, tools.length ? 'tool_calls' : 'stop', action.noUsage ? {} : { usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } });
+      chunk({}, action.stopReason ?? (tools.length ? 'tool_calls' : 'stop'), action.noUsage ? {} : { usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } });
       res.write('data: [DONE]\n\n');
     } else if (protocol === 'anthropic-messages') {
       send({ type: 'message_start', message: { id: `msg_${calls.length}`, type: 'message', role: 'assistant', model: 'fixture-model', content: [], stop_reason: null, usage: action.noUsage ? undefined : { input_tokens: 10, output_tokens: 0 } } });
       let index = 0;
+      if (action.thinking) {
+        send({ type: 'content_block_start', index, content_block: { type: 'thinking', thinking: '', signature: '' } });
+        send({ type: 'content_block_delta', index, delta: { type: 'thinking_delta', thinking: action.thinking } });
+        send({ type: 'content_block_delta', index, delta: { type: 'signature_delta', signature: 'fixture-signature' } });
+        send({ type: 'content_block_stop', index }); index += 1;
+      }
       if (action.text) {
         send({ type: 'content_block_start', index, content_block: { type: 'text', text: '' } });
         send({ type: 'content_block_delta', index, delta: { type: 'text_delta', text: action.text } });
@@ -56,7 +63,7 @@ export async function fixture(t, protocol = 'openai-chat-completions', script = 
         for (const part of parts) send({ type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: part } });
         send({ type: 'content_block_stop', index }); index += 1;
       }
-      send({ type: 'message_delta', delta: { stop_reason: tools.length ? 'tool_use' : 'end_turn', stop_sequence: null }, usage: action.noUsage ? undefined : { output_tokens: 5 } });
+      send({ type: 'message_delta', delta: { stop_reason: action.stopReason ?? (tools.length ? 'tool_use' : 'end_turn'), stop_sequence: null }, usage: action.noUsage ? undefined : { output_tokens: 5 } });
       send({ type: 'message_stop' });
     } else {
       send({ type: 'response.created', response: { id: `resp_${calls.length}`, status: 'in_progress', output: [] } });
@@ -88,7 +95,7 @@ export async function fixture(t, protocol = 'openai-chat-completions', script = 
     candidateSpoolPaths.push(spool_path);
     return {
       protocol: 'cairn-candidate-spool-v1', spool_path, capture_id: captureId,
-      max_candidates: 16, max_candidate_bytes: 2 * 1024 * 1024, max_manifest_bytes: 4 * 1024,
+      max_candidates: 16, max_candidate_bytes: 2 * 1024 * 1024, max_manifest_bytes: 16 * 1024,
       max_spool_bytes: 34 * 1024 * 1024, forbidden_literals: [],
     };
   };

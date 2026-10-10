@@ -36,7 +36,8 @@ from cairn.server.db_schema import (
     SQLITE_PROJECT_AUTHORIZATION_GRANTS_IMMUTABLE_SCHEMA,
     SQLITE_PROJECT_AUTHORIZATION_GRANTS_V2_IMMUTABLE_SCHEMA,
     SQLITE_TASK_RUN_CANDIDATES_IMMUTABLE_SCHEMA,
-    TASK_RUN_CANDIDATES_TABLE_SCHEMA,
+    TASK_RUN_CANDIDATES_V41_TABLE_SCHEMA,
+    TASK_RUN_CANDIDATES_V47_TABLE_SCHEMA,
 )
 
 
@@ -3771,11 +3772,11 @@ POSTGRES_PROJECT_AUTHORIZATION = Migration(
 
 
 SQLITE_TASK_RUN_CANDIDATE_STORE_V41 = (
-    TASK_RUN_CANDIDATES_TABLE_SCHEMA
+    TASK_RUN_CANDIDATES_V41_TABLE_SCHEMA
     + SQLITE_TASK_RUN_CANDIDATES_IMMUTABLE_SCHEMA
 )
 POSTGRES_TASK_RUN_CANDIDATE_STORE_V41 = (
-    TASK_RUN_CANDIDATES_TABLE_SCHEMA
+    TASK_RUN_CANDIDATES_V41_TABLE_SCHEMA
     .replace("raw_bytes BLOB NOT NULL", "raw_bytes BYTEA NOT NULL")
     .replace("length(CAST(manifest_json AS BLOB))", "octet_length(manifest_json)")
     .replace(
@@ -4110,6 +4111,64 @@ GOAL_DRIVEN_SCENARIO_CATALOG = Migration(
 )
 
 
+SQLITE_TASK_RUN_CANDIDATE_CAPACITY_V47 = """\
+CREATE TEMP TABLE cairn_v47_candidates AS SELECT * FROM task_run_candidates;
+CREATE TEMP TABLE cairn_v47_candidate_outcomes AS SELECT * FROM task_run_candidate_outcomes;
+PRAGMA defer_foreign_keys=ON;
+DROP TABLE task_run_candidate_outcomes;
+DROP TABLE task_run_candidates;
+""" + TASK_RUN_CANDIDATES_V47_TABLE_SCHEMA + """\
+INSERT INTO task_run_candidates SELECT * FROM cairn_v47_candidates;
+INSERT INTO task_run_candidate_outcomes SELECT * FROM cairn_v47_candidate_outcomes;
+DROP TABLE cairn_v47_candidate_outcomes;
+DROP TABLE cairn_v47_candidates;
+""" + SQLITE_TASK_RUN_CANDIDATES_IMMUTABLE_SCHEMA
+
+POSTGRES_TASK_RUN_CANDIDATE_CAPACITY_V47 = """\
+ALTER TABLE task_run_candidates
+    DROP CONSTRAINT task_run_candidates_artifact_count_check,
+    ADD CONSTRAINT task_run_candidates_artifact_count_check
+        CHECK (artifact_count BETWEEN 0 AND 32),
+    DROP CONSTRAINT task_run_candidates_manifest_json_check,
+    ADD CONSTRAINT task_run_candidates_manifest_json_check
+        CHECK (octet_length(manifest_json) BETWEEN 2 AND 16384);
+ALTER TABLE task_run_candidate_outcomes
+    DROP CONSTRAINT task_run_candidate_outcomes_manifest_json_check,
+    ADD CONSTRAINT task_run_candidate_outcomes_manifest_json_check
+        CHECK (octet_length(manifest_json) BETWEEN 2 AND 16384);
+"""
+
+
+def _apply_sqlite_task_run_candidate_capacity_v47(conn) -> None:
+    # 外层事务内不能关闭 FK；先备份 outcomes 并先删除依赖表，避免级联删除触发不可变约束。
+    # 自引用 lineage 暂缓校验，允许原顺序恢复；SQL 原样复制 BLOB/TEXT，不解析或重写材料。
+    _execute_sqlite_statements(conn, SQLITE_TASK_RUN_CANDIDATE_CAPACITY_V47)
+    violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(
+            f"SQLite candidate capacity v47 migration found {len(violations)} foreign key violations"
+        )
+    conn.execute("PRAGMA defer_foreign_keys=OFF")
+
+
+def _apply_postgres_task_run_candidate_capacity_v47(conn) -> None:
+    conn.executescript(POSTGRES_TASK_RUN_CANDIDATE_CAPACITY_V47)
+
+
+SQLITE_TASK_RUN_CANDIDATE_CAPACITY = Migration(
+    version=47,
+    name="task-run-candidate-capacity-v1",
+    checksum=sha256(SQLITE_TASK_RUN_CANDIDATE_CAPACITY_V47.encode("utf-8")).hexdigest(),
+    apply=_apply_sqlite_task_run_candidate_capacity_v47,
+)
+POSTGRES_TASK_RUN_CANDIDATE_CAPACITY = Migration(
+    version=47,
+    name="task-run-candidate-capacity-v1",
+    checksum=sha256(POSTGRES_TASK_RUN_CANDIDATE_CAPACITY_V47.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_task_run_candidate_capacity_v47,
+)
+
+
 SQLITE_MIGRATIONS = (
     SQLITE_BASELINE,
     SQLITE_IDENTITY_TENANT,
@@ -4157,6 +4216,7 @@ SQLITE_MIGRATIONS = (
     SQLITE_PROJECT_CONTAINER_PAUSE,
     SQLITE_LEASE_ELAPSED_CLOCK,
     GOAL_DRIVEN_SCENARIO_CATALOG,
+    SQLITE_TASK_RUN_CANDIDATE_CAPACITY,
 )
 POSTGRES_MIGRATIONS = (
     POSTGRES_BASELINE,
@@ -4205,6 +4265,7 @@ POSTGRES_MIGRATIONS = (
     POSTGRES_PROJECT_CONTAINER_PAUSE,
     POSTGRES_LEASE_ELAPSED_CLOCK,
     GOAL_DRIVEN_SCENARIO_CATALOG,
+    POSTGRES_TASK_RUN_CANDIDATE_CAPACITY,
 )
 
 

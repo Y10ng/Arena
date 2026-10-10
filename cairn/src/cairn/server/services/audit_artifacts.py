@@ -62,6 +62,7 @@ def create_artifact_record(project_id: str, body: CreateArtifactRequest) -> Arti
     else:
         assert body.content is not None
         content = body.content.encode("utf-8")
+    _validate_registered_content(body.metadata, len(content), sha256(content).hexdigest())
     with get_conn() as conn:
         get_project_or_404(conn, project_id)
         task_row = None
@@ -128,6 +129,7 @@ async def create_raw_artifact_record(
             artifact_file.flush()
             os.fsync(artifact_file.fileno())
 
+        _validate_registered_content(body.metadata, size, digest.hexdigest())
         # 完整接收后再分配 ID；counter 更新让并发上传的 ID 分配和最终发布保持串行原子性。
         with get_conn() as conn:
             get_project_or_404(conn, project_id)
@@ -163,6 +165,13 @@ async def create_raw_artifact_record(
         if replaced and final_path is not None:
             final_path.unlink(missing_ok=True)
         raise
+
+
+def _validate_registered_content(metadata: dict, size: int, digest: str) -> None:
+    if metadata.get("declared_by_worker") is True and (
+        metadata.get("registered_sha256") != digest or metadata.get("registered_size_bytes") != size
+    ):
+        raise HTTPException(422, "registered_content_version_mismatch")
 
 
 def _insert_artifact_record(

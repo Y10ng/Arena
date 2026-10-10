@@ -83,12 +83,31 @@
               "pattern": "^/",
               "title": "Path",
               "type": "string"
+            },
+            "sha256": {
+              "pattern": "^[a-f0-9]{64}$",
+              "title": "Sha256",
+              "type": "string"
+            },
+            "size_bytes": {
+              "maximum": 33554432,
+              "minimum": 0,
+              "title": "Size Bytes",
+              "type": "integer"
+            },
+            "source_path": {
+              "pattern": "^/",
+              "title": "Source Path",
+              "type": "string"
             }
           },
           "required": [
             "handle",
             "kind",
-            "path"
+            "path",
+            "source_path",
+            "sha256",
+            "size_bytes"
           ],
           "title": "ArtifactDeclaration",
           "type": "object"
@@ -175,40 +194,6 @@
           "title": "AssessmentEvidenceRef",
           "type": "object"
         },
-        "AssetIdentity": {
-          "additionalProperties": false,
-          "properties": {
-            "host": {
-              "minLength": 1,
-              "title": "Host",
-              "type": "string"
-            },
-            "port": {
-              "anyOf": [
-                {
-                  "maximum": 65535,
-                  "minimum": 1,
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Port"
-            },
-            "protocol": {
-              "default": "",
-              "title": "Protocol",
-              "type": "string"
-            }
-          },
-          "required": [
-            "host"
-          ],
-          "title": "AssetIdentity",
-          "type": "object"
-        },
         "CompleteResult": {
           "additionalProperties": false,
           "properties": {
@@ -229,28 +214,6 @@
             "description"
           ],
           "title": "CompleteResult",
-          "type": "object"
-        },
-        "EntrypointIdentity": {
-          "additionalProperties": false,
-          "properties": {
-            "locus": {
-              "default": "",
-              "title": "Locus",
-              "type": "string"
-            },
-            "method": {
-              "default": "",
-              "title": "Method",
-              "type": "string"
-            },
-            "route": {
-              "default": "",
-              "title": "Route",
-              "type": "string"
-            }
-          },
-          "title": "EntrypointIdentity",
           "type": "object"
         },
         "FactResult": {
@@ -297,15 +260,7 @@
               "type": "number"
             },
             "identity": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/VulnerabilityIdentity"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null
+              "$ref": "#/$defs/VulnerabilityIdentityInput"
             },
             "packet_artifact_handle": {
               "anyOf": [
@@ -364,7 +319,8 @@
           },
           "required": [
             "title",
-            "severity"
+            "severity",
+            "identity"
           ],
           "title": "Finding",
           "type": "object"
@@ -479,7 +435,113 @@
           "title": "SurfaceResult",
           "type": "object"
         },
-        "VectorIdentity": {
+        "VulnerabilityAssetIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "host": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Host",
+              "type": "string"
+            },
+            "port": {
+              "anyOf": [
+                {
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Port"
+            },
+            "protocol": {
+              "default": "",
+              "title": "Protocol",
+              "type": "string"
+            }
+          },
+          "required": [
+            "host"
+          ],
+          "title": "VulnerabilityAssetIdentity",
+          "type": "object"
+        },
+        "VulnerabilityEntrypointIdentity": {
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "properties": {
+                "route": {
+                  "pattern": "\\S"
+                }
+              },
+              "required": [
+                "route"
+              ]
+            },
+            {
+              "properties": {
+                "locus": {
+                  "pattern": "\\S"
+                }
+              },
+              "required": [
+                "locus"
+              ]
+            }
+          ],
+          "properties": {
+            "locus": {
+              "default": "",
+              "title": "Locus",
+              "type": "string"
+            },
+            "method": {
+              "default": "",
+              "title": "Method",
+              "type": "string"
+            },
+            "route": {
+              "default": "",
+              "title": "Route",
+              "type": "string"
+            }
+          },
+          "title": "VulnerabilityEntrypointIdentity",
+          "type": "object"
+        },
+        "VulnerabilityIdentityInput": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/VulnerabilityAssetIdentity"
+            },
+            "entrypoint": {
+              "$ref": "#/$defs/VulnerabilityEntrypointIdentity"
+            },
+            "vector": {
+              "$ref": "#/$defs/VulnerabilityVectorIdentity"
+            },
+            "vulnerability_class": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Vulnerability Class",
+              "type": "string"
+            }
+          },
+          "required": [
+            "vulnerability_class",
+            "asset",
+            "entrypoint"
+          ],
+          "title": "VulnerabilityIdentityInput",
+          "type": "object"
+        },
+        "VulnerabilityVectorIdentity": {
           "additionalProperties": false,
           "properties": {
             "object_type": {
@@ -513,33 +575,7 @@
               "type": "string"
             }
           },
-          "title": "VectorIdentity",
-          "type": "object"
-        },
-        "VulnerabilityIdentity": {
-          "additionalProperties": false,
-          "properties": {
-            "asset": {
-              "$ref": "#/$defs/AssetIdentity"
-            },
-            "entrypoint": {
-              "$ref": "#/$defs/EntrypointIdentity"
-            },
-            "vector": {
-              "$ref": "#/$defs/VectorIdentity"
-            },
-            "vulnerability_class": {
-              "minLength": 1,
-              "title": "Vulnerability Class",
-              "type": "string"
-            }
-          },
-          "required": [
-            "vulnerability_class",
-            "asset",
-            "entrypoint"
-          ],
-          "title": "VulnerabilityIdentity",
+          "title": "VulnerabilityVectorIdentity",
           "type": "object"
         }
       },
@@ -719,12 +755,31 @@
               "pattern": "^/",
               "title": "Path",
               "type": "string"
+            },
+            "sha256": {
+              "pattern": "^[a-f0-9]{64}$",
+              "title": "Sha256",
+              "type": "string"
+            },
+            "size_bytes": {
+              "maximum": 33554432,
+              "minimum": 0,
+              "title": "Size Bytes",
+              "type": "integer"
+            },
+            "source_path": {
+              "pattern": "^/",
+              "title": "Source Path",
+              "type": "string"
             }
           },
           "required": [
             "handle",
             "kind",
-            "path"
+            "path",
+            "source_path",
+            "sha256",
+            "size_bytes"
           ],
           "title": "ArtifactDeclaration",
           "type": "object"
@@ -811,40 +866,6 @@
           "title": "AssessmentEvidenceRef",
           "type": "object"
         },
-        "AssetIdentity": {
-          "additionalProperties": false,
-          "properties": {
-            "host": {
-              "minLength": 1,
-              "title": "Host",
-              "type": "string"
-            },
-            "port": {
-              "anyOf": [
-                {
-                  "maximum": 65535,
-                  "minimum": 1,
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Port"
-            },
-            "protocol": {
-              "default": "",
-              "title": "Protocol",
-              "type": "string"
-            }
-          },
-          "required": [
-            "host"
-          ],
-          "title": "AssetIdentity",
-          "type": "object"
-        },
         "CompleteResult": {
           "additionalProperties": false,
           "properties": {
@@ -865,28 +886,6 @@
             "description"
           ],
           "title": "CompleteResult",
-          "type": "object"
-        },
-        "EntrypointIdentity": {
-          "additionalProperties": false,
-          "properties": {
-            "locus": {
-              "default": "",
-              "title": "Locus",
-              "type": "string"
-            },
-            "method": {
-              "default": "",
-              "title": "Method",
-              "type": "string"
-            },
-            "route": {
-              "default": "",
-              "title": "Route",
-              "type": "string"
-            }
-          },
-          "title": "EntrypointIdentity",
           "type": "object"
         },
         "FactResult": {
@@ -933,15 +932,7 @@
               "type": "number"
             },
             "identity": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/VulnerabilityIdentity"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null
+              "$ref": "#/$defs/VulnerabilityIdentityInput"
             },
             "packet_artifact_handle": {
               "anyOf": [
@@ -1000,7 +991,8 @@
           },
           "required": [
             "title",
-            "severity"
+            "severity",
+            "identity"
           ],
           "title": "Finding",
           "type": "object"
@@ -1115,7 +1107,113 @@
           "title": "SurfaceResult",
           "type": "object"
         },
-        "VectorIdentity": {
+        "VulnerabilityAssetIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "host": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Host",
+              "type": "string"
+            },
+            "port": {
+              "anyOf": [
+                {
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Port"
+            },
+            "protocol": {
+              "default": "",
+              "title": "Protocol",
+              "type": "string"
+            }
+          },
+          "required": [
+            "host"
+          ],
+          "title": "VulnerabilityAssetIdentity",
+          "type": "object"
+        },
+        "VulnerabilityEntrypointIdentity": {
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "properties": {
+                "route": {
+                  "pattern": "\\S"
+                }
+              },
+              "required": [
+                "route"
+              ]
+            },
+            {
+              "properties": {
+                "locus": {
+                  "pattern": "\\S"
+                }
+              },
+              "required": [
+                "locus"
+              ]
+            }
+          ],
+          "properties": {
+            "locus": {
+              "default": "",
+              "title": "Locus",
+              "type": "string"
+            },
+            "method": {
+              "default": "",
+              "title": "Method",
+              "type": "string"
+            },
+            "route": {
+              "default": "",
+              "title": "Route",
+              "type": "string"
+            }
+          },
+          "title": "VulnerabilityEntrypointIdentity",
+          "type": "object"
+        },
+        "VulnerabilityIdentityInput": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/VulnerabilityAssetIdentity"
+            },
+            "entrypoint": {
+              "$ref": "#/$defs/VulnerabilityEntrypointIdentity"
+            },
+            "vector": {
+              "$ref": "#/$defs/VulnerabilityVectorIdentity"
+            },
+            "vulnerability_class": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Vulnerability Class",
+              "type": "string"
+            }
+          },
+          "required": [
+            "vulnerability_class",
+            "asset",
+            "entrypoint"
+          ],
+          "title": "VulnerabilityIdentityInput",
+          "type": "object"
+        },
+        "VulnerabilityVectorIdentity": {
           "additionalProperties": false,
           "properties": {
             "object_type": {
@@ -1149,33 +1247,7 @@
               "type": "string"
             }
           },
-          "title": "VectorIdentity",
-          "type": "object"
-        },
-        "VulnerabilityIdentity": {
-          "additionalProperties": false,
-          "properties": {
-            "asset": {
-              "$ref": "#/$defs/AssetIdentity"
-            },
-            "entrypoint": {
-              "$ref": "#/$defs/EntrypointIdentity"
-            },
-            "vector": {
-              "$ref": "#/$defs/VectorIdentity"
-            },
-            "vulnerability_class": {
-              "minLength": 1,
-              "title": "Vulnerability Class",
-              "type": "string"
-            }
-          },
-          "required": [
-            "vulnerability_class",
-            "asset",
-            "entrypoint"
-          ],
-          "title": "VulnerabilityIdentity",
+          "title": "VulnerabilityVectorIdentity",
           "type": "object"
         }
       },
@@ -1348,12 +1420,31 @@
               "pattern": "^/",
               "title": "Path",
               "type": "string"
+            },
+            "sha256": {
+              "pattern": "^[a-f0-9]{64}$",
+              "title": "Sha256",
+              "type": "string"
+            },
+            "size_bytes": {
+              "maximum": 33554432,
+              "minimum": 0,
+              "title": "Size Bytes",
+              "type": "integer"
+            },
+            "source_path": {
+              "pattern": "^/",
+              "title": "Source Path",
+              "type": "string"
             }
           },
           "required": [
             "handle",
             "kind",
-            "path"
+            "path",
+            "source_path",
+            "sha256",
+            "size_bytes"
           ],
           "title": "ArtifactDeclaration",
           "type": "object"
@@ -1438,40 +1529,6 @@
             }
           },
           "title": "AssessmentEvidenceRef",
-          "type": "object"
-        },
-        "AssetIdentity": {
-          "additionalProperties": false,
-          "properties": {
-            "host": {
-              "minLength": 1,
-              "title": "Host",
-              "type": "string"
-            },
-            "port": {
-              "anyOf": [
-                {
-                  "maximum": 65535,
-                  "minimum": 1,
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Port"
-            },
-            "protocol": {
-              "default": "",
-              "title": "Protocol",
-              "type": "string"
-            }
-          },
-          "required": [
-            "host"
-          ],
-          "title": "AssetIdentity",
           "type": "object"
         },
         "CoverageResult": {
@@ -1572,28 +1629,6 @@
             "outcome"
           ],
           "title": "CoverageResult",
-          "type": "object"
-        },
-        "EntrypointIdentity": {
-          "additionalProperties": false,
-          "properties": {
-            "locus": {
-              "default": "",
-              "title": "Locus",
-              "type": "string"
-            },
-            "method": {
-              "default": "",
-              "title": "Method",
-              "type": "string"
-            },
-            "route": {
-              "default": "",
-              "title": "Route",
-              "type": "string"
-            }
-          },
-          "title": "EntrypointIdentity",
           "type": "object"
         },
         "ExperimentRecord": {
@@ -1768,15 +1803,7 @@
               "type": "number"
             },
             "identity": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/VulnerabilityIdentity"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null
+              "$ref": "#/$defs/VulnerabilityIdentityInput"
             },
             "packet_artifact_handle": {
               "anyOf": [
@@ -1835,7 +1862,8 @@
           },
           "required": [
             "title",
-            "severity"
+            "severity",
+            "identity"
           ],
           "title": "Finding",
           "type": "object"
@@ -1908,7 +1936,113 @@
           "title": "SurfaceResult",
           "type": "object"
         },
-        "VectorIdentity": {
+        "VulnerabilityAssetIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "host": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Host",
+              "type": "string"
+            },
+            "port": {
+              "anyOf": [
+                {
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Port"
+            },
+            "protocol": {
+              "default": "",
+              "title": "Protocol",
+              "type": "string"
+            }
+          },
+          "required": [
+            "host"
+          ],
+          "title": "VulnerabilityAssetIdentity",
+          "type": "object"
+        },
+        "VulnerabilityEntrypointIdentity": {
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "properties": {
+                "route": {
+                  "pattern": "\\S"
+                }
+              },
+              "required": [
+                "route"
+              ]
+            },
+            {
+              "properties": {
+                "locus": {
+                  "pattern": "\\S"
+                }
+              },
+              "required": [
+                "locus"
+              ]
+            }
+          ],
+          "properties": {
+            "locus": {
+              "default": "",
+              "title": "Locus",
+              "type": "string"
+            },
+            "method": {
+              "default": "",
+              "title": "Method",
+              "type": "string"
+            },
+            "route": {
+              "default": "",
+              "title": "Route",
+              "type": "string"
+            }
+          },
+          "title": "VulnerabilityEntrypointIdentity",
+          "type": "object"
+        },
+        "VulnerabilityIdentityInput": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/VulnerabilityAssetIdentity"
+            },
+            "entrypoint": {
+              "$ref": "#/$defs/VulnerabilityEntrypointIdentity"
+            },
+            "vector": {
+              "$ref": "#/$defs/VulnerabilityVectorIdentity"
+            },
+            "vulnerability_class": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Vulnerability Class",
+              "type": "string"
+            }
+          },
+          "required": [
+            "vulnerability_class",
+            "asset",
+            "entrypoint"
+          ],
+          "title": "VulnerabilityIdentityInput",
+          "type": "object"
+        },
+        "VulnerabilityVectorIdentity": {
           "additionalProperties": false,
           "properties": {
             "object_type": {
@@ -1942,33 +2076,7 @@
               "type": "string"
             }
           },
-          "title": "VectorIdentity",
-          "type": "object"
-        },
-        "VulnerabilityIdentity": {
-          "additionalProperties": false,
-          "properties": {
-            "asset": {
-              "$ref": "#/$defs/AssetIdentity"
-            },
-            "entrypoint": {
-              "$ref": "#/$defs/EntrypointIdentity"
-            },
-            "vector": {
-              "$ref": "#/$defs/VectorIdentity"
-            },
-            "vulnerability_class": {
-              "minLength": 1,
-              "title": "Vulnerability Class",
-              "type": "string"
-            }
-          },
-          "required": [
-            "vulnerability_class",
-            "asset",
-            "entrypoint"
-          ],
-          "title": "VulnerabilityIdentity",
+          "title": "VulnerabilityVectorIdentity",
           "type": "object"
         }
       },
@@ -2132,12 +2240,31 @@
               "pattern": "^/",
               "title": "Path",
               "type": "string"
+            },
+            "sha256": {
+              "pattern": "^[a-f0-9]{64}$",
+              "title": "Sha256",
+              "type": "string"
+            },
+            "size_bytes": {
+              "maximum": 33554432,
+              "minimum": 0,
+              "title": "Size Bytes",
+              "type": "integer"
+            },
+            "source_path": {
+              "pattern": "^/",
+              "title": "Source Path",
+              "type": "string"
             }
           },
           "required": [
             "handle",
             "kind",
-            "path"
+            "path",
+            "source_path",
+            "sha256",
+            "size_bytes"
           ],
           "title": "ArtifactDeclaration",
           "type": "object"
@@ -2222,40 +2349,6 @@
             }
           },
           "title": "AssessmentEvidenceRef",
-          "type": "object"
-        },
-        "AssetIdentity": {
-          "additionalProperties": false,
-          "properties": {
-            "host": {
-              "minLength": 1,
-              "title": "Host",
-              "type": "string"
-            },
-            "port": {
-              "anyOf": [
-                {
-                  "maximum": 65535,
-                  "minimum": 1,
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Port"
-            },
-            "protocol": {
-              "default": "",
-              "title": "Protocol",
-              "type": "string"
-            }
-          },
-          "required": [
-            "host"
-          ],
-          "title": "AssetIdentity",
           "type": "object"
         },
         "CoverageResult": {
@@ -2356,28 +2449,6 @@
             "outcome"
           ],
           "title": "CoverageResult",
-          "type": "object"
-        },
-        "EntrypointIdentity": {
-          "additionalProperties": false,
-          "properties": {
-            "locus": {
-              "default": "",
-              "title": "Locus",
-              "type": "string"
-            },
-            "method": {
-              "default": "",
-              "title": "Method",
-              "type": "string"
-            },
-            "route": {
-              "default": "",
-              "title": "Route",
-              "type": "string"
-            }
-          },
-          "title": "EntrypointIdentity",
           "type": "object"
         },
         "ExperimentRecord": {
@@ -2552,15 +2623,7 @@
               "type": "number"
             },
             "identity": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/VulnerabilityIdentity"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null
+              "$ref": "#/$defs/VulnerabilityIdentityInput"
             },
             "packet_artifact_handle": {
               "anyOf": [
@@ -2619,7 +2682,8 @@
           },
           "required": [
             "title",
-            "severity"
+            "severity",
+            "identity"
           ],
           "title": "Finding",
           "type": "object"
@@ -2692,7 +2756,113 @@
           "title": "SurfaceResult",
           "type": "object"
         },
-        "VectorIdentity": {
+        "VulnerabilityAssetIdentity": {
+          "additionalProperties": false,
+          "properties": {
+            "host": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Host",
+              "type": "string"
+            },
+            "port": {
+              "anyOf": [
+                {
+                  "maximum": 65535,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Port"
+            },
+            "protocol": {
+              "default": "",
+              "title": "Protocol",
+              "type": "string"
+            }
+          },
+          "required": [
+            "host"
+          ],
+          "title": "VulnerabilityAssetIdentity",
+          "type": "object"
+        },
+        "VulnerabilityEntrypointIdentity": {
+          "additionalProperties": false,
+          "anyOf": [
+            {
+              "properties": {
+                "route": {
+                  "pattern": "\\S"
+                }
+              },
+              "required": [
+                "route"
+              ]
+            },
+            {
+              "properties": {
+                "locus": {
+                  "pattern": "\\S"
+                }
+              },
+              "required": [
+                "locus"
+              ]
+            }
+          ],
+          "properties": {
+            "locus": {
+              "default": "",
+              "title": "Locus",
+              "type": "string"
+            },
+            "method": {
+              "default": "",
+              "title": "Method",
+              "type": "string"
+            },
+            "route": {
+              "default": "",
+              "title": "Route",
+              "type": "string"
+            }
+          },
+          "title": "VulnerabilityEntrypointIdentity",
+          "type": "object"
+        },
+        "VulnerabilityIdentityInput": {
+          "additionalProperties": false,
+          "properties": {
+            "asset": {
+              "$ref": "#/$defs/VulnerabilityAssetIdentity"
+            },
+            "entrypoint": {
+              "$ref": "#/$defs/VulnerabilityEntrypointIdentity"
+            },
+            "vector": {
+              "$ref": "#/$defs/VulnerabilityVectorIdentity"
+            },
+            "vulnerability_class": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Vulnerability Class",
+              "type": "string"
+            }
+          },
+          "required": [
+            "vulnerability_class",
+            "asset",
+            "entrypoint"
+          ],
+          "title": "VulnerabilityIdentityInput",
+          "type": "object"
+        },
+        "VulnerabilityVectorIdentity": {
           "additionalProperties": false,
           "properties": {
             "object_type": {
@@ -2726,33 +2896,7 @@
               "type": "string"
             }
           },
-          "title": "VectorIdentity",
-          "type": "object"
-        },
-        "VulnerabilityIdentity": {
-          "additionalProperties": false,
-          "properties": {
-            "asset": {
-              "$ref": "#/$defs/AssetIdentity"
-            },
-            "entrypoint": {
-              "$ref": "#/$defs/EntrypointIdentity"
-            },
-            "vector": {
-              "$ref": "#/$defs/VectorIdentity"
-            },
-            "vulnerability_class": {
-              "minLength": 1,
-              "title": "Vulnerability Class",
-              "type": "string"
-            }
-          },
-          "required": [
-            "vulnerability_class",
-            "asset",
-            "entrypoint"
-          ],
-          "title": "VulnerabilityIdentity",
+          "title": "VulnerabilityVectorIdentity",
           "type": "object"
         }
       },
@@ -2916,12 +3060,31 @@
               "pattern": "^/",
               "title": "Path",
               "type": "string"
+            },
+            "sha256": {
+              "pattern": "^[a-f0-9]{64}$",
+              "title": "Sha256",
+              "type": "string"
+            },
+            "size_bytes": {
+              "maximum": 33554432,
+              "minimum": 0,
+              "title": "Size Bytes",
+              "type": "integer"
+            },
+            "source_path": {
+              "pattern": "^/",
+              "title": "Source Path",
+              "type": "string"
             }
           },
           "required": [
             "handle",
             "kind",
-            "path"
+            "path",
+            "source_path",
+            "sha256",
+            "size_bytes"
           ],
           "title": "ArtifactDeclaration",
           "type": "object"
@@ -3516,12 +3679,31 @@
               "pattern": "^/",
               "title": "Path",
               "type": "string"
+            },
+            "sha256": {
+              "pattern": "^[a-f0-9]{64}$",
+              "title": "Sha256",
+              "type": "string"
+            },
+            "size_bytes": {
+              "maximum": 33554432,
+              "minimum": 0,
+              "title": "Size Bytes",
+              "type": "integer"
+            },
+            "source_path": {
+              "pattern": "^/",
+              "title": "Source Path",
+              "type": "string"
             }
           },
           "required": [
             "handle",
             "kind",
-            "path"
+            "path",
+            "source_path",
+            "sha256",
+            "size_bytes"
           ],
           "title": "ArtifactDeclaration",
           "type": "object"
@@ -3672,12 +3854,31 @@
               "pattern": "^/",
               "title": "Path",
               "type": "string"
+            },
+            "sha256": {
+              "pattern": "^[a-f0-9]{64}$",
+              "title": "Sha256",
+              "type": "string"
+            },
+            "size_bytes": {
+              "maximum": 33554432,
+              "minimum": 0,
+              "title": "Size Bytes",
+              "type": "integer"
+            },
+            "source_path": {
+              "pattern": "^/",
+              "title": "Source Path",
+              "type": "string"
             }
           },
           "required": [
             "handle",
             "kind",
-            "path"
+            "path",
+            "source_path",
+            "sha256",
+            "size_bytes"
           ],
           "title": "ArtifactDeclaration",
           "type": "object"
@@ -3891,12 +4092,31 @@
               "pattern": "^/",
               "title": "Path",
               "type": "string"
+            },
+            "sha256": {
+              "pattern": "^[a-f0-9]{64}$",
+              "title": "Sha256",
+              "type": "string"
+            },
+            "size_bytes": {
+              "maximum": 33554432,
+              "minimum": 0,
+              "title": "Size Bytes",
+              "type": "integer"
+            },
+            "source_path": {
+              "pattern": "^/",
+              "title": "Source Path",
+              "type": "string"
             }
           },
           "required": [
             "handle",
             "kind",
-            "path"
+            "path",
+            "source_path",
+            "sha256",
+            "size_bytes"
           ],
           "title": "ArtifactDeclaration",
           "type": "object"

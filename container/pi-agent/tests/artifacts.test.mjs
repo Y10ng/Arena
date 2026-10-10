@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile, readFile, truncate, symlink, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runRequest } from '../dist/runner.js';
@@ -30,7 +30,9 @@ test('register evidence via actual SDK; inject exact artifact declaration and au
   assert.equal(calls.length, 2);
   const data = result.result.data;
   assert.equal(data.artifacts.length, 1);
-  assert.deepEqual(Object.keys(data.artifacts[0]).sort(), ['handle', 'kind', 'path']);
+  assert.deepEqual(Object.keys(data.artifacts[0]).sort(), ['handle', 'kind', 'path', 'sha256', 'size_bytes', 'source_path']);
+  assert.equal(data.artifacts[0].source_path, join(cwd, 'evidence.txt'));
+  assert.equal(await readFile(data.artifacts[0].path, 'utf8'), 'local fixture evidence');
   assert.match(data.artifacts[0].handle, /^local-/);
   assert.equal(data.evidence_refs[0].artifact_id, data.artifacts[0].handle);
   assert.deepEqual(data.coverage_result, { slot_key: 'cell-1', surface_key: 'surface-1', test_family: 'authorization' });
@@ -61,7 +63,7 @@ test('unknown evidence handles fail after bounded repairs', async (t) => {
   assert.equal(calls.length, 3);
 });
 
-test('registry rejects symlinks and changed artifacts, and permits explicit re-registration', async (t) => {
+test('registry preserves fixed versions and provenance; changed copies and wrong references still reject', async (t) => {
   const { cwd, request } = await fixture(t);
   const file = join(cwd, 'evidence.txt');
   await writeFile(file, 'before');
@@ -70,13 +72,42 @@ test('registry rejects symlinks and changed artifacts, and permits explicit re-r
   await assert.rejects(registry.register('evidence-link', 'file'), { code: 'artifact_invalid' });
   const first = await registry.register('evidence.txt', 'file');
   await writeFile(file, 'after');
-  await assert.rejects(registry.inject({}), { code: 'artifact_changed' });
+  const data = { evidence_refs: [{ artifact_id: first.handle }] };
+  await registry.inject(data);
+  assert.equal(await readFile(first.path, 'utf8'), 'before');
+  assert.equal(first.source_path, file);
   const second = await registry.register('evidence.txt', 'file');
   assert.notEqual(first.handle, second.handle);
-  const data = {};
+  assert.notEqual(first.path, second.path);
+  assert.equal(await readFile(second.path, 'utf8'), 'after');
   await registry.inject(data);
-  assert.equal(data.artifacts.length, 1);
-  assert.equal(data.artifacts[0].handle, second.handle);
+  assert.equal(data.artifacts.length, 2);
+  assert.equal(data.evidence_refs[0].artifact_id, first.handle);
+  await assert.rejects(registry.inject({ evidence_refs: [{ artifact_id: 'local-missing' }] }), { code: 'artifact_unknown' });
+  await assert.rejects(registry.inject({ artifacts: [{ handle: first.handle, path: file, kind: first.kind }] }), { code: 'artifact_unknown' });
+  await chmod(first.path, 0o600);
+  await writeFile(first.path, 'tampered');
+  await assert.rejects(registry.inject(data), { code: 'artifact_changed' });
+  assert.equal(registry.items[0].sha256, first.sha256);
+  await rm(first.path);
+  await assert.rejects(registry.inject(data), { code: 'ENOENT' });
+});
+
+test('registration rejects capacity before capture without truncating or discarding versions', async (t) => {
+  const { cwd, request } = await fixture(t);
+  const file = join(cwd, 'evidence.txt');
+  await writeFile(file, 'one');
+  const registry = new ArtifactRegistry(cwd, request.session_root);
+  for (let index = 0; index < 32; index += 1) await registry.register(file, 'file');
+  await assert.rejects(registry.register(file, 'file'), { code: 'artifact_invalid' });
+  assert.equal(registry.items.length, 32);
+  await registry.inject({});
+  const large = join(cwd, 'large.txt');
+  await writeFile(large, '');
+  await truncate(large, 32 * 1024 * 1024 + 1);
+  const bounded = new ArtifactRegistry(cwd, request.session_root);
+  await assert.rejects(bounded.register(large, 'file'), { code: 'artifact_invalid' });
+  assert.equal(bounded.items.length, 0);
 });
 
 test('readonly inputs remain readable but cannot be registered as artifacts', async (t) => {

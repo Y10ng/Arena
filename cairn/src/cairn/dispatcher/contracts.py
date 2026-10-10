@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from re import fullmatch
 from typing import Any
 
+from pydantic import ValidationError
+
 from cairn.assessment_contracts import (
     DepthReviewDecision,
     ExperimentRecord,
@@ -16,7 +18,7 @@ from cairn.assessment_contracts import (
     valid_reason_dependency,
 )
 from cairn.dispatcher.worker_protocol import validate_result_envelope
-from cairn.dispatcher.worker_protocol.submission import validate_phase_data
+from cairn.dispatcher.worker_protocol.submission import ArtifactDeclaration, validate_phase_data
 from cairn.server.models import EvidenceRef
 
 LOG = logging.getLogger(__name__)
@@ -110,6 +112,9 @@ class DeclaredArtifact:
     handle: str
     kind: str
     path: str
+    source_path: str
+    sha256: str
+    size_bytes: int
 
 
 def rejection_error_type(payload: dict[str, Any] | None) -> str:
@@ -166,12 +171,16 @@ def _validate_artifact_declarations(data: dict[str, Any]) -> None:
     for index, artifact in enumerate(artifacts):
         if not isinstance(artifact, dict):
             raise PhaseContractError(f"invalid artifact at index {index}")
-        unexpected = sorted(set(artifact) - {"handle", "kind", "path"})
+        unexpected = sorted(set(artifact) - ArtifactDeclaration.model_fields.keys())
         if unexpected:
             raise PhaseContractError(
                 f"unexpected artifact fields at index {index}: {', '.join(unexpected)}",
                 public_reason=f"unexpected artifact fields at index {index}",
             )
+        try:
+            ArtifactDeclaration.model_validate(artifact)
+        except ValidationError as exc:
+            raise PhaseContractError(f"invalid artifact content version at index {index}") from exc
         handle = _validate_artifact_handle(
             artifact.get("handle"),
             path=f"artifact.handle at index {index}",
@@ -316,7 +325,10 @@ def extract_declared_artifacts(payload: dict[str, Any]) -> list[DeclaredArtifact
             continue
         if kind not in ALLOWED_DECLARED_ARTIFACT_KINDS:
             continue
-        result.append(DeclaredArtifact(handle=handle, kind=kind, path=path))
+        result.append(DeclaredArtifact(
+            handle=handle, kind=kind, path=path, source_path=artifact["source_path"],
+            sha256=artifact["sha256"], size_bytes=artifact["size_bytes"],
+        ))
     return result
 
 

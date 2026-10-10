@@ -148,7 +148,8 @@ def test_missing_declared_artifact_is_collect_failure_not_write_failure() -> Non
         "proj_015",
         "tr027",
         phase="bootstrap_conclude",
-        artifacts=[DeclaredArtifact(handle="target-source", kind="file", path="/tmp/target-only.java")],
+        artifacts=[DeclaredArtifact(handle="target-source", kind="file", path="/tmp/target-only.java",
+                                    source_path="/tmp/source.java", sha256=sha256(b"missing").hexdigest(), size_bytes=7)],
     )
 
     assert record.refs == []
@@ -169,6 +170,9 @@ def test_successful_declared_artifact_records_ordered_aliases() -> None:
                 handle="packet",
                 kind="report",
                 path="/workspace/evidence/packet.txt",
+                source_path="/workspace/source.txt",
+                sha256=sha256(b"evidence from /workspace/evidence/packet.txt").hexdigest(),
+                size_bytes=len(b"evidence from /workspace/evidence/packet.txt"),
             )
         ],
     )

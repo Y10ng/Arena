@@ -160,6 +160,7 @@ def run_reason_task(
             worker, prompt, session, phase="reason_execute",
             project_id=project.project.id, task_run_id=task_run_id,
             timeout_seconds=execution_timeout, binding=reason_context.binding,
+            inputs=frozen_delivery["inputs"],
             resume=delivery_context is not None or continuation_context is not None,
             conclude_only=delivery_context is not None,
             continuation=continuation_context,

@@ -21,6 +21,7 @@ from cairn.server.schemas.candidates import (
     CANDIDATE_MAX_MANIFEST_BYTES,
     CANDIDATE_MAX_OUTCOMES_PER_CANDIDATE,
     CANDIDATE_MAX_RAW_BYTES,
+    CANDIDATE_MAX_SPOOL_BYTES,
     CANDIDATE_SOURCE_FORMAT,
     CandidateCapabilities,
     CandidateFrameManifest,
@@ -223,6 +224,22 @@ def _outcome_receipt(
     )
 
 
+def _require_storage_budget(conn, project_id: str, task_run_id: str, incoming: int) -> None:
+    # 与 Worker binary spool 一样按 UTF-8 bytes 及每帧 48-byte 开销计量，重放不重复计费。
+    candidates = conn.execute(
+        "SELECT raw_size_bytes, manifest_json FROM task_run_candidates WHERE project_id=? AND task_run_id=?",
+        (project_id, task_run_id),
+    ).fetchall()
+    outcomes = conn.execute(
+        "SELECT manifest_json FROM task_run_candidate_outcomes WHERE project_id=? AND task_run_id=?",
+        (project_id, task_run_id),
+    ).fetchall()
+    stored = sum(int(row["raw_size_bytes"]) + len(row["manifest_json"].encode("utf-8")) + 48 for row in candidates)
+    stored += sum(len(row["manifest_json"].encode("utf-8")) + 48 for row in outcomes)
+    if stored + incoming > CANDIDATE_MAX_SPOOL_BYTES:
+        raise HTTPException(413, "candidate_storage_limit_reached")
+
+
 def capture_candidate(
     project_id: str,
     task_run_id: str,
@@ -346,6 +363,7 @@ def capture_candidate(
         if int(candidate_count) >= CANDIDATE_MAX_CANDIDATES_PER_TASK_RUN:
             raise HTTPException(409, "candidate_limit_reached")
 
+        _require_storage_budget(conn, project_id, task_run_id, len(manifest_bytes) + len(raw) + 48)
         candidate_id = f"cnd_{uuid4().hex}"
         received_at = utcnow()
         cursor = conn.execute(
@@ -493,6 +511,7 @@ def capture_candidate_outcome(
         if manifest.outcome_sequence != int(outcome_state["maximum"]) + 1:
             raise HTTPException(409, "candidate_outcome_sequence_mismatch")
 
+        _require_storage_budget(conn, project_id, task_run_id, len(manifest_bytes) + 48)
         outcome_id = f"cno_{uuid4().hex}"
         received_at = utcnow()
         cursor = conn.execute(

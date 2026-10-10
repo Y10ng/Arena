@@ -586,7 +586,9 @@ def test_goal_driven_reason_delivery_registration_binds_project_intent_ids(conn,
         "allowed_fact_ids": ["origin"], "allowed_intent_ids": [intent.id],
         "max_intents": 3, "decision_input_digest": "a" * 64,
     }
-    schema_digest = canonical_value_sha256(build_submit_result_schema("reason_execute", binding))
+    schema_digest = canonical_value_sha256(build_submit_result_schema(
+        "reason_execute", binding, inputs={"open_intent_ids": [intent.id]},
+    ))
     if mutation == "missing":
         binding.pop("allowed_intent_ids")
     elif mutation == "foreign":

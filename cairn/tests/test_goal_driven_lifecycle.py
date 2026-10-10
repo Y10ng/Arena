@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from base64 import b64decode, b64encode
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
+from pathlib import Path
 import sqlite3
+import subprocess
 
 import pytest
 from fastapi import HTTPException
@@ -336,8 +339,395 @@ def test_provider_explore_retries_keep_one_attempt_candidate_and_budget(lifecycl
     assert conn.execute("SELECT COUNT(*) FROM assessment_attempts WHERE project_id='p'").fetchone()[0] == 1
 
 
+@pytest.mark.parametrize("transient", ["provider_error", "transport_error"])
+def test_goal_driven_original_delivery_transient_keeps_attempt_and_frozen_inputs(lifecycle_db, monkeypatch, transient):
+    from cairn.server.services import assessment_attempts, explore_attempts
+
+    conn = lifecycle_db
+    _seed_running_goal_driven_explore(conn)
+    clock = ["2050-01-01T00:00:00Z"]
+    for module in (assessment_attempts, explore_attempts, audit_task_runs):
+        monkeypatch.setattr(module, "utcnow", lambda: clock[0])
+    snapshot = json.loads(conn.execute("SELECT runtime_context_json FROM task_runs WHERE id='run-1'").fetchone()[0])["execution_delivery"]
+    run_id = "run-1"
+    for index, error in enumerate(("submission_missing", transient)):
+        _fail_explore(conn, run_id, error)
+        audit_task_runs.update_task_run_record("p", run_id, UpdateTaskRunRequest(runtime_context={"execution_lifecycle": {
+            "generation": 0, "process_started": True, "termination_confirmed": True, "cleanup_confirmed": True,
+        }}), principal=_DISPATCHER)
+        clock[0] = f"2050-01-01T00:0{index + 1}:00Z"
+        next_run = _retry_explore(conn)
+        assert next_run.assessment_attempt_id == "attempt-1"
+        assert next_run.session_id == _SESSION
+        assert next_run.worker_name == "worker"
+        assert next_run.execution_generation == 0
+        assert next_run.runtime_context["dispatcher_id"] == "dispatcher"
+        assert next_run.runtime_context["execution_delivery"] == snapshot
+        assert next_run.runtime_context["delivery_retry"] == {"source_task_run_id": run_id}
+        run_id = next_run.id
+    assert dict(conn.execute("SELECT charged, execution_count, status FROM assessment_attempts WHERE id='attempt-1'").fetchone()) == {"charged": 1, "execution_count": 3, "status": "active"}
+    assert conn.execute("SELECT COUNT(*) FROM assessment_attempts WHERE project_id='p'").fetchone()[0] == 1
+    assert tuple(conn.execute("SELECT explore_attempts_started, verification_attempts_started FROM projects WHERE id='p'").fetchone()) == (1, 0)
+    assert conn.execute("SELECT concluded_at FROM intents WHERE id='i1'").fetchone()[0] is None
+
+
+def test_goal_driven_artifact_rejection_after_provider_retry_remains_terminal(lifecycle_db, monkeypatch):
+    from cairn.server.services import assessment_attempts, explore_attempts
+
+    conn = lifecycle_db
+    _seed_running_goal_driven_explore(conn)
+    clock = ["2050-01-01T00:00:00Z"]
+    for module in (assessment_attempts, explore_attempts, audit_task_runs):
+        monkeypatch.setattr(module, "utcnow", lambda: clock[0])
+    _fail_explore(conn, "run-1", "provider_error")
+    clock[0] = "2050-01-01T00:01:00Z"
+    retried = _retry_explore(conn)
+    _fail_explore(conn, retried.id, "artifact_error")
+    assert dict(conn.execute("SELECT status, outcome, execution_count FROM assessment_attempts WHERE id='attempt-1'").fetchone()) == {"status": "failed", "outcome": "artifact_error", "execution_count": 2}
+    with pytest.raises(HTTPException):
+        _retry_explore(conn)
+    assert conn.execute("SELECT COUNT(*) FROM task_runs WHERE project_id='p'").fetchone()[0] == 2
+    assert conn.execute("SELECT explore_attempts_started FROM projects WHERE id='p'").fetchone()[0] == 1
+
+
+def test_fixed_material_versions_and_identity_repair_reach_server(lifecycle_db, tmp_path):
+    from cairn.dispatcher import contracts
+    from cairn.dispatcher.protocol.client import ApiResult
+    from cairn.dispatcher.tasks.artifact_records import record_declared_artifacts
+    from cairn.dispatcher.tasks.candidate_intake import decode_candidate_spool
+    from cairn.dispatcher.tasks.conclude_writer import build_assessment_record_for_conclude, build_vulnerability_for_conclude
+    from cairn.dispatcher.worker_protocol.submission import build_submit_result_schema
+    from cairn.dispatcher.worker_result_gateway import decode_pi_result
+    from cairn.dispatcher.workers.base import WorkerCandidateSpool
+
+    conn = lifecycle_db
+    _seed_running_goal_driven_explore(conn)
+    before = dict(conn.execute(
+        "SELECT authorization_epoch, authorization_scope_digest, execution_generation, "
+        "explore_budget, explore_attempts_started, verification_attempts_started "
+        "FROM projects WHERE id='p'"
+    ).fetchone())
+    binding = {"assessment_protocol": "goal-driven-v1"}
+    schema = build_submit_result_schema("explore_execute", binding)
+    context = json.loads(conn.execute("SELECT runtime_context_json FROM task_runs WHERE id='run-1'").fetchone()[0])
+    context["execution_delivery"].update(binding=binding, result_schema_sha256=canonical_value_sha256(schema))
+    conn.execute("UPDATE task_runs SET runtime_context_json=? WHERE id='run-1'", (json.dumps(context),))
+    conn.commit()
+    # 只替代 provider 与容器 IO；真实 SDK 的捕获、生产解码、持久化及业务接受不替代。
+    script = r"""
+import { readFile, writeFile, appendFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fixture } from './tests/fixtures.mjs';
+import { runRequest } from './dist/runner.js';
+import { parseRequest } from './dist/protocol.js';
+
+let input = '';
+for await (const chunk of process.stdin) input += chunk;
+const schema = JSON.parse(input);
+const cleanups = [];
+let cwd;
+let registered;
+let rejection;
+const original = '合成观察：registered evidence version 1。\r\n';
+const identity = { vulnerability_class: 'synthetic_access_boundary', asset: { host: 'fixture.invalid', protocol: 'http' }, entrypoint: { method: 'GET', route: '/synthetic-evidence' } };
+const submit = (withIdentity) => ({ tools: [{ name: 'submit_result', args: {
+  accepted: true,
+  data: {
+    fact: { description: '合成已有材料的交付，不主张真实漏洞', vulnerability: {
+      title: '合成材料接受测试', severity: 'low',
+      repro_request: 'GET /synthetic-evidence HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n',
+      repro_response: 'HTTP/1.1 200 OK\r\n\r\nsynthetic evidence',
+      ...(withIdentity ? { identity } : {}),
+    } },
+    assessment_record: {
+      version: 1, kind: 'experiment', hypothesis: '已有合成观察能否按固定版本可靠交付？',
+      outcome: 'finding', observations: [original], evidence_refs: registered.map((item) => ({ artifact_handle: item.handle })),
+    },
+  },
+} }] });
+try {
+  const f = await fixture({ after: (cleanup) => cleanups.push(cleanup) }, 'openai-chat-completions', [
+    { tools: [
+      ...Array.from({ length: 20 }, (_, index) => ({ name: 'register_artifact', args: { path: `evidence-${index}.txt`, kind: 'raw_output' } })),
+      { name: 'bash', args: { command: `node -e "process.stdout.write(('fixture-output-'+String.fromCharCode(10)).repeat(30000))"` } },
+    ] },
+    async (call) => {
+      registered = call.body.messages.filter((message) => message.role === 'tool').slice(0, 20).map((message) => JSON.parse(message.content));
+      await appendFile(join(cwd, 'evidence-0.txt'), 'continued background output');
+      return submit(false);
+    },
+    (call) => {
+      rejection = JSON.parse(call.body.messages.filter((message) => message.role === 'tool').at(-1).content);
+      return submit(true);
+    },
+  ]);
+  cwd = f.cwd;
+  for (let index = 0; index < 20; index += 1) await writeFile(join(cwd, `evidence-${index}.txt`), index === 0 ? original : `synthetic evidence ${index}`);
+  const request = parseRequest({ ...f.request, project_id: 'p', task_run_id: 'run-1',
+    session: process.argv[1], result_schema: schema, binding: { assessment_protocol: 'goal-driven-v1' } });
+  const audit = [];
+  const envelope = await runRequest(request, { audit: (event) => audit.push(event) });
+  const materials = {};
+  for (const item of envelope.result?.data.artifacts ?? []) materials[item.path] = (await readFile(item.path)).toString('base64');
+  process.stdout.write(JSON.stringify({
+    raw: JSON.stringify(envelope), registered, rejection, cwd, materials,
+    source: await readFile(join(cwd, 'evidence-0.txt'), 'utf8'),
+    spool_base64: (await readFile(request.capabilities.candidate_capture.spool_path)).toString('base64'),
+    capture: request.capabilities.candidate_capture, binding: request.binding, audit,
+    tool_scopes: f.calls.map((call) => call.body.tools.map((tool) => tool.function.name).sort()),
+  }));
+} finally {
+  for (const cleanup of cleanups.reverse()) await cleanup();
+}
+"""
+    runner = subprocess.run(
+        ["node", "--input-type=module", "-e", script, _SESSION],
+        cwd=Path(__file__).resolve().parents[2] / "container" / "pi-agent",
+        input=json.dumps(schema, ensure_ascii=False), text=True, capture_output=True, timeout=30,
+    )
+    assert runner.returncode == 0, runner.stderr
+    captured = json.loads(runner.stdout)
+    envelope = json.loads(captured["raw"])
+    assert envelope["status"] == "succeeded", envelope
+    registered = captured["registered"]
+    assert len(registered) == 20
+    declarations = envelope["result"]["data"]["artifacts"]
+    assert len(declarations) == 21
+    materials = {path: b64decode(raw, validate=True) for path, raw in captured["materials"].items()}
+    first = registered[0]
+    material = materials[first["path"]]
+    assert material == "合成观察：registered evidence version 1。\r\n".encode()
+    assert captured["source"] == material.decode() + "continued background output"
+    assert first["path"] != first["source_path"]
+    for item in declarations:
+        assert item["sha256"] == sha256(materials[item["path"]]).hexdigest()
+        assert item["size_bytes"] == len(materials[item["path"]])
+    assert declarations[:20] == registered
+    assert any(event.get("source") == "sdk_bash_overflow" for event in captured["audit"])
+    assert captured["rejection"]["code"] == "submission_invalid"
+    assert any(
+        rule.get("path") == "/data/fact/vulnerability"
+        and any("identity" in alternative.get("required", []) for alternative in rule.get("alternatives", []))
+        for rule in captured["rejection"]["issue"]["rules"]
+    ), captured["rejection"]["issue"]
+    assert not Path(captured["cwd"]).exists()
+    assert not Path(captured["capture"]["spool_path"]).exists()
+    assert len(captured["tool_scopes"]) == 3
+    assert "bash" in captured["tool_scopes"][0]
+    assert captured["tool_scopes"][2] == ["read_evidence", "register_artifact", "submit_result"]
+    assert {event["session"] for event in captured["audit"]} == {_SESSION}
+    assert {event["task_run_id"] for event in captured["audit"]} == {"run-1"}
+    repairs = [event for event in captured["audit"] if event["event"] == "result_repair"]
+    assert [event["code"] for event in repairs] == ["submission_invalid"]
+
+    capture = captured["capture"]
+    entries = decode_candidate_spool(
+        b64decode(captured["spool_base64"], validate=True),
+        WorkerCandidateSpool(
+            path=capture["spool_path"], capture_id=capture["capture_id"],
+            binding_sha256=canonical_value_sha256(captured["binding"]),
+            result_schema_sha256=canonical_value_sha256(schema),
+        ),
+        project_id="p", task_run_id="run-1", phase="explore_execute", session=_SESSION,
+    )
+    candidates = [entry for entry in entries if entry.record_kind == "candidate"]
+    assert len(candidates) == 2
+    identities = sorted([{key: item[key] for key in ("handle", "kind", "sha256", "size_bytes")} for item in declarations], key=lambda item: item["handle"])
+    for index, candidate in enumerate(candidates):
+        manifest = json.loads(candidate.manifest_bytes)
+        assert manifest["artifacts"] == identities
+        assert len(candidate.manifest_bytes) > 4 * 1024
+        assert ("identity" in json.loads(candidate.raw)["data"]["fact"]["vulnerability"]) == (index == 1)
+        outcomes = [json.loads(entry.manifest_bytes) for entry in entries
+                    if entry.record_kind == "outcome" and entry.producer_candidate_key == candidate.producer_candidate_key]
+        assert {(outcome["code"], outcome["artifact_status"]) for outcome in outcomes} == {
+            ("submission_invalid", "not_evaluated") if index == 0 else ("locally_validated", "validated")
+        }
+    assert json.loads(candidates[1].manifest_bytes)["parent_producer_candidate_key"] == candidates[0].producer_candidate_key
+    for entry in entries:
+        manifest = json.loads(entry.manifest_bytes)
+        if entry.record_kind == "candidate":
+            receipt = candidate_store.capture_candidate(
+                "p", "run-1", CandidateFrameManifest.model_validate(manifest), entry.manifest_bytes,
+                entry.raw, principal=_DISPATCHER,
+            )
+            replay = candidate_store.capture_candidate(
+                "p", "run-1", CandidateFrameManifest.model_validate(manifest), entry.manifest_bytes,
+                entry.raw, principal=_DISPATCHER,
+            )
+        else:
+            receipt = candidate_store.capture_candidate_outcome(
+                "p", "run-1", CandidateOutcomeManifest.model_validate(manifest), entry.manifest_bytes,
+                entry.raw, principal=_DISPATCHER,
+            )
+            replay = candidate_store.capture_candidate_outcome(
+                "p", "run-1", CandidateOutcomeManifest.model_validate(manifest), entry.manifest_bytes,
+                entry.raw, principal=_DISPATCHER,
+            )
+        assert receipt.disposition == "received" and replay.disposition == "replayed"
+        assert receipt.request_sha256 == replay.request_sha256
+    saved_candidates = conn.execute("SELECT artifact_count, raw_bytes, manifest_json FROM task_run_candidates WHERE task_run_id='run-1' ORDER BY assistant_turn").fetchall()
+    assert len(saved_candidates) == 2
+    for saved, candidate in zip(saved_candidates, candidates, strict=True):
+        assert saved["artifact_count"] == 21
+        assert bytes(saved["raw_bytes"]) == candidate.raw
+        assert saved["manifest_json"].encode() == candidate.manifest_bytes
+
+    decoded = decode_pi_result(
+        captured["raw"], phase="explore_execute", project_id="p", task_run_id="run-1",
+        session=_SESSION, assessment_protocol="goal-driven-v1",
+        validator=lambda payload: contracts.validate_explore_payload(
+            payload, goal_driven=True, strict_contract=True, expected_kind="explore_result",
+            outcome_contract_version=2,
+        ),
+    )
+    assert decoded.succeeded, decoded.failure
+    assert envelope["status"] == "succeeded"
+    artifacts = contracts.extract_declared_artifacts(decoded.payload)
+    assert [(artifact.handle, artifact.path, artifact.kind) for artifact in artifacts] == [
+        (item["handle"], item["path"], item["kind"]) for item in declarations
+    ]
+    reads = []
+    stored = []
+
+    class MaterialIO:
+        def read_file(self, container_name, path):
+            assert container_name == "isolated-container"
+            reads.append(path)
+            return materials[path]
+
+    class ArtifactIO:
+        def create_artifact(self, project_id, *, task_run_id, kind, content, filename, metadata):
+            artifact = audit_artifacts.create_artifact_record(
+                project_id, CreateArtifactRequest(
+                    task_run_id=task_run_id, kind=kind,
+                    content_base64=b64encode(content.read()).decode("ascii"),
+                    filename=filename, metadata=metadata,
+                ),
+            )
+            stored.append(artifact)
+            return ApiResult(status_code=201, data=artifact.model_dump(mode="json"))
+
+    declared = record_declared_artifacts(
+        ArtifactIO(), MaterialIO(), "isolated-container", "p", "run-1",
+        phase="explore_execute", artifacts=artifacts,
+    )
+    assert not declared.collect_failed and not declared.write_failed
+    assert reads == [item["path"] for item in declarations]
+    assert len(stored) == 21
+    for artifact, item in zip(stored, declarations, strict=True):
+        assert (artifact.project_id, artifact.task_run_id, artifact.kind) == ("p", "run-1", "raw_output")
+        assert artifact.sha256 == item["sha256"] == sha256(materials[item["path"]]).hexdigest()
+        assert artifact.size == item["size_bytes"] == len(materials[item["path"]])
+        assert (tmp_path / artifact.uri.rsplit("/", 1)[1]).read_bytes() == materials[item["path"]]
+        assert artifact.metadata["source_path"] == item["source_path"]
+        assert artifact.metadata["registered_path"] == item["path"]
+        assert declared.artifact_ids_by_handle[item["handle"]] == artifact.id
+    artifact = stored[0]
+    assert dict(conn.execute(
+        "SELECT project_id, task_run_id, sha256, size FROM artifacts WHERE id=?", (artifact.id,),
+    ).fetchone()) == {"project_id": "p", "task_run_id": "run-1", "sha256": first["sha256"], "size": len(material)}
+    # 上传前副本再被修改也不能写入；Server 同样核对实际 bytes，不相信元数据自报。
+    materials[first["path"]] = b"tampered after local validation"
+    rejected = record_declared_artifacts(ArtifactIO(), MaterialIO(), "isolated-container", "p", "run-1", phase="explore_execute", artifacts=artifacts[:1])
+    assert rejected.collect_failed and len(stored) == 21
+    with pytest.raises(HTTPException) as mismatch:
+        audit_artifacts.create_artifact_record("p", CreateArtifactRequest(task_run_id="run-1", kind="raw_output", content="tampered", metadata={"declared_by_worker": True, "registered_sha256": first["sha256"], "registered_size_bytes": first["size_bytes"]}))
+    assert mismatch.value.status_code == 422
+
+    wire, assessment_refs = build_assessment_record_for_conclude(decoded.payload, declared)
+    assert wire["evidence_refs"] == [{"artifact_id": declared.artifact_ids_by_handle[item["handle"]], "pointer": ""} for item in registered]
+    vulnerability = build_vulnerability_for_conclude(decoded.payload, declared, require_current_run_reproduction=True)
+    body = ConcludeRequest(
+        worker="worker", task_run_id="run-1", description=decoded.description,
+        evidence=declared.refs + assessment_refs, assessment_record=wire, vulnerability=vulnerability,
+    )
+    accepted = intents_router.conclude("p", "i1", body)
+    assert accepted.fact.task_run_id == "run-1"
+    assert accepted.fact.description == decoded.description
+    assert accepted.fact.assessment_record["outcome"] == "finding"
+    assert accepted.fact.assessment_record["observations"] == [material.decode()]
+    assert accepted.fact.assessment_record["evidence_refs"] == wire["evidence_refs"]
+    fact = conn.execute("SELECT * FROM facts WHERE id=?", (accepted.fact.id,)).fetchone()
+    assert fact["task_run_id"] == "run-1"
+    assert json.loads(fact["assessment_record_json"]) == accepted.fact.assessment_record
+    from cairn.server.services.vulnerability_identity import canonicalize_vulnerability_identity, vulnerability_fingerprint
+
+    expected_identity = canonicalize_vulnerability_identity(vulnerability["identity"], version=1)
+    saved_vulnerability = conn.execute("SELECT * FROM vulnerabilities WHERE source_fact_id=?", (accepted.fact.id,)).fetchone()
+    assert saved_vulnerability["status"] == "new"
+    assert json.loads(saved_vulnerability["identity_json"]) == expected_identity
+    assert saved_vulnerability["fingerprint"] == vulnerability_fingerprint(expected_identity)
+    observation = conn.execute("SELECT * FROM vulnerability_observations WHERE source_fact_id=?", (accepted.fact.id,)).fetchone()
+    assert (observation["task_run_id"], observation["worker"], observation["vulnerability_id"]) == ("run-1", "worker", saved_vulnerability["id"])
+    assert json.loads(observation["identity_json"]) == expected_identity
+    assert (observation["repro_request"], observation["repro_response"]) == (vulnerability["repro_request"], vulnerability["repro_response"])
+    evidence = conn.execute(
+        "SELECT artifact_id, pointer FROM fact_evidence WHERE project_id='p' AND fact_id=?",
+        (accepted.fact.id,),
+    ).fetchall()
+    assert {(row["artifact_id"], row["pointer"]) for row in evidence} == {
+        (declared.artifact_ids_by_handle[item["handle"]], item["handle"]) for item in declarations
+    } | {(declared.artifact_ids_by_handle[item["handle"]], "") for item in registered}
+    assert dict(conn.execute(
+        "SELECT status, outcome, charged, execution_count FROM assessment_attempts WHERE id='attempt-1'"
+    ).fetchone()) == {"status": "completed", "outcome": "finding", "charged": 1, "execution_count": 1}
+    run = conn.execute("SELECT * FROM task_runs WHERE id='run-1'").fetchone()
+    assert (run["session_id"], run["assessment_attempt_id"], run["execution_generation"]) == (_SESSION, "attempt-1", 0)
+    assert json.loads(run["runtime_context_json"])["accepted_fact_id"] == accepted.fact.id
+
+    # ACK 采用真实 Runner 终态；不靠 SQL 改状态来证明 Server 已接受材料。
+    ack = audit_task_runs.update_task_run_record(
+        "p", "run-1", UpdateTaskRunRequest(status=envelope["status"], exit_code=runner.returncode,
+            runtime_context={"execution_lifecycle": {
+                "generation": run["execution_generation"], "process_started": True,
+                "termination_confirmed": True, "cleanup_confirmed": True,
+            }}), principal=_DISPATCHER,
+    )
+    assert ack.status == envelope["status"]
+    replay = intents_router.conclude("p", "i1", body)
+    assert replay.fact == accepted.fact
+    assert conn.execute("SELECT COUNT(*) FROM vulnerability_observations WHERE source_fact_id=?", (accepted.fact.id,)).fetchone()[0] == 1
+    with pytest.raises(HTTPException):
+        _retry_explore(conn)
+    assert tuple(conn.execute(
+        "SELECT (SELECT COUNT(*) FROM facts WHERE project_id='p'), "
+        "(SELECT COUNT(*) FROM task_runs WHERE project_id='p'), "
+        "(SELECT COUNT(*) FROM assessment_attempts WHERE project_id='p'), "
+        "(SELECT COUNT(*) FROM artifacts WHERE project_id='p')"
+    ).fetchone()) == (4, 1, 1, 21)
+    assert conn.execute("SELECT charged, execution_count FROM assessment_attempts WHERE id='attempt-1'").fetchone()[:] == (1, 1)
+    assert dict(conn.execute(
+        "SELECT authorization_epoch, authorization_scope_digest, execution_generation, "
+        "explore_budget, explore_attempts_started, verification_attempts_started "
+        "FROM projects WHERE id='p'"
+    ).fetchone()) == before
+    assert before["explore_attempts_started"] == 1
+
+    followup = intents_router.create_intent(
+        "p", CreateIntentRequest(from_=[accepted.fact.id], description="基于合成观察研究另一个问题"),
+        principal=_USER,
+    )
+    assert followup.from_ == [accepted.fact.id]
+    next_run = start_explore_attempt(
+        conn, "p", followup.id,
+        CreateTaskRunRequest(
+            expected_execution_generation=0, intent_id=followup.id, task_type="explore",
+            worker_name="worker", worker_type="pi", status="running",
+            runtime_context={"dispatcher_id": "dispatcher"},
+        ), principal=_DISPATCHER,
+    )
+    assert next_run.id != "run-1"
+    assert next_run.assessment_attempt_id != "attempt-1"
+    assert next_run.intent_id == followup.id
+    assert next_run.execution_generation == before["execution_generation"]
+    assert conn.execute("SELECT explore_attempts_started FROM projects WHERE id='p'").fetchone()[0] == 2
+    assert conn.execute("SELECT execution_count FROM assessment_attempts WHERE id='attempt-1'").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM facts WHERE task_run_id='run-1'").fetchone()[0] == 1
+
+
 @pytest.mark.parametrize("error_type", [
-    "provider_auth", "request_contract", "result_schema", "session_error", "transport_error",
+    "provider_auth", "request_contract", "result_schema", "session_error", "transport_error", "artifact_error",
 ])
 def test_nonretryable_explore_failure_closes_attempt(lifecycle_db, error_type):
     conn = lifecycle_db

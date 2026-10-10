@@ -42,6 +42,7 @@ SERVER_RESULT_CONTEXT_FIELDS = {
     "accepted_completion_digest", "accepted_completion_intent_id",
     "accepted_intent_submissions", "execution_generation", "pause_requested", "pause_interrupted", "assessment_phase",
     "structured_intent_binding", "structured_explore_binding", "continuation",
+    "completion_rejection", "reason_decision_boundary",
 }
 
 
@@ -214,6 +215,12 @@ def create_task_run_record(project_id: str, body: CreateTaskRunRequest, *, princ
         from .assessment_attempts import require_execution_retry_eligible
 
         require_execution_retry_eligible(conn, project, body.task_type, intent_id=body.intent_id)
+        if body.task_type == "reason" and conn.execute(
+            "SELECT 1 FROM task_runs WHERE project_id = ? AND execution_generation = ? "
+            "AND task_type = 'reason' AND status IN ('queued', 'running') LIMIT 1",
+            (project_id, project["execution_generation"]),
+        ).fetchone() is not None:
+            raise HTTPException(409, "reason_execution_pending")
         return insert_task_run_record(conn, project_id, body, principal=principal)
 
 

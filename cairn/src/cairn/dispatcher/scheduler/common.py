@@ -30,6 +30,7 @@ from cairn.dispatcher.tasks.reason import run_reason_task
 from cairn.dispatcher.tasks.report import run_post_completion_report
 from cairn.dispatcher.workers.registry import get_driver
 from cairn.server.models import Intent, ProjectDetail, ProjectSummary, Scenario, Target
+from cairn.server.schemas.common import STANDARD_TASK_RUN_ERROR_TYPES
 
 LOG = logging.getLogger(__name__)
 WORKER_COOLDOWN_RETRY_AFTER_SECONDS = 5
@@ -70,52 +71,7 @@ REJECTION_RETRY_ERROR_TYPES = {
     "evidence_insufficient",
     "worker_oom",
 }
-STANDARD_ERROR_TYPES = {
-    *READINESS_ERROR_TYPES,
-    "provider_auth",
-    "provider_rate_limit",
-    "provider_error",
-    "session_error",
-    "transport_error",
-    "protocol_error",
-    "contract_error",
-    "request_contract",
-    "result_schema",
-    "business_acceptance",
-    "candidate_integrity",
-    "artifact_error",
-    "parse_error",
-    "repair_failed",
-    "worker_timeout",
-    "conclude_timeout",
-    "worker_unhealthy",
-    "healthcheck_timeout",
-    "api_unreachable",
-    "api_incompatible",
-    "config_mismatch",
-    "worker_rejected",
-    "worker_command_failed",
-    "worker_oom",
-    "heartbeat_lost",
-    "server_write_failed",
-    "submission_missing",
-    "submission_invalid",
-    "delivery_unavailable",
-    "stale_business_state",
-    "receipt_conflict",
-    "report_packet_read_failed",
-    "tool_missing",
-    "network_blocked",
-    "target_unreachable",
-    "auth_failed",
-    "policy_denied",
-    "evidence_insufficient",
-    "artifact_write_failed",
-    "container_failed",
-    "container_runtime_mismatch",
-    "cancelled",
-    "unknown",
-}
+STANDARD_ERROR_TYPES = STANDARD_TASK_RUN_ERROR_TYPES
 DEFAULT_WORKER_FEATURES = {
     "pi": {
         "supports_resume": True,

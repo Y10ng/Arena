@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile, access, readdir } from 'node:fs/promises';
+import { readFile, writeFile, access, readdir, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createRequestBashToolDefinition, runRequest } from '../dist/runner.js';
 import { parseRequest, PHASE_RESULT_KINDS } from '../dist/protocol.js';
@@ -74,6 +74,167 @@ test('text is not JSON fallback; repair is same session and removes target tools
   assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
   assert.equal(audit.filter((e) => e.event === 'result_repair').length, 1);
   assert.equal(new Set(audit.map((e) => e.session)).size, 1);
+});
+
+test('thinking-only length continues the same session to tools and synthetic evidence without replay or repair', async (t) => {
+  const { request, calls, cwd } = await fixture(t, 'anthropic-messages', [
+    { tools: [{ name: 'bash', args: { command: 'printf before >> actions.txt' } }] },
+    { thinking: 'synthetic unfinished reasoning', stopReason: 'max_tokens' },
+    { tools: [{ name: 'bash', args: { command: 'printf after >> actions.txt; printf synthetic-evidence > evidence.txt' } }] },
+    { tools: [{ name: 'register_artifact', args: { path: 'evidence.txt', kind: 'raw_output' } }] },
+    ok,
+  ]);
+  const audit = [];
+  const result = await runRequest(parseRequest(request), { audit: (event) => audit.push(event) });
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  assert.equal(calls.length, 5);
+  assert.equal(await readFile(join(cwd, 'actions.txt'), 'utf8'), 'beforeafter');
+  assert.equal(await readFile(result.result.data.artifacts[0].path, 'utf8'), 'synthetic-evidence');
+  assert.ok(calls[2].body.tools.some((tool) => tool.name === 'bash'));
+  assert.match(JSON.stringify(calls[2].body.messages), /synthetic unfinished reasoning/);
+  assert.equal(audit.filter((event) => event.event === 'output_continuation').length, 1);
+  assert.equal(audit.filter((event) => event.event === 'result_repair').length, 0);
+  assert.equal(audit.filter((event) => event.event === 'tool_execution_start' && event.tool_name === 'bash').length, 2);
+  assert.equal(new Set(audit.map((event) => event.session)).size, 1);
+  assert.equal(new Set(audit.map((event) => event.task_run_id)).size, 1);
+});
+
+test('consecutive thinking-only length has a finite endpoint without result repairs', async (t) => {
+  const { request, calls } = await fixture(t, 'anthropic-messages', [
+    { thinking: 'synthetic unfinished reasoning', stopReason: 'max_tokens' },
+  ]);
+  const audit = [];
+  const result = await runRequest(request, { audit: (event) => audit.push(event) });
+  assert.equal(result.status, 'failed', JSON.stringify(result));
+  assert.equal(result.error.code, 'submission_missing');
+  assert.match(result.error.message, /truncation continuation limit/);
+  assert.equal(result.error.submission_attempts, 0);
+  assert.equal(result.error.repair_rounds, 0);
+  assert.equal(calls.length, 3);
+  assert.equal(audit.filter((event) => event.event === 'output_continuation').length, 2);
+  assert.ok(audit.some((event) => event.event === 'output_truncation_limit'));
+});
+
+test('length continuation cannot extend the original deadline or continue after cancellation', async (t) => {
+  for (const cancelled of [false, true]) await t.test(cancelled ? 'cancelled' : 'deadline', async (t) => {
+    const controller = new AbortController();
+    const { request, calls } = await fixture(t, 'anthropic-messages', [
+      async () => { await new Promise((resolve) => setTimeout(resolve, 200)); return { thinking: 'synthetic', stopReason: 'max_tokens' }; },
+      { hang: true },
+    ]);
+    request.timeout_seconds = 0.7;
+    const audit = [];
+    const start = performance.now();
+    const result = await runRequest(request, {
+      signal: controller.signal,
+      audit: (event) => { audit.push(event); if (cancelled && event.event === 'output_continuation') controller.abort(); },
+    });
+    assert.equal(result.status, 'cancelled', JSON.stringify(result));
+    assert.equal(result.error.code, cancelled ? 'cancelled' : 'deadline_exceeded');
+    assert.ok(performance.now() - start < 850, 'continuation reset the original deadline');
+    assert.equal(calls.length, cancelled ? 1 : 2);
+    assert.equal(audit.some((event) => event.event === 'result_repair'), false);
+  });
+});
+
+test('length after submit or in conclude_only never restores execution tools', async (t) => {
+  for (const concludeOnly of [false, true]) await t.test(concludeOnly ? 'conclude_only' : 'submitted', async (t) => {
+    const { request, calls, cwd } = await fixture(t, 'anthropic-messages', [
+      ...(concludeOnly ? [] : [{ tools: [{ name: 'submit_result', args: { accepted: true, data: {} } }] }]),
+      { thinking: 'synthetic unfinished correction', stopReason: 'max_tokens' },
+      { tools: [{ name: 'bash', args: { command: 'touch forbidden-length-repair' } }] },
+    ]);
+    request.conclude_only = concludeOnly;
+    const audit = [];
+    const result = await runRequest(request, { audit: (event) => audit.push(event) });
+    assert.equal(result.status, 'failed', JSON.stringify(result));
+    assert.equal(result.error.code, 'tool_permission');
+    assert.equal(audit.some((event) => event.event === 'output_continuation'), false);
+    for (const call of calls.slice(concludeOnly ? 0 : 1)) assert.ok(!call.body.tools.some((tool) => tool.name === 'bash'));
+    await assert.rejects(access(join(cwd, 'forbidden-length-repair')));
+  });
+});
+
+test('length continuation preserves the soft deadline and cannot restore target tools after it', async (t) => {
+  const { request, calls, cwd } = await fixture(t, 'anthropic-messages', [
+    { thinking: 'synthetic unfinished reasoning', stopReason: 'max_tokens' },
+    { hang: true },
+    { tools: [{ name: 'bash', args: { command: 'touch forbidden-length-soft-deadline' } }] },
+  ]);
+  request.timeout_seconds = 1.2;
+  request.conclude_timeout_seconds = 0.8;
+  const audit = [];
+  const result = await runRequest(request, { audit: (event) => audit.push(event) });
+  assert.equal(result.status, 'failed', JSON.stringify(result));
+  assert.equal(result.error.code, 'tool_permission');
+  assert.equal(calls.length, 3);
+  assert.ok(calls[1].body.tools.some((tool) => tool.name === 'bash'));
+  assert.ok(!calls[2].body.tools.some((tool) => tool.name === 'bash'));
+  assert.equal(audit.filter((event) => event.event === 'output_continuation').length, 1);
+  assert.equal(audit.filter((event) => event.event === 'exploration_deadline').length, 1);
+  await assert.rejects(access(join(cwd, 'forbidden-length-soft-deadline')));
+});
+
+test('length with partial tool arguments fails without execution continuation or tool replay', async (t) => {
+  const { request, calls, cwd } = await fixture(t, 'anthropic-messages', [
+    { tools: [{ name: 'bash', rawArgs: '{"command":"touch forbidden-partial' }], stopReason: 'max_tokens' },
+    ok,
+  ]);
+  const audit = [];
+  const result = await runRequest(request, { audit: (event) => audit.push(event) });
+  assert.equal(result.status, 'failed', JSON.stringify(result));
+  assert.equal(result.error.code, 'provider_error');
+  assert.equal(calls.length, 1);
+  assert.equal(audit.some((event) => event.event === 'output_continuation' || event.event === 'result_repair'), false);
+  await assert.rejects(access(join(cwd, 'forbidden-partial')));
+});
+
+test('source growth delivers the fixed registered bytes without another repair', async (t) => {
+  let cwd;
+  let registered;
+  const { request, calls, cwd: workspace } = await fixture(t, 'openai-chat-completions', [
+    { tools: [{ name: 'register_artifact', args: { path: 'evidence.txt', kind: 'raw_output' } }] },
+    async (call) => {
+      registered = JSON.parse(call.body.messages.find((message) => message.role === 'tool').content);
+      await writeFile(join(cwd, 'evidence.txt'), 'original synthetic evidence\ncontinued background output');
+      return { tools: [{ name: 'submit_result', args: { accepted: true, data: { status: 'ok' } } }] };
+    },
+  ]);
+  cwd = workspace;
+  await writeFile(join(cwd, 'evidence.txt'), 'original synthetic evidence');
+  const audit = [];
+  const result = await runRequest(parseRequest(request), { audit: (event) => audit.push(event) });
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  assert.equal(calls.length, 2);
+  assert.deepEqual(result.result.data.artifacts, [registered]);
+  assert.equal(await readFile(registered.path, 'utf8'), 'original synthetic evidence');
+  assert.equal(registered.source_path, join(cwd, 'evidence.txt'));
+  assert.equal(audit.filter((event) => event.event === 'result_repair').length, 0);
+});
+
+test('artifact_changed repair never extends the original deadline', async (t) => {
+  let cwd;
+  const { request, calls, cwd: workspace } = await fixture(t, 'openai-chat-completions', [
+    { tools: [{ name: 'register_artifact', args: { path: 'evidence.txt', kind: 'file' } }] },
+    async (call) => {
+      const registered = JSON.parse(call.body.messages.find((message) => message.role === 'tool').content);
+      await chmod(registered.path, 0o600);
+      await writeFile(registered.path, 'after');
+      return ok;
+    },
+    { hang: true },
+  ]);
+  cwd = workspace;
+  await writeFile(join(cwd, 'evidence.txt'), 'before');
+  request.timeout_seconds = 0.8;
+  const result = await runRequest(parseRequest(request));
+  assert.equal(result.status, 'cancelled', JSON.stringify(result));
+  assert.equal(result.error.code, 'deadline_exceeded');
+  assert.equal(result.error.repair_rounds, 1);
+  assert.equal(result.error.submission_attempts, 1);
+  assert.equal(result.result, null);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[2].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
 });
 
 test('strict tool arguments reject coercion and allow at most two repair rounds', async (t) => {

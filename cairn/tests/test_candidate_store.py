@@ -15,7 +15,11 @@ from cairn.dispatcher.worker_protocol.submission import build_submit_result_sche
 from cairn.server import db
 from cairn.server.app import app
 from cairn.server.auth import create_machine_principal, create_user_with_personal_tenant, login
-from cairn.server.schemas.candidates import canonical_json_bytes, canonical_value_sha256
+from cairn.server.schemas.candidates import (
+    CandidateFrameManifest,
+    canonical_json_bytes,
+    canonical_value_sha256,
+)
 from cairn.server.services import candidate_store as candidate_store_service
 
 _SESSION = "pi:11111111-1111-4111-8111-111111111111"
@@ -305,7 +309,7 @@ def test_capabilities_are_machine_only_and_always_required() -> None:
     ).encode("utf-8")
     assert canonical_value_sha256(
         build_submit_result_schema("explore_execute", binding=None)
-    ) == "03f431a1b170e8d6f8823a2ba54c99194b4959328157c72ce4fba55f539eea9d"
+    ) == "6ca9651baef3d1a93b1a70d1863dc7df531d6b5dcd6cff44619b74c9fe869b4f"
     identity = _seed_identity()
     path = "/candidates/capabilities"
 
@@ -332,10 +336,10 @@ def test_capabilities_are_machine_only_and_always_required() -> None:
         "source_format": "pi-toolcall-delta-utf8-v1",
         "max_candidates_per_task_run": 16,
         "max_raw_bytes": 2 * 1024 * 1024,
-        "max_manifest_bytes": 4 * 1024,
+        "max_manifest_bytes": 16 * 1024,
         "max_spool_bytes": 34 * 1024 * 1024,
         "max_outcomes_per_candidate": 64,
-        "max_artifacts_per_candidate": 16,
+        "max_artifacts_per_candidate": 32,
     }
 
 
@@ -918,3 +922,135 @@ def test_candidate_limit_is_per_task_run_and_repairs_are_append_only() -> None:
     assert len(rows) == 16
     assert rows[0]["parent_candidate_id"] is None
     assert {row["id"] for row in rows} == set(ids)
+
+
+def test_capacity_accepts_32_longest_artifact_identities_and_rejects_overflow() -> None:
+    identity = _seed_identity()
+    raw = b"{}"
+    artifacts = [
+        {
+            "handle": f"local-{index:02d}-" + "a" * 119,
+            "kind": "screenshot",
+            "sha256": "a" * 64,
+            "size_bytes": 1024 * 1024,
+        }
+        for index in range(32)
+    ]
+    manifest = _candidate_manifest(raw, artifacts=artifacts)
+
+    # 按权威 Schema 的最长执行身份及最费字节的 JSON 转义核算，不用普通 UUID 代替上界。
+    longest = _candidate_manifest(
+        b"x" * (2 * 1024 * 1024),
+        assistant_turn=1_000_000,
+        content_index=1_000_000,
+        parent_producer_candidate_key=f"{_CAPTURE}:" + "9" * 89 + ":0",
+        project_id="\x01" * 256,
+        task_run_id="\x01" * 256,
+        phase="p" * 64,
+        artifacts=artifacts,
+    )
+    validated = CandidateFrameManifest.model_validate(longest)
+    longest_bytes = canonical_json_bytes(validated.model_dump(mode="json"))
+    assert len(longest_bytes) <= 16 * 1024, len(longest_bytes)
+
+    status, _, body = _post_candidate(identity["machine_token"], manifest, raw)
+    assert status == 201, body
+    receipt = _json(body)
+    with db.get_conn() as conn:
+        stored = conn.execute(
+            "SELECT artifact_count, artifact_identities_json, manifest_json, raw_bytes "
+            "FROM task_run_candidates WHERE id = ?",
+            (receipt["candidate_id"],),
+        ).fetchone()
+    assert stored["artifact_count"] == 32
+    assert json.loads(stored["artifact_identities_json"]) == artifacts
+    assert stored["manifest_json"].encode("utf-8") == canonical_json_bytes(manifest)
+    assert stored["raw_bytes"] == raw
+
+    overflow_artifacts = [
+        *artifacts,
+        {**artifacts[-1], "handle": "local-32-" + "a" * 119, "size_bytes": 0},
+    ]
+    overflow_bytes = [{**artifacts[0], "size_bytes": 1024 * 1024 + 1}, *artifacts[1:]]
+    for rejected in (overflow_artifacts, overflow_bytes):
+        status, _, body = _post_candidate(
+            identity["machine_token"], _candidate_manifest(raw, artifacts=rejected), raw
+        )
+        assert (status, _json(body)["detail"]) == (422, "candidate_manifest_invalid")
+
+    status, _, body = _request(
+        "POST",
+        "/projects/candidate-project/task-runs/candidate-run/candidates",
+        authorization=f"Bearer {identity['machine_token']}",
+        manifest_bytes=b"x" * (16 * 1024 + 1),
+        body=raw,
+    )
+    assert (status, _json(body)["detail"]) == (413, "candidate_manifest_too_large")
+    with db.get_conn() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) AS count FROM task_run_candidates"
+        ).fetchone()["count"] == 1
+
+
+def test_persisted_storage_budget_rejects_new_frames_without_charging_exact_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = _seed_identity()
+    raw = '{"note":"中文"}'.encode("utf-8")
+    first = _candidate_manifest(raw)
+    outcome = _outcome_manifest()
+    second = _candidate_manifest(
+        raw,
+        assistant_turn=2,
+        parent_producer_candidate_key=first["producer_candidate_key"],
+    )
+    frames = ((first, raw), (outcome, b""), (second, raw))
+    budget = sum(
+        len(canonical_json_bytes(manifest)) + len(content) + 48
+        for manifest, content in frames
+    )
+    # 仅在本测试缩小 34 MiB 预算，用少量真实持久化帧验证 bytes 与 48-byte 开销的计量分支。
+    monkeypatch.setattr(candidate_store_service, "CANDIDATE_MAX_SPOOL_BYTES", budget)
+    receipts = []
+    for manifest, content in frames:
+        status, _, body = _post_candidate(identity["machine_token"], manifest, content)
+        assert status == 201, body
+        receipts.append(_json(body))
+
+    for (manifest, content), receipt in zip(frames, receipts):
+        status, _, body = _post_candidate(identity["machine_token"], manifest, content)
+        assert status == 200, body
+        assert _json(body) == {**receipt, "disposition": "replayed"}
+
+    third = _candidate_manifest(
+        raw,
+        assistant_turn=3,
+        parent_producer_candidate_key=second["producer_candidate_key"],
+    )
+    for manifest, content in ((third, raw), (_outcome_manifest(sequence=2), b"")):
+        status, _, body = _post_candidate(identity["machine_token"], manifest, content)
+        assert (status, _json(body)["detail"]) == (413, "candidate_storage_limit_reached")
+
+    with db.get_conn() as conn:
+        candidates = conn.execute(
+            "SELECT id, raw_bytes, manifest_json FROM task_run_candidates "
+            "WHERE project_id = 'candidate-project' AND task_run_id = 'candidate-run' "
+            "ORDER BY assistant_turn"
+        ).fetchall()
+        outcomes = conn.execute(
+            "SELECT candidate_id, manifest_json FROM task_run_candidate_outcomes "
+            "WHERE project_id = 'candidate-project' AND task_run_id = 'candidate-run'"
+        ).fetchall()
+    assert [row["id"] for row in candidates] == [
+        receipts[0]["candidate_id"], receipts[2]["candidate_id"]
+    ]
+    assert [row["candidate_id"] for row in outcomes] == [receipts[0]["candidate_id"]]
+    assert [row["raw_bytes"] for row in candidates] == [raw, raw]
+    persisted_bytes = sum(
+        len(row["raw_bytes"]) + len(row["manifest_json"].encode("utf-8")) + 48
+        for row in candidates
+    )
+    persisted_bytes += sum(
+        len(row["manifest_json"].encode("utf-8")) + 48 for row in outcomes
+    )
+    assert persisted_bytes == budget

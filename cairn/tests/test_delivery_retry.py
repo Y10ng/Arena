@@ -48,7 +48,15 @@ def _report_delivery_failure_request(claim, error_type: str):
 
 
 def source_execution(conn, *, error="submission_invalid", lifecycle=True, delivery=None):
-    _seed(conn)
+    from test_goal_driven_authorization_v42 import _seed_goal_project
+
+    _seed_goal_project(conn, project_id="p", status="active")
+    conn.execute("UPDATE projects SET execution_generation=0, explore_deadline='2099-01-01T00:00:00Z' WHERE id='p'")
+    for fact_id in ("origin", "goal"):
+        conn.execute(
+            "INSERT INTO facts (id, project_id, description, creator, created_at) VALUES (?, 'p', ?, 'system', '2020-01-01T00:00:00Z')",
+            (fact_id, fact_id),
+        )
     snapshot = delivery or {
         "session_id": SESSION,
         "phase": "reason_execute",
@@ -60,7 +68,6 @@ def source_execution(conn, *, error="submission_invalid", lifecycle=True, delive
     }
     context = {
         "dispatcher_id": OWNER,
-        "assessment_phase": "finalizing",
         "execution_delivery": snapshot,
         "execution_lifecycle": {"generation": 0, "process_started": True,
                                 "termination_confirmed": lifecycle, "cleanup_confirmed": False},
@@ -106,13 +113,238 @@ def test_http_admission_derives_same_session_delivery_from_persisted_failure(con
 def test_http_prior_successful_reason_does_not_close_new_delivery_obligation(conn, client):
     snapshot = source_execution(conn)
     conn.execute("INSERT INTO task_runs (id, project_id, task_type, worker_name, worker_type, status, started_at, ended_at, runtime_context_json, execution_generation) VALUES ('t000', 'p', 'reason', 'pi-worker', 'pi', 'succeeded', '2019-01-01T00:00:00Z', '2019-01-01T00:00:01Z', ?, 0)",
-        (json.dumps({"dispatcher_id": OWNER, "assessment_phase": "finalizing", "accepted_result_digest": "earlier-business-result"}),))
+        (json.dumps({"dispatcher_id": OWNER, "accepted_result_digest": "earlier-business-result"}),))
     conn.commit()
     route = client.get("/projects/p/task-runs").json()[-1]["delivery_retry_route"]
     assert route["allowed"] is True
     admitted = admit_reason(client)
     assert admitted.status_code == 201, admitted.text
     assert admitted.json()["runtime_context"]["execution_delivery"] == snapshot
+
+
+def test_http_successful_delivery_reason_releases_next_same_generation_reason(conn, client, monkeypatch):
+    from types import MethodType
+    from unittest.mock import Mock
+    from cairn.dispatcher.models import ReasonCheckpoint
+    from cairn.dispatcher.protocol.client import CairnClient
+    from cairn.dispatcher.scheduler.dispatch_cycle import DispatchCycleMixin
+    from test_dispatcher_multi_project_capacity import _loop, _summary
+    from test_pi_execution import worker
+
+    source_execution(conn, error="submission_missing")
+    conn.execute("INSERT INTO facts (id, project_id, description, creator, created_at) VALUES ('f1', 'p', 'prior evidence', 'system', '2020-01-01T00:00:00Z')")
+    conn.commit()
+    delivered = admit_reason(client)
+    assert delivered.status_code == 201, delivered.text
+    run_id = delivered.json()["id"]
+    assert client.patch(f"/projects/p/task-runs/{run_id}", json={"status": "succeeded"}).status_code == 200
+    assert client.post("/projects/p/reason/release", json={"worker": "pi-worker", "task_run_id": run_id}).status_code == 200
+
+    runs = client.get("/projects/p/task-runs").json()
+    assert all(run["delivery_retry_route"] is None for run in runs)
+    # 合成 Reason 产出的整批 Intent；Explore 结算经真实 TaskRun API，业务接受由种子模拟。
+    for index in range(3):
+        intent_id = f"i{index}"
+        explore_id = f"e{index}"
+        conn.execute("INSERT INTO intents (id, project_id, description, creator, created_at) VALUES (?, 'p', 'synthetic work', 'reason', '2020-01-01T00:00:00Z')", (intent_id,))
+        conn.execute("INSERT INTO task_runs (id, project_id, intent_id, task_type, worker_name, worker_type, status, started_at, execution_generation, runtime_context_json) VALUES (?, 'p', ?, 'explore', 'pi-worker', 'pi', 'running', '2020-01-01T00:00:00Z', 0, ?)", (explore_id, intent_id, json.dumps({"dispatcher_id": OWNER})))
+        conn.commit()
+        assert client.patch(f"/projects/p/task-runs/{explore_id}", json={"status": "succeeded"}).status_code == 200
+        conn.execute("UPDATE intents SET concluded_at='2020-01-01T00:00:01Z', conclusion='completed' WHERE id=?", (intent_id,))
+        conn.commit()
+
+    api = CairnClient("http://testserver", token="synthetic-test-only")
+    monkeypatch.setattr(api, "_session", lambda: client)
+    monkeypatch.setattr(api, "export_project", lambda project_id: "accumulated synthetic results")
+    loop = _loop(max_workers=1, max_running_projects=1, worker_count=0)
+    loop._try_dispatch_project = MethodType(DispatchCycleMixin._try_dispatch_project, loop)
+    loop.client = api
+    loop.dispatcher_id = OWNER
+    loop._candidate_project_blocked = lambda project_id: False
+    loop.reason_checkpoints = {"p": ReasonCheckpoint(fact_count=3, hint_count=0, open_intent_count=0, settled_intent_count=0, execution_generation=0)}
+    bound_worker = worker()
+    loop._scenario_for_project = lambda project: SimpleNamespace(key="default", prompt_group="goal-driven-v1", knowledge=None)
+    loop._container_runtime_options = lambda *a: None
+    loop._select_worker = lambda *a, **kw: SimpleNamespace(worker=bound_worker)
+    loop._materialize_selected_worker = lambda *a: (bound_worker, {}, None)
+    loop._task_run_runtime_context = lambda *a, **kw: {"dispatcher_id": OWNER}
+    loop.executor = SimpleNamespace(submit=Mock(return_value=object()))
+    assert loop._try_dispatch_project(_summary("p")) is True
+    submitted = loop.executor.submit.call_args
+    assert submitted.kwargs["delivery_context"] is None
+    assert conn.execute("SELECT reason_trigger FROM projects WHERE id='p'").fetchone()[0] == "settled_intents:0->3"
+    next_reason = client.get("/projects/p/task-runs").json()[-1]
+    assert next_reason["task_type"] == "reason"
+    assert next_reason["session_id"] is None
+    assert "delivery_retry" not in next_reason["runtime_context"]
+    assert "execution_delivery" not in next_reason["runtime_context"]
+    assert next_reason["execution_generation"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM task_runs WHERE error_type='submission_missing'").fetchone()[0] == 1
+    api.close()
+
+
+@pytest.mark.parametrize("error", ["provider_error", "provider_rate_limit", "transport_error"])
+def test_http_delivery_transient_failure_keeps_original_chain(conn, client, monkeypatch, error):
+    from cairn.server.services import assessment_attempts, audit_task_runs
+    from cairn.dispatcher.runtime.cancellation import TaskCancellation
+    from cairn.dispatcher.tasks import delivery, reason
+    from test_pi_execution import worker
+    from test_reason_depth_review import execution_view, project_with_execution
+
+    bound_worker = worker()
+    binding = {"allowed_fact_ids": ["origin"], "max_intents": 3}
+    snapshot = source_execution(conn, error="submission_missing", delivery={
+        "session_id": SESSION, "phase": "reason_execute",
+        "deadline_at": "2050-01-01T00:01:00Z", "container_id": "original-container",
+        "model_binding_sha256": delivery.model_binding_digest(bound_worker),
+        "result_schema_sha256": delivery.result_schema_digest("reason_execute", binding),
+        "binding": binding, "inputs": {"open_intent_ids": []},
+    })
+    clock = ["2050-01-01T00:00:00Z"]
+    monkeypatch.setattr(assessment_attempts, "utcnow", lambda: clock[0])
+    monkeypatch.setattr(audit_task_runs, "utcnow", lambda: clock[0])
+    first_retry = admit_reason(client)
+    assert first_retry.status_code == 201, first_retry.text
+    run_id = first_retry.json()["id"]
+    failed = client.patch(f"/projects/p/task-runs/{run_id}", json={
+        "status": "failed", "error_type": error,
+        "runtime_context": {"execution_lifecycle": {
+            "generation": 0, "process_started": True,
+            "termination_confirmed": True, "cleanup_confirmed": True,
+        }},
+    })
+    assert failed.status_code == 200, failed.text
+    assert client.post("/projects/p/reason/release", json={"worker": "pi-worker", "task_run_id": run_id}).status_code == 200
+    route = client.get("/projects/p/task-runs").json()[-1]["delivery_retry_route"]
+    assert route["reason"] == "execution_retry_cooldown"
+    assert route["retry_at"] == "2050-01-01T00:00:10Z"
+    clock[0] = "2050-01-01T00:00:11Z"
+    second_retry = admit_reason(client)
+    assert second_retry.status_code == 201, second_retry.text
+    run = second_retry.json()
+    assert run["session_id"] == SESSION
+    assert run["worker_name"] == "pi-worker"
+    assert run["runtime_context"]["dispatcher_id"] == OWNER
+    assert run["runtime_context"]["delivery_retry"] == {"source_task_run_id": run_id}
+    assert run["runtime_context"]["execution_delivery"] == snapshot
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromisoformat(clock[0].replace("Z", "+00:00"))
+
+    monkeypatch.setattr(delivery, "datetime", FrozenDatetime)
+    lease = SimpleNamespace(start=lambda: None, stop=lambda: None, failure=None)
+    monkeypatch.setattr(reason.HeartbeatLease, "for_reason", lambda *a: lease)
+    monkeypatch.setattr(reason, "best_effort_release_reason", lambda *a, **kw: None)
+
+    def forbidden(*a, **kw):
+        pytest.fail("original delivery attempted fresh exploration or deadline registration")
+
+    monkeypatch.setattr(reason, "build_reason_prompt_context", forbidden)
+    monkeypatch.setattr(reason, "record_prompt_rendered", forbidden)
+    monkeypatch.setattr(reason, "register_delivery", forbidden)
+    manager = SimpleNamespace(ensure_running=forbidden, container_name=lambda p: "original-name",
+        runtime_metadata=lambda n: {"container_id": "original-container", "container_state": "running"})
+    captured = []
+
+    class ExecutionReached(BaseException):
+        pass
+
+    def capture(manager, name, worker, command, **kwargs):
+        assert name == snapshot["container_id"]
+        captured.append(json.loads(command.input_files[0].content))
+        raise ExecutionReached
+
+    monkeypatch.setattr(reason, "run_worker_process", capture)
+    config = SimpleNamespace(runtime=SimpleNamespace(interval=1, prompt_group="goal-driven-v1"), tasks=SimpleNamespace(reason=SimpleNamespace(timeout=500, max_intents=3)))
+    project = project_with_execution(execution_view(phase="baseline"))
+    with pytest.raises(ExecutionReached):
+        reason.run_reason_task(config, SimpleNamespace(), manager, project, "changed graph", bound_worker, TaskCancellation(), run["id"], delivery_context=run["runtime_context"])
+    request = captured[0]
+    assert request["phase"] == snapshot["phase"]
+    assert request["session"] == SESSION
+    assert request["binding"] == binding
+    assert request["resume"] is True and request["conclude_only"] is True
+    assert request["timeout_seconds"] == 49
+    assert snapshot["deadline_at"] == "2050-01-01T00:01:00Z"
+
+
+@pytest.mark.parametrize("boundary,reason", [
+    ("expired", "execution_delivery_unavailable"),
+    ("termination_unconfirmed", "execution_delivery_unavailable"),
+    ("quota", "execution_retry_exhausted"),
+    ("artifact_changed", "execution_retry_blocked"),
+    ("source_missing", "execution_retry_blocked"),
+    ("snapshot_changed", "execution_retry_blocked"),
+    ("in_flight", "reason_execution_pending"),
+])
+def test_http_transient_delivery_preserves_blocking_boundaries(conn, client, monkeypatch, boundary, reason):
+    from cairn.server.services import assessment_attempts
+
+    source_execution(conn, error="submission_missing")
+    monkeypatch.setattr(assessment_attempts, "utcnow", lambda: "2050-01-01T00:00:00Z")
+    context = json.loads(conn.execute("SELECT runtime_context_json FROM task_runs WHERE id='t001'").fetchone()[0])
+    if boundary == "expired":
+        context["execution_delivery"]["deadline_at"] = "2049-01-01T00:00:00Z"
+        conn.execute("UPDATE task_runs SET runtime_context_json=? WHERE id='t001'", (json.dumps(context),))
+    context["delivery_retry"] = {"source_task_run_id": "t001"}
+    if boundary == "termination_unconfirmed":
+        context["execution_lifecycle"]["termination_confirmed"] = False
+    elif boundary == "source_missing":
+        context["delivery_retry"]["source_task_run_id"] = "missing"
+    elif boundary == "snapshot_changed":
+        context["execution_delivery"]["container_id"] = "replacement"
+    conn.execute("INSERT INTO task_runs (id, project_id, task_type, worker_name, worker_type, status, session_id, started_at, ended_at, error_type, runtime_context_json, execution_generation) VALUES ('t002', 'p', 'reason', 'pi-worker', 'pi', ?, ?, '2020-01-01T00:00:02Z', '2020-01-01T00:00:03Z', ?, ?, 0)", ("running" if boundary == "in_flight" else "failed", SESSION, "artifact_error" if boundary == "artifact_changed" else "provider_error", json.dumps(context)))
+    if boundary == "quota":
+        context["delivery_retry"] = {"source_task_run_id": "t002"}
+        conn.execute("INSERT INTO task_runs (id, project_id, task_type, worker_name, worker_type, status, session_id, started_at, ended_at, error_type, runtime_context_json, execution_generation) VALUES ('t003', 'p', 'reason', 'pi-worker', 'pi', 'failed', ?, '2020-01-01T00:00:04Z', '2020-01-01T00:00:05Z', 'provider_error', ?, 0)", (SESSION, json.dumps(context)))
+    conn.commit()
+    before = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+    denied = admit_reason(client)
+    assert denied.status_code == 409, denied.text
+    assert denied.json()["detail"] == reason
+    route = client.get("/projects/p/task-runs").json()[-1]["delivery_retry_route"]
+    assert route["allowed"] is False
+    assert route["reason"] == ("assessment_execution_not_quiescent" if boundary == "in_flight" else reason)
+    assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_http_success_boundary_diagnostics_preserve_new_failure_and_partial_receipt(conn, client, partial):
+    from cairn.server.services import project_runtime_diagnostics
+
+    source_execution(conn, error="submission_missing")
+    delivered = admit_reason(client)
+    run_id = delivered.json()["id"]
+    assert client.patch(f"/projects/p/task-runs/{run_id}", json={"status": "succeeded"}).status_code == 200
+    assert client.post("/projects/p/reason/release", json={"worker": "pi-worker", "task_run_id": run_id}).status_code == 200
+    project = conn.execute("SELECT * FROM projects WHERE id='p'").fetchone()
+    before = list(conn.iterdump())
+    assert project_runtime_diagnostics._retry_decision(conn, project, "2050-01-01T00:00:00Z") is None
+    assert project_runtime_diagnostics._last_error(conn, "p").task_run_id == "t001"
+    assert list(conn.iterdump()) == before
+    new_reason = admit_reason(client)
+    assert new_reason.status_code == 201, new_reason.text
+    new_id = new_reason.json()["id"]
+    context = new_reason.json()["runtime_context"]
+    if partial:
+        context["accepted_intent_submissions"] = {"0": {"intent_id": "accepted-prefix", "digest": "a" * 64}}
+        conn.execute("INSERT INTO intents (id, project_id, task_run_id, description, creator, created_at) VALUES ('accepted-prefix', 'p', ?, 'accepted first item', 'reason', '2020-01-01T00:00:00Z')", (new_id,))
+    conn.execute("UPDATE task_runs SET status='failed', error_type=?, ended_at='2020-01-01T00:00:01Z', runtime_context_json=? WHERE id=?", ("provider_error" if partial else "business_acceptance", json.dumps(context), new_id))
+    conn.execute("UPDATE projects SET reason_worker=NULL WHERE id='p'")
+    conn.commit()
+    project = conn.execute("SELECT * FROM projects WHERE id='p'").fetchone()
+    before = list(conn.iterdump())
+    decision = project_runtime_diagnostics._retry_decision(conn, project, "2050-01-01T00:00:00Z")
+    assert decision.code == "execution_retry_blocked"
+    assert project_runtime_diagnostics._last_error(conn, "p").task_run_id == new_id
+    if partial:
+        run = conn.execute("SELECT * FROM task_runs WHERE id=?", (new_id,)).fetchone()
+        assert project_runtime_diagnostics._business_receipt_projection(conn, project, run, context)[0] == "partially_accepted"
+    assert list(conn.iterdump()) == before
+    denied = admit_reason(client)
+    assert denied.status_code == 409 and denied.json()["detail"] == "execution_retry_blocked"
 
 
 @pytest.mark.parametrize("mutation", ["generation_bool", "generation_wrong", "termination_missing", "snapshot_missing", "accepted", "expired", "owner", "session_missing", "legacy_schema", "delivery_session_error"])
@@ -734,7 +966,7 @@ def assert_cleanup_submissions(state, status, count, owner, *, container_id="ori
         managed_container_names=lambda: [])
     loop._inactive_cleanup_done, loop.futures, loop.cleanup_futures, loop._cleanup_pending = {}, {}, {}, set()
     loop.cleanup_executor = SimpleNamespace(submit=Mock(return_value=object()))
-    loop._queue_container_cleanups([SimpleNamespace(id="p1", status=status)])
+    loop._queue_container_cleanups([SimpleNamespace(id="p1", status=status, execution_generation=0)])
     assert loop.cleanup_executor.submit.call_count == count
 
 
@@ -745,10 +977,12 @@ def test_unknown_report_eligibility_defers_destructive_cleanup_but_not_pause(api
     assert_cleanup_submissions(state, "paused", 1, OWNER, api_status=api_status)
 
 
+@pytest.mark.parametrize("second_error", ["submission_invalid", "provider_error"])
 def test_report_claim_retains_generation_and_persisted_backoff(
     report_claim_db,
     monkeypatch,
     tmp_path: Path,
+    second_error,
 ):
     from fastapi import HTTPException
     from cairn.server.models import UpdateTaskRunRequest
@@ -778,12 +1012,15 @@ def test_report_claim_retains_generation_and_persisted_backoff(
         first,
         artifact_id="a1",
     )
+    from cairn.dispatcher.tasks.delivery import result_schema_digest
+
     snapshot = {
         "session_id": SESSION,
         "phase": "report_execute",
         "deadline_at": "2098-01-01T00:00:00Z",
         "container_id": "original-container",
         "model_binding_sha256": "a" * 64,
+        "result_schema_sha256": result_schema_digest("report_execute", None),
         "binding": None,
         "inputs": {
             "snapshot_path": (
@@ -932,7 +1169,7 @@ def test_report_claim_retains_generation_and_persisted_backoff(
     )
     assessment_reports.finish_assessment_report_finalization(
         "p1",
-        _report_delivery_failure_request(second, "submission_invalid"),
+        _report_delivery_failure_request(second, second_error),
         principal=TEST_DISPATCHER,
     )
     clock[0] = "2050-01-01T00:02:00Z"
@@ -945,6 +1182,10 @@ def test_report_claim_retains_generation_and_persisted_backoff(
     assert third.input_snapshot_artifact_id == snapshot_id
     assert third.input_snapshot_sha256 == snapshot_digest
     assert third.task_run_context["execution_delivery"] == snapshot
+    assert third.generation_token == first.generation_token
+    assert third.task_run_context["delivery_retry"] == {"source_task_run_id": second.task_run_id}
+    assert report_claim_db.execute("SELECT task_run_id FROM artifacts WHERE id=? AND project_id='p1'", (snapshot_id,)).fetchone()[0] == first.task_run_id
+    assert report_claim_db.execute("SELECT COUNT(*) FROM artifacts WHERE project_id='p1'").fetchone()[0] == 1
     audit_task_runs.update_task_run_record(
         "p1",
         third.task_run_id,
@@ -2932,3 +3173,395 @@ def test_report_crash_after_execution_fence_blocks_claim_and_model_after_restart
 
     assert restarted_outbox.entries() == pending
     assert model_calls == ["entered"]
+
+
+def _decision_lifecycle(*, cleanup=True):
+    return {"generation": 0, "process_started": True,
+            "termination_confirmed": True, "cleanup_confirmed": cleanup}
+
+
+def _decision_patch(client, run_id, **updates):
+    response = client.patch(f"/projects/p/task-runs/{run_id}", json=updates)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _decision_cost_state(conn):
+    # 结算可改变 attempt 状态，但不得重复执行、收费、换代或重建授权。
+    queries = (
+        "SELECT explore_budget, explore_attempts_started, verification_attempts_started, execution_generation, explore_deadline, authorization_expires_at FROM projects WHERE id='p'",
+        "SELECT id, intent_id, charged, execution_count FROM assessment_attempts WHERE project_id='p' ORDER BY id",
+        "SELECT id, assessment_attempt_id, session_id FROM task_runs WHERE project_id='p' AND task_type='explore' ORDER BY id",
+        "SELECT * FROM project_authorization_grants_v2 WHERE project_id='p'",
+    )
+    return [[tuple(row) for row in conn.execute(query)] for query in queries]
+
+
+@pytest.fixture
+def rejected_reason_with_verifier(conn, client, monkeypatch):
+    from contextlib import contextmanager
+    from cairn.dispatcher.protocol.client import CairnClient
+    from cairn.dispatcher.tasks.delivery import register_delivery
+    from cairn.dispatcher.tasks.reason_context import build_reason_prompt_context
+    from cairn.server.auth import RequestPrincipal
+    from cairn.server.schemas.candidates import (
+        CandidateFrameManifest, CandidateOutcomeManifest, canonical_json_bytes, canonical_value_sha256,
+    )
+    from cairn.server.services import candidate_store
+    from cairn.server.services.vulnerability_verifications import schedule_observation_verifier
+    from test_goal_driven_authorization_v42 import _seed_goal_project
+    from test_goal_driven_reason import FakeContainerManager
+    from test_independent_vulnerability_verification import seed_observation, seed_verifier_run
+    from test_pi_execution import worker
+
+    _seed_goal_project(conn, project_id="p", status="active")
+    conn.execute("UPDATE projects SET execution_generation=0, explore_deadline='2099-01-01T00:00:00Z' WHERE id='p'")
+    for fact_id in ("origin", "goal"):
+        conn.execute("INSERT INTO facts (id, project_id, description, creator, created_at) VALUES (?, 'p', ?, 'system', '2020-01-01T00:00:00Z')", (fact_id, fact_id))
+    seed_observation(conn, project_id="p")
+    conn.execute("UPDATE task_runs SET worker_type='pi', runtime_context_json=? WHERE id='tr-discovery'",
+        (json.dumps({"dispatcher_id": OWNER}),))
+    verifier_intent = schedule_observation_verifier(conn, "p", "vo1")
+    # 只复用证据种子；verifier 的 claim、attempt 和收费执行真实 HTTP admission。
+    seed_verifier_run(conn, verifier_intent, project_id="p", run_id="seed-verifier")
+    conn.execute("UPDATE artifacts SET task_run_id='tr-discovery' WHERE id='a-verifier'")
+    conn.execute("DELETE FROM task_runs WHERE id='seed-verifier'")
+    conn.commit()
+    _decision_patch(client, "tr-discovery", runtime_context={"execution_lifecycle": _decision_lifecycle()})
+    started = client.post(f"/projects/p/intents/{verifier_intent}/explore-attempts", json={
+        "task_type": "explore", "intent_id": verifier_intent, "worker_name": "worker-b",
+        "worker_type": "pi", "status": "running", "expected_execution_generation": 0,
+        "session_id": "pi:22222222-2222-4222-8222-222222222222", "runtime_context": {"dispatcher_id": OWNER},
+    })
+    assert started.status_code == 201, started.text
+    verifier_run = started.json()["id"]
+    conn.execute("UPDATE artifacts SET task_run_id=? WHERE id='a-verifier'", (verifier_run,))
+    conn.commit()
+    api = CairnClient("http://testserver", token="synthetic-test-only")
+    monkeypatch.setattr(api, "_session", lambda: client)
+    manager = FakeContainerManager()
+    manager.runtime_metadata = lambda name: {"container_id": "reason-container", "container_state": "running"}
+    config = SimpleNamespace(tasks=SimpleNamespace(reason=SimpleNamespace(max_intents=3)))
+    bound_worker = worker()
+    admitted = admit_reason(client)
+    assert admitted.status_code == 201, admitted.text
+    reason_run = admitted.json()["id"]
+    project = api.get_project("p")
+    context = build_reason_prompt_context(config, manager, "reason-container", project, "original evidence", client=api)
+    snapshot = register_delivery(api, manager, "reason-container", project, reason_run, bound_worker,
+        phase="reason_execute", session=SESSION, timeout_seconds=120,
+        binding=context.binding, inputs={"open_intent_ids": [verifier_intent]})
+    complete = {"from": ["f-discovery"], "description": "原始完成建议，不应改写或丢失。",
+                "worker": "pi-worker", "task_run_id": reason_run}
+    rejected = client.post("/projects/p/complete", json=complete)
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["detail"] == "goal_driven_completion_open_intents"
+    persisted = next(run for run in client.get("/projects/p/task-runs").json() if run["id"] == reason_run)
+    assert persisted["runtime_context"]["completion_rejection"] == {
+        "code": "goal_driven_completion_open_intents", "decision_input_digest": context.binding["decision_input_digest"],
+    }
+
+    @contextmanager
+    def get_conn():
+        with conn:
+            yield conn
+
+    monkeypatch.setattr(candidate_store, "get_conn", get_conn)
+    from cairn.server.routers import export as export_router
+    monkeypatch.setattr(export_router, "get_conn", get_conn)
+    client.app.include_router(export_router.router)
+    principal = RequestPrincipal(kind="machine", subject_id=OWNER)
+    raw = json.dumps({"action": "complete", "data": complete}, ensure_ascii=False, indent=2).encode()
+    capture_id = "33333333-3333-4333-8333-333333333333"
+    manifest = CandidateFrameManifest.model_validate({
+        "protocol": "cairn-candidate-frame-v1", "record_kind": "candidate", "capture_id": capture_id,
+        "producer_candidate_key": f"{capture_id}:1:0", "parent_producer_candidate_key": None,
+        "assistant_turn": 1, "content_index": 0, "project_id": "p", "task_run_id": reason_run,
+        "phase": "reason_execute", "session": SESSION, "binding_sha256": canonical_value_sha256(context.binding),
+        "result_schema_sha256": snapshot["result_schema_sha256"], "raw_sha256": sha256(raw).hexdigest(),
+        "raw_size_bytes": len(raw), "artifacts": [],
+    })
+    receipt = candidate_store.capture_candidate("p", reason_run, manifest,
+        canonical_json_bytes(manifest.model_dump(mode="json")), raw, principal=principal)
+
+    def settle_candidate():
+        outcome = CandidateOutcomeManifest.model_validate({
+            "protocol": "cairn-candidate-frame-v1", "record_kind": "outcome", "capture_id": capture_id,
+            "producer_candidate_key": manifest.producer_candidate_key, "outcome_sequence": 1,
+            "code": "locally_validated", "path": None, "keyword": None, "count": 1,
+            "artifact_status": "validated", "binding_status": "injected",
+        })
+        return candidate_store.capture_candidate_outcome("p", reason_run, outcome,
+            canonical_json_bytes(outcome.model_dump(mode="json")), b"", principal=principal)
+
+    state = SimpleNamespace(api=api, manager=manager, config=config, worker=bound_worker,
+        reason_run=reason_run, verifier_run=verifier_run, verifier_intent=verifier_intent,
+        snapshot=snapshot, context=context, raw=raw, candidate_id=receipt.candidate_id,
+        settle_candidate=settle_candidate, costs=_decision_cost_state(conn))
+    yield state
+    api.close()
+
+
+def _decision_conclude_verifier(client, state):
+    concluded = client.post(f"/projects/p/intents/{state.verifier_intent}/conclude", json={
+        "worker": "worker-b", "description": "独立复核确认跨身份读取；证据保留。", "task_run_id": state.verifier_run,
+        "verification_result": {"observation_id": "vo1", "outcome": "confirmed",
+            "evidence_refs": [{"artifact_id": "a-verifier"}], "notes": "independent reproduction"},
+    })
+    assert concluded.status_code == 200, concluded.text
+    state.fact_id = concluded.json()["fact"]["id"]
+
+
+def _decision_loop(state):
+    from types import MethodType
+    from unittest.mock import Mock
+    from cairn.dispatcher.scheduler.dispatch_cycle import DispatchCycleMixin
+    from test_dispatcher_multi_project_capacity import _loop
+
+    loop = _loop(max_workers=1, max_running_projects=1, worker_count=0)
+    loop._try_dispatch_project = MethodType(DispatchCycleMixin._try_dispatch_project, loop)
+    loop.client = state.api
+    loop.dispatcher_id = OWNER
+    loop.reason_checkpoints = {}
+    loop._candidate_project_blocked = lambda project_id: False
+    loop._scenario_for_project = lambda project: SimpleNamespace(key="default", prompt_group="goal-driven-v1", knowledge=None)
+    loop._container_runtime_options = lambda *a: None
+    loop._select_worker = lambda *a, **kw: SimpleNamespace(worker=state.worker)
+    loop._materialize_selected_worker = lambda *a: (state.worker, {}, None)
+    loop._task_run_runtime_context = lambda *a, **kw: {"dispatcher_id": OWNER}
+    loop.executor = SimpleNamespace(submit=Mock(return_value=object()))
+    return loop
+
+
+def _decision_assert_blocked(conn, client, state):
+    from test_dispatcher_multi_project_capacity import _summary
+
+    before = conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0]
+    route = next(run for run in client.get("/projects/p/task-runs").json() if run["id"] == state.reason_run)["delivery_retry_route"]
+    assert route is not None and route["allowed"] is False
+    claim = client.post("/projects/p/reason/claim", json={"worker": "pi-worker", "trigger": "graph_changed"})
+    assert claim.status_code == 409, claim.text
+    admission = client.post("/projects/p/task-runs", json={
+        "task_type": "reason", "worker_name": "pi-worker", "worker_type": "pi", "runtime_context": {"dispatcher_id": OWNER},
+    })
+    assert admission.status_code == 409, admission.text
+    for _ in range(2):
+        # 重启丢失 checkpoint 仍不能绕过 Server，不能靠 Dispatcher 缓存避免重复。
+        loop = _decision_loop(state)
+        assert loop._try_dispatch_project(_summary("p")) is False
+        assert loop._try_dispatch_project(_summary("p")) is False
+        loop.executor.submit.assert_not_called()
+    assert conn.execute("SELECT COUNT(*) FROM task_runs").fetchone()[0] == before
+    assert _decision_cost_state(conn) == state.costs
+
+
+def test_http_verifier_fact_releases_fresh_reason_after_controlled_completion_rejection(
+    conn, client, rejected_reason_with_verifier,
+):
+    from cairn.dispatcher.prompting import load_prompt, render_prompt
+    from cairn.dispatcher.tasks.delivery import register_delivery, remaining_delivery_seconds
+    from cairn.dispatcher.tasks.reason_context import build_reason_prompt_context
+    from cairn.dispatcher.workers.adapters.pi import PiDriver
+    from test_dispatcher_multi_project_capacity import _summary
+
+    state = rejected_reason_with_verifier
+    state.settle_candidate()
+    _decision_patch(client, state.reason_run, status="failed", error_type="business_acceptance",
+        runtime_context={"execution_lifecycle": _decision_lifecycle(cleanup=False)})
+    assert client.post("/projects/p/reason/release", json={"worker": "pi-worker", "task_run_id": state.reason_run}).status_code == 200
+    _decision_assert_blocked(conn, client, state)
+    _decision_conclude_verifier(client, state)
+    assert conn.execute("SELECT status FROM vulnerabilities WHERE id='v1'").fetchone()[0] == "confirmed"
+    # Fact 已被真实接受，但生产者仍运行时不允许切断失败决策链。
+    _decision_assert_blocked(conn, client, state)
+    _decision_patch(client, state.verifier_run, status="succeeded",
+        runtime_context={"execution_lifecycle": _decision_lifecycle(cleanup=False)})
+    _decision_assert_blocked(conn, client, state)
+    _decision_patch(client, state.verifier_run, runtime_context={"execution_lifecycle": _decision_lifecycle()})
+    _decision_assert_blocked(conn, client, state)
+    _decision_patch(client, state.reason_run, runtime_context={"execution_lifecycle": _decision_lifecycle()})
+    assert all(run["delivery_retry_route"] is None for run in client.get("/projects/p/task-runs").json())
+    for field in ("completion_rejection", "reason_decision_boundary"):
+        forged = {field: {"source_task_run_id": state.reason_run, "decision_input_digest": "f" * 64}}
+        response = client.patch(f"/projects/p/task-runs/{state.reason_run}", json={"runtime_context": forged})
+        assert response.status_code == 422, response.text
+        response = client.post("/projects/p/task-runs", json={
+            "task_type": "reason", "worker_name": "pi-worker", "worker_type": "pi", "runtime_context": {"dispatcher_id": OWNER, **forged},
+        })
+        assert response.status_code == 422, response.text
+    claimed = client.post("/projects/p/reason/claim", json={"worker": "pi-worker", "trigger": "facts_changed"})
+    assert claimed.status_code == 200, claimed.text
+    old_session = client.post("/projects/p/task-runs", json={
+        "task_type": "reason", "worker_name": "pi-worker", "worker_type": "pi", "expected_execution_generation": 0,
+        "session_id": SESSION, "runtime_context": {"dispatcher_id": OWNER},
+    })
+    assert old_session.status_code == 409, old_session.text
+    assert old_session.json()["detail"] == "execution_delivery_session_already_bound"
+    assert client.post("/projects/p/reason/release", json={"worker": "pi-worker"}).status_code == 200
+    loop = _decision_loop(state)
+    assert loop._try_dispatch_project(_summary("p")) is True
+    kwargs = loop.executor.submit.call_args.kwargs
+    assert kwargs["delivery_context"] is None and kwargs["continuation_context"] is None
+    new_run = client.get("/projects/p/task-runs").json()[-1]
+    assert new_run["id"] != state.reason_run and new_run["session_id"] is None
+    boundary = new_run["runtime_context"]["reason_decision_boundary"]
+    assert boundary["source_task_run_id"] == state.reason_run
+    assert boundary["decision_input_digest"] != state.context.binding["decision_input_digest"]
+    assert not {"delivery_retry", "execution_delivery", "continuation", "completion_rejection"} & new_run["runtime_context"].keys()
+    duplicate = admit_reason(client)
+    assert duplicate.status_code == 409, duplicate.text
+    assert len([run for run in client.get("/projects/p/task-runs").json() if run["task_type"] == "reason"]) == 2
+    project = state.api.get_project("p")
+    export_yaml = state.api.export_project("p")
+    context = build_reason_prompt_context(state.config, state.manager, "reason-container", project,
+        export_yaml, client=state.api, admission_context=kwargs["admission_context"])
+    assert context.binding["decision_input_digest"] == boundary["decision_input_digest"]
+    assert state.fact_id in context.binding["allowed_fact_ids"]
+    assert any(state.fact_id in text and "独立复核确认跨身份读取" in text
+               for text in state.manager.files.values())
+    driver = PiDriver()
+    session = driver.prepare_session()
+    snapshot = register_delivery(state.api, state.manager, "reason-container", project, new_run["id"], state.worker,
+        phase="reason_execute", session=session, timeout_seconds=300, binding=context.binding, inputs={"open_intent_ids": []})
+    assert session != SESSION and snapshot["deadline_at"] != state.snapshot["deadline_at"]
+    command = driver.build_execute(state.worker, render_prompt(load_prompt("goal-driven-v1", "reason.md"), context.replacements),
+        session, phase="reason_execute", project_id="p", task_run_id=new_run["id"],
+        timeout_seconds=remaining_delivery_seconds(snapshot), binding=context.binding, inputs=snapshot["inputs"])
+    request = json.loads(command.input_files[0].content)
+    assert request["session"] == session
+    assert request["resume"] is False and request["conclude_only"] is False
+    assert request["binding"]["decision_input_digest"] == boundary["decision_input_digest"]
+    assert state.fact_id in request["binding"]["allowed_fact_ids"]
+    complete = {"from": [state.fact_id], "description": "最新独立复核事实已结算，无未决工作。",
+                "worker": "pi-worker", "task_run_id": new_run["id"]}
+    accepted = client.post("/projects/p/complete", json=complete)
+    assert accepted.status_code == 200, accepted.text
+    tables = ("task_runs", "facts", "intents", "assessment_attempts", "task_run_candidates", "task_run_candidate_outcomes")
+    counts = [conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables]
+    replay = client.post("/projects/p/complete", json=complete)
+    assert replay.status_code == 200, replay.text
+    for key in ("id", "from", "to", "description", "task_run_id"):
+        assert replay.json()[key] == accepted.json()[key]
+    assert counts == [conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables]
+    assert conn.execute("SELECT status FROM projects WHERE id='p'").fetchone()[0] == "completed"
+    _decision_patch(client, new_run["id"], status="succeeded", runtime_context={"execution_lifecycle": _decision_lifecycle()})
+    assert _decision_cost_state(conn) == state.costs
+    old_run = next(run for run in client.get("/projects/p/task-runs").json() if run["id"] == state.reason_run)
+    assert old_run["status"] == "failed" and old_run["error_type"] == "business_acceptance"
+    stored = conn.execute("SELECT raw_bytes FROM task_run_candidates WHERE id=?", (state.candidate_id,)).fetchone()
+    assert bytes(stored[0]) == state.raw
+    assert conn.execute("SELECT code FROM task_run_candidate_outcomes WHERE candidate_id=?", (state.candidate_id,)).fetchone()[0] == "locally_validated"
+
+
+@pytest.mark.parametrize("boundary", ["ordinary_error", "provider_delivery", "accepted_result", "pending_candidate"])
+def test_http_changed_verifier_fact_does_not_reset_unqualified_reason_chain(
+    conn, client, rejected_reason_with_verifier, boundary, monkeypatch,
+):
+    state = rejected_reason_with_verifier
+    if boundary != "pending_candidate":
+        state.settle_candidate()
+    error = {"ordinary_error": "provider_auth", "provider_delivery": "submission_missing"}.get(boundary, "business_acceptance")
+    _decision_patch(client, state.reason_run, status="failed", error_type=error,
+        runtime_context={"execution_lifecycle": _decision_lifecycle()})
+    assert client.post("/projects/p/reason/release", json={"worker": "pi-worker", "task_run_id": state.reason_run}).status_code == 200
+    if boundary == "provider_delivery":
+        from cairn.server.services import assessment_attempts, audit_task_runs
+        retry_time = (datetime.now(timezone.utc) + timedelta(seconds=20)).isoformat()
+        monkeypatch.setattr(assessment_attempts, "utcnow", lambda: retry_time)
+        monkeypatch.setattr(audit_task_runs, "utcnow", lambda: retry_time)
+        retry = admit_reason(client)
+        assert retry.status_code == 201, retry.text
+        retry_id = retry.json()["id"]
+        assert retry.json()["runtime_context"]["delivery_retry"] == {"source_task_run_id": state.reason_run}
+        _decision_patch(client, retry_id, status="failed", error_type="provider_error",
+            runtime_context={"execution_lifecycle": _decision_lifecycle()})
+        assert client.post("/projects/p/reason/release", json={"worker": "pi-worker", "task_run_id": retry_id}).status_code == 200
+        state.reason_run = retry_id
+    elif boundary == "accepted_result":
+        # 历史接受回执种子不替代 Server marker、Fact 生产、route 或 admission 规则。
+        row = conn.execute("SELECT runtime_context_json FROM task_runs WHERE id=?", (state.reason_run,)).fetchone()
+        context = json.loads(row[0])
+        context["accepted_result_digest"] = "a" * 64
+        conn.execute("UPDATE task_runs SET runtime_context_json=? WHERE id=?", (json.dumps(context), state.reason_run))
+        conn.commit()
+    _decision_conclude_verifier(client, state)
+    _decision_patch(client, state.verifier_run, status="succeeded",
+        runtime_context={"execution_lifecycle": _decision_lifecycle()})
+    if boundary == "provider_delivery":
+        route = next(run for run in client.get("/projects/p/task-runs").json() if run["id"] == state.reason_run)["delivery_retry_route"]
+        assert route["reason"] == "execution_retry_cooldown"
+    _decision_assert_blocked(conn, client, state)
+
+
+def test_completion_with_shared_connection_does_not_commit_callers_pending_writes(
+    conn, client, rejected_reason_with_verifier,
+):
+    from fastapi import HTTPException
+    from cairn.server.models import CompleteRequest
+    from cairn.server.services.project_completion import complete_project_record_with_conn
+
+    state = rejected_reason_with_verifier
+    before = conn.execute("SELECT runtime_context_json FROM task_runs WHERE id=?", (state.reason_run,)).fetchone()[0]
+    assert conn.in_transaction is False
+    conn.execute("INSERT INTO hints (id, project_id, content, creator, created_at) VALUES ('pending-hint', 'p', '尚未提交的业务方向', 'operator', '2026-10-10T00:00:00Z')")
+    with pytest.raises(HTTPException) as exc:
+        complete_project_record_with_conn(conn, "p", CompleteRequest(
+            from_=["f-discovery"], description="旧输入完成建议", worker="pi-worker", task_run_id=state.reason_run,
+        ))
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "goal_driven_completion_input_stale"
+    current = json.loads(conn.execute("SELECT runtime_context_json FROM task_runs WHERE id=?", (state.reason_run,)).fetchone()[0])
+    assert current["completion_rejection"]["code"] == "goal_driven_completion_input_stale"
+    assert conn.in_transaction is True
+    # with_conn 不能因为动态拒绝提交调用者事务；HTTP 自有事务另由主线验证。
+    conn.rollback()
+    assert conn.execute("SELECT 1 FROM hints WHERE id='pending-hint'").fetchone() is None
+    assert conn.execute("SELECT runtime_context_json FROM task_runs WHERE id=?", (state.reason_run,)).fetchone()[0] == before
+
+
+def test_http_stale_snapshot_on_fresh_boundary_cannot_repeat_same_reason_input(
+    conn, client, rejected_reason_with_verifier,
+):
+    from cairn.dispatcher.tasks.delivery import register_delivery
+    from cairn.dispatcher.workers.adapters.pi import PiDriver
+
+    state = rejected_reason_with_verifier
+    state.settle_candidate()
+    source_run_id = state.reason_run
+    _decision_patch(client, source_run_id, status="failed", error_type="business_acceptance",
+        runtime_context={"execution_lifecycle": _decision_lifecycle()})
+    assert client.post("/projects/p/reason/release", json={"worker": "pi-worker", "task_run_id": source_run_id}).status_code == 200
+    _decision_conclude_verifier(client, state)
+    _decision_patch(client, state.verifier_run, status="succeeded",
+        runtime_context={"execution_lifecycle": _decision_lifecycle()})
+    admitted = admit_reason(client)
+    assert admitted.status_code == 201, admitted.text
+    fresh = admitted.json()
+    boundary = fresh["runtime_context"]["reason_decision_boundary"]
+    assert boundary["source_task_run_id"] == source_run_id
+    assert boundary["decision_input_digest"] != state.context.binding["decision_input_digest"]
+    # 新会话错误消费旧业务快照，不应因 stale 拒绝再次消费同一份权威输入。
+    snapshot = register_delivery(state.api, state.manager, "reason-container", state.api.get_project("p"),
+        fresh["id"], state.worker, phase="reason_execute", session=PiDriver.prepare_session(),
+        timeout_seconds=300, binding=state.context.binding,
+        inputs=state.snapshot["inputs"])
+    assert snapshot["session_id"] != SESSION
+    rejected = client.post("/projects/p/complete", json={
+        "from": ["f-discovery"], "description": "新Run不慎沿用旧完成快照。",
+        "worker": "pi-worker", "task_run_id": fresh["id"],
+    })
+    assert rejected.status_code == 409, rejected.text
+    assert rejected.json()["detail"] == "goal_driven_completion_input_stale"
+    failed = _decision_patch(client, fresh["id"], status="failed", error_type="stale_business_state",
+        runtime_context={"execution_lifecycle": _decision_lifecycle()})
+    assert failed["runtime_context"]["reason_decision_boundary"] == boundary
+    assert failed["runtime_context"]["completion_rejection"] == {
+        "code": "goal_driven_completion_input_stale",
+        "decision_input_digest": state.context.binding["decision_input_digest"],
+    }
+    assert client.post("/projects/p/reason/release", json={"worker": "pi-worker", "task_run_id": fresh["id"]}).status_code == 200
+    state.reason_run = fresh["id"]
+    _decision_assert_blocked(conn, client, state)
+    reasons = [run for run in client.get("/projects/p/task-runs").json() if run["task_type"] == "reason"]
+    assert len(reasons) == 2 and all(run["status"] == "failed" for run in reasons)
+    assert next(run for run in reasons if run["id"] == source_run_id)["runtime_context"]["completion_rejection"]["code"] == "goal_driven_completion_open_intents"

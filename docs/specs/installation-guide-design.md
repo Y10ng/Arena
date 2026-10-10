@@ -135,3 +135,25 @@
 5. 预构建 Worker 镜像、配套 ZIP 的真实分发地址与架构 / 版本配套仍未确认；全新机器安装、pull / load、重启生效、远程登录、更新和真实任务均待另行授权动态验证。
 
 本轮实施到此停止。后续分析会话应结合实际 diff 和用户反馈验收，不以实施者的完成声明直接结案。
+
+## 7. 后续诉求：Worker 镜像分发（待确定发布目标）
+
+用户随后询问当前镜像如何安装、能否发布到 Docker。推荐先将现有 Worker 发布到 Docker Hub，让安装者 pull 代替本地构建，不先改全栈部署架构或增加发布平台。此处是分发方案，不是已发布声明；此前 Git push 授权不自动延伸为 Docker Hub 上传授权。
+
+### 本次只读证据
+
+- 当前源码提交为 `623603a`，已推送至 `Y10ng/Arena` 的 `docs/installation-guide` 分支，尚未合入 main。需要本轮代码时不能只给默认分支的 clone 命令。
+- 本机存在 `arena-worker:local`，镜像 ID 为 `sha256:9b9aa6dd56452f101bf8baa82b12ea7540ae901912f1408c514ad81f61c23cde`，平台 `linux/amd64`，本地大小 1,900,507,939 bytes（约 1.90 GB，不是压缩下载体积）。标签声明 pi 1.0.0 / SDK 0.73.0，`RepoDigests` 为空。
+- 上述元信息只能证明本机镜像存在，不能证明它包含 `623603a` 的全部 Worker 修改，也不能证明远端从未发布过同内容镜像。本次没有提取或运行容器内程序核对版本。
+- 构建入口仍是 `docker build -t <镜像引用> container/`；`container/.dockerignore` 排除了运行目录、宿主依赖、私有配置等。首次正式分发宜从明确源码提交构建，不把有未知改动的业务容器 docker commit 成发布镜像。
+
+### 推荐最短分发路径
+
+1. 由用户确定 Docker Hub 用户名或组织、仓库公开或私有，并明确允许上传；建议仓库名 `arena-worker`。不能从 GitHub 用户名猜 Docker Hub 账号，不索取或记录密码/token。
+2. 新实施会话在明确目标后，用当前指定提交的 `container/` 构建并推送 `docker.io/<namespace>/arena-worker:git-623603a`（这是建议 tag，尚未创建）；首次仅声明本次实际构建的架构，不因 Dockerfile 有分支就宣称已发布多架构镜像。用户需要稳定入口时再给同一产物附加 `latest`，不必引入 CI 或版本审批框架。
+3. 登录由用户在会话终端自行执行 `! docker login` 等交互入口，认证材料不进入聊天、Git 或构建参数。实施会话做一次必要的镜像内容/安装自检即可，不增加安装者预检门槛，不调用模型、不操作已有项目或更新正在运行的业务容器。
+4. 发布后记录实际 tag/digest/架构，用户安装时只需 pull 并设置 `runtime/dispatch.yaml` 的 `container.image`，或按需使用默认本地别名；由 Dispatcher 启动 Worker，不要求用户手工 docker run。
+5. 应用仍需宿主 Python/uv、Server、Dispatcher 和 PostgreSQL；使用源码时仍需构建前端。若还希望省去前端构建，配套发布应用 ZIP 是另一个需要明确目标的上传动作，不假装 Docker Hub 镜像已经包含完整应用。
+6. 成功后更新现有部署指南的实际拉取命令、来源说明和本方案；全栈应用容器化、自动发布流水线、跨架构构建与已有任务迁移不在这轮默认范围。
+
+待用户提供 Docker Hub namespace、可见性和上传确认后，再填写本轮专用实施提示词；当前没有构建、登录、上传、运行测试或启停服务。

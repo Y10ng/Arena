@@ -18,6 +18,8 @@ from cairn.assessment_contracts import (
     StructuredIntentBinding,
     Text,
 )
+from cairn.server.schemas.candidates import CANDIDATE_MAX_ARTIFACT_BYTES
+from cairn.server.schemas.projects import VulnerabilityIdentityInput
 from .envelope import ASSESSMENT_PROTOCOL_ID, PHASE_RESULT_KINDS, validate_result_envelope
 
 REQUEST_PROTOCOL = "cairn-agent-request-v1"
@@ -42,34 +44,9 @@ class ArtifactDeclaration(ResultModel):
     handle: Text
     kind: ArtifactKind
     path: str = Field(pattern=r"^/")
-
-
-class AssetIdentity(ResultModel):
-    host: Text
-    protocol: str = ""
-    port: int | None = Field(default=None, ge=1, le=65535)
-
-
-class EntrypointIdentity(ResultModel):
-    method: str = ""
-    route: str = ""
-    locus: str = ""
-
-
-class VectorIdentity(ResultModel):
-    parameter: str = ""
-    object_type: str = ""
-    source_role: str = ""
-    target_role: str = ""
-    state: str = ""
-    variant: str = ""
-
-
-class VulnerabilityIdentity(ResultModel):
-    vulnerability_class: Text
-    asset: AssetIdentity
-    entrypoint: EntrypointIdentity
-    vector: VectorIdentity = Field(default_factory=VectorIdentity)
+    source_path: str = Field(pattern=r"^/")
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    size_bytes: int = Field(ge=0, le=CANDIDATE_MAX_ARTIFACT_BYTES)
 
 
 class Finding(ResultModel):
@@ -82,7 +59,7 @@ class Finding(ResultModel):
     packet_artifact_handle: Text | None = None
     repro_request: str = ""
     repro_response: str = ""
-    identity: VulnerabilityIdentity | None = None
+    identity: VulnerabilityIdentityInput
 
 
 class FactResult(ResultModel):
@@ -378,6 +355,7 @@ def _build_submit_result_schema(
     binding: dict[str, Any] | None,
     *,
     data_models: dict[str, type[ResultModel]],
+    inputs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     model = data_models.get(phase)
     if model is None:
@@ -403,6 +381,31 @@ def _build_submit_result_schema(
                 ref="#/$defs/ExperimentRecord",
             )
             bind_goal_driven_experiment_schema(definitions["ExperimentRecord"])
+            # finding 与漏洞声明一一对应，不能靠 outcome 推测或补造 identity。
+            data_schema.setdefault("allOf", []).append({
+                "if": {
+                    "properties": {
+                        "assessment_record": {
+                            "properties": {"outcome": {"const": "finding"}},
+                            "required": ["outcome"],
+                        },
+                    },
+                    "required": ["assessment_record"],
+                },
+                "then": {
+                    "properties": {
+                        "fact": {
+                            "required": ["vulnerability"],
+                            "properties": {"vulnerability": {"$ref": "#/$defs/Finding"}},
+                        },
+                    },
+                },
+                "else": {
+                    "properties": {
+                        "fact": {"properties": {"vulnerability": {"type": "null"}}},
+                    },
+                },
+            })
         else:
             fixed = [key for key in ("slot_key", "surface_key", "test_family") if binding.get(key)]
             _hide_fields(definitions["CoverageResult"], fixed)
@@ -427,6 +430,17 @@ def _build_submit_result_schema(
         if intents is not None:
             intents["maxItems"] = max_intents
     if phase == "reason_execute":
+        # decision_input_digest 仅由 goal-driven Reason 冻结；开放工作取原交付输入，不能用实时图谱替换。
+        if binding.get("decision_input_digest") is not None:
+            open_intent_ids = inputs.get("open_intent_ids") if isinstance(inputs, dict) else None
+            if not isinstance(open_intent_ids, list):
+                raise ValueError("goal-driven Reason requires frozen open_intent_ids")
+            if not open_intent_ids:
+                data_schema["anyOf"] = [
+                    {"required": ["intents"], "properties": {"intents": {"type": "array", "minItems": 1}}},
+                    {"required": ["complete"], "properties": {"complete": {"$ref": "#/$defs/CompleteResult"}}},
+                    {"required": ["abandon"], "properties": {"abandon": {"type": "array", "minItems": 1}}},
+                ]
         _bind_structured_reason_intents(data_schema, definitions, binding)
         allowed_intents = binding.get("allowed_intent_ids")
         if isinstance(allowed_intents, list):
@@ -473,12 +487,15 @@ def _build_submit_result_schema(
 def build_submit_result_schema(
     phase: str,
     binding: dict[str, Any] | None = None,
+    *,
+    inputs: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """只为当前可执行阶段构造 submit_result Schema。"""
+    """从当前阶段及冻结交付输入构造实际 submit_result Schema。"""
     return _build_submit_result_schema(
         phase,
         binding,
         data_models=PHASE_DATA_MODELS,
+        inputs=inputs,
     )
 
 

@@ -25,13 +25,15 @@ from cairn.dispatcher.worker_protocol.submission import (
     SUBMISSION_ISSUE_KEYWORDS,
     submission_schema_paths,
 )
-from cairn.dispatcher.workers.base import CANDIDATE_FRAME_PROTOCOL, WorkerCandidateSpool
+from cairn.dispatcher.workers.base import (
+    CANDIDATE_FRAME_PROTOCOL, CANDIDATE_MAX_ARTIFACTS, CANDIDATE_MAX_ARTIFACT_BYTES,
+    WorkerCandidateSpool,
+)
 
 
 _FRAME_MAGIC = b"CRNCND01"
 _FRAME_HEADER_BYTES = 16
 _FRAME_CHECKSUM_BYTES = 32
-_MAX_ARTIFACTS = 16
 _MAX_SAFE_INTEGER = 2**53 - 1
 _MAX_PRODUCER_COORDINATE = 1_000_000
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
@@ -140,7 +142,7 @@ def _required_text(value: object) -> bool:
 
 
 def _validate_artifacts(value: object) -> None:
-    if not isinstance(value, list) or len(value) > _MAX_ARTIFACTS:
+    if not isinstance(value, list) or len(value) > CANDIDATE_MAX_ARTIFACTS:
         raise CandidateIntakeError("candidate artifact identity list is invalid")
     handles: list[str] = []
     for artifact in value:
@@ -160,6 +162,8 @@ def _validate_artifacts(value: object) -> None:
         ):
             raise CandidateIntakeError("candidate artifact identity is invalid")
         handles.append(handle)
+    if sum(artifact["size_bytes"] for artifact in value) > CANDIDATE_MAX_ARTIFACT_BYTES:
+        raise CandidateIntakeError("candidate registered content exceeds the total byte limit")
     if len(set(handles)) != len(handles) or handles != sorted(handles):
         raise CandidateIntakeError("candidate artifact handles must be unique and sorted")
 

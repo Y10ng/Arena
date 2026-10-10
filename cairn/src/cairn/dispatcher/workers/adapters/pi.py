@@ -69,6 +69,7 @@ class PiDriver:
         timeout_seconds: int,
         conclude_timeout_seconds: int = 0,
         binding: dict[str, Any] | None = None,
+        inputs: dict[str, Any] | None = None,
         resume: bool = False,
         conclude_only: bool = False,
         enable_checkpoints: bool = False,
@@ -142,7 +143,7 @@ class PiDriver:
         if phase not in PHASE_DATA_MODELS:
             reject("phase", "unsupported result phase", code="phase_unsupported")
         try:
-            result_schema = build_submit_result_schema(phase, binding=binding)
+            result_schema = build_submit_result_schema(phase, binding=binding, inputs=inputs)
         except ValueError as exc:
             raise WorkerRequestError(
                 "result_schema",

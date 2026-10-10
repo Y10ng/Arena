@@ -19,7 +19,10 @@ CANDIDATE_MANIFEST_ENCODING = "base64url-utf8-canonical-json-no-padding"
 CANDIDATE_SOURCE_FORMAT = "pi-toolcall-delta-utf8-v1"
 CANDIDATE_MAX_CANDIDATES_PER_TASK_RUN = 16
 CANDIDATE_MAX_RAW_BYTES = 2 * 1024 * 1024
-CANDIDATE_MAX_MANIFEST_BYTES = 4 * 1024
+# 32 个最长合法材料身份加执行身份可在 16 KiB 内编码，原文及 spool 总预算不变。
+CANDIDATE_MAX_MANIFEST_BYTES = 16 * 1024
+CANDIDATE_MAX_ARTIFACTS = 32
+CANDIDATE_MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 CANDIDATE_MAX_SPOOL_BYTES = 34 * 1024 * 1024
 CANDIDATE_MAX_OUTCOMES_PER_CANDIDATE = 64
 
@@ -169,7 +172,7 @@ class CandidateFrameManifest(BaseModel):
     result_schema_sha256: str = Field(min_length=64, max_length=64)
     raw_sha256: str = Field(min_length=64, max_length=64)
     raw_size_bytes: int = Field(ge=0, le=CANDIDATE_MAX_RAW_BYTES)
-    artifacts: list[CandidateArtifactIdentity] = Field(max_length=16)
+    artifacts: list[CandidateArtifactIdentity] = Field(max_length=CANDIDATE_MAX_ARTIFACTS)
 
     @field_validator("capture_id")
     @classmethod
@@ -228,6 +231,8 @@ class CandidateFrameManifest(BaseModel):
             raise ValueError("producer_candidate_key does not match capture coordinates")
         if self.parent_producer_candidate_key == self.producer_candidate_key:
             raise ValueError("candidate cannot be its own parent")
+        if sum(artifact.size_bytes for artifact in self.artifacts) > CANDIDATE_MAX_ARTIFACT_BYTES:
+            raise ValueError("registered content exceeds the total byte limit")
         handles = [artifact.handle for artifact in self.artifacts]
         if handles != sorted(handles) or len(handles) != len(set(handles)):
             raise ValueError("artifacts must use unique handles in sorted order")
@@ -299,7 +304,7 @@ class CandidateCapabilities(BaseModel):
     max_manifest_bytes: int = CANDIDATE_MAX_MANIFEST_BYTES
     max_spool_bytes: int = CANDIDATE_MAX_SPOOL_BYTES
     max_outcomes_per_candidate: int = CANDIDATE_MAX_OUTCOMES_PER_CANDIDATE
-    max_artifacts_per_candidate: int = 16
+    max_artifacts_per_candidate: int = CANDIDATE_MAX_ARTIFACTS
 
 
 class CandidateReceipt(BaseModel):

@@ -833,7 +833,7 @@ def claim_assessment_report_finalization(
         if current is None:
             raise HTTPException(404, "assessment_report_finalization_not_found")
         from .assessment_attempts import (
-            DELIVERY_RETRY_ERROR_TYPES,
+            _is_delivery_execution,
             execution_retry_eligibility,
         )
 
@@ -913,7 +913,7 @@ def claim_assessment_report_finalization(
         delivery_source = _report_task_run(conn, current)
         if (
             delivery_source is not None
-            and delivery_source["error_type"] in DELIVERY_RETRY_ERROR_TYPES
+            and _is_delivery_execution(delivery_source)
             and current["input_snapshot_artifact_id"] is not None
             and current["input_snapshot_sha256"] is not None
         ):

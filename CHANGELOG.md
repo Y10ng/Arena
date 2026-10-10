@@ -2,6 +2,32 @@
 
 记录源码的主要用户可见变化；“未发布”不表示已推送或发布 Release。Arena 从当前工作区建立全新历史，不将原项目的测试次数、候选镜像或发布记录冒充为本项目验收。
 
+## 未发布 · 可靠交付与研究连续性
+
+### 证据与提交契约
+
+- Artifact 登记改为保存固定内容版本：登记时复制原始字节并记录 SHA256 与大小，源文件后续变化不再使已登记版本失效；再次登记产生新版本，保留旧版本与引用。声明新增必填 `source_path`、`sha256`、`size_bytes`，`path` 指向交付副本；交付副本被修改或删除仍会被拒绝，不截断或改写证据来通过校验。
+- 证据容量统一为最多 32 个内容版本、合计 32 MiB，包含 Harness 保存的输出，重复登记占用版本额度；超限明确拒绝并保留已有版本。Candidate manifest 的 Artifact 身份数量上限由 16 提升至 32，manifest 字节上限由 4 KiB 提升至 16 KiB，并核对证据合计大小；candidate 原文及 spool 总预算未提高。
+- Server 持久化 candidate 时统一核算原文字节、UTF-8 candidate／outcome manifest 与每帧开销，精确重放不重复占用预算；每个 TaskRun 最多 16 个 candidates、每个 candidate 原文 2 MiB、最多 64 个 outcomes 及 spool 合计 34 MiB 的上限保持不变。
+- Dispatcher 上传前与 Server 接收 Worker 声明材料时校验固定版本的实际大小和摘要，不把变化后的来源文件当作已登记版本。`artifact_changed` 可以在原执行期限、修正次数及只读工具边界内修正并重新提交；已完成的实验不因来源文件变化而被迫重做，修正不延长原 deadline。
+- Finding 的 `identity` 改为必填且不可为空，分类和主机不能仅含空白，入口至少提供有效 `route` 或 `locus`，端口必须为合法整数或空值；目标驱动 Explore／Conclude 的本地契约同步约束 finding 与 outcome 一致性，减少本地提交有效但下游必然拒绝的情况。
+
+### 研究执行与决策
+
+- 原会话补交发生允许的 provider／transport 瞬态失败后，继续原冻结交付链而非退回重新探索，保留 session、执行归属、deadline、binding、重试额度及既有 Attempt 计费。Report 补交保留原 generation token 与输入快照，structured Explore 补交不重新消费实时 Cell 准入；成功的 Reason 结束旧失败链，不再阻断后续正常规划。
+- TaskRun 错误类型 API 补齐 `candidate_integrity`、`readiness_*` 及 `container_runtime_mismatch`；Dispatcher 复用 Server 权威枚举，避免真实失败分类在终态写回时丢失或被拒绝。
+- 模型响应因输出长度截断、尚未提交且没有完整或部分工具调用时，可在同一 Run／session 内最多追加两次执行续行，保留已有上下文，不消耗结果修正次数，也不重放已执行工具。续行仍受原探索窗口、总 deadline 和取消约束；已提交、只读收尾及不完整工具流不能借此恢复执行权限。达到连续截断上限明确失败并记录原因；续行可能增加模型请求与费用。
+- 目标驱动 Reason 根据冻结的开放 Intent 输入生成生产提交 Schema：没有开放工作时，`accepted:true` 必须给出非空 intents、complete 或非空 abandon 等合法动作；有开放工作时仍允许合法 noop，`accepted:false` 行为保持不变。实际 Worker Schema、交付登记摘要、恢复与 candidate authority 使用同一冻结输入，避免无动作结果出本地后才被确定性拒绝。
+- 完成建议因输入过时或仍有开放 Intent 被拒绝时，Server 持久化受控拒绝信息；在业务输入确有变化、旧执行和必要交付已清理后，允许新的 Reason 决策。同一输入不会自动反复重试，也不重放旧 complete、放宽完成门禁或将所有业务失败改为可重试；路由、claim 与 TaskRun 准入共用这一判断。
+
+### 升级与验证边界
+
+- 新增 SQLite／PostgreSQL v47 迁移，扩大 candidate／outcome manifest 容量及材料身份数量约束；保留 v41 的历史 SQL 与 checksum，不通过修改旧迁移升级容量，保留历史候选原文、关联关系及计费记录。
+- Worker、Dispatcher、Server 与提交契约需要配套更新；旧 Artifact 声明、缺少有效 identity 的 Finding 或与新规则不一致的冻结 Schema 不保证可继续提交，不静默改写历史交付摘要或失败记录。新增 Server 自有决策标记不接受客户端写入。
+- Runner 改动需要重新构建 Worker 镜像；更新同名镜像标签不会替换已有项目容器。宿主服务重载不等于旧容器已升级，也不会自动恢复历史失败项目；保留原 session 与材料，项目恢复和真实模型调用仍需按正常生命周期明确决定。
+- 安装方案补充 Worker 镜像分发的设计取舍，尚未发布 Docker Hub 镜像，不将分发方案写成已上线能力。
+- 补充各轮可靠交付与连续决策的设计、定向验证及部署记录。本次整理提交和推送只进行差异审阅与格式检查，未重新执行测试、构建、部署或真实任务；保留既有实施中的失败与后续复验记录，不声称全部测试通过，也不以合成测试或部署成功宣称真实研究效果已验收。
+
 ## 未发布 · 项目工作区与执行交付
 
 ### 项目工作区
