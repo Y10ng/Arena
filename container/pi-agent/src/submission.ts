@@ -185,10 +185,11 @@ export class SubmissionState {
   repairs = 0;
   code = "submission_missing";
   issue: SubmissionIssue | undefined;
+  message: string | undefined;
   constructor(readonly maxRepairs: number) {}
-  reject(code: string, issue?: SubmissionIssue): void { this.code = code; this.issue = issue; }
+  reject(code: string, issue?: SubmissionIssue, message?: string): void { this.code = code; this.issue = issue; this.message = message; }
   diagnostics(): SubmissionDiagnostics {
     return { ...(this.issue ? { issue: this.issue } : {}), submission_attempts: this.attempts, repair_rounds: this.repairs, max_repair_rounds: this.maxRepairs };
   }
-  repairable(): boolean { return ["submission_missing", "submission_invalid", "artifact_unknown"].includes(this.code); }
+  repairable(): boolean { return ["submission_missing", "submission_invalid", "artifact_unknown", "artifact_changed"].includes(this.code); }
 }

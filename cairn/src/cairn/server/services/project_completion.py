@@ -52,7 +52,7 @@ from .time_utils import utcnow
 
 
 def _goal_driven_completion_detail(conn, project_row) -> ProjectDetail:
-    """在完成事务内重建与 Reason 相同的业务输入，不触发读路径租约清理。"""
+    """在调用方事务内重建与 Reason 相同的业务输入，不触发读路径租约清理。"""
     project_id = project_row["id"]
     facts = conn.execute(
         """
@@ -77,6 +77,23 @@ def _goal_driven_completion_detail(conn, project_row) -> ProjectDetail:
         hints=[Hint(**dict(row)) for row in hints],
         targets=build_targets(conn, project_id),
     )
+
+
+class _GoalDrivenCompletionRejection(HTTPException):
+    """受控动态拒绝须由事务所有者保存，不提交调用方的其他业务写入。"""
+
+
+def _reject_goal_driven_completion(conn, run, run_context, code, decision_digest):
+    """动态门禁拒绝不是业务接受；在当前事务内记录原冻结输入的拒绝回执。"""
+    run_context["completion_rejection"] = {
+        "code": code,
+        "decision_input_digest": decision_digest,
+    }
+    conn.execute(
+        "UPDATE task_runs SET runtime_context_json = ? WHERE project_id = ? AND id = ?",
+        (json.dumps(run_context, sort_keys=True), run["project_id"], run["id"]),
+    )
+    raise _GoalDrivenCompletionRejection(409, code)
 
 
 def _require_goal_driven_quiescence(
@@ -114,7 +131,9 @@ def _require_goal_driven_quiescence(
         _goal_driven_completion_detail(conn, project_row)
     )
     if decision_digest != current_digest:
-        raise HTTPException(409, "goal_driven_completion_input_stale")
+        _reject_goal_driven_completion(
+            conn, run, run_context, "goal_driven_completion_input_stale", decision_digest,
+        )
 
     if conn.execute(
         """
@@ -125,7 +144,9 @@ def _require_goal_driven_quiescence(
         """,
         (project_id,),
     ).fetchone() is not None:
-        raise HTTPException(409, "goal_driven_completion_open_intents")
+        _reject_goal_driven_completion(
+            conn, run, run_context, "goal_driven_completion_open_intents", decision_digest,
+        )
 
     if conn.execute(
         """
@@ -247,13 +268,19 @@ def _complete_project_record(
                 )
             ):
                 raise HTTPException(409, "goal_driven_completion_stopping")
-            _require_goal_driven_quiescence(
-                conn,
-                project_row,
-                run,
-                run_context,
-                worker=body.worker,
-            )
+            try:
+                _require_goal_driven_quiescence(
+                    conn,
+                    project_row,
+                    run,
+                    run_context,
+                    worker=body.worker,
+                )
+            except _GoalDrivenCompletionRejection:
+                if connection is None:
+                    # HTTP complete 自有事务尚无完成写入；拒绝回执须在 409 回滚前提交。
+                    conn.commit()
+                raise
         if policy.phased:
             if run is not None and run["task_type"] != "reason":
                 raise HTTPException(409, "assessment_completion_run_mismatch")

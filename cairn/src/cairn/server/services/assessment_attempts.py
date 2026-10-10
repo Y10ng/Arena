@@ -277,7 +277,7 @@ def validate_delivery_registration(conn, project, run, body, snapshot):
 
     try:
         expected_schema_sha256 = canonical_value_sha256(
-            build_submit_result_schema(snapshot["phase"], binding=binding)
+            build_submit_result_schema(snapshot["phase"], binding=binding, inputs=inputs)
         )
     except (KeyError, TypeError, ValueError):
         raise HTTPException(422, "execution_delivery_invalid") from None
@@ -413,9 +413,12 @@ def delivery_retry_routes(conn, project, *, executions=None):
         groups.setdefault((run["task_type"], run["intent_id"]), []).append(run)
     routes = {}
     for (task_type, intent_id), runs in groups.items():
+        runs = _current_execution_chain(conn, project, task_type, runs)
+        if not runs:
+            continue
         source = runs[-1]
         context = parse_scenario_snapshot(source["runtime_context_json"])
-        delivery_retry = source["error_type"] in DELIVERY_RETRY_ERROR_TYPES or bool(context.get("delivery_retry"))
+        delivery_retry = _is_delivery_execution(source)
         eligibility = execution_retry_eligibility(conn, project, task_type, intent_id=intent_id, report_generation_token=token, executions=runs)
         continuation_source = _prestart_continuation_source(conn, project, source) if context.get("continuation") and not delivery_retry else None
         if context.get("continuation") and source["status"] != "succeeded" and not delivery_retry and continuation_source is None:
@@ -476,7 +479,119 @@ def delivery_retry_routes(conn, project, *, executions=None):
     return routes
 
 
-def _logical_executions(conn, project, task_type, intent_id, report_generation_token=None):
+def _fresh_reason_decision_digest(conn, project, runs):
+    """仅已结算的受控完成拒绝可因权威输入变化开启新决策，不重置普通失败链。"""
+    if not runs or project["assessment_protocol"] != GOAL_DRIVEN_PROTOCOL:
+        return None
+    source = runs[-1]
+    context = parse_scenario_snapshot(source["runtime_context_json"])
+    rejection = context.get("completion_rejection")
+    delivery = context.get("execution_delivery", {})
+    binding = delivery.get("binding", {}) if isinstance(delivery, dict) else {}
+    if (
+        source["status"] != "failed"
+        or source["error_type"] not in {"business_acceptance", "stale_business_state"}
+        or not isinstance(rejection, dict)
+        or not isinstance(binding, dict)
+        or not isinstance(rejection.get("decision_input_digest"), str)
+        or rejection["decision_input_digest"] != binding.get("decision_input_digest")
+    ):
+        return None
+    for run in runs:
+        prior = parse_scenario_snapshot(run["runtime_context_json"])
+        if (
+            run["status"] not in {"failed", "timed_out", "cancelled"}
+            or _is_delivery_execution(run)
+            or prior.get("continuation")
+            or any(prior.get(key) for key in ACCEPTED_RESULT_CONTEXT_FIELDS)
+            or conn.execute(
+                "SELECT 1 FROM facts WHERE project_id = ? AND task_run_id = ? LIMIT 1",
+                (project["id"], run["id"]),
+            ).fetchone() is not None
+            or conn.execute(
+                "SELECT 1 FROM task_run_candidates AS c WHERE c.project_id = ? AND c.task_run_id = ? "
+                "AND NOT EXISTS (SELECT 1 FROM task_run_candidate_outcomes AS o "
+                "WHERE o.project_id = c.project_id AND o.candidate_id = c.id) LIMIT 1",
+                (project["id"], run["id"]),
+            ).fetchone() is not None
+        ):
+            return None
+    # 终态执行及新事实生产者须完成物理结算；未交付结果的 Explore 仍可与 Reason 并行。
+    for producer in conn.execute(
+        "SELECT r.* FROM task_runs AS r WHERE r.project_id = ? AND r.task_type <> 'report' "
+        "AND (r.status NOT IN ('queued', 'running') OR EXISTS "
+        "(SELECT 1 FROM facts AS f WHERE f.project_id = r.project_id AND f.task_run_id = r.id))",
+        (project["id"],),
+    ):
+        lifecycle = parse_scenario_snapshot(producer["runtime_context_json"]).get("execution_lifecycle", {})
+        if (
+            producer["status"] in {"queued", "running"}
+            or not isinstance(lifecycle, dict)
+            or lifecycle.get("generation") != producer["execution_generation"]
+            or lifecycle.get("termination_confirmed") is not True
+            or lifecycle.get("cleanup_confirmed") is not True
+        ):
+            return None
+    from cairn.assessment_contracts import goal_driven_decision_input_digest
+    from .project_completion import _goal_driven_completion_detail
+
+    digest = goal_driven_decision_input_digest(_goal_driven_completion_detail(conn, project))
+    boundary = context.get("reason_decision_boundary", {})
+    # fresh 准入之后没有新业务输入时，旧快照过时也不能形成同输入的循环调用。
+    if digest == rejection["decision_input_digest"] or digest == boundary.get("decision_input_digest"):
+        return None
+    return digest
+
+
+def _current_execution_chain(conn, project, task_type, runs, *, allow_new_decision=True):
+    """成功或 Server 已授予的新决策结束旧链；未决拒绝仍按原链阻断。"""
+    if task_type == "reason":
+        for index in range(len(runs) - 1, -1, -1):
+            if runs[index]["status"] == "succeeded":
+                runs = runs[index + 1:]
+                break
+            if parse_scenario_snapshot(runs[index]["runtime_context_json"]).get("reason_decision_boundary"):
+                runs = runs[index:]
+                break
+        if allow_new_decision and _fresh_reason_decision_digest(conn, project, runs) is not None:
+            return []
+    return runs
+
+
+def _is_delivery_execution(run):
+    context = parse_scenario_snapshot(run["runtime_context_json"])
+    return run["error_type"] in DELIVERY_RETRY_ERROR_TYPES or bool(context.get("delivery_retry"))
+
+
+def _delivery_predecessor_matches(runs, run):
+    """续交付只能引用当前链内真实失败来源，并完整沿用其冻结归属与输入。"""
+    context = parse_scenario_snapshot(run["runtime_context_json"])
+    retry = context.get("delivery_retry")
+    if retry is None:
+        return True
+    if not isinstance(retry, dict) or set(retry) != {"source_task_run_id"}:
+        return False
+    for source in runs:
+        if source["id"] == run["id"]:
+            break
+        if source["id"] != retry["source_task_run_id"]:
+            continue
+        previous = parse_scenario_snapshot(source["runtime_context_json"])
+        return bool(
+            source["status"] in {"failed", "timed_out"}
+            and _is_delivery_execution(source)
+            and all(source[key] == run[key] for key in (
+                "project_id", "execution_generation", "task_type", "intent_id",
+                "assessment_attempt_id", "worker_name", "session_id",
+            ))
+            and previous.get("dispatcher_id") == context.get("dispatcher_id")
+            and isinstance(context.get("execution_delivery"), dict)
+            and previous.get("execution_delivery") == context["execution_delivery"]
+        )
+    return False
+
+
+def _logical_executions(conn, project, task_type, intent_id, report_generation_token=None, *, allow_new_decision=True):
     phase = parse_scenario_snapshot(project["assessment_progress_json"]).get("phase")
     runs = []
     for run in conn.execute(
@@ -495,7 +610,7 @@ def _logical_executions(conn, project, task_type, intent_id, report_generation_t
         elif "assessment_phase" in context and context["assessment_phase"] != phase:
             continue
         runs.append(run)
-    return runs
+    return _current_execution_chain(conn, project, task_type, runs, allow_new_decision=allow_new_decision)
 
 
 def _delivery_source_usable(project, run, now):
@@ -584,7 +699,18 @@ def _pause_continuation_source(conn, project, body, assessment_attempt_id):
 def derive_delivery_retry_context(conn, project, body, *, assessment_attempt_id=None):
     """在 admission 的项目写锁内派生原交付或已确认暂停的续作来源。"""
     token = body.runtime_context.get("report_claim", {}).get("generation_token") if body.task_type == "report" else None
-    runs = _logical_executions(conn, project, body.task_type, body.intent_id, token)
+    runs = _logical_executions(conn, project, body.task_type, body.intent_id, token, allow_new_decision=False)
+    if body.task_type == "reason":
+        digest = _fresh_reason_decision_digest(conn, project, runs)
+        if digest is not None:
+            if body.session_id is not None and conn.execute(
+                "SELECT 1 FROM task_runs WHERE project_id = ? AND session_id = ? LIMIT 1",
+                (project["id"], body.session_id),
+            ).fetchone():
+                raise HTTPException(409, "execution_delivery_session_already_bound")
+            return {"reason_decision_boundary": {
+                "source_task_run_id": runs[-1]["id"], "decision_input_digest": digest,
+            }}
     if not runs:
         source = _pause_continuation_source(conn, project, body, assessment_attempt_id)
         if source is None:
@@ -602,9 +728,9 @@ def derive_delivery_retry_context(conn, project, body, *, assessment_attempt_id=
         }}
     source = runs[-1]
     context = parse_scenario_snapshot(source["runtime_context_json"])
-    if any(run["error_type"] in DELIVERY_RETRY_ERROR_TYPES for run in runs) and any(run["status"] in {"queued", "running"} for run in runs):
+    if any(_is_delivery_execution(run) for run in runs) and any(run["status"] in {"queued", "running"} for run in runs):
         raise HTTPException(409, "assessment_execution_not_quiescent")
-    if source["error_type"] not in DELIVERY_RETRY_ERROR_TYPES:
+    if not _is_delivery_execution(source):
         if context.get("continuation"):
             original = _prestart_continuation_source(conn, project, source)
             if original is None:
@@ -620,8 +746,6 @@ def derive_delivery_retry_context(conn, project, body, *, assessment_attempt_id=
                 "source_task_run_id": original["id"], "execution_generation": project["execution_generation"],
                 "container_id": context["continuation"]["container_id"],
             }}
-        if context.get("delivery_retry"):
-            raise HTTPException(409, "execution_retry_blocked")
         if body.session_id is not None and conn.execute(
             "SELECT 1 FROM task_runs WHERE project_id = ? AND session_id = ? LIMIT 1",
             (project["id"], body.session_id),
@@ -696,7 +820,8 @@ def execution_retry_eligibility(
     check_delivery_source: bool = True,
 ) -> dict:
     """以同代持久失败统一裁决准入、路由和 Explore 收尾；收尾不受暂时冷却影响。"""
-    runs = executions if executions is not None else _logical_executions(conn, project, task_type, intent_id, report_generation_token)
+    runs = (_current_execution_chain(conn, project, task_type, executions) if executions is not None
+            else _logical_executions(conn, project, task_type, intent_id, report_generation_token))
     if task_type == "explore" and max_runtime_retries is None and intent_id is not None:
         attempt = conn.execute(
             "SELECT id, max_runtime_retries FROM assessment_attempts "
@@ -734,13 +859,22 @@ def execution_retry_eligibility(
             extended_only = False
             failures.append(run)
             continue
-        # 进入原会话交付链后，其他错误即使属于 provider 白名单也不能退回 fresh。
-        if (delivery_chain and not delivery_error) or (not delivery_error and run["error_type"] not in retryable):
+        # 交付模式不随服务故障切回 fresh；瞬态错误只能沿真实冻结来源使用原额度。
+        if delivery_chain:
+            if not delivery_error and (
+                run["error_type"] not in EXTENDED_PROJECT_RETRYABLE_ERROR_TYPES
+                or not context.get("delivery_retry")
+            ):
+                return {"allowed": False, "reason": "execution_retry_blocked", "retry_at": None}
+            if not _delivery_predecessor_matches(runs, run):
+                return {"allowed": False, "reason": "execution_retry_blocked", "retry_at": None}
+            if check_delivery_source and not _delivery_source_usable(project, run, now or utcnow()):
+                return {"allowed": False, "reason": "execution_delivery_unavailable", "retry_at": None}
+            if not isinstance(context.get("execution_delivery"), dict):
+                return {"allowed": False, "reason": "execution_delivery_unavailable", "retry_at": None}
+            extended_only = False
+        elif run["error_type"] not in retryable:
             return {"allowed": False, "reason": "execution_retry_blocked", "retry_at": None}
-        if delivery_error and check_delivery_source and not _delivery_source_usable(project, run, now or utcnow()):
-            return {"allowed": False, "reason": "execution_delivery_unavailable", "retry_at": None}
-        if delivery_error and not isinstance(context.get("execution_delivery"), dict):
-            return {"allowed": False, "reason": "execution_delivery_unavailable", "retry_at": None}
         extended_only = extended_only and run["error_type"] in extended
         failures.append(run)
     limit = EXTENDED_MAX_RUNTIME_RETRIES if extended_only else DEFAULT_MAX_RUNTIME_RETRIES

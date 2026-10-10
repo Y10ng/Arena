@@ -10,8 +10,8 @@ from cairn.assessment_contracts import GOAL_DRIVEN_PROTOCOL
 from cairn.server.models import CreateTaskRunRequest, TaskRun
 
 from .assessment_attempts import (
-    DELIVERY_RETRY_ERROR_TYPES,
     EXTENDED_MAX_RUNTIME_RETRIES,
+    _is_delivery_execution,
     attempt_has_accepted_result,
     execution_retry_eligibility,
 )
@@ -87,12 +87,7 @@ def start_explore_attempt(
         and not policy.independent_verifier_enabled
     ):
         raise HTTPException(409, "independent_verifier_not_enabled")
-    # 旧协议仍由 Cell 决定准入；新协议直接对 Intent 预约同一套逻辑 Attempt。
-    structured_explore_binding = (
-        admit_structured_explore_binding(conn, project, intent)
-        if policy.structured
-        else None
-    )
+    structured_explore_binding = None
     runtime_context = dict(body.runtime_context)
     assessment_attempt_id: str | None = None
     if policy.structured or goal_driven:
@@ -129,21 +124,6 @@ def start_explore_attempt(
             paused_execution = bool(last_execution["pause_interrupted"]) or (
                 last_execution["execution_generation"] != project["execution_generation"]
             )
-            if last_error in DELIVERY_RETRY_ERROR_TYPES and not paused_execution:
-                # 交付重试必须沿用原 admission 快照，不能重新扩大 Cell 权限。
-                source_context = raw_task_run_runtime_context(last_execution)
-                if structured_explore_binding is not None:
-                    source_binding = parse_structured_explore_binding(
-                        source_context.get("structured_explore_binding")
-                    )
-                    if (
-                        source_binding.intent_id != intent_id
-                        or source_binding.strategy_key != str(intent["strategy_key"] or "")
-                    ):
-                        raise HTTPException(409, "structured_intent_binding_stale")
-                    structured_explore_binding = source_binding.model_dump(
-                        mode="json", exclude_none=True
-                    )
             retryable = paused_execution
             retry_reason = None
             if not paused_execution and last_status in ("failed", "timed_out"):
@@ -161,6 +141,20 @@ def start_explore_attempt(
                 retry_reason = eligibility["reason"]
                 if retry_reason in {"execution_retry_cooldown", "execution_delivery_unavailable"}:
                     raise HTTPException(409, retry_reason)
+            if retryable and not paused_execution and _is_delivery_execution(last_execution) and policy.structured:
+                # 交付模式沿用已裁决的原 binding；服务故障不能使它重新消费实时 Cell。
+                source_context = raw_task_run_runtime_context(last_execution)
+                source_binding = parse_structured_explore_binding(
+                    source_context.get("structured_explore_binding")
+                )
+                if (
+                    source_binding.intent_id != intent_id
+                    or source_binding.strategy_key != str(intent["strategy_key"] or "")
+                ):
+                    raise HTTPException(409, "structured_intent_binding_stale")
+                structured_explore_binding = source_binding.model_dump(
+                    mode="json", exclude_none=True
+                )
             deadline_exceeded = (
                 policy.explore_deadline is not None
                 and policy.explore_deadline <= now
@@ -215,6 +209,9 @@ def start_explore_attempt(
                 conn.commit()
             raise HTTPException(409, "explore_deadline_exceeded")
 
+        if policy.structured and structured_explore_binding is None:
+            # fresh 与暂停续作保留原 Cell 准入语义；原链补交不重新签发快照。
+            structured_explore_binding = admit_structured_explore_binding(conn, project, intent)
         if active_attempt is None:
             prior = conn.execute(
                 "SELECT outcome FROM assessment_attempts WHERE project_id = ? AND intent_id = ? AND status != 'active' LIMIT 1",

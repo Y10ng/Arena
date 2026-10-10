@@ -15,7 +15,7 @@ import {
 const FRAME_MAGIC = Buffer.from("CRNCND01", "ascii");
 const FRAME_HEADER_BYTES = FRAME_MAGIC.length + 8;
 const FRAME_CHECKSUM_BYTES = 32;
-const MAX_ARTIFACTS = 16;
+const MAX_ARTIFACTS = CANDIDATE_SPOOL_HARD_LIMITS.max_artifacts;
 const MAX_OUTCOMES_PER_CANDIDATE = 64;
 const MAX_CANDIDATE_POSITION = 1_000_000;
 const ARTIFACT_KINDS = new Set([
@@ -144,7 +144,7 @@ function validArtifactManifest(value: unknown): value is CandidateArtifactIdenti
     handles.add(artifact.handle);
     previous = artifact.handle;
   }
-  return true;
+  return value.reduce((total, artifact) => total + artifact.size_bytes, 0) <= CANDIDATE_SPOOL_HARD_LIMITS.max_artifact_bytes;
 }
 function submissionSchemaPaths(value: unknown): Set<string> {
   const paths = new Set<string>(["$"]);
@@ -305,6 +305,7 @@ function validateArtifacts(artifacts: readonly CandidateArtifactIdentity[]): Can
     }
     return { handle: artifact.handle, kind: artifact.kind, sha256: artifact.sha256, size_bytes: artifact.size_bytes };
   }).sort((left, right) => compareAscii(left.handle, right.handle));
+  if (result.reduce((total, artifact) => total + artifact.size_bytes, 0) > CANDIDATE_SPOOL_HARD_LIMITS.max_artifact_bytes) throw candidateFailure("candidate_spool_limit", "Registered content exceeds the total byte limit");
   if (new Set(result.map((artifact) => artifact.handle)).size !== result.length) throw candidateFailure("candidate_manifest_invalid", "Candidate artifact handles must be unique");
   return result;
 }

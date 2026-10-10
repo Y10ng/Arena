@@ -612,7 +612,8 @@ END;
 """
 
 
-TASK_RUN_CANDIDATES_TABLE_SCHEMA = """\
+# v41 SQL 参与双后端历史 checksum，容量升级不能原地修改。
+TASK_RUN_CANDIDATES_V41_TABLE_SCHEMA = """\
 CREATE TABLE IF NOT EXISTS task_run_candidates (
     id TEXT NOT NULL,
     project_id TEXT NOT NULL,
@@ -723,6 +724,14 @@ CREATE TABLE IF NOT EXISTS task_run_candidate_outcomes (
 CREATE INDEX IF NOT EXISTS idx_task_run_candidate_outcomes_candidate
 ON task_run_candidate_outcomes(candidate_id, outcome_sequence);
 """
+
+
+TASK_RUN_CANDIDATES_V47_TABLE_SCHEMA = (
+    TASK_RUN_CANDIDATES_V41_TABLE_SCHEMA
+    .replace("artifact_count BETWEEN 0 AND 16", "artifact_count BETWEEN 0 AND 32")
+    .replace("BETWEEN 2 AND 4096", "BETWEEN 2 AND 16384")
+)
+TASK_RUN_CANDIDATES_TABLE_SCHEMA = TASK_RUN_CANDIDATES_V47_TABLE_SCHEMA
 
 
 SQLITE_TASK_RUN_CANDIDATES_IMMUTABLE_SCHEMA = """\

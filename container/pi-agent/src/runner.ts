@@ -31,6 +31,13 @@ import { requestModel, REQUEST_PROVIDER, SDK_AUTH_PLACEHOLDER } from "./model.js
 const SAFE_TOOLS = ["read_evidence", "register_artifact", "submit_result"];
 const BASE_EXECUTION_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls", ...SAFE_TOOLS];
 const MAX_RESULT_BYTES = 1024 * 1024;
+// deadline 限制总时长但不限制快速重复的截断请求；每个 Run 只提供两次续行，不借用结果修正额度。
+const MAX_OUTPUT_CONTINUATIONS = 2;
+const OUTPUT_CONTINUATION_PROMPT =
+  "Your previous model response reached its output limit without a tool call or submission. " +
+  "Continue the unfinished task in this same session using the existing observations and tool results. " +
+  "Do not repeat completed actions. The original authorization, execution deadline and resource limits still apply. " +
+  "Use submit_result when you have a truthful result.";
 const SCHEMA_ERROR_BUDGET = 256;
 const SCHEMA_DIAGNOSTIC_VIEW_LIMIT = 32;
 const SCHEMA_COLLECTED_ERROR_BUDGET = 4096;
@@ -163,6 +170,8 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
   const candidateAttempts = new Map<string, CandidateAttempt>();
   const candidateOutcomeCalls = new Set<string>();
   let assistantTurn = 0;
+  let outputContinuations = 0;
+  let truncatedWithoutToolCalls = false;
   let currentToolCallId = "";
   const submission = new SubmissionState(request.max_result_repairs);
   let candidateCaptureError: AgentFailure | undefined;
@@ -221,7 +230,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
       }
       return false;
     };
-    const submissionMessage = () => JSON.stringify({ code: submission.code, ...submission.diagnostics() });
+    const submissionMessage = () => JSON.stringify({ code: submission.code, ...(submission.message ? { message: submission.message } : {}), ...submission.diagnostics() });
     lease = await acquireSession(request);
     const artifacts = new ArtifactRegistry(request.cwd, request.session_root);
     const candidateSpool = new CandidateSpool(request);
@@ -299,7 +308,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
             }
           } catch (error) {
             const safe = evidenceFailure(error);
-            submission.reject(safe.code);
+            submission.reject(safe.code, undefined, safe.code === "artifact_changed" ? safe.message : undefined);
             await appendOutcome(id, {
               code: safe.code,
               artifact_status: safe.code.startsWith("artifact_") ? "rejected" : artifactStatus,
@@ -339,7 +348,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
       },
       {
         name: "register_artifact", label: "Register artifact",
-        description: "Register an existing workspace evidence file. Returns a generated handle, SHA256 and size. Registration does not upload the file or establish Server acceptance.",
+        description: "Preserve the observed bytes of an existing workspace evidence file as a fixed content version. Returns handle, delivery path, source_path, SHA256 and size. Source changes do not change previous versions. At most 32 versions and 32 MiB total, including Harness output; oversized files are rejected, not truncated. Registration is not upload or Server acceptance.",
         parameters: { type: "object", properties: { path: { type: "string", minLength: 1 }, kind: { type: "string", enum: [...ARTIFACT_KINDS] } }, required: ["path", "kind"], additionalProperties: false } as TSchema,
         executionMode: "sequential",
         async execute(_id, args, signal) {
@@ -432,7 +441,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
         await mkdir(directory, { recursive: true, mode: 0o700 });
         const path = join(directory, basename(source));
         await copyFile(source, path, constants.COPYFILE_EXCL);
-        const artifact = await artifacts.register(path, "raw_output");
+        const artifact = await artifacts.register(path, "raw_output", signal);
         await unlink(source);
         audit("artifact_registered", { size_bytes: artifact.size_bytes, source: "sdk_bash_overflow" });
         return { ...inherited, content: [...(inherited?.content ?? context.result.content), { type: "text", text: `Preserved full output: ${JSON.stringify(artifact)}` }], details: { ...details, fullOutputPath: path } };
@@ -468,6 +477,10 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
         audit(event.type, { tool_name: executionTools.includes(event.toolName) ? event.toolName : "unknown", tool_call_id: event.toolCallId, is_error: event.isError, output_bytes: Buffer.byteLength(JSON.stringify(event.result)) });
       } else if (event.type === "message_end" && event.message.role === "assistant") {
         const message = event.message;
+        // 部分参数即使未成为 toolCall 也不能走正常执行续行，避免把截断工具当成可重放动作。
+        truncatedWithoutToolCalls = message.stopReason === "length"
+          && !message.content.some((block) => block.type === "toolCall")
+          && rawArguments.size === 0 && oversizedArgumentIndexes.size === 0;
         for (const [index, block] of message.content.entries()) {
           if (block.type !== "toolCall") continue;
           const rawText = rawArguments.get(index) ?? "";
@@ -511,8 +524,8 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
           if (!u || u.input + u.output + u.cacheRead + u.cacheWrite <= 0) usageKnown = false;
           else { usageSeen = true; usage.input_tokens += u.input; usage.output_tokens += u.output; usage.cache_read_tokens += u.cacheRead; usage.cache_write_tokens += u.cacheWrite; }
         }
-      } else if (event.type === "turn_end" && attempted) {
-        // 无效工具参数也会进入SDK自动续轮；在当前turn结束时截断，让修正只走统一有界入口。
+      } else if (event.type === "turn_end" && (attempted || providerError || candidateCaptureError)) {
+        // 提交及不完整工具流不能进入 SDK 自动续轮；结果修正只走统一有界入口。
         session?.agent.abort();
       }
     });
@@ -533,6 +546,25 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
       audit("readonly_conclusion", { remaining_seconds: Math.max(0, Math.floor((deadline - performance.now()) / 1000)) });
     }
     await session.prompt(startedInConclusion ? READONLY_CONCLUSION_PROMPT : request.prompt, { expandPromptTemplates: false });
+    while (truncatedWithoutToolCalls && !readonly && !attempted && !candidate
+      && !candidateCaptureError && !providerError && !conflict) {
+      ensureActive();
+      if (performance.now() >= explorationDeadline) {
+        beginReadonlyConclusion(false);
+        break;
+      }
+      if (outputContinuations >= MAX_OUTPUT_CONTINUATIONS) {
+        audit("output_truncation_limit", { stop_reason: "length", output_continuations: outputContinuations });
+        throw new AgentFailure("submission_missing", `Model output truncation continuation limit reached after ${outputContinuations} continuations without a submission`);
+      }
+      outputContinuations += 1;
+      audit("output_continuation", {
+        stop_reason: "length", output_continuations: outputContinuations,
+        remaining_execution_seconds: Math.max(0, (explorationDeadline - performance.now()) / 1000),
+      });
+      ensureActive();
+      await session.prompt(OUTPUT_CONTINUATION_PROMPT, { expandPromptTemplates: false });
+    }
     if (explorationDeadlineReached && !startedInConclusion && !candidate && !candidateCaptureError && !providerError && !conflict) {
       ensureActive();
       narrow();

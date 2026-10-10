@@ -19,7 +19,8 @@ function goalSchemas() {
 from cairn.dispatcher.worker_protocol.submission import build_submit_result_schema
 print(json.dumps({
   'explore': build_submit_result_schema('explore_execute', {'assessment_protocol': 'goal-driven-v1'}),
-  'reason': build_submit_result_schema('reason_execute', {'allowed_fact_ids': ['f1'], 'allowed_intent_ids': ['i-closed'], 'max_intents': 2, 'decision_input_digest': 'a' * 64}),
+  'explore_conclude': build_submit_result_schema('explore_conclude', {'assessment_protocol': 'goal-driven-v1'}),
+  'reason': build_submit_result_schema('reason_execute', {'allowed_fact_ids': ['f1'], 'allowed_intent_ids': ['i-closed'], 'max_intents': 2, 'decision_input_digest': 'a' * 64}, inputs={'open_intent_ids': []}),
 }))`;
   return JSON.parse(execFileSync(process.env.PYTHON_BIN || 'python3', ['-c', code], {
     encoding: 'utf8', env: { ...process.env, PYTHONPATH: source },
@@ -29,13 +30,65 @@ print(json.dumps({
 const findingResult = {
   accepted: true,
   data: {
-    fact: { description: 'Synthetic finding' },
+    fact: {
+      description: 'Synthetic finding',
+      vulnerability: {
+        title: 'Synthetic access control finding', severity: 'high',
+        identity: {
+          vulnerability_class: 'broken_access_control',
+          asset: { host: 'synthetic.example', port: 443 },
+          entrypoint: { route: '/synthetic' },
+        },
+      },
+    },
     assessment_record: {
       hypothesis: 'Synthetic access check', outcome: 'finding',
       observations: ['Synthetic owner data observed'], evidence_refs: [{ artifact_id: 'a1' }],
     },
   },
 };
+
+test('goal-driven Explore production Schema requires finding identity and matching outcome', () => {
+  const schemas = goalSchemas();
+  for (const schema of [schemas.explore, schemas.explore_conclude]) {
+    const validator = Compile(schema);
+    assert.equal(validator.Check(findingResult), true);
+    const invalidChanges = [
+      (data) => { delete data.fact.vulnerability; },
+      (data) => { data.fact.vulnerability = null; },
+      (data) => { delete data.fact.vulnerability.identity; },
+      (data) => { data.fact.vulnerability.identity = null; },
+      (data) => { data.fact.vulnerability.identity.vulnerability_class = ' \t'; },
+      (data) => { data.fact.vulnerability.identity.asset.host = ' \t'; },
+      (data) => { data.fact.vulnerability.identity.asset.port = 0; },
+      (data) => { data.fact.vulnerability.identity.asset.port = 65536; },
+      (data) => { data.fact.vulnerability.identity.asset.port = '443'; },
+      (data) => { data.fact.vulnerability.identity.entrypoint = {}; },
+      (data) => { data.fact.vulnerability.identity.entrypoint = { route: ' ', locus: '\t' }; },
+      (data) => { data.fact.vulnerability.identity.unexpected = true; },
+      (data) => { data.fact.vulnerability.identity.asset.unexpected = true; },
+      (data) => { data.fact.vulnerability.identity.entrypoint.unexpected = true; },
+      (data) => { data.fact.vulnerability.identity.vector = { unexpected: true }; },
+    ];
+    for (const change of invalidChanges) {
+      const invalid = structuredClone(findingResult);
+      change(invalid.data);
+      assert.equal(validator.Check(invalid), false, change.toString());
+    }
+    const locus = structuredClone(findingResult);
+    locus.data.fact.vulnerability.identity.entrypoint = { route: ' ', locus: 'Synthetic handler' };
+    assert.equal(validator.Check(locus), true);
+    for (const outcome of ['observation', 'tested_no_finding']) {
+      const nonFinding = structuredClone(findingResult);
+      nonFinding.data.assessment_record.outcome = outcome;
+      assert.equal(validator.Check(nonFinding), false, outcome);
+      nonFinding.data.fact.vulnerability = null;
+      assert.equal(validator.Check(nonFinding), true, `${outcome}: null vulnerability`);
+      delete nonFinding.data.fact.vulnerability;
+      assert.equal(validator.Check(nonFinding), true, outcome);
+    }
+  }
+});
 
 test('goal-driven production Schema accepts missing comparisons and repairs missing observations', async (t) => {
   const schema = goalSchemas().explore;

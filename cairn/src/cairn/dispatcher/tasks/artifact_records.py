@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from hashlib import sha256
 from io import BytesIO
 import re
 from typing import BinaryIO, Iterator
+
+from cairn.server.schemas.candidates import CANDIDATE_MAX_ARTIFACTS, CANDIDATE_MAX_ARTIFACT_BYTES
 
 from .common_base import *
 from .process_runner import worker_process_failure
@@ -316,6 +319,8 @@ def record_declared_artifacts(
     if task_run_id is None or not artifacts:
         return ProcessArtifactRecord(refs=[])
 
+    if len(artifacts) > CANDIDATE_MAX_ARTIFACTS or sum(artifact.size_bytes for artifact in artifacts) > CANDIDATE_MAX_ARTIFACT_BYTES:
+        return ProcessArtifactRecord(refs=[], collect_failed=True)
     refs: list[EvidenceRef] = []
     artifact_ids_by_handle: dict[str, str] = {}
     write_failed = False
@@ -337,6 +342,16 @@ def record_declared_artifacts(
         try:
             # 声明 artifact 必须从容器文件系统取证，并通过宿主临时文件流式上传。
             with _open_container_artifact(container_manager, container_name, artifact.path) as content:
+                digest = sha256()
+                size = 0
+                while chunk := content.read(64 * 1024):
+                    size += len(chunk)
+                    if size > artifact.size_bytes:
+                        raise ValueError("registered content version size mismatch")
+                    digest.update(chunk)
+                if size != artifact.size_bytes or digest.hexdigest() != artifact.sha256:
+                    raise ValueError("registered content version digest mismatch")
+                content.seek(0)
                 response = client.create_artifact(
                     project_id,
                     task_run_id=task_run_id,
@@ -345,7 +360,11 @@ def record_declared_artifacts(
                     filename=filename,
                     metadata={
                         "phase": phase,
-                        "source_path": artifact.path,
+                        "source_path": artifact.source_path,
+                        "registered_path": artifact.path,
+                        "registered_handle": artifact.handle,
+                        "registered_sha256": artifact.sha256,
+                        "registered_size_bytes": artifact.size_bytes,
                         "declared_by_worker": True,
                     },
                 )

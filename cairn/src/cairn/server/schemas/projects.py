@@ -903,9 +903,11 @@ class ReasonClaimRequest(BaseModel):
 
 
 class VulnerabilityAssetIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     protocol: str = ""
-    host: str
-    port: int | None = None
+    host: str = Field(min_length=1, pattern=r"\S")
+    port: int | None = Field(default=None, ge=1, le=65535)
 
     @field_validator("protocol")
     @classmethod
@@ -920,15 +922,16 @@ class VulnerabilityAssetIdentity(BaseModel):
             raise ValueError("must not be empty")
         return text
 
-    @field_validator("port")
-    @classmethod
-    def validate_port(cls, value: int | None) -> int | None:
-        if value is not None and not 1 <= value <= 65535:
-            raise ValueError("port must be 1-65535")
-        return value
-
 
 class VulnerabilityEntrypointIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, json_schema_extra={
+        # route 与 locus 可单独为空，但至少一处必须给出真实定位。
+        "anyOf": [
+            {"required": ["route"], "properties": {"route": {"pattern": r"\S"}}},
+            {"required": ["locus"], "properties": {"locus": {"pattern": r"\S"}}},
+        ],
+    })
+
     method: str = ""
     route: str = ""
     locus: str = ""
@@ -941,6 +944,8 @@ class VulnerabilityEntrypointIdentity(BaseModel):
 
 
 class VulnerabilityVectorIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     parameter: str = ""
     object_type: str = ""
     source_role: str = ""
@@ -950,7 +955,9 @@ class VulnerabilityVectorIdentity(BaseModel):
 
 
 class VulnerabilityIdentityInput(BaseModel):
-    vulnerability_class: str
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    vulnerability_class: str = Field(min_length=1, pattern=r"\S")
     asset: VulnerabilityAssetIdentity
     entrypoint: VulnerabilityEntrypointIdentity
     vector: VulnerabilityVectorIdentity = Field(

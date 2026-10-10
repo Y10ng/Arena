@@ -22,7 +22,10 @@ export const CANDIDATE_SPOOL_ROOT = "/tmp/cairn-prompts";
 export const CANDIDATE_SPOOL_HARD_LIMITS = {
   max_candidates: 16,
   max_candidate_bytes: 2 * 1024 * 1024,
-  max_manifest_bytes: 4 * 1024,
+  // 32 个身份按最长合法 handle 编码仍可装入 manifest；原文与 spool 总预算不变。
+  max_manifest_bytes: 16 * 1024,
+  max_artifacts: 32,
+  max_artifact_bytes: 32 * 1024 * 1024,
   max_spool_bytes: 34 * 1024 * 1024,
   max_forbidden_literals: 32,
   max_forbidden_literal_bytes: 4 * 1024,

@@ -70,7 +70,7 @@ test('candidate capability is required and strictly bounds identity, paths, lite
   const original = request.capabilities.candidate_capture;
   for (const [field, value] of [
     ['max_candidates', 17], ['max_candidate_bytes', 2 * 1024 * 1024 + 1],
-    ['max_manifest_bytes', 4097], ['max_spool_bytes', 34 * 1024 * 1024 + 1],
+    ['max_manifest_bytes', 16 * 1024 + 1], ['max_spool_bytes', 34 * 1024 * 1024 + 1],
   ]) {
     assert.throws(() => parseRequest({ ...request, capabilities: { candidate_capture: { ...original, [field]: value } } }), { code: 'invalid_request', path: `capabilities.candidate_capture.${field}` });
   }
@@ -86,7 +86,7 @@ test('production explore schema and null binding have cross-language canonical d
   await new CandidateSpool(request).appendCandidate(1, 0, Buffer.from('{}'));
   const manifest = decodeFrames(await readFile(path))[0].manifest;
   assert.equal(manifest.binding_sha256, '74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b');
-  assert.equal(manifest.result_schema_sha256, '03f431a1b170e8d6f8823a2ba54c99194b4959328157c72ce4fba55f539eea9d');
+  assert.equal(manifest.result_schema_sha256, '6ca9651baef3d1a93b1a70d1863dc7df531d6b5dcd6cff44619b74c9fe869b4f');
 });
 
 test('candidate spool preserves malformed Unicode and CRLF bytes in a checksummed binary frame', async (t) => {
@@ -297,6 +297,7 @@ test('candidate spool enforces registry artifact identity at append and readback
   assert.deepEqual(decodeFrames(await readFile(accepted.path))[0].manifest.artifacts, artifacts);
 
   for (const artifact of [
+    null,
     { handle: 'evidence-1', kind: 'log', sha256: 'a'.repeat(64), size_bytes: 1 },
     { handle: 'local-proof', kind: 'http_exchange', sha256: 'a'.repeat(64), size_bytes: 1 },
     { handle: `local-${'a'.repeat(123)}`, kind: 'log', sha256: 'a'.repeat(64), size_bytes: 1 },
@@ -383,20 +384,35 @@ test('schema-invalid attempts retain exact bytes and safe schema outcomes across
 
 test('artifact injection failure preserves pre-injection candidate and registered artifact identity', async (t) => {
   let workspace;
-  const { request, candidateSpoolPath } = await fixture(t, 'openai-chat-completions', [
+  const { request, calls, candidateSpoolPath } = await fixture(t, 'openai-chat-completions', [
     { tools: [{ name: 'register_artifact', args: { path: 'evidence.log', kind: 'log' } }] },
-    async () => {
-      await writeFile(join(workspace, 'evidence.log'), 'after');
+    async (call) => {
+      const registered = JSON.parse(call.body.messages.find((message) => message.role === 'tool').content);
+      await chmod(registered.path, 0o600);
+      await writeFile(registered.path, 'after');
       return { tools: [{ name: 'submit_result', rawArgs: '{"accepted":true,"data":{"status":"ok"}}' }] };
     },
   ]);
   workspace = request.cwd;
   await writeFile(join(workspace, 'evidence.log'), 'before');
   const result = await runRequest(parseRequest(request));
+  assert.equal(result.status, 'failed');
+  assert.equal(result.result, null);
+  assert.equal(result.submission_id, null);
   assert.equal(result.error.code, 'artifact_changed');
+  assert.equal(result.error.repair_rounds, request.max_result_repairs);
+  assert.equal(result.error.submission_attempts, 1 + request.max_result_repairs);
+  assert.equal(calls.length, 2 + request.max_result_repairs);
+  for (const call of calls.slice(2)) assert.deepEqual(call.body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
   const frames = decodeFrames(await readFile(candidateSpoolPath));
-  const candidate = frames.find((entry) => entry.manifest.record_kind === 'candidate');
-  const outcome = frames.find((entry) => entry.manifest.record_kind === 'outcome');
+  const candidates = frames.filter((entry) => entry.manifest.record_kind === 'candidate');
+  const outcomes = frames.filter((entry) => entry.manifest.record_kind === 'outcome');
+  assert.equal(candidates.length, 1 + request.max_result_repairs);
+  assert.equal(outcomes.length, candidates.length);
+  assert.ok(outcomes.every((entry) => entry.manifest.code === 'artifact_changed' && entry.manifest.artifact_status === 'rejected'));
+  assert.ok(candidates.every((entry) => entry.raw.equals(Buffer.from('{"accepted":true,"data":{"status":"ok"}}'))));
+  const candidate = candidates[0];
+  const outcome = outcomes[0];
   assert.equal(candidate.manifest.artifacts.length, 1);
   assert.deepEqual(Object.keys(candidate.manifest.artifacts[0]).sort(), ['handle', 'kind', 'sha256', 'size_bytes']);
   assert.equal(candidate.manifest.artifacts[0].kind, 'log');

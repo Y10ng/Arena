@@ -7,10 +7,13 @@ import json
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from cairn.dispatcher.protocol.client import ApiResult, CairnClient
 from cairn.server import db
+from cairn.server.app import app
+from cairn.server.auth import create_machine_principal
 from cairn.server.models import CreateArtifactRequest, CreateRawArtifactRequest
 from cairn.server.routers.audit import create_raw_artifact
 from cairn.server.services import audit_artifacts
@@ -132,6 +135,110 @@ def test_raw_route_streams_body_and_reuses_artifact_audit_semantics(
     assert payload["size"] == len(content)
     assert calls == {"fsync": 1, "replace": 1}
     assert not list(configured_database.rglob("*.tmp"))
+
+
+@pytest.fixture
+def raw_http_client(configured_database: Path):
+    _, token = create_machine_principal("raw-artifact-dispatcher", "synthetic-raw-token")
+    with TestClient(app, headers={"Authorization": f"Bearer {token}"}) as client:
+        yield client
+
+
+def _registered_metadata(content: bytes) -> dict[str, object]:
+    return {
+        "phase": "explore_execute",
+        "source_path": "/work/evidence/原始响应.bin",
+        "registered_path": "/work/.cairn/registered/evidence-v1.bin",
+        "registered_handle": "evidence-v1",
+        "registered_sha256": sha256(content).hexdigest(),
+        "registered_size_bytes": len(content),
+        "declared_by_worker": True,
+    }
+
+
+def test_raw_http_preserves_registered_content_and_source_identity(
+    configured_database: Path,
+    raw_http_client: TestClient,
+) -> None:
+    content = b"\x00\xff" + "  固定材料\r\n".encode("utf-8") + b"trailing  \n\x00"
+    metadata = _registered_metadata(content)
+    response = raw_http_client.post(
+        "/projects/p1/artifacts/raw",
+        params={
+            "task_run_id": "tr001",
+            "kind": "file",
+            "filename": "fixed-evidence.bin",
+            "metadata_json": json.dumps(metadata, ensure_ascii=False),
+        },
+        content=content,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+
+    assert response.status_code == 201, response.text
+    artifact = response.json()
+    assert artifact["project_id"] == "p1"
+    assert artifact["task_run_id"] == "tr001"
+    assert artifact["sha256"] == sha256(content).hexdigest()
+    assert artifact["size"] == len(content)
+    assert artifact["category"] == "deliverable"
+    assert artifact["uri"] == "artifact://projects/p1/runs/tr001/a001-fixed-evidence.bin"
+    for key, value in metadata.items():
+        assert artifact["metadata"][key] == value
+    context = artifact["metadata"]["runtime_context"]
+    assert context["project_id"] == "p1"
+    assert context["task_run_id"] == "tr001"
+    assert context["worker_name"] == "worker-1"
+    assert context["worker_type"] == "claudecode"
+
+    with db.get_conn() as conn:
+        rows = conn.execute("SELECT * FROM artifacts").fetchall()
+    assert len(rows) == 1
+    row = rows[0]
+    for key in ("id", "project_id", "task_run_id", "sha256", "size", "uri"):
+        assert row[key] == artifact[key]
+    assert json.loads(row["metadata_json"]) == artifact["metadata"]
+    disk_path = configured_database / "projects/p1/runs/tr001/a001-fixed-evidence.bin"
+    persisted = disk_path.read_bytes()
+    assert persisted == content
+    assert sha256(persisted).hexdigest() == row["sha256"]
+    assert disk_path.stat().st_size == row["size"]
+    assert list((configured_database / ".uploads").iterdir()) == []
+    assert [path for path in configured_database.rglob("*") if path.is_file()] == [disk_path]
+
+
+@pytest.mark.parametrize("mismatched_field", ["registered_sha256", "registered_size_bytes"])
+def test_raw_http_rejects_registered_content_mismatch_without_residue(
+    configured_database: Path,
+    raw_http_client: TestClient,
+    mismatched_field: str,
+) -> None:
+    content = b"\x00fixed-registered-content\xff\r\n"
+    metadata = _registered_metadata(content)
+    metadata[mismatched_field] = (
+        sha256(b"different-content").hexdigest()
+        if mismatched_field == "registered_sha256"
+        else len(content) + 1
+    )
+    response = raw_http_client.post(
+        "/projects/p1/artifacts/raw",
+        params={
+            "task_run_id": "tr001",
+            "kind": "file",
+            "filename": "rejected-evidence.bin",
+            "metadata_json": json.dumps(metadata, ensure_ascii=False),
+        },
+        content=content,
+        headers={"Content-Type": "application/octet-stream"},
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json() == {"detail": "registered_content_version_mismatch"}
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT COUNT(*) AS count FROM artifacts").fetchone()["count"] == 0
+        assert conn.execute("SELECT COUNT(*) AS count FROM agent_events").fetchone()["count"] == 0
+    # .uploads 已创建，确保验证经过 raw 接收路径，而非仅在请求解析阶段拒绝。
+    assert list((configured_database / ".uploads").iterdir()) == []
+    assert not [path for path in configured_database.rglob("*") if path.is_file()]
 
 
 def test_raw_stream_failure_cleans_temporary_and_database_state(

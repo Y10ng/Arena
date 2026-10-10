@@ -35,9 +35,9 @@ def model_binding_digest(worker) -> str:
     return sha256(serialized.encode()).hexdigest()
 
 
-def result_schema_digest(phase, binding) -> str:
+def result_schema_digest(phase, binding, inputs=None) -> str:
     """冻结实际交给 Pi 的 submit_result Schema 身份。"""
-    schema = build_submit_result_schema(phase, binding=binding)
+    schema = build_submit_result_schema(phase, binding=binding, inputs=inputs)
     return candidate_authority_sha256(schema)
 
 
@@ -75,6 +75,7 @@ def resume_delivery(
         expected_schema_sha256 = result_schema_digest(
             frozen_phase,
             snapshot["binding"],
+            snapshot["inputs"],
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise DeliveryUnavailable from exc
@@ -216,7 +217,7 @@ def register_delivery(
                     ),
                 )
     try:
-        schema_sha256 = result_schema_digest(phase, binding)
+        schema_sha256 = result_schema_digest(phase, binding, inputs)
     except (KeyError, TypeError, ValueError) as exc:
         raise DeliveryUnavailable from exc
     snapshot = {
