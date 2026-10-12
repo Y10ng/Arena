@@ -455,7 +455,7 @@ def _build_submit_result_schema(
             }
             intents_schema = _array_schema(data_schema["properties"]["intents"])
             if intents_schema is not None and type(max_intents) is int:
-                # prefixItems 约束同批位置；通用 items 仍检查每个 Intent 的字段结构。
+                # prefixItems 覆盖的位置不再由 items 校验，须同时保留完整结构和依赖顺序约束。
                 intents_schema["prefixItems"] = []
                 for index in range(max_intents):
                     choices = [*allowed_intents, *(f"@{i + 1}" for i in range(index))]
@@ -464,7 +464,10 @@ def _build_submit_result_schema(
                         if choices else {"type": "null"}
                     )
                     intents_schema["prefixItems"].append({
-                        "properties": {"depends_on": dependency_schema},
+                        "allOf": [
+                            intents_schema["items"],
+                            {"properties": {"depends_on": dependency_schema}},
+                        ],
                     })
     return {
         "type": "object",

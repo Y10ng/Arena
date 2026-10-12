@@ -424,12 +424,14 @@ def _write_decoded_reason(state, decoded):
     )
 
 
-def test_goal_reason_empty_work_repairs_in_session_and_server_accepts_intent_receipt(conn, monkeypatch):
+@pytest.mark.parametrize("open_work", [False, True], ids=["independent", "existing-dependency"])
+@pytest.mark.parametrize("invalid_index", [0, 1, 2], ids=["first", "middle", "last"])
+def test_goal_reason_structure_repairs_in_session_and_server_accepts_intent_receipts(conn, monkeypatch, open_work, invalid_index):
     from cairn.dispatcher.tasks.delivery import DeliveryUnavailable, resume_delivery
     from cairn.dispatcher.worker_protocol.submission import build_submit_result_schema
 
-    state = _goal_reason_delivery(conn, monkeypatch)
-    assert state.frozen["inputs"] == {"open_intent_ids": []}
+    state = _goal_reason_delivery(conn, monkeypatch, open_work=open_work)
+    assert state.frozen["inputs"] == {"open_intent_ids": ["open-work"] if open_work else []}
     for inputs in (None, {}):
         with pytest.raises(ValueError):
             build_submit_result_schema("reason_execute", state.frozen["binding"], inputs=inputs)
@@ -440,43 +442,58 @@ def test_goal_reason_empty_work_repairs_in_session_and_server_accepts_intent_rec
     assert container_id == state.frozen["container_id"] and remaining > 0
     assert restored is state.frozen
     changed_context = json.loads(json.dumps(retry_context))
-    changed_context["execution_delivery"]["inputs"]["open_intent_ids"] = ["open-work"]
+    changed_context["execution_delivery"]["inputs"]["open_intent_ids"] = [] if open_work else ["open-work"]
     with pytest.raises(DeliveryUnavailable):
         resume_delivery(state.manager, "p", state.worker, changed_context, "reason_execute")
     assert state.sent == []
     persisted = json.loads(conn.execute("SELECT runtime_context_json FROM task_runs WHERE id=?", (state.run.id,)).fetchone()[0])
     assert persisted["execution_delivery"] == state.frozen
     rationale = "合成事实支持继续研究，不把未测试写成安全结论。"
-    decision = {"from": ["baseline", "origin"], "description": "只安排后续合成证据核对，不访问目标。", "priority": 2}
-    captured = _run_reason_submission_fixture(state, [
-        {"accepted": True, "data": {"rationale": rationale}},
-        {"accepted": True, "data": {"rationale": rationale, "intents": [decision]}},
-    ])
-    assert json.loads(captured["raw"])["status"] == "succeeded", captured["raw"]
+    decisions = [
+        {"from": ["baseline", "origin"], "description": f"核对第{index + 1}份合成材料，不访问目标。", "priority": 2}
+        for index in range(3)
+    ]
+    if open_work:
+        decisions[0]["depends_on"] = "open-work"
+    decisions[1]["depends_on"] = "@1"
+    decisions[2]["depends_on"] = "@2"
+    valid = {"accepted": True, "data": {"rationale": rationale, "intents": decisions}}
+    invalid = json.loads(json.dumps(valid))
+    invalid["data"]["intents"][invalid_index]["controls"] = []
+    captured = _run_reason_submission_fixture(state, [invalid, valid])
+    envelope = json.loads(captured["raw"])
+    assert envelope["status"] == "succeeded", captured["raw"]
+    assert envelope["result"]["data"] == valid["data"]
     assert [item["code"] for item in captured["rejections"]] == ["submission_invalid"]
+    assert captured["rejections"][0]["issue"]["keyword"] == "additionalProperties"
+    assert captured["rejections"][0]["issue"]["path"] == "/data/intents/*"
     assert [item["code"] for item in captured["outcomes"]] == ["submission_invalid", "locally_validated"]
     assert captured["candidates"][1]["parent_producer_candidate_key"] == captured["candidates"][0]["producer_candidate_key"]
     assert [event["code"] for event in captured["audit"] if event["event"] == "result_repair"] == ["submission_invalid"]
     assert captured["tool_scopes"][1] == ["read_evidence", "register_artifact", "submit_result"]
-    assert conn.execute("SELECT count(*) FROM intents").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM intents").fetchone()[0] == int(open_work)
     decoded = _decode_reason_submission(state, captured["raw"])
     assert decoded.succeeded and decoded.kind == "intents", decoded.failure
     assert _write_decoded_reason(state, decoded) == "success"
-    assert len(state.accepted) == 1
-    intent_id = state.accepted[0]["id"]
-    intent = conn.execute("SELECT * FROM intents WHERE id=?", (intent_id,)).fetchone()
-    assert (intent["creator"], intent["task_run_id"], intent["priority"]) == (state.worker.name, state.run.id, 2)
-    assert intent["description"] == decision["description"]
-    assert [tuple(row) for row in conn.execute(
-        "SELECT fact_id,source_order FROM intent_sources WHERE intent_id=? ORDER BY source_order", (intent_id,),
-    )] == [("baseline", 0), ("origin", 1)]
+    assert len(state.accepted) == 3
+    intent_ids = [item["id"] for item in state.accepted]
+    for index, intent_id in enumerate(intent_ids):
+        intent = conn.execute("SELECT * FROM intents WHERE id=?", (intent_id,)).fetchone()
+        assert (intent["creator"], intent["task_run_id"], intent["priority"]) == (state.worker.name, state.run.id, 2)
+        assert intent["description"] == decisions[index]["description"]
+        assert intent["depends_on"] == (intent_ids[index - 1] if index else "open-work" if open_work else None)
+        assert [tuple(row) for row in conn.execute(
+            "SELECT fact_id,source_order FROM intent_sources WHERE intent_id=? ORDER BY source_order", (intent_id,),
+        )] == [("baseline", 0), ("origin", 1)]
     context = json.loads(conn.execute("SELECT runtime_context_json FROM task_runs WHERE id=?", (state.run.id,)).fetchone()[0])
-    assert context["accepted_intent_submissions"]["0"]["intent_id"] == intent_id
+    assert {index: receipt["intent_id"] for index, receipt in context["accepted_intent_submissions"].items()} == {
+        str(index): intent_id for index, intent_id in enumerate(intent_ids)
+    }
     assert context["execution_delivery"] == state.frozen
     assert _write_decoded_reason(state, decoded) == "success"
-    assert state.accepted[0] == state.accepted[1]
-    assert conn.execute("SELECT count(*) FROM intents").fetchone()[0] == 1
-    assert conn.execute("SELECT count(*) FROM intent_sources").fetchone()[0] == 2
+    assert state.accepted[3:] == state.accepted[:3]
+    assert conn.execute("SELECT count(*) FROM intents").fetchone()[0] == 3 + int(open_work)
+    assert conn.execute("SELECT count(*) FROM intent_sources").fetchone()[0] == 6 + int(open_work)
     state.client.close()
 
 

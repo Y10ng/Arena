@@ -1,6 +1,37 @@
 # Dispatcher
 
-> 本文保留了历史执行器与旧协议设计，不代表各段均已与当前实现对齐。当前交接见“proj_037：输出截断与研究连续性”；`proj_036` 的完成拒绝后新决策、`proj_035` 的可靠交付及更早记录保留在后文，以各节实际实施记录为准，不自动成为本轮待办。不要据旧 driver、失败处理或示例输出重建当前系统。
+> 本文保留了历史执行器与旧协议设计，不代表各段均已与当前实现对齐。当前定向修复见“proj_038：Reason 提交结构与依赖同时有效”；`proj_037` 的截断续行、`proj_036` 的完成拒绝后新决策、`proj_035` 的可靠交付及更早记录保留在后文，以各节实际实施记录为准，不自动成为本轮待办。不要据旧 driver、失败处理或示例输出重建当前系统。
+
+## proj_038：Reason 提交结构与依赖同时有效（2026-10-12 UTC；代码、定向本地接受验证与完整宿主部署完成，真实任务未验收）
+
+### 已确认问题与批准范围
+
+本轮仅解决研究被内部提交协议矛盾打断，不重新审计历史待办，不扩展自主研究反馈利用，也不宣称增强自主选题或真实漏洞发现能力。proj_037 只提供上下文，已生效的截断续行及原提交修正边界保持不变。
+
+- **现场与本轮快照分开。** 用户已确认 tr017 的两个后续 Intent 带 `controls: []`，本地通过后遭 Dispatcher 拒绝。本轮重新核对当前进程与实际 PostgreSQL `127.0.0.1:55433/cairn_isolated`，02:21–02:24 UTC 的 `REPEATABLE READ READ ONLY`／ROLLBACK 快照确认 proj_038 为 active／generation 1，共17个Run；最新 tr017 为 failed／result_schema，验证码 phase_shape_invalid，无接受 receipt、delivery_retry、continuation 或受控完成拒绝边界。Dispatcher 新鲜投影仍为 execution_retry_blocked／reason／generation 1。全库无 queued／running，终局Run均有同代 termination／cleanup 确认。旧PID、时间及状态不是永久事实，启停前重新核查。
+- **当前生产首因。** `submission.py` 给 Reason intents 添加的 prefixItems 仅声明 depends_on。JSON Schema 的 items 不再校验被 prefixItems 覆盖的位置，而 maxItems 又使合法批次全部落在前缀内，因而完整 Intent 的额外字段、必填和类型限制被绕过。Runner 实际使用 TypeBox Compile，不是 Ajv；gateway 的 validate_phase_data 仍严格拒绝非法结构。历史冻结 Schema 原件未找到，本轮不把当前生产复现冒称逐字验证历史冻结文件。
+- **用户确认的方案。** 每个 prefix 项以 allOf 复用原 items 的完整 Intent Schema，并叠加既有当前位置的依赖限制；贯通生产 Schema → 既有 Worker 本地诊断与同会话修正 → 未放宽的 Dispatcher／Server 接受。只改必要生产者与已有验证用例，不新增 controls、不忽略额外字段，不扩大 result_schema／business_acceptance 自动重试，不增加次数、超时、提示词、状态、依赖或模型变更。
+
+### 代码实现与本地接受验证
+
+实施分支 `fix/proj-038-reason-schema`，从干净的 `docs/installation-guide`／`cd1a09b` 创建；不 commit／push。
+
+- **唯一生产代码改动。** `submission.py` 的 prefixItems 每项为 `allOf: [原 items, 原 depends_on 片段]`，同时保留唯一完整 Intent 定义及冻结 binding、来源限制、maxItems、已有依赖与同批前序 @N；修正原“items 仍检查每项”的错误注释。不复制字段模型、不加 controls 拒绝特例，也不在依赖片段加入 additionalProperties:false 或 depends_on 必填。Runner、gateway、Server、截断续行和重试策略均未修改。
+- **生产本地校验节点：1 passed。** 扩展 `container/pi-agent/tests/contracts.test.mjs` 的原生产 Reason Schema 用例，以 TypeBox Compile 验证三项批次：各前缀位置的 controls、缺 from／description、非法嵌套 from、未知来源 Fact、错误 description／Intent 类型均拒绝；self／forward／unknown 依赖拒绝；省略／null、已有ID、合法前序 @1／@2 通过。原 loopback HTTP 的依赖诊断与同会话修正仍通过。
+- **完整接受链路：6 passed。** 扩展 `test_pi_submission_receipts.py::test_goal_reason_structure_repairs_in_session_and_server_accepts_intent_receipts`，参数为非法字段在首／中／末项，及有／无已有依赖。生产上下文与冻结交付登记 → 实际 Pi 请求 Schema → 真实 Runner 首次本地拒绝 controls（additionalProperties、`/data/intents/*`）→ 同 Run／session 仅删除该字段，原合法内容与 @1／@2 不变 → candidate capture／outcome → 原 gateway → 原 writer → 隔离生产 Server router 实际接受三项 Intent。核对 provider／冻结／candidate Schema 摘要一致，安全修正工具范围、候选 parent、来源顺序、实际ID依赖、索引0／1／2的接受receipt；重复写回未增加 Intent／来源，冻结恢复及篡改 inputs 拒绝检查仍通过。不是只断言拒绝或 Runner status，也未手换最终 payload 绕过 Runner。
+- **验证边界。** 全部使用本地合成 provider 响应和隔离 SQLite，未访问目标、执行项目保存脚本或调用付费模型；没有写实际项目库。只跑上述定向节点，未跑全套、lint或浏览器矩阵，未安装依赖或另建验证框架。完整系统 `build:server` 成功（包含 vue-tsc 与 Vite），仅有插件耗时与大chunk提示；没有UI业务改动。增量代码差异与 git diff --check 已通过。
+
+### 部署、正常恢复与剩余限制
+
+**完整宿主部署完成，原项目容器保留。** 本次生产改动仅在宿主 Schema：PiDriver 随新请求发送它，原 Runner 动态编译；未重建 Worker 镜像或替换项目容器。单独运行 start 可能复用旧进程，因此按批准范围重载完整宿主系统，不以健康检查冒称真实研究接受。
+
+- **启停前门禁。** 02:52:17 UTC 的只读快照及紧接启停的第二次核查确认：唯一 active 项目为 proj_038／generation 1、无 Reason claim；全库 queued／running=0、未结算 candidate=0，物理 termination／cleanup 均确认，155个历史Run的 candidate_recovery 均为 stopped。最新 Reason 仍为 tr017／failed／result_schema，Dispatcher idle／running_task_count=0，同代 execution_retry_blocked。项目容器无 ExecIDs，进程仅 docker-init／sleep；未发现会中断在途工作或开启新模型调用的条件，未执行项目生命周期操作。
+- **实际重载与烟测。** 执行现有 `deploy/stop.sh`，再执行 `deploy/start.sh --host 0.0.0.0 --port 8001`；新 Server PID `1817480`、Dispatcher PID `1817654`，均与旧PID不同，已核对 `/proc` 启动身份、PID元数据的 proc_start_time 及 cwd。`/health` 为200／ok，`/`及入口引用的10项 `/static/` 资源均200，bytes与本次发布产物相同。两个PostgreSQL容器healthy。烟测脚本首次错误使用元数据键 starttime 而出现 KeyError；修正为 proc_start_time 后进程检查通过。静态资源检查最初错误筛选 `/assets/`、实际收集0项，因此该次不算资源验证；改用 `/static/` 并强制非空后，10项全部复验通过。以上为检查脚本错误，不是应用故障，不隐藏成全程一次通过。
+- **保留与部署后状态。** 原项目容器仍为 `341b742fbf83fda36f9b0087d57ebfdab6d750123797d7bb4deb60079cb2be59`，image仍为 `sha256:6bf2537efe9953204ed4642a0794130ce6c7d20a6ad13fe7527e09c08a1a16cc`，启动时间 `2026-10-10T09:43:23.807947236Z`、宿主PID `3978514`未变，原可写层与材料未替换。02:55:43 UTC 从新Server实际环境定位同一 `cairn_isolated`，显式 `REPEATABLE READ READ ONLY`／ROLLBACK 核对：proj_038仍active／generation 1、未claim，最新Reason仍tr017／failed／result_schema；Run17、Fact11、Intent10、candidate15、outcome15、Artifact116，与重载前一致。全库在途／未结算candidate仍为0，Dispatcher新鲜决策为02:55:42的 execution_retry_blocked／reason／generation 1，running_task_count=0。部署没有恢复研究或新增Run；新Schema可供后续新请求使用，不回写历史冻结交付或自动重投失败候选。
+
+**保留材料的正常恢复路径，仅说明、不执行。** 当前 active 上的 resume 是幂等noop，不能清除同代 result_schema 阻断；reopen 只适用于 completed，当前不可用。另行授权后可以普通 pause → 等待物理停止／ACK → resume：generation 1升至2，resume不再增代；不删事实、Intent、证据、历史Run或费用／预算。pause 使用 Docker stop 而非remove，保留原容器可写层及session材料；即使无在途Run，也须当前 activation 的 stopped／pause_generation 和其他恢复前置条件确认。新代 fresh Reason 使用新session及已接受共享事实／证据，不是续作失败tr017；未接受候选／旧会话正文不会自动升级成成果，也不保证自动消费全部原材料。resume开放自动研究，可能产生新模型费用。修复Schema或重启本身不清除旧失败，不将其加入同代fresh特例，不手改DB。
+
+本轮不 pause／resume／reopen／重跑 proj_038，不改历史记录、候选、证据或费用，不访问目标、不发起付费调用。真实项目接受、研究效果与发现能力均未验收，不能用合成接受或健康检查代替。i002→i003、i007→i008 的研究反馈／前提利用不纳入本轮；实施结束即停止。
 
 ## proj_037：输出截断与研究连续性（2026-10-10；代码、定向验证、宿主部署与新镜像完成，旧容器保留，真实任务未验收）
 
