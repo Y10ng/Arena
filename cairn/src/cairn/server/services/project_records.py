@@ -145,7 +145,6 @@ def list_project_summaries(tenant_id: str | None = None) -> list[ProjectSummary]
                 assessment_progress=parse_scenario_snapshot(row_value(row, "assessment_progress_json")) or None,
                 assessment_execution=project_meta_from_row(conn, row).assessment_execution,
                 verification_attempts_started=int(row_value(row, "verification_attempts_started") or 0),
-                explore_budget=row_value(row, "explore_budget"),
                 explore_deadline=row_value(row, "explore_deadline"),
                 authorization_expires_at=row_value(
                     row, "authorization_expires_at"
@@ -228,11 +227,8 @@ def _create_project_record(
     policy = policy_for_scenario(
         scenario,
         created_at=now,
-        explore_budget=body.explore_budget,
         explore_deadline=body.explore_deadline,
     )
-    if policy.logical_attempts_enabled:
-        snapshot["features"]["verification_reserve"] = policy.verification_reserve
     selected_workers = validate_tenant_worker_selection(
         conn,
         tenant_id=tenant_id,
@@ -248,9 +244,9 @@ def _create_project_record(
         INSERT INTO projects (
             id, title, status, created_at, scenario_key,
             scenario_snapshot_json, assessment_protocol,
-            vulnerability_fingerprint_version, explore_budget, explore_deadline,
+            vulnerability_fingerprint_version, explore_deadline,
             authorization_expires_at, preferred_workers_json, group_id, tenant_id
-        ) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             pid,
@@ -260,7 +256,6 @@ def _create_project_record(
             dump_json(snapshot),
             policy.protocol,
             policy.fingerprint_version,
-            policy.explore_budget,
             policy.explore_deadline,
             body.authorization_expires_at,
             "[]",

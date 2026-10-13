@@ -170,7 +170,7 @@ def _abandon_unclaimed_intents(
               AND t.intent_id = intents.id AND t.status IN ('queued','running'))
           AND NOT EXISTS (SELECT 1 FROM assessment_attempts a WHERE a.project_id = intents.project_id
               AND a.intent_id = intents.id AND a.status = 'active')
-          AND ( ? IN ('deadline_exceeded', 'budget_exhausted', 'user_stopped')
+          AND ( ? IN ('deadline_exceeded', 'user_stopped')
                 OR (assessment_role != 'verifier' AND depth_review_fact_id IS NULL))
         """,
         (now, reason, project_id, reason),
@@ -284,13 +284,9 @@ def advance_structured_convergence(
 
     stop_reason: str | None = None
     skip_reason: str | None = None
-    attempts = int(row_value(project, "explore_attempts_started") or 0)
     if policy.explore_deadline and now >= policy.explore_deadline:
         stop_reason = "deadline_exceeded"
         skip_reason = "deadline_skipped"
-    elif policy.explore_budget is not None and attempts >= policy.explore_budget:
-        stop_reason = "budget_exhausted"
-        skip_reason = "budget_skipped"
 
     if stop_reason is not None:
         _abandon_unclaimed_intents(conn, project_id, reason=stop_reason)
@@ -409,7 +405,6 @@ def assessment_execution_view(conn, project) -> dict:
     progress = assessment_progress(project)
     total = int(row_value(project, "explore_attempts_started") or 0)
     verified = int(row_value(project, "verification_attempts_started") or 0)
-    budget = policy.explore_budget
     rejection = execution_rejection_reason(project)
     return {
         "version": 2,
@@ -432,13 +427,10 @@ def assessment_execution_view(conn, project) -> dict:
         "depth_review_fact_id": progress.get("depth_review_fact_id"),
         "accepted_input_digest": progress.get("accepted_input_digest"),
         "review_input_digest": assessment_review_digest(conn, project["id"]) if policy.phased and progress.get("phase") == "depth_review" else None,
-        "verification_reserve": policy.verification_reserve,
-        "budget": budget,
         "deadline": policy.explore_deadline,
+        "authorization_expires_at": row_value(project, "authorization_expires_at"),
         "attempts_started": total,
         "verification_attempts_started": verified,
-        "remaining_total": None if budget is None else max(0, budget - total),
-        "remaining_discovery": None if budget is None else max(0, budget - total - max(policy.verification_reserve - verified, 0)),
         "stop_reason": row_value(project, "coverage_stop_reason"),
         "current_tasks": [dict(row) for row in conn.execute(
             "SELECT id, intent_id, task_type, status FROM task_runs WHERE project_id = ? AND status IN ('queued', 'running') ORDER BY id", (project["id"],)
@@ -454,7 +446,6 @@ def assessment_has_running_work(conn, project_id: str, *, exclude_task_run_id: s
 
 
 _GOAL_DRIVEN_STOP_REASONS = {
-    "budget_exhausted",
     "deadline_exceeded",
     "user_stopped",
 }
@@ -548,11 +539,8 @@ def advance_goal_driven_convergence(
         reason = str(existing)
     elif reason is None:
         now = utcnow()
-        attempts = int(row_value(project, "explore_attempts_started") or 0)
         if policy.explore_deadline and now >= policy.explore_deadline:
             reason = "deadline_exceeded"
-        elif policy.explore_budget is not None and attempts >= policy.explore_budget:
-            reason = "budget_exhausted"
     if reason not in _GOAL_DRIVEN_STOP_REASONS:
         return None
 
@@ -697,11 +685,10 @@ def _advance_assessment_phase(conn, project_id: str) -> str | None:
     active_explore = conn.execute(
         "SELECT 1 FROM task_runs WHERE project_id = ? AND task_type IN ('explore', 'bootstrap') AND status IN ('queued','running') LIMIT 1", (project_id,)
     ).fetchone() is not None
-    total = int(row_value(project, "explore_attempts_started") or 0)
     active_attempt = conn.execute(
         "SELECT 1 FROM assessment_attempts WHERE project_id = ? AND status = 'active' LIMIT 1", (project_id,)
     ).fetchone() is not None
-    # 已收费且等待 bounded retry 的 attempt 仍是义务，T == B 不能剥夺其免费重试。
+    # 已计量且等待 bounded retry 的 Attempt 仍是未结算义务。
     quiescent = not active_explore and not active_attempt and running == 0
     phase = progress.get("phase")
     if phase == "mapping":
@@ -712,12 +699,8 @@ def _advance_assessment_phase(conn, project_id: str) -> str | None:
             _set_phase(conn, project_id, "baseline")
             phase = "baseline"
     if phase == "baseline" and quiescent:
-        remaining = assessment_execution_view(conn, project)["remaining_discovery"]
-        accounted = _baseline_accounted(conn, project_id)
-        if accounted or remaining == 0:
-            _abandon_unclaimed_intents(conn, project_id, reason="baseline_accounted" if accounted else "discovery_budget_exhausted")
-            if not accounted:
-                _skip_open_cells(conn, project_id, reason="discovery_budget_exhausted")
+        if _baseline_accounted(conn, project_id):
+            _abandon_unclaimed_intents(conn, project_id, reason="baseline_accounted")
             _set_phase(conn, project_id, "depth_review")
     if phase == "deep" and quiescent:
         open_work = conn.execute(
@@ -726,26 +709,6 @@ def _advance_assessment_phase(conn, project_id: str) -> str | None:
         accounted = _baseline_accounted(conn, project_id)
         if open_work is None and progress.get("depth_review_fact_id") and accounted:
             _set_phase(conn, project_id, "finalizing")
-        elif policy.explore_budget is not None and total >= policy.explore_budget:
-            stop_assessment(conn, project_id, "budget_exhausted")
-            return "budget_exhausted"
-        elif assessment_execution_view(conn, project)["remaining_discovery"] == 0:
-            # 保留额度仅供 verifier；未运行深测必须显式记为未测，而不是成功或普通 abandon。
-            conn.execute(
-                """UPDATE intents SET concluded_at = ?, conclusion = 'abandoned',
-                       conclusion_reason = 'discovery_budget_exhausted'
-                   WHERE project_id = ? AND concluded_at IS NULL AND to_fact_id IS NULL
-                     AND worker IS NULL AND assessment_role != 'verifier'""",
-                (utcnow(), project_id),
-            )
-            if not accounted:
-                _skip_open_cells(conn, project_id, reason="discovery_budget_exhausted")
-            conn.execute("UPDATE projects SET coverage_stop_reason = 'discovery_budget_exhausted' WHERE id = ?", (project_id,))
-            pending = conn.execute(
-                "SELECT 1 FROM intents WHERE project_id = ? AND concluded_at IS NULL AND to_fact_id IS NULL LIMIT 1", (project_id,)
-            ).fetchone()
-            if pending is None and progress.get("depth_review_fact_id") and _baseline_accounted(conn, project_id):
-                _set_phase(conn, project_id, "finalizing")
     return None
 
 

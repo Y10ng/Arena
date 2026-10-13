@@ -607,7 +607,6 @@ def project_meta_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> Project
             template_profile=report_policy.template_profile or None,
             reason=report_policy.reason,
         ),
-        explore_budget=row_value(row, "explore_budget"),
         explore_deadline=row_value(row, "explore_deadline"),
         authorization_expires_at=row_value(row, "authorization_expires_at"),
         explore_attempts_started=int(row_value(row, "explore_attempts_started") or 0),

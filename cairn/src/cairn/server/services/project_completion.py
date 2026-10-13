@@ -256,15 +256,10 @@ def _complete_project_record(
         if goal_driven:
             limit_reason = row_value(project_row, "coverage_stop_reason")
             if (
-                limit_reason in {"budget_exhausted", "deadline_exceeded", "user_stopped"}
+                limit_reason in {"deadline_exceeded", "user_stopped"}
                 or (
                     policy.explore_deadline
                     and utcnow() >= policy.explore_deadline
-                )
-                or (
-                    policy.explore_budget is not None
-                    and int(row_value(project_row, "explore_attempts_started") or 0)
-                    >= policy.explore_budget
                 )
             ):
                 raise HTTPException(409, "goal_driven_completion_stopping")
@@ -342,42 +337,24 @@ def _complete_project_record(
             require_verified = bool(scenario_features.get("verifier"))
             proj_row = conn.execute(
                 """
-                SELECT explore_budget, explore_deadline, reason_idle_streak
+                SELECT explore_deadline, reason_idle_streak
                 FROM projects
                 WHERE id = ?
                 """,
                 (project_id,),
             ).fetchone()
-            budget = (
-                proj_row["explore_budget"]
-                if proj_row and "explore_budget" in proj_row.keys()
-                else None
-            )
             deadline = (
                 proj_row["explore_deadline"]
                 if proj_row and "explore_deadline" in proj_row.keys()
                 else None
             )
-            if budget is not None or deadline:
-                succeeded = conn.execute(
-                    """
-                    SELECT COUNT(*) AS c
-                    FROM task_runs
-                    WHERE project_id = ? AND task_type = 'explore'
-                      AND status = 'succeeded'
-                    """,
-                    (project_id,),
-                ).fetchone()["c"]
-                now = utcnow()
-                if (budget is not None and succeeded >= budget) or (
-                    deadline and now >= deadline
-                ):
-                    mark_slots_skipped(
-                        conn,
-                        project_id,
-                        tier=None,
-                        reason="budget coverage tail",
-                    )
+            if deadline and utcnow() >= deadline:
+                mark_slots_skipped(
+                    conn,
+                    project_id,
+                    tier=None,
+                    reason="deadline coverage tail",
+                )
 
             core_open = count_open_coverage_slots(
                 conn,

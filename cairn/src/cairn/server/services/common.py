@@ -211,12 +211,6 @@ SCENARIO_FEATURE_SCHEMA_DEFS: tuple[dict[str, Any], ...] = (
         "default": DEFAULT_PROMPT_GROUP, "runtime_driver": False,
         "description": "报告使用的 Prompt 组；留空时使用目标驱动内置模板。",
     },
-    {
-        "key": "exploration_limit", "label": "探索投入", "value_type": "enum",
-        "default": "balanced", "options": ["compact", "balanced", "thorough"],
-        "runtime_driver": False,
-        "description": "创建项目时使用的默认探索预算，可在项目中单独设置。",
-    },
 )
 KNOWLEDGE_KEY_RE = re.compile(r"^[a-z0-9_-]+$")
 KNOWLEDGE_FILE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")

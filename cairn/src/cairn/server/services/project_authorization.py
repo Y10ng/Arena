@@ -25,6 +25,7 @@ from cairn.server.db import get_conn
 from cairn.server.models import ProjectMeta, ReauthorizeProjectRequest
 
 from .assessment_policy import (
+    DEFAULT_COPY_PROTOCOL,
     parse_scenario_snapshot,
     policy_from_project_row,
     row_value,
@@ -51,6 +52,28 @@ def _goal_driven_target_scope(conn, project_id: str) -> tuple[str, list[str]]:
         ).fetchall()
     ]
     return target_scope_v3(targets)
+
+
+def _historical_scope_reserve(project, snapshot: dict[str, Any]) -> int:
+    """仅重建 v1 历史授权摘要，不参与当前目标驱动的执行策略。"""
+    features = snapshot.get("features") or {}
+    if int(features.get("assessment_contract_version") or 0) != 2:
+        return 0
+    if row_value(project, "assessment_protocol") != DEFAULT_COPY_PROTOCOL:
+        return 0
+    budget = row_value(project, "explore_budget")
+    configured = features.get("verification_reserve")
+    if budget is None:
+        if configured not in (None, 0):
+            raise ValueError("unlimited budget has no fixed verification reserve")
+        return 0
+    budget = int(budget)
+    if budget < 1:
+        raise ValueError("explore_budget must be positive or null")
+    reserve = min(budget - 1, (budget + 4) // 5) if configured is None else int(configured)
+    if not 0 <= reserve < budget:
+        raise ValueError("verification_reserve must satisfy 0 <= V < B")
+    return reserve
 
 
 def authorization_scope_projection(
@@ -88,8 +111,12 @@ def authorization_scope_projection(
         target_ids=target_ids,
         assessment_protocol=policy.protocol,
         assessment_contract_version=policy.contract_version,
-        explore_budget=policy.explore_budget,
-        verification_reserve=policy.verification_reserve,
+        explore_budget=(
+            int(project["explore_budget"])
+            if policy.protocol == DEFAULT_COPY_PROTOCOL and row_value(project, "explore_budget") is not None
+            else None
+        ),
+        verification_reserve=_historical_scope_reserve(project, snapshot),
         window_seconds=window_seconds,
     )
     return AuthorizationScopeProjection(

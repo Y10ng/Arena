@@ -243,7 +243,11 @@ Body：
 
 #### POST /projects
 
-创建新项目。`origin` 和 `goal` 写入 `facts` 作为特殊 Fact，`hints` 可选。Worker 数量和手工 connectivity 结果不会阻止项目创建；项目若设置 `preferred_workers`，Dispatcher 在后续任务调度时按原有规则严格使用该 Worker 名单。
+创建新项目。`origin` 和 `goal` 写入 `facts` 作为特殊 Fact，`hints` 可选。必须显式选择同 Tenant 的项目组 `group_id` 和至少一个可用的 `tenant_worker_ids`；创建不要求手工 connectivity 验证。当前创建请求拒绝额外字段（422），旧客户端不得继续发送 `explore_budget`、`exploration_limit` 或 `verification_reserve` 等已移除额度参数，也不再使用旧的 `preferred_workers`／`bootstrap_enabled` 创建参数。
+
+当前目标驱动执行没有项目级固定 Explore 次数上限或复核预留；discovery 与 verifier 都保留正常准入、证据接受和必要实质复核。`explore_deadline` 是唯一可选项目执行停止时间，省略或 `null` 表示不限期，非空值必须是含时区的未来绝对时间。到期停止新研究并按已有路径有序停止和收口，不代表 Goal 达成，也不只是停止新增 Explore。当前没有运行中编辑或自动延期 API，重新授权不延长这个执行停止时间。
+
+`authorization_expires_at` 在 API 请求中必须显式携带：未来绝对时间或 `null`，不能省略该键。创建页的“授权到期时间”可选、默认留空且可直接编辑，无需额外勾选无限期确认即可创建；留空表示不设到期时间，payload 明确发送 `authorization_expires_at: null`。如实际授权有期限，请填写；非空值沿用本地时间到含时区绝对时间的转换和未来时间校验，非法输入不能静默转为 `null`，清空后恢复提交 `null`。这是请求字段的显式性，不是要求使用者逐次手动确认，也不改变已有项目或授权 grant。授权到期时间与 `explore_deadline` 独立，设置执行停止时间不会生成授权期限，二者不能互相推导。不限项目执行期限不取消授权范围、用户停止、单 Run timeout、有界 retry／补交／截断续行、并发及静止／物理停止确认。累计 Attempt、Run、证据和历史记录继续保留；旧预算字段仅作为历史材料留在数据库或冻结原件中，不再控制当前运行，也不会自动恢复旧停止项目。
 
 Body：
 
@@ -252,10 +256,13 @@ Body：
   "title": "xx渗透测试",
   "origin": "目标 http://192.168.1.10",
   "goal": "拿到 flag",
-  "bootstrap_enabled": true,
+  "group_id": "group_001",
+  "tenant_worker_ids": ["worker_001"],
+  "explore_deadline": null,
+  "authorization_expires_at": null,
   "hints": [
-    { "content": "优先看 web 服务", "creator": "human" },
-    { "content": "注意 80 端口", "creator": "human" }
+    { "content": "优先看 web 服务" },
+    { "content": "注意 80 端口" }
   ]
 }
 ```

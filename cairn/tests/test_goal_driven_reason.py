@@ -75,9 +75,6 @@ def goal_project():
         "surface_manifest_enabled": True,
         "independent_verifier_enabled": True,
         "outcome_contract_version": 3,
-        "remaining_total": 7,
-        "remaining_discovery": 5,
-        "remaining_verification": 2,
         # 历史字段即使意外存在，也不能重新启用旧深测路径。
         "phase": "depth_review",
     }
@@ -88,7 +85,6 @@ def goal_project():
         assessment_execution=execution,
         execution_generation=4,
         vulnerability_fingerprint_version=1,
-        explore_budget=12,
         explore_deadline="2026-09-22T00:00:00Z",
         authorization_expires_at=None,
         explore_attempts_started=3,
@@ -155,7 +151,12 @@ def test_goal_driven_reason_context_binds_digest_priority_goal_and_scope():
     assessment = json.loads(context.replacements["assessment_execution"])
     assert "selected_depth_obligations" not in assessment
     decision = json.loads(context.replacements["decision_context"])
-    assert decision["logical_budget"]["remaining_discovery"] == 5
+    assert decision["attempt_statistics"] == {
+        "explore_attempts_started": 3,
+        "verification_attempts_started": 2,
+    }
+    assert "logical_budget" not in decision
+    assert decision["execution_cutoff"] == project.project.explore_deadline
     assert decision["concurrency"] == {
         "open_intents": 2,
         "claimed_open_intents": 1,
@@ -174,9 +175,38 @@ def test_goal_driven_decision_digest_ignores_lease_noise_but_tracks_business_inp
     lease_change.project.reason = SimpleNamespace(worker="reasoner")
     assert goal_driven_decision_input_digest(lease_change) == baseline
 
+    historical_budget_change = deepcopy(project)
+    historical_budget_change.project.explore_budget = 1
+    historical_budget_change.project.assessment_execution.update(
+        budget=1, verification_reserve=8, remaining_discovery=0,
+    )
+    assert goal_driven_decision_input_digest(historical_budget_change) == baseline
+
+    cutoff_change = deepcopy(project)
+    cutoff_change.project.explore_deadline = None
+    assert goal_driven_decision_input_digest(cutoff_change) != baseline
+
     business_change = deepcopy(project)
     business_change.intents[0].priority = 0
     assert goal_driven_decision_input_digest(business_change) != baseline
+
+
+@pytest.mark.parametrize(("budget", "reserve"), [(40, 99), ("invalid", "invalid")])
+def test_goal_driven_policy_ignores_invalid_historical_limits(budget, reserve):
+    from cairn.server.services.assessment_policy import policy_from_project_row
+
+    policy = policy_from_project_row({
+        "assessment_protocol": "goal-driven-v1",
+        "explore_budget": budget,
+        "scenario_snapshot_json": json.dumps({"features": {
+            "assessment_contract_version": 2, "verifier_contract_version": 1,
+            "verification_reserve": reserve,
+        }}),
+    })
+    assert policy.goal_driven
+    assert policy.contract_version == 2
+    assert policy.logical_attempts_enabled
+    assert policy.explore_deadline is None
 
 
 def test_goal_driven_reason_accepts_surfaces_and_prioritized_intents_together():

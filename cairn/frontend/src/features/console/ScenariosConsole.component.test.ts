@@ -503,7 +503,6 @@ describe('ScenariosConsole whole-list ownership', () => {
       features: {
         assessment_protocol: 'legacy',
         blocker_cooldown_version: '0',
-        exploration_limit: 'balanced',
         isolation: 'container',
         minimum_coverage_version: '0',
         network_flow: false,

@@ -1,6 +1,7 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { ref, unref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import Input from '@/components/ui/Input.vue'
 import NewProject from './NewProject.vue'
 
 const aiAgentOrigin = 'AI Agent origin\n- tenant: test-tenant\n- side effects: reversible only'
@@ -360,7 +361,6 @@ describe('NewProject shared control migration', () => {
       scenario: 'default',
       tenant_worker_ids: ['worker-available'],
       group_id: 'group-a',
-      explore_budget: 40,
       explore_deadline: new Date('2035-04-05T10:30').toISOString(),
       authorization_expires_at: new Date('2035-04-06T11:45').toISOString(),
       resource_batch_id: 'batch-created',
@@ -374,26 +374,110 @@ describe('NewProject shared control migration', () => {
     expect(mocks.router.push).toHaveBeenCalledWith('/projects/project-created')
   })
 
-  it('requires an explicit authorization term and sends null only after unlimited is confirmed', async () => {
+  it('creates with explicit null without touching the optional authorization controls', async () => {
     await mountPage()
+
+    expect(document.querySelector('#np-explore-budget')).toBeNull()
+    expect(document.body.textContent).toContain('执行停止时间')
+    expect(document.body.textContent).toContain('留空为不限')
+    expect(document.body.textContent).toContain('有序停止在途执行')
+    expect(document.querySelector<HTMLInputElement>('#np-explore-deadline')?.value).toBe('')
+    const authorizationInput = document.querySelector<HTMLInputElement>(
+      '#np-authorization-expires-at',
+    )!
+    expect(authorizationInput.value).toBe('')
+    expect(authorizationInput.disabled).toBe(false)
+    expect(authorizationInput.required).toBe(false)
+    expect(document.body.textContent).toContain('留空表示不设到期时间；如实际授权有期限，请填写')
+    expect(document.body.textContent).not.toContain('明确确认真实授权无限期有效')
+    expect(document.querySelector('input[aria-label="授权无限期有效"]')).toBeNull()
+    expect(
+      document.querySelector<HTMLInputElement>('input[aria-label="选择 Worker 可用 Worker"]')?.checked,
+    ).toBe(true)
 
     await setFieldValue('#np-title', 'Unlimited authorization')
     await selectOption('np-group-select', 'Red Team')
-
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true }))
+    buttonByText('确认创建项目')?.click()
     await flushPromises()
 
+    expect(mocks.createProject).toHaveBeenCalledOnce()
+    expect(mocks.createProject).toHaveBeenCalledWith({
+      title: 'Unlimited authorization',
+      origin: 'default origin\npublic environment context',
+      goal: 'default goal',
+      scenario: 'default',
+      tenant_worker_ids: ['worker-available'],
+      group_id: 'group-a',
+      authorization_expires_at: null,
+      library_keys: [],
+    })
+    expect(mocks.router.push).toHaveBeenCalledWith('/projects/project-created')
+  })
+
+  it('validates the optional stop time without deriving an authorization expiry', async () => {
+    await mountPage()
+    await setFieldValue('#np-title', 'Independent stop time')
+    await selectOption('np-group-select', 'Red Team')
+
+    await setFieldValue('#np-explore-deadline', '2000-01-01T00:00')
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true }))
+    await flushPromises()
     expect(mocks.createProject).not.toHaveBeenCalled()
-    expect(document.body.textContent).toContain('请选择授权过期时间或明确确认无限期授权')
+    expect(document.body.textContent).toContain('执行停止时间必须晚于当前时间')
 
-    document.querySelector<HTMLInputElement>('input[aria-label="授权无限期有效"]')?.click()
+    await setFieldValue('#np-explore-deadline', '2035-04-05T10:30')
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true }))
+    await flushPromises()
+    expect(mocks.createProject).toHaveBeenCalledOnce()
+    expect(mocks.createProject.mock.calls[0]?.[0]).toMatchObject({
+      explore_deadline: new Date('2035-04-05T10:30').toISOString(),
+      authorization_expires_at: null,
+    })
+    expect(document.querySelector<HTMLInputElement>('#np-authorization-expires-at')?.value).toBe('')
+  })
+
+  it('submits a finite authorization expiry and restores explicit null after clearing it', async () => {
+    await mountPage()
+    await setFieldValue('#np-title', 'Editable authorization')
+    await selectOption('np-group-select', 'Red Team')
+
+    await setFieldValue('#np-authorization-expires-at', '2035-04-06T11:45')
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true }))
+    await flushPromises()
+    expect(mocks.createProject).toHaveBeenCalledOnce()
+    expect(mocks.createProject.mock.calls[0]?.[0]).toMatchObject({
+      authorization_expires_at: new Date('2035-04-06T11:45').toISOString(),
+    })
+    expect(mocks.createProject.mock.calls[0]?.[0]).not.toHaveProperty('explore_deadline')
+    expect(document.querySelector<HTMLInputElement>('#np-explore-deadline')?.value).toBe('')
+
+    await setFieldValue('#np-authorization-expires-at', '')
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true }))
+    await flushPromises()
+    expect(mocks.createProject).toHaveBeenCalledTimes(2)
+    expect(mocks.createProject.mock.calls[1]?.[0]).toHaveProperty('authorization_expires_at', null)
+    expect(mocks.createProject.mock.calls[1]?.[0]).not.toHaveProperty('explore_deadline')
+  })
+
+  it.each([
+    ['2000-01-01T00:00', '授权到期时间必须晚于当前时间'],
+    ['invalid-date', '授权到期时间格式无效'],
+  ])('rejects nonempty authorization expiry %s instead of submitting null', async (value, error) => {
+    const wrapper = await mountPage()
+    await setFieldValue('#np-title', 'Invalid authorization')
+    await selectOption('np-group-select', 'Red Team')
+
+    // datetime-local 会清空非法 DOM 值；通过控件事件验证非空非法表单值不会降级成 null。
+    const input = wrapper.findAllComponents(Input).find(
+      (component) => component.attributes('id') === 'np-authorization-expires-at',
+    )!
+    input.vm.$emit('update:modelValue', value)
     await flushPromises()
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true }))
     await flushPromises()
-
-    expect(mocks.createProject).toHaveBeenCalledWith(
-      expect.objectContaining({ authorization_expires_at: null }),
-    )
+    expect(mocks.createProject).not.toHaveBeenCalled()
+    expect(document.body.textContent).toContain(error)
+    expect(mocks.router.push).not.toHaveBeenCalled()
   })
 
   it('keeps an uploaded batch after project validation fails so submission can retry', async () => {
@@ -404,8 +488,6 @@ describe('NewProject shared control migration', () => {
 
     await setFieldValue('#np-title', 'Retry project')
     await selectOption('np-group-select', 'Red Team')
-    document.querySelector<HTMLInputElement>('input[aria-label="授权无限期有效"]')?.click()
-    await flushPromises()
 
     const fileInput = document.querySelectorAll<HTMLInputElement>('input[type="file"]')[0]
     Object.defineProperty(fileInput, 'files', {

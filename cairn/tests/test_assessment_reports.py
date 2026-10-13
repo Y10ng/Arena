@@ -2980,7 +2980,26 @@ def test_goal_driven_report_coverage_uses_experiment_records_and_intent_conclusi
             """
         )
 
-        coverage = assessment_reports._goal_driven_report_coverage(conn, "p1")
+        snapshot = json.loads(conn.execute(
+            "SELECT scenario_snapshot_json FROM projects WHERE id='p1'"
+        ).fetchone()[0])
+        snapshot["features"]["verification_reserve"] = 8
+        conn.execute(
+            "UPDATE projects SET explore_budget=40, explore_attempts_started=47, scenario_snapshot_json=? WHERE id='p1'",
+            (json.dumps(snapshot),),
+        )
+        packet = build_assessment_report_packet(conn, "p1")
+        assert "explore_budget" not in packet.project
+        assert not {"explore_budget", "verification_reserve"} & packet.policy.keys()
+        execution = packet.assessment_summary["execution"]
+        assert execution["deadline"] is None
+        assert execution["attempts_started"] == 47
+        assert not {"budget", "verification_reserve", "remaining_total", "remaining_discovery"} & execution.keys()
+        assert packet.project["scenario_snapshot"] == snapshot
+        assert json.loads(conn.execute(
+            "SELECT scenario_snapshot_json FROM projects WHERE id='p1'"
+        ).fetchone()[0]) == snapshot
+        coverage = packet.assessment_summary["coverage"]
 
         assert [item["intent_id"] for item in coverage["tested"]] == [
             "intent-tested"

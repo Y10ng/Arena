@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 import pytest
 
@@ -230,9 +231,9 @@ def test_admin_foreign_project_uses_target_tenant_options_and_attribution() -> N
     )
     assert detail.project.vulnerability_fingerprint_version == 1
     assert detail.project.assessment_protocol == "goal-driven-v1"
-    assert detail.project.explore_budget == 40
+    assert "explore_budget" not in detail.project.model_dump()
     assert detail.project.assessment_progress is None
-    assert detail.project.assessment_execution["verification_reserve"] == 8
+    assert "verification_reserve" not in detail.project.assessment_execution
     assert [item.id for item in list_projects(owner)] == [detail.project.id]
     summaries = list_projects(admin)
     assert {item.id for item in summaries} == {detail.project.id, admin_detail.project.id}
@@ -428,6 +429,29 @@ def test_project_creation_consumes_binary_resource_batch(tmp_path: Path) -> None
     }
 
 
+@pytest.mark.parametrize(("field", "value"), [
+    ("explore_budget", 40), ("explore_budget", None),
+    ("exploration_limit", "balanced"), ("verification_reserve", 8),
+])
+def test_create_project_rejects_removed_budget_fields_with_422(monkeypatch, field, value) -> None:
+    from cairn.server.auth import protect_cookie_request
+
+    principal = RequestPrincipal(kind="user", subject_id="fixture-user", tenant_id="fixture-tenant", role="user")
+    monkeypatch.setitem(app.dependency_overrides, protect_cookie_request, lambda: principal)
+    response = TestClient(app).post("/projects", json={
+        "title": "Removed budget request", "origin": "授权本地测试", "goal": "验证创建边界",
+        "tenant_worker_ids": ["fixture-worker"], "group_id": "fixture-group",
+        "authorization_expires_at": None, field: value,
+    })
+    assert response.status_code == 422
+    assert any(
+        error["loc"] == ["body", field] and error["type"] == "extra_forbidden"
+        for error in response.json()["detail"]
+    )
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT COUNT(*) AS c FROM projects").fetchone()["c"] == 0
+
+
 def test_project_creation_requires_explicit_authorization_expiry_choice() -> None:
     with pytest.raises(ValidationError) as exc:
         CreateProjectRequest(
@@ -466,16 +490,23 @@ def test_project_creation_rejects_expired_authorization() -> None:
     assert exc.value.detail == "authorization_expires_at_not_future"
 
 
-def test_default_copy_v2_project_freezes_scenario_and_assessment_policy() -> None:
+@pytest.mark.parametrize("deadline", [None, "2099-01-01T00:00:00Z"])
+def test_goal_driven_project_freezes_scenario_without_budget_and_keeps_optional_deadline(deadline) -> None:
     principal = _principal("snapshot-owner")
     worker = _worker(principal, "Snapshot Worker")
+    with db.get_conn() as conn:
+        conn.execute(
+            "UPDATE scenarios SET features_json = ? WHERE key = 'goal-driven-v1'",
+            (json.dumps({"sandbox": True, "exploration_limit": "thorough", "verification_reserve": 8}),),
+        )
 
     project = create_project_record(
         CreateProjectRequest(
             title="Snapshot project",
             origin="已有接口说明和两个测试角色，关注订单审批相关功能",
             goal="检查普通用户之间的数据隔离及审批流程",
-            scenario="default-copy-v2",
+            scenario="goal-driven-v1",
+            **({"explore_deadline": deadline} if deadline is not None else {}),
             tenant_worker_ids=[worker.id],
             group_id=_group(principal).id,
             authorization_expires_at=None,
@@ -485,7 +516,7 @@ def test_default_copy_v2_project_freezes_scenario_and_assessment_policy() -> Non
 
     assert project.targets == []
     frozen = project.project.scenario_snapshot
-    assert frozen["key"] == "default-copy-v2"
+    assert frozen["key"] == "goal-driven-v1"
     assert frozen["prompt_group"] == "goal-driven-v1"
     assert frozen["features"]["assessment_protocol"] == "goal-driven-v1"
     assert frozen["features"]["report_prompt_group"] == "goal-driven-v1"
@@ -499,8 +530,11 @@ def test_default_copy_v2_project_freezes_scenario_and_assessment_policy() -> Non
     assert "minimum_coverage_version" not in frozen["features"]
     assert "quality_gate_version" not in frozen["features"]
     assert project.project.assessment_protocol == "goal-driven-v1"
-    assert project.project.explore_budget == 40
-    assert project.project.explore_deadline is None
+    assert "explore_budget" not in project.project.model_dump()
+    assert "verification_reserve" not in frozen["features"]
+    assert "exploration_limit" not in frozen["features"]
+    assert not {"budget", "verification_reserve", "remaining_total", "remaining_discovery"} & project.project.assessment_execution.keys()
+    assert project.project.explore_deadline == deadline
     assert project.project.assessment_progress is None
 
     with db.get_conn() as conn:
@@ -511,28 +545,29 @@ def test_default_copy_v2_project_freezes_scenario_and_assessment_policy() -> Non
         ).fetchone()
         assert json.loads(row["scenario_snapshot_json"]) == frozen
         assert row["assessment_protocol"] == "goal-driven-v1"
-        assert row["explore_budget"] == 40
-        assert row["explore_deadline"] is None
+        assert row["explore_budget"] is None
+        assert row["explore_deadline"] == deadline
         conn.execute(
             "UPDATE scenarios SET label = ?, prompt_group = ?, features_json = ? WHERE key = ?",
             (
                 "Changed after creation",
                 "default",
                 json.dumps({"sandbox": True}),
-                "default-copy-v2",
+                "goal-driven-v1",
             ),
         )
 
     reloaded = get_project_detail(project.project.id, tenant_id=principal.tenant_id)
     assert reloaded.project.scenario_snapshot == frozen
-    assert reloaded.project.scenario_snapshot["key"] == "default-copy-v2"
+    assert reloaded.project.scenario_snapshot["key"] == "goal-driven-v1"
     assert reloaded.project.scenario_snapshot["prompt_group"] == "goal-driven-v1"
     assert (
         reloaded.project.scenario_snapshot["features"]["report_prompt_group"]
         == "goal-driven-v1"
     )
     assert reloaded.project.assessment_protocol == "goal-driven-v1"
-    assert reloaded.project.explore_budget == 40
+    assert "explore_budget" not in reloaded.project.model_dump()
+    assert reloaded.project.explore_deadline == deadline
     assert reloaded.project.assessment_quality is None
 
 

@@ -537,7 +537,6 @@ class ProjectMeta(BaseModel):
     assessment_protocol: str = ""
     vulnerability_fingerprint_version: int | None = None
     report_capability: ReportCapabilityView = Field(default_factory=ReportCapabilityView)
-    explore_budget: int | None = None
     explore_deadline: str | None = None
     authorization_expires_at: str | None = None
     explore_attempts_started: int = 0
@@ -620,6 +619,8 @@ class CreateHintInline(BaseModel):
 
 
 class CreateProjectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str
     origin: str
     goal: str
@@ -634,7 +635,6 @@ class CreateProjectRequest(BaseModel):
     tenant_worker_ids: list[str] = Field(min_length=1)
     # 新建项目必须显式绑定同 Tenant 的项目组；存量项目生命周期仍允许为空。
     group_id: str
-    explore_budget: int = Field(default=40, ge=1, le=10_000, strict=True)
     explore_deadline: str | None = None
     # 创建方必须显式选择未来期限或以 null 表示无限期，不能靠字段缺失推导授权。
     authorization_expires_at: str | None

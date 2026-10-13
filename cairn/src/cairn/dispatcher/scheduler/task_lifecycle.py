@@ -481,10 +481,7 @@ class TaskLifecycleMixin(TaskRunFinishMixin, DispatchDecisionsMixin):
                 if isinstance(admission.data, dict)
                 else None
             )
-            if detail in {
-                "explore_budget_exhausted",
-                "explore_deadline_exceeded",
-            }:
+            if detail == "explore_deadline_exceeded":
                 convergence = self.client.advance_coverage_convergence(
                     project.project.id
                 )

@@ -109,15 +109,6 @@ export const DEFAULT_FEATURE_SCHEMA: ScenarioFeatureSchemaItem[] = [
     runtime_driver: false,
     description: '手动 durable 报告使用的独立 Prompt Group。',
   },
-  {
-    key: 'exploration_limit',
-    label: 'Exploration Limit',
-    value_type: 'enum',
-    default: 'balanced',
-    options: ['compact', 'balanced', 'thorough'],
-    runtime_driver: false,
-    description: 'Hard Explore attempt and wall-clock limit.',
-  },
 ]
 
 export interface ValidationResult {

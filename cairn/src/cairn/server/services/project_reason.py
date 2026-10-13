@@ -322,18 +322,11 @@ def _maybe_converge_coverage(conn, project_id: str, row) -> str | None:
         (idle, fact_count, project_id),
     )
 
-    # D 预算兜底：到点把所有层 pending/exploring 标 skipped（含 core），允许强制 complete。
-    budget = row["explore_budget"] if "explore_budget" in row.keys() else None
+    # 历史覆盖路径仍保留执行截止收口，不再以完成次数强制结算。
     deadline = row["explore_deadline"] if "explore_deadline" in row.keys() else None
-    if budget is not None or deadline:
-        succeeded = conn.execute(
-            "SELECT COUNT(*) AS c FROM task_runs WHERE project_id = ? AND task_type = 'explore' AND status = 'succeeded'",
-            (project_id,),
-        ).fetchone()["c"]
-        now = utcnow()
-        if (budget is not None and succeeded >= budget) or (deadline and now >= deadline):
-            mark_slots_skipped(conn, project_id, tier=None, reason="budget coverage tail")
-            return
+    if deadline and utcnow() >= deadline:
+        mark_slots_skipped(conn, project_id, tier=None, reason="deadline coverage tail")
+        return
 
     # B 收益递减：连续 K 轮无新 fact → 收尾 extended（core 仍由完成门 A 保证）。
     k_row = conn.execute("SELECT coverage_idle_rounds FROM settings WHERE id = 1").fetchone()

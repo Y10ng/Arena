@@ -199,7 +199,7 @@
         <details class="advanced-settings" open>
           <summary>
             <span>高级设置</span>
-            <span class="summary-hint">预算、时限与辅助资料</span>
+            <span class="summary-hint">时限与辅助资料</span>
           </summary>
 
           <div class="advanced-settings-content">
@@ -207,31 +207,15 @@
               <div class="section-title-row compact-title-row">
                 <div>
                   <h3>执行边界</h3>
-                  <p class="section-desc">逻辑预算、执行截止与真实授权期限相互独立。</p>
+                  <p class="section-desc">执行停止时间与真实授权期限相互独立。</p>
                 </div>
               </div>
               <div class="execution-settings-grid">
                 <FormField
-                  label="Explore 逻辑预算"
-                  for="np-explore-budget"
-                  required
-                  :error="validationErrors.exploreBudget"
-                  hint="按逻辑 Explore Attempt 计费；同一 Attempt 的物理重试不会重复扣减。"
-                >
-                  <Input
-                    id="np-explore-budget"
-                    v-model="form.explore_budget"
-                    type="number"
-                    min="1"
-                    max="10000"
-                    step="1"
-                  />
-                </FormField>
-                <FormField
-                  label="执行截止时间"
+                  label="执行停止时间"
                   for="np-explore-deadline"
                   :error="validationErrors.exploreDeadline"
-                  hint="可选。到时停止新增 Explore，不代表真实授权期限。"
+                  hint="可选，留空为不限。到时停止新研究，并有序停止在途执行；不代表真实授权期限。"
                 >
                   <Input
                     id="np-explore-deadline"
@@ -240,26 +224,16 @@
                   />
                 </FormField>
                 <FormField
-                  label="真实授权期限"
+                  label="授权到期时间"
                   for="np-authorization-expires-at"
-                  required
                   :error="validationErrors.authorizationExpiresAt"
-                  hint="必须明确填写未来的绝对时间，或确认真实授权无限期；不会从执行截止时间推导。"
+                  hint="可选，留空表示不设到期时间；如实际授权有期限，请填写。与执行停止时间独立。"
                 >
                   <Input
                     id="np-authorization-expires-at"
                     v-model="form.authorization_expires_at"
                     type="datetime-local"
-                    :disabled="authorizationUnlimited"
                   />
-                  <label class="authorization-choice">
-                    <Checkbox
-                      v-model="authorizationUnlimited"
-                      :disabled="isSubmitting"
-                      aria-label="授权无限期有效"
-                    />
-                    <span>明确确认真实授权无限期有效</span>
-                  </label>
                 </FormField>
               </div>
             </div>
@@ -398,11 +372,9 @@ const form = reactive({
   tenant_worker_ids: [] as string[],
   group_id: '',
   library_keys: [] as string[],
-  explore_budget: 40 as number | null,
   explore_deadline: '',
   authorization_expires_at: '',
 })
-const authorizationUnlimited = ref(false)
 const workerSelectionTouched = ref(false)
 
 const scenarioTemplateMeta = reactive({
@@ -416,7 +388,6 @@ const validationErrors = reactive({
   group: '',
   origin: '',
   goal: '',
-  exploreBudget: '',
   exploreDeadline: '',
   authorizationExpiresAt: '',
 })
@@ -639,19 +610,6 @@ const validateForm = (): { valid: boolean; firstErrorAnchor: string | null } => 
     validationErrors.goal = ''
   }
 
-  if (
-    form.explore_budget === null ||
-    !Number.isInteger(form.explore_budget) ||
-    form.explore_budget < 1 ||
-    form.explore_budget > 10000
-  ) {
-    validationErrors.exploreBudget = 'Explore 逻辑预算必须是 1 到 10000 之间的整数'
-    valid = false
-    firstErrorAnchor = firstErrorAnchor || 'np-section-basic'
-  } else {
-    validationErrors.exploreBudget = ''
-  }
-
   const validateFutureDate = (value: string, label: string) => {
     if (!value) return ''
     const timestamp = new Date(value).getTime()
@@ -659,12 +617,11 @@ const validateForm = (): { valid: boolean; firstErrorAnchor: string | null } => 
     if (timestamp <= Date.now()) return `${label}必须晚于当前时间`
     return ''
   }
-  validationErrors.exploreDeadline = validateFutureDate(form.explore_deadline, '执行截止时间')
-  validationErrors.authorizationExpiresAt = authorizationUnlimited.value
-    ? ''
-    : form.authorization_expires_at
-      ? validateFutureDate(form.authorization_expires_at, '授权过期时间')
-      : '请选择授权过期时间或明确确认无限期授权'
+  validationErrors.exploreDeadline = validateFutureDate(form.explore_deadline, '执行停止时间')
+  validationErrors.authorizationExpiresAt = validateFutureDate(
+    form.authorization_expires_at,
+    '授权到期时间',
+  )
   if (validationErrors.exploreDeadline || validationErrors.authorizationExpiresAt) {
     valid = false
     firstErrorAnchor = firstErrorAnchor || 'np-section-basic'
@@ -731,13 +688,12 @@ const submitProject = async () => {
     scenario: form.scenario,
     tenant_worker_ids: [...form.tenant_worker_ids],
     group_id: form.group_id,
-    explore_budget: form.explore_budget as number,
     ...(form.explore_deadline
       ? { explore_deadline: optionalDateTimeToIso(form.explore_deadline) }
       : {}),
-    authorization_expires_at: authorizationUnlimited.value
-      ? null
-      : new Date(form.authorization_expires_at).toISOString(),
+    authorization_expires_at: form.authorization_expires_at
+      ? new Date(form.authorization_expires_at).toISOString()
+      : null,
     ...(resourceBatch.value ? { resource_batch_id: resourceBatch.value.id } : {}),
     library_keys: [...form.library_keys],
   }
@@ -996,18 +952,8 @@ onUnmounted(() => {
 
 .execution-settings-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
-}
-
-.authorization-choice {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-top: var(--space-2);
-  color: var(--text-muted);
-  font-size: 12px;
-  cursor: pointer;
 }
 
 .optional-badge {

@@ -214,7 +214,7 @@ def build_reason_prompt_context(
     if goal_driven:
         coverage_context = (
             "Goal-driven scheduling does not use Coverage Cells; consume Facts, "
-            "Intents, evidence, logical budget, and authorized Targets."
+            "Intents, evidence, execution stop time, and authorized Targets."
         )
     elif structured_intent_binding is not None:
         coverage_context = (
@@ -245,8 +245,7 @@ def build_reason_prompt_context(
         )
     authorized_targets = _authorized_targets(project)
     decision_context = {
-        "logical_budget": {
-            "configured": getattr(project.project, "explore_budget", None),
+        "attempt_statistics": {
             "explore_attempts_started": getattr(
                 project.project,
                 "explore_attempts_started",
@@ -257,9 +256,6 @@ def build_reason_prompt_context(
                 "verification_attempts_started",
                 0,
             ),
-            "remaining_total": execution.get("remaining_total"),
-            "remaining_discovery": execution.get("remaining_discovery"),
-            "remaining_verification": execution.get("remaining_verification"),
         },
         "execution_cutoff": getattr(project.project, "explore_deadline", None),
         "authorization_expires_at": getattr(

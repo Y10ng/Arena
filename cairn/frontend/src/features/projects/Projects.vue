@@ -311,7 +311,7 @@
       <ConfirmAction
         :open="Boolean(reauthorizationTarget)"
         title="重新确认项目授权"
-        description="为当前冻结范围创建新的绝对授权时间窗。已有 Facts、Evidence、Coverage 和预算使用量保持不变；授权更新后项目仍保持暂停，需要单独恢复执行。"
+        description="为当前冻结范围创建新的绝对授权时间窗。已有 Facts、Evidence、Coverage 和累计 Explore 次数保持不变；执行停止时间不变，授权更新后项目仍保持暂停，需要单独恢复执行。"
         confirm-label="确认重新授权"
         tone="warning"
         :loading="Boolean(pendingProjectId)"
@@ -340,15 +340,12 @@
             <dd class="mono">{{ reauthorizationTarget.payload.expected_scope_digest }}</dd>
           </div>
           <div>
-            <dt>已使用预算</dt>
-            <dd>
-              {{ reauthorizationTarget.project.explore_attempts_started ?? 0 }} /
-              {{ reauthorizationTarget.project.explore_budget ?? '不限' }}
-            </dd>
+            <dt>累计 Explore 次数</dt>
+            <dd>{{ reauthorizationTarget.project.explore_attempts_started ?? 0 }}</dd>
           </div>
           <div>
-            <dt>原授权截止时间</dt>
-            <dd>{{ reauthorizationTarget.project.explore_deadline || '未记录' }}</dd>
+            <dt>执行停止时间</dt>
+            <dd>{{ reauthorizationTarget.project.explore_deadline || '不限' }}</dd>
           </div>
           <div>
             <dt>新窗口长度</dt>

@@ -18,6 +18,10 @@ def _scenario_keys(conn: sqlite3.Connection) -> set[str]:
 
 
 def scenario_from_row(row: sqlite3.Row) -> Scenario:
+    features = _loads_json(row["features_json"])
+    # 历史迁移或旧配置可留原件，但不再向当前场景编辑器暴露无效额度。
+    for key in ("explore_budget", "exploration_limit", "verification_reserve"):
+        features.pop(key, None)
     return Scenario(
         key=row["key"],
         label=row["label"],
@@ -29,7 +33,7 @@ def scenario_from_row(row: sqlite3.Row) -> Scenario:
         origin_template=_row_value(row, "origin_template") or None,
         goal_template=_row_value(row, "goal_template") or None,
         cap_add=_loads_json_list(row["cap_add_json"]),
-        features=_loads_json(row["features_json"]),
+        features=features,
     )
 
 

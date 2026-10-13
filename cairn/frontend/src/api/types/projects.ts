@@ -62,7 +62,6 @@ export interface ProjectSummary {
   authorization_scope_digest?: string | null
   authorization_window_seconds?: number | null
   authorization_expires_at?: string | null
-  explore_budget?: number | null
   explore_deadline?: string | null
   explore_attempts_started?: number
   verification_attempts_started?: number
@@ -503,7 +502,6 @@ export interface CreateProjectRequest {
   scenario: string
   tenant_worker_ids: string[]
   group_id: string
-  explore_budget: number
   explore_deadline?: string
   authorization_expires_at: string | null
   hints?: Array<{ content: string }>
@@ -538,7 +536,6 @@ export interface ProjectDetail {
     authorization_scope_digest?: string | null
     authorization_window_seconds?: number | null
     authorization_expires_at?: string | null
-    explore_budget?: number | null
     explore_deadline?: string | null
     explore_attempts_started?: number
     verification_attempts_started?: number

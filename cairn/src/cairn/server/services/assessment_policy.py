@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import json
 from typing import Any, Mapping
 
@@ -16,13 +15,6 @@ DEFAULT_COPY_OUTCOME_CONTRACT_VERSION = 2
 DEFAULT_COPY_BLOCKER_COOLDOWN_VERSION = 1
 DEFAULT_COPY_BLOCKER_COOLDOWN_SECONDS = 900
 
-_EXPLORATION_LIMITS: dict[str, tuple[int, int]] = {
-    "compact": (16, 2),
-    "balanced": (40, 6),
-    "thorough": (80, 12),
-}
-
-
 @dataclass(frozen=True)
 class AssessmentPolicy:
     protocol: str = ""
@@ -33,10 +25,8 @@ class AssessmentPolicy:
     minimum_coverage_version: int = 0
     quality_gate_version: int = 0
     verifier_contract_version: int = 0
-    explore_budget: int | None = None
     explore_deadline: str | None = None
     contract_version: int = 0
-    verification_reserve: int = 0
 
     @property
     def goal_driven(self) -> bool:
@@ -96,6 +86,9 @@ def frozen_execution_features(scenario: Scenario) -> dict[str, Any]:
         "quality_gate_version",
         "surface_manifest_version",
         "verifier",
+        "explore_budget",
+        "exploration_limit",
+        "verification_reserve",
     ):
         features.pop(key, None)
     features.update(
@@ -137,45 +130,17 @@ def policy_for_scenario(
     scenario: Scenario,
     *,
     created_at: str,
-    explore_budget: int | None = None,
     explore_deadline: str | None = None,
 ) -> AssessmentPolicy:
-    del created_at  # 新协议不再把项目创建时间解释为授权或执行截止。
-    scenario = scenario.model_copy(update={"features": frozen_execution_features(scenario)})
-    limit_name = str(scenario.features.get("exploration_limit") or "balanced")
-    default_attempts, _ = _EXPLORATION_LIMITS.get(
-        limit_name,
-        _EXPLORATION_LIMITS["balanced"],
-    )
-    attempts = default_attempts if explore_budget is None else int(explore_budget)
-    reserve = verification_reserve(
-        attempts,
-        scenario.features.get("verification_reserve"),
-    )
+    del scenario, created_at  # 新协议不从场景或创建时间推导次数限制和执行截止。
     return AssessmentPolicy(
         protocol=GOAL_DRIVEN_PROTOCOL,
         fingerprint_version=DEFAULT_COPY_FINGERPRINT_VERSION,
         outcome_contract_version=DEFAULT_COPY_OUTCOME_CONTRACT_VERSION,
         verifier_contract_version=1,
-        explore_budget=attempts,
         explore_deadline=explore_deadline,
         contract_version=2,
-        verification_reserve=reserve,
     )
-
-
-def verification_reserve(budget: int | None, configured: object = None) -> int:
-    if budget is None:
-        if configured not in (None, 0):
-            raise ValueError("unlimited budget has no fixed verification reserve")
-        return 0
-    budget = int(budget)
-    if budget < 1:
-        raise ValueError("explore_budget must be positive or null")
-    reserve = min(budget - 1, (budget + 4) // 5) if configured is None else int(configured)
-    if not 0 <= reserve < budget:
-        raise ValueError("verification_reserve must satisfy 0 <= V < B")
-    return reserve
 
 
 def execution_rejection_reason(row: Mapping[str, Any]) -> str | None:
@@ -254,11 +219,6 @@ def _policy_from_project_row(row: Mapping[str, Any]) -> AssessmentPolicy:
         if isinstance(snapshot.get("features"), dict)
         else {}
     )
-    budget = (
-        int(row["explore_budget"])
-        if "explore_budget" in keys and row["explore_budget"] is not None
-        else None
-    )
     deadline = (
         str(row["explore_deadline"])
         if "explore_deadline" in keys and row["explore_deadline"]
@@ -280,15 +240,6 @@ def _policy_from_project_row(row: Mapping[str, Any]) -> AssessmentPolicy:
                 features.get("verifier_contract_version") or 0
             ),
             contract_version=contract_version,
-            verification_reserve=(
-                verification_reserve(
-                    budget,
-                    features.get("verification_reserve"),
-                )
-                if contract_version == 2
-                else 0
-            ),
-            explore_budget=budget,
             explore_deadline=deadline,
         )
     if protocol != DEFAULT_COPY_PROTOCOL:
@@ -315,15 +266,6 @@ def _policy_from_project_row(row: Mapping[str, Any]) -> AssessmentPolicy:
             features.get("verifier_contract_version") or 0
         ),
         contract_version=int(features.get("assessment_contract_version") or 0),
-        verification_reserve=(
-            verification_reserve(row_value(row, "explore_budget"), features.get("verification_reserve"))
-            if int(features.get("assessment_contract_version") or 0) == 2 else 0
-        ),
-        explore_budget=(
-            int(row["explore_budget"])
-            if "explore_budget" in keys and row["explore_budget"] is not None
-            else None
-        ),
         explore_deadline=(
             str(row["explore_deadline"])
             if "explore_deadline" in keys and row["explore_deadline"]

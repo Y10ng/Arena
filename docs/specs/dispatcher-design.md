@@ -1,6 +1,206 @@
 # Dispatcher
 
-> 本文保留了历史执行器与旧协议设计，不代表各段均已与当前实现对齐。当前定向修复见“proj_038：Reason 提交结构与依赖同时有效”；`proj_037` 的截断续行、`proj_036` 的完成拒绝后新决策、`proj_035` 的可靠交付及更早记录保留在后文，以各节实际实施记录为准，不自动成为本轮待办。不要据旧 driver、失败处理或示例输出重建当前系统。
+> 本文保留了历史执行器与旧协议设计，不代表各段均已与当前实现对齐。本轮“创建体验补充：授权到期时间默认不限，无需手动确认”已实现、定向验证并完成静态交付，记录见本节；上一轮删除 Explore 固定逻辑预算的实现及复核记录保留在其后，不重复实施。“探索额度耗尽后的收尾”的旧补丁已被替代；`proj_038` 及更早记录以各节实际实施记录为准，不自动成为本轮待办。不要据旧 driver、失败处理或示例输出重建当前系统。
+
+## 创建体验补充：授权到期时间默认不限，无需手动确认（2026-10-13 UTC 已实现、定向验证、静态交付；真实项目未验收）
+
+**最新用户要求。** 新建项目不应再要求手动勾选“明确确认真实授权无限期有效”。上一轮保留了这个交互门槛，删除次数预算不等于消除了它；本轮按用户明确的默认行为调整创建体验，不把上一轮的手动确认设计当作不可替换前提。
+
+**实施前已核对根因（以下位置描述改动前实现）。** `cairn/frontend/src/features/projects/NewProject.vue:226–246` 把真实授权期限标为必填，并以独立 Checkbox 确认无限期；`:388` 的 `authorizationUnlimited` 初始为 false，`:632–636` 因时间为空且未勾选而拒绝提交，`:706–708` 只有勾选后才发送 null。后端 `cairn/src/cairn/server/schemas/projects.py:639–640,680–687` 已接受显式 `authorization_expires_at: null`；`server/services/project_records.py:219–226` 只对非空时间校验未来期限，因此实现该体验不需要放宽后端授权校验或变更 Schema。
+
+### 本轮最小完整范围
+
+1. **删除多余确认状态，而非自动代替用户宣称“已确认”。** 新建页移除该 Checkbox、`authorizationUnlimited` 及仅服务于它的样式／引用；不要删除页面其他用途的 Checkbox。授权时间默认空、输入始终可编辑，去掉必填标记。推荐标签“授权到期时间”，说明“可选，留空表示不设到期时间；如实际授权有期限，请填写。与执行停止时间独立。”不增加确认弹窗、隐藏确认标志或额外模式开关。
+2. **空值直接使用既有合同。** 创建提交时，空授权时间明确发送 `authorization_expires_at: null`，填写时发送现有时区转换后的绝对时间；不能省略该键、发送空字符串或给后端字段增加默认值。表单仅对非空授权时间校验格式及未来时间，错误输入不得降级成 null。执行停止时间的默认空值和校验保持原样，两个字段不互相填充或推导。
+3. **仅改变新建默认交互。** 不迁移／延长已有项目授权、不改 grant、scope、epoch、目标范围或截止执行逻辑；不自动重新授权，不改项目列表／工作区的重新授权流程，不合并执行停止时间与授权到期时间，不恢复次数预算。默认不设到期时间不是凭空授予真实目标授权，也不是取消撤销、用户停止或单 Run timeout。
+4. **对齐直接消费者。** 主要修改 `NewProject.vue` 和 `NewProject.component.test.ts`；在 `docs/specs/server-protocol.md` 说明“创建页空值默认发送 null，无需额外勾选”与“API 请求必须携带该键”是两层含义，不再把 API 显式字段理解成人必须逐次确认。没有证据需要改后端业务代码、API 类型、其他页面或 Worker。
+5. **最少定向验证。** 复用创建组件的具体受影响用例，确认不触碰授权控件即可正常提交且 payload 明确为 null；填写未来授权时间仍准确提交，清空后恢复 null，过去／非法非空时间不能提交；设置执行停止时间不自动生成授权期限。保留资源上传重试用例，去掉其中已删除的勾选操作，不删其材料保留断言。只运行必要节点，不跑全套测试，不新建真实项目或调用模型验证这个表单行为。
+6. **交付不扰动正在运行的研究。** 这是前端变更，按现有构建与静态交付方式完成用户实际入口更新；先确认构建输出位置，避免尚未成功便覆盖正式产物。正常不需要重启 Server／Dispatcher 或重建 Worker，不得为更新页面暂停／恢复／重跑项目。上轮看到 `proj_040` 在途只是时间点事实，交付时不能沿用旧 PID或空闲结论；若实际发现必须启停则先说明影响并取得本次许可。更新本节实施记录，区分源码、定向验证和实际静态交付，不自动续做历史任务。
+
+**本分析交付。** 只更新本原方案，未改业务代码、运行测试、构建、启停或操作项目；下一新会话仅实施本节。前一轮关于“必须手动确认无限期”的创建交互要求由本节替代，原实施记录保留其历史含义。分支沿用 `fix/proj-038-reason-schema`，保留现有未提交改动，不 commit／push。
+
+### 本节实施记录（2026-10-13 UTC）
+
+**已实现。** 沿用 `fix/proj-038-reason-schema`，保留会话开始的全部未提交改动，仅增量修改 `cairn/frontend/src/features/projects/NewProject.vue`、`NewProject.component.test.ts`（同目录）、`docs/specs/server-protocol.md` 和本节。新建页删除无限期确认框、`authorizationUnlimited`、专用必填校验及 `.authorization-choice` 样式，保留 Worker 的 Checkbox；没有默认勾选、新确认弹窗或隐藏确认状态。“授权到期时间”可选、默认空、可直接编辑，并说明“留空表示不设到期时间；如实际授权有期限，请填写”。
+
+空值 payload 明确携带 `authorization_expires_at: null`；非空值继续先校验格式及未来时间，再以原有 `new Date(...).toISOString()` 转换，非法非空值不降级为 null。执行停止时间仍独立可选、默认不限，两个字段不互相推导。协议说明区分 API 必须显式携带字段与使用者不必额外手动确认。本轮没有修改后端默认值／校验、API 类型、其他页面、已有项目、授权 grant、目标范围、重新授权或 Worker，也没有恢复次数预算。
+
+**已验证。** 创建组件共 **7 个不同定向实例通过**，其余8个用例未执行：默认不操作授权控件即可通过创建按钮提交且明确为 null；两个有限时间按原转换分别提交；清空授权时间恢复 null；过去时间和非法非空值均拒绝提交；过去执行停止时间仍拒绝、未来停止时间不生成授权期限；资源上传后的创建失败可重试且仍保留批次、只创建／上传一次。上传重试用例只删除失效勾选操作，原材料保留断言未删除。非法日期通过实际 Input 的 v-model 事件注入，避免 datetime-local 将非法 DOM 值清空而掩盖格式校验。
+
+运行命令为 `npm --prefix cairn/frontend run test:component -- src/features/projects/NewProject.component.test.ts -t 'submits address-free|creates with explicit null|validates the optional stop time|submits a finite authorization expiry|rejects nonempty authorization expiry|keeps an uploaded batch'`，结果7 passed／8 skipped。首次构建的 `vue-tsc -b` 发现测试字符串选择器返回类型缺少 `vm`（TS2339），当时未进入 Vite 构建、未覆盖正式产物；改为按实际 Input 组件定位后，仅重跑 `-t 'rejects nonempty authorization expiry'` 的2个受影响实例，结果2 passed／13 skipped。未跑全套测试、后端测试、lint 或浏览器矩阵，未新增依赖。局部差异已审阅，`git diff --check` 通过。
+
+**已构建并交付。** 先核对 Vite 默认 `outDir` 为 `cairn/src/cairn/server/static` 且 `emptyOutDir: true`；运行 Server 未设置 `CAIRN_STATIC_DIR` 覆盖，确实使用该目录。因此使用 `npm --prefix cairn/frontend run build:server -- --outDir /tmp/arena-auth-expiry.eGC2zT/static` 构建到本轮新建临时目录，保留原 `vue-tsc -b` 与生产 Vite 构建。修正测试定位后构建成功，仅有大 chunk 警告；构建前后正式静态目录内容摘要一致，未在构建成功前更新正式产物。
+
+2026-10-13 **02:29:03 UTC** 完成实际静态交付：先复制已构建资源，确认同名旧资源内容一致，最后原子替换 `index.html`；新增22个 hash资源文件，全部87个构建资源与交付文件一致，原有109个静态资源均原样保留，未清空正式目录或删除旧资源。实际 `http://127.0.0.1:8001/` 和入口的10个静态引用均HTTP 200、响应 bytes与本次构建一致。Server PID `2092372`、Dispatcher PID `2092519` 及其进程启动身份在交付前后未变化；没有重启服务、重建 Worker 或修改运行配置。临时构建目录在交付核验后删除，不作为持久部署副本。
+
+**验收边界与结束。** 已完成源码实现、定向组件验证、包含类型检查的前端构建及用户实际入口的静态交付；已打开页面需刷新才能加载新版。没有创建、暂停、恢复或重跑真实项目，没有查写项目数据库、访问目标或调用模型，不能把静态 HTTP 核验表述为真实项目验收。真实授权有期限时仍需填写对应时间；本轮无待实施业务项，后续实际使用验收由用户按正常流程决定。不 commit、不 push，实施到此停止，不接续下方历史待办。
+
+## proj_039 续议：移除 Explore 固定逻辑预算，执行停止时间默认不限（2026-10-12 UTC 实施；2026-10-13 UTC 部署完成，真实任务验收未做）
+
+### 本轮结论与对旧建议的更正
+
+**认可本次拿到 flag 的实际成果；准确评价是“人工提供关键线索后完成目标”，不是完全自主解题，也不是项目已经进入 completed。** 本轮只读核对支持后文的关键成功证据和人工贡献。09:37:51 UTC 的最新只读快照中，精确项目仍为 active／generation 0，63 个 Run 全部终结，唯一开放工作为没有执行归属的 `i036`；不能把旧方案或其他会话的完成声明当作新的运行验收。
+
+用户本次明确要求删除固定 Explore 逻辑预算。因此，**不再实施后文“普通探索额度耗尽后局部 abandon”的旧补丁，而是移除制造该准入边界的现行策略及其直接消费者。** 旧方案以 `B=40、R=8、T=36、V=4` 解释当时阻断是成立的：32 个 discovery 已占满其额度，4 个 verifier 已消耗，尚余 4 个预留名额不能用于 discovery；它说明的是当时配置如何执行，不证明次数预算是必须保留的产品设计。既不改成更大的数字，也不引入新的轮次／事实数上限代替它。
+
+第一性原理上，研究由目标、证据、下一步的信息价值、实际授权和用户愿意投入的资源决定。一个大 Intent 和数个小 Intent 的研究深度与费用不相等，逻辑次数既不是金额，也不是探索充分性的证据。删除这一人为额度能避免有价值的工作被计数截断，并删除复核预留与普通探索争额度的矛盾；**它本身不会让模型自动找到关键方向，也不会解决过期目标上的重复投入、阴性结论过强或复核重叠。** 本轮不借此重写研究内核、增加角色或硬编码本题路线。
+
+### 本轮查证补充与实施前实现边界
+
+- **证据与人工帮助。** 实际入口和数据库仍从当前进程身份定位，为本仓库的 `8001`／`127.0.0.1:55433/cairn_isolated`，查询使用只读事务。`h001` 是过期实例的环境替换，`h002` 给出命令执行方向，`h003` 明确给出 CVE；后两项是实质研究帮助，不是重复 Goal，也不是重新授权。本轮定向核对 `a450/a451/a457/a458/a471/a472/a477/a478/a518/a522/a523/a524` 共 12 项关键原件，大小和 SHA256 均与登记一致；直接读取、编码读取及含当次新标记的命令回读支持同一 flag 内容，Server 已接受 `f034–f037`。具体证据链见后文；没有全量审计 524 项 Artifact，不复制 flag、目标地址或利用内容，不重新请求目标或提交外部判分。
+- **终局错误与局部修正分开。** 63 个 Run 中 52 成功、11 失败；终局失败为 10 次 provider_error 和 `tr028` 的提交错误。候选层在 `tr006/tr053/tr059` 还记录过 submission_invalid，`tr029` 有 artifact_unknown，后续仍可成功接受；不能将“只有一次提交类终局失败”写成“全过程没有其他协议错误”。本轮没有证据将当前停顿归因为模型的 cyber 安全拒绝，也不保证任何供应商将来不会拒绝。
+- **默认无限期并非全新机制。** `server/schemas/projects.py` 的 `CreateProjectRequest` 当前默认 `explore_budget=40`，而 `explore_deadline=None`。项目级截止与逻辑次数是独立字段。当前项目路由没有执行截止时间编辑 API；本轮保留创建时可选设置及后续查看，不凭“可以留着”扩成运行中修改截止、续期或重写冻结 deadline 的新功能。
+- **次数策略不只一处。** `assessment_policy.py` 有场景预算 fallback 和 goal-driven 的 verification_reserve 校验；仅把创建默认改成 null，仍可能重新得到场景额度，或让旧 reserve 与空 budget 组合判成不支持的执行契约。`explore_attempts.py` 的准入、`assessment_convergence.py` 的收敛、`project_completion.py:257–270` 的完成拒绝都消费额度；Reason 输入／摘要、报告及前端也有消费者，必须一起对齐。
+- **不限项目期限不等于取消执行保障。** 非 report 的交付登记取单 Run 时限、非空项目截止和真实授权到期时间的最早值；Runner 消费冻结 deadline。授权本身支持明确的无到期时间，但是否选择它仍由真实授权决定，不能自动把已有有限授权改成无限期。单 Run timeout、提交修正／provider retry／输出截断续行的有限边界、并发、取消、物理停止确认和证据门禁均不属于本次要删除的项目逻辑额度。
+- **删预算不保证立即收尾。** `dispatcher/scheduler/dispatch_cycle.py:381–457` 先选择可派的 verifier／discovery，之后才进入 Reason；`:576–622` 的新事实／Hint 触发也不能抢在前面的可派任务之前。`i036` 原本是依赖 `i034` 的失败兜底，但 depends_on 仅表达前项收敛，不解析描述中的失败条件。移除额度后它可能先被正常派发，而不是直接进入 Reason。`project_completion.py:99–189` 的最新输入、开放工作、在途执行、active Attempt 与候选门禁仍须保留；`reason_writes.py:79–92` 已有 abandon 再决策路径，不用 flag 关键词自动 complete，不将“所有安排都得实际执行”当作完成要求。本轮不附带改调度优先级或增加条件依赖 DSL。
+
+### 推荐实施范围：删除额度策略，保留真实停止边界
+
+1. **配置入口和现行策略一起删除。** 从当前创建 API、前端创建表单／类型、场景设置及默认种子移除 `explore_budget`、有效探索次数 `exploration_limit` 和为共享次数额度服务的 `verification_reserve`；清除新项目冻结快照对 reserve 的写入和当前 goal-driven 对它的强制解释。删除当前受支持执行路径的预算 fallback、预算比较和预算耗尽分支，不以 `0/-1/999999/null` 哨兵加旧比较来假装删除。不新增另一套预算开关、协议分支或兼容适配层；历史 legacy／phased 的归档说明不是重建旧引擎的授权。
+2. **旧客户端不能被静默升级成无限次数。** 当前创建请求直接继承 Pydantic BaseModel，未声明 extra=forbid。只删字段会把旧客户端显式发送的 `explore_budget` 静默忽略。应在创建请求范围按已有 ConfigDict 用法明确拒绝移除后的额外字段，让旧预算请求得到可理解的 422；不全局开启 strict，不接受后偷偷无效化，也不保留可配置但不起作用的预算输入。
+3. **准入、收敛和完成链贯通。** 新 discovery 与 verifier 都不再因累计逻辑次数被拒绝；保留 verifier 的角色、必要实质复核及现有调度优先级。删除相关 `budget_exhausted/discovery_budget_exhausted` 的现行触发、错误分流和预算式收口，正常 Goal 完成不得因旧累计次数被拒绝。继续使用既有 Attempt 归属、事务互斥、幂等、重试／补交和结算机制，不能顺手删除 assessment_attempts、放宽候选接受或把失败改成成功；也不实施旧建议中的“预算不足就 abandon”。
+4. **历史事实保留，不造迁移补丁。** 已有次数、charged 与历史补偿记录、Run、Fact、证据、失败、历史授权 grant、原冻结输入和已冻结报告保持原样。必要的数据库旧列可以保留为历史记录，但不进入当前 goal-driven 的有效配置／决策，也不显示成仍可控制运行的预算。新建项目不再写入有效次数上限；不得清零计数或改历史 snapshot 来让校验通过。旧的预算终止项目不自动 reopen／resume，不据新策略把过去的停止改写成目标达成；不为纯删除政策强制新增 schema 迁移、恢复器或双轨配置。
+5. **执行停止时间沿用一个权威字段。** `explore_deadline` 保留为项目级可选绝对停止时间，创建默认空值，界面显示“执行停止时间：不限”；用户设置时沿用现有时区解析、校验与冻结语义，不引入第二个同义 deadline。保留已有明确时间，不清空历史截止或授权。到期停止新研究并沿现有路径有序停止／收口，不能把截止记成 Goal 成功，也不能将停止请求当作已物理停止；显式报告与材料查看按原边界可用。项目可以持续多个有界 Run，不等于任一进程无限挂起；无期限不要求 Goal 已达成后仍继续运行，也不允许故障无限重试。
+6. **直接消费者必须一致。** 对齐 `assessment_contracts.py` 的 Reason digest、`dispatcher/tasks/reason_context.py`、报告生成／接受、项目详情／列表／诊断、前端类型与创建页、场景 features 配置以及当前 API／用户文档。删除“剩余次数／预算耗尽／复核预留”作为当前运行控制的投影，不把统计次数冒充货币费用；必要累计统计保留。历史报告和历史诊断原件不重写。只改这些语义的直接使用位置，不借机重做页面、报告布局或全站组件。
+
+**不做与效果边界：** 不改模型／SDK、放宽工具与提交权限、增加长 Prompt 或固定 CVE 流程；不保证或设计绕过模型安全机制。仅使用真实的 CTF／本地研究授权背景，不伪装用途、隐藏实际目标或将拒绝包装成成功。过期目标重复尝试、阴性证据尺度、重复复核与新证据驱动的及时重排，保留为本案已观察到的研究质量问题，不把删除预算宣称为它们的修复，也不自动启动下一轮。
+
+### 必要定位与截止时间文案纠偏
+
+以下路径均以当前仓库为准，行号只作定位，不代替新会话阅读最新源码：
+
+- 配置／策略：`cairn/src/cairn/server/schemas/projects.py:622–687`、`server/services/project_records.py:220–265`、`server/services/assessment_policy.py:136–178,257–292`。后两项以 `cairn/src/cairn/` 为根；删除 fallback／reserve 的现行消费，不改历史迁移定义。
+- 准入／收敛：同根 `server/services/explore_attempts.py:95–347`、`assessment_convergence.py:407–459,534–615`、`project_reason.py:36–49,111–118`、`project_completion.py:257–270`，以及 `dispatcher/scheduler/task_lifecycle.py:463–498`。同名历史错误记录保留，不再作为新运行的次数停止策略。
+- 决策／报告：同根 `assessment_contracts.py:65–75`、`dispatcher/tasks/reason_context.py:247–279`、`dispatcher/tasks/report.py:1264–1280`、`server/services/assessment_reports.py:1597–1620`、`dispatcher/prompts/goal-driven-v1/reason.md` 与 `report.md`；只删额度语义，不延长研究 Prompt。
+- 前端／场景：`cairn/frontend/src/features/projects/NewProject.vue`、`Projects.vue`、`ProjectWorkspace.vue`、`projectRuntime.ts`、`cairn/frontend/src/api/types/projects.ts`、`cairn/frontend/src/features/settings/featuresSchema.ts:113–119`；服务端 `cairn/src/cairn/server/services/common.py:215`、`server/db_defaults.py:132` 的现行配置及种子一起对齐。已有场景记录中的旧字段不再成为有效设置，不直接修改过去已执行的 migration 来掩盖来源。
+- **保留时间也要准确解释。** `NewProject.vue:230–240` 的“到时停止新增 Explore”不完整：实际 `dispatcher/tasks/delivery.py:190–240` 还约束非 report 的冻结执行期限。`projectRuntime.ts:128` 将 `explore_deadline_exceeded` 解释成“授权时间窗到期、重新授权”，但当前重新授权不改项目执行截止。作为本轮时间入口／诊断的直接消费者应纠正文案，分别解释用户执行停止时间与真实授权期限，不给出无效的续期承诺；不因此新增时间编辑 API。
+- 定向验证可复用 `cairn/tests/test_project_creation_workers.py`、`test_goal_driven_lifecycle.py`、`test_goal_driven_reason.py`、`test_goal_driven_authorization_v42.py` 及前端既有创建用例的受影响节点。不是要求跑这些整份文件；已冻结报告与 v39 补偿历史的旧断言不能按关键字批量删除。
+
+### 最直接验证与生效边界
+
+- 本分析不运行测试。实施复用现有隔离 fixture，围绕当前问题走一条创建 → 准入／接受 → Reason／正常完成的合成链：无预算参数、截止空值的项目可创建；旧客户端带预算字段明确拒绝；累计逻辑次数超过原 40 和原 discovery 预留分界后仍可合法启动新 discovery／verifier，不再出现预算409或预算式停止，已有成果仍能通过正常完成门禁。使用合成材料及假 provider，不以改最终状态或仅测一个预算函数代替链路。
+- 同一必要路径覆盖非空未来截止与到期停止、真实授权到期／撤销、单 Run timeout、合法 retry／补交不清历史、未结算候选／执行未静止仍不能完成。按具体受影响接缝选择最少用例，不默认全套测试、lint、浏览器矩阵或另建验证平台。前端只检查本次创建表单、截止显示和被删除额度的必要直接消费者；新统计文案不依赖模型调用验证。
+- 明确验证到哪一步：默认不限期及删除次数门禁是本地机制验证；真实模型能否及时判断 Goal、避免重复研究、正常完成 proj_039，仍需另行授权的实际使用验收。未设置停止时间会增加持续运行和费用的不确定性，不再有固定次数作为总工作量上界；不能以此次用户产品设计意图自动扩大真实目标或费用授权。
+- 运行代码改动后，按现有方式构建并交付完整系统；仅宿主和前端语义改变时不默认重建 Worker 镜像。部署前重新核对真实实例、在途执行、候选和所有 active 项目；**移除旧次数门禁后，仍 active 的 proj_039 可能自动启动 i036 或新 Reason，产生目标请求与模型费用，不是零副作用重载。** 必须说明这个具体后果并取得本次许可，未获准就止于构建／本地验证，记录部署待许可；不自行 pause/resume 规避边界，不为展示效果新建项目、清库或回填历史。
+- 本轮分析沿用 `fix/proj-038-reason-schema`，只增量更新本方案，保留会话开始已有文档改动。未改业务代码、测试、配置或数据库，未构建／启停／访问目标／调用模型／操作项目，未运行测试，未 commit／push。实施会话应更新本节实施记录，分别说明代码、本地验证、部署和真实验收；仅完成本轮范围，不继承后文历史待办。
+
+### 本轮实施记录（2026-10-12 UTC）
+
+**实现。** 本轮沿用 `fix/proj-038-reason-schema`，保留会话开始已有方案改动，仅实施上方删除次数政策的范围。创建请求局部 `extra="forbid"`，旧额度字段明确 422；创建／场景配置、策略 fallback、新冻结 features、原子准入、收敛、Reason claim／digest、completion、Dispatcher 错误消费、当前报告与前端不再使用固定 Explore 次数及复核预留。未用无限哨兵保留比较，未新增替代轮数上限、时间编辑 API 或自动延期。`explore_deadline` 继续是唯一可选停止时间，默认空值。
+
+Attempt 归属、累计计量、charged／历史补偿、有限 retry／补交、单 Run timeout、并发、必要复核、candidate 接受与静止／物理清理门禁仍保留。旧数据库列、项目冻结快照、失败和授权 grant 未迁移或清零；历史 v1 授权摘要继续解释旧额度，定向验证与原 grant 完全一致。历史迁移中的场景种子保留原件，当前种子不含额度；场景读取投影不暴露旧额度配置且不写数据库。新报告展示停止时间和累计计量，已有旧协议及旧 goal-driven 冻结 Packet 的额度原件仍按历史含义渲染。没有实施后文的预算耗尽局部 abandon 补丁，没有恢复旧停止项目。
+
+**源码、测试与文档修改。** 共 47 个文件（含会话开始已修改、本轮增量维护的方案；部署生成的静态产物另计）：
+- `cairn/frontend/src/`：`api/client.test.ts`、`api/types/projects.ts`、`features/settings/featuresSchema.ts`、`features/console/ScenariosConsole.component.test.ts`；`features/projects/` 下 `NewProject.vue`／`NewProject.component.test.ts`、`Projects.vue`／`Projects.component.test.ts`、`ProjectWorkspace.vue`／`ProjectWorkspace.component.test.ts`、`projectRuntime.ts`／`projectRuntime.component.test.ts`、`workspaceStatus.test.ts`。
+- `cairn/src/cairn/`：`assessment_contracts.py`；`dispatcher/prompts/goal-driven-v1/` 下 `reason.md`、`report.md`；`dispatcher/scheduler/` 下 `dispatch_cycle.py`（仅注释）、`task_lifecycle.py`；`dispatcher/tasks/` 下 `reason_context.py`、`report.py`；`server/` 下 `db_defaults.py`、`routers/intents.py`（仅注释）、`schemas/projects.py`；`server/services/` 下 `assessment_policy.py`、`assessment_convergence.py`、`assessment_reports.py`、`common.py`、`coverage_slots.py`（仅注释）、`explore_attempts.py`、`project_authorization.py`、`project_completion.py`、`project_reason.py`、`project_records.py`、`projects.py`、`scenarios.py`。
+- `cairn/tests/`：`test_assessment_reports.py`、`test_goal_driven_completion.py`、`test_goal_driven_lifecycle.py`、`test_goal_driven_reason.py`、`test_pi_dispatch_cycle.py`、`test_project_authorization_v40.py`、`test_project_creation_workers.py`、`test_report_frozen_rendering.py`、`test_scenarios.py`、`test_web_assessment_phases.py`。
+- 文档：本文件与 `docs/specs/server-protocol.md`。没有 Worker 代码、模型／SDK、权限或部署脚本改动。
+
+**本地验证。** 仅运行具体节点，未跑整份前后端测试、lint 或浏览器矩阵，未新增依赖或验证平台，未请求真实目标或付费模型。后端去重共 **39 个测试实例最终通过**：
+
+| 接缝 | 通过实例数 | 验证内容 |
+| --- | ---: | --- |
+| 创建 | 6 | 旧额度字段 HTTP 422（含显式 null）；无预算且默认空截止／未来截止创建，新冻结配置与旧列写入正确 |
+| Reason | 4 | 显式累计计量上下文、旧额度不影响 digest、截止变化影响 digest、损坏旧额度不污染当前合同 |
+| 场景 | 6 | 当前种子／历史只读投影、冻结策略、协议和已删除额度字段拒绝 |
+| 生命周期 | 8 | 45 次后 discovery → 合成 finding 接受 → 独立 verifier 接受 → Reason；历史停止不自动恢复；有限 provider／runtime retry 保留计量；授权到期、用户停止、截止接受和 candidate／cleanup 收口 |
+| 完成 | 3 | 47 次后新鲜静止 Reason 正常完成；在途 Run 与 active Attempt 分别拒绝完成 |
+| 报告 | 4 | 当前 Server Packet 保留原 snapshot但不输出有效额度；当前渲染与两类旧冻结额度原件保真 |
+| 授权 | 3 | v3 scope 不含额度，重新授权不延长停止时间，历史 v1 descriptor／digest 与冻结 grant 一致且 grant 不可变 |
+| Dispatcher | 2 | 高累计计量不本地阻断合法重试；授权范围变化逐轮阻止新执行 |
+| 执行／补交 | 3 | 有限补交保留原 deadline与 cooldown，单 Run 总超时保留，超时不把成功 stdout 接受为成果 |
+
+前端 6 个组件实例与 1 个单元实例通过：创建表单／payload及空停止时间、未来时间校验、重新授权累计展示、停止时间不延长文案、场景保存。旧 phase 文件只做两个限定节点的 collection，未执行其历史引擎测试正文，不宣称旧协议执行通过；仅清理删除函数引用和失去意义的预算断言，未重建旧执行路径。
+
+验证中曾有 fixture／断言失败，均如实修正并仅重跑受影响节点：生命周期断言误取 `ProjectMeta.reason_worker`；创建 fixture 引用已不存在的 `default-copy-v2` 场景；旧迁移种子仍有 `exploration_limit`，最终以不写库的当前场景投影去掉无效设置。系统 Python 有 pytest但缺 docker，应用 `.venv` 有运行依赖但缺 pytest；Dispatcher相关验证在现有应用解释器内将 `/usr/lib/python3/dist-packages` 追加到 `sys.path` 尾部使用已安装 pytest，没有安装包或修改环境配置。运行形式为 `PYTHONPATH=cairn/src cairn/.venv/bin/python -c 'import sys; sys.path.append("/usr/lib/python3/dist-packages"); import pytest; raise SystemExit(pytest.main(["-q", "<具体节点>"]))'`；仅 Server 生命周期节点使用系统 Python。最终差异审阅及 `git diff --check` 通过。
+
+**构建与交付。** 现有 `npm --prefix cairn/frontend run build:server`（包含 `vue-tsc -b`）成功；20 个改动宿主 Python 源文件编译检查通过，暂存 `index.html` 的10个本地静态引用均存在。宿主 Server／Dispatcher 仍按现有源码运行方式交付，不新增打包／安装流程；本轮不重建 Worker 镜像。Vite 有插件耗时提示，不影响构建成功。
+
+构建脚本直接写入 Server 默认静态目录，构建期间该目录短暂更新，运行 Server 可能提供过新版页面；不能把这一点说成运行文件全无变化。为避免未经许可留下前后端混合版本，已将完整产物保存到 `/tmp/arena-unlimited-frontend-build-2z77qyra/static`，再恢复构建前没有用户修改的正式静态目录，最终该目录 Git 状态 clean。该临时产物不是持久发布，后续正式部署可按许可重新构建或使用已核对产物。
+
+**实例与部署。** 10:17:58.444460 UTC 的只读事务快照重新确认本仓库 Server `1817480`／`8001`、Dispatcher `1817654`，实际数据库本机端口 `55433`／`cairn_isolated`，Schema 47；没有依据旧 PID或默认端口推定实例。所有 active 项目仅 `proj_039`，generation 0／goal-driven-v1，历史计量36（32 discovery、4 verifier），旧 budget40／reserve8，执行停止时间与授权到期均空，v3授权范围摘要一致。63个历史Run均有对应generation的 termination／cleanup确认；在途Run、active Attempt、未裁决candidate和Reason lease均为0。唯一开放 `i036` 未认领，其前置 `i034` 已完成；精确容器仍运行但只见 idle进程，不能将此写成项目已暂停或容器已停止。
+
+**首次本地交付：部署待许可。** 当时已向用户说明：删除次数阻断后，仍active且授权有效的 `proj_039` 可能自动派发 `i036` 或新 Reason，产生目标请求和模型费用；无在途任务不是零副作用保证。首次交付时未取得部署许可，因此未 stop／start／restart宿主进程，未部署后端策略，未自行 pause／resume、创建／恢复／重跑任何真实项目，也未改真实数据库或历史授权。该只读核对是时间点事实；后续用户暂停项目并授权部署后的记录见下文。
+
+**首次交付的真实任务验收与剩余边界。** 本轮没有真实模型验收，不声明 `proj_039` 已 completed、`i036` 会跳过或模型会立即收尾。删除固定次数上限增加持续投入和费用不确定性，不扩大真实授权，也不解决研究选题、重复投入或阴性证据尺度问题。首次本地交付到此停止，不接续额外历史待办。未 commit、未 push。
+
+### 授权后的部署追加记录（2026-10-13 UTC）
+
+**本次许可与部署前核对。** 用户明确告知“原项目我暂停了，部署更新吧”，据此执行部署，不视作恢复／重跑项目或模型验收许可。01:22:18.837282 UTC 的重新只读快照确认全部8个项目为6 paused／2 completed、active=0；`proj_039` 已 paused／generation 1，关联精确容器 exited／PID 0，暂停代次为1。该项目63 Run、36 Attempt、60 candidate及60 outcome均未新增，累计计量仍36／4；没有queued／running Run、未裁决candidate或Reason lease。全局保留 `proj_033` 的一个active Attempt，但其项目已paused、6个关联Run均终态且有原代次的termination／cleanup证明；这是保留的历史义务，不自行恢复或修复。01:24:14.147972 UTC 的追加核对确认全部项目均无报告请求／租约，两个现有outbox均为空。当前Server环境DB URL与 `runtime/arena.env` 的实际值在内存中比较相等，仍为同一本机 external数据库，不输出URL或凭据。
+
+**发布与停启。** 当前配置的 `arena-worker:local` 已存在且标签检查通过，无需重新构建。沿用既有 `deploy/stop.sh` 停止Dispatcher与Server，发布此前验证通过的正式前端产物，然后执行 `deploy/start.sh --host 0.0.0.0 --port 8001`；未跑install、依赖安装、重复前端构建或Worker镜像构建，未修改runtime配置、端口、密码或授权。Server与Dispatcher已加载当前宿主源码。部署生成的文件另计：`server/static/index.html` 更新及22个新hash静态资源；保留原资源，没有覆盖用户静态修改。
+
+**启动登记异常及恢复。** 首次start输出degraded并称Dispatcher立即退出，但实际新Dispatcher仍在运行并持续报告idle；其生命周期锁由真实PID `2092519`独占，cmdline／cwd／PGID／SID与本仓库一致，丢失的是PID及token摘要metadata。既有 `write_pid_metadata` 在 `setsid` 建立进程组之前校验、或 `$!` 与最终锁owner不一致，均可能造成此状态；现有证据不能确定本次具体是哪条路径。在部署操作锁内重新验证真实锁owner、进程身份及其token与现存secret一致，使用既有helper恢复0600 metadata和token摘要，没有打印凭据、重新start、删除生命周期锁或启动第二实例。随后status为running、Dispatcher ownership=tracked，heartbeat新鲜idle。没有顺手修改部署脚本；此登记竞态仍是后续启停可能复现的额外发现。
+
+**部署验收范围。** 新Server PID `2092372`／Dispatcher PID `2092519`，仍为本仓库与8001；`/health`、前端入口均HTTP 200，实际返回index及10个静态引用与已验证产物逐字节一致。Dispatcher日志确认没有active项目，启动SDK自检因当前无enabled Worker配置而跳过，不把镜像标签检查或服务启动写成真实执行验收。`/openapi.json` 为404，不为此改服务；项目详情GET含lease清理UPDATE路径，未将它当严格只读验收调用。创建422等业务行为仍以先前39个后端／7个前端定向实例为验证依据，本次不重复测试套件、不新增真实项目、不恢复原项目、不调用目标或模型。
+
+**部署后只读对比。** 01:31:46.406083 UTC 的 `REPEATABLE READ／READ ONLY` 快照确认仍为同一数据库、Schema 47；全部项目仍6 paused／2 completed、active=0。`proj_039` 保持paused／generation 1、63 Run／36 Attempt、60 candidate／60 outcome／38 Intent及36／4累计计量；全部项目的Run／Attempt总数仍218／113，没有新增。全局在途Run、未裁决candidate、Reason lease、可派报告和暂停清理证明缺失均为0，outbox仍空；`proj_033/aa001`原样保留。原项目授权epoch／v3 scope／grant及当前目标集合摘要仍匹配，历史Run清理证明和已退出容器状态不变。新Dispatcher heartbeat新鲜idle、运行任务0；没有恢复或重跑项目。
+
+后续真实任务验收仍未进行；用户以后主动恢复项目时，未结 `i036` 或保留Attempt仍可能继续并产生目标请求及费用。此次仅完成已获许可的部署，未 commit、未 push。
+
+### 分析会话实施后复核（运行快照：2026-10-13 01:42:48 UTC）
+
+**结论与范围。** 定向审阅实际未提交 diff、相关源码和测试内容，未发现本轮删除固定 Explore 次数政策需要返工的重要实质遗漏；部署有实际进程与前端交付依据，可以结束本轮实施纠偏，不另造修复任务。该结论不等于真实研究或自主完成能力已验收。上文实施记录的39个后端／7个前端实例通过及构建结果仍标记为实施会话报告，本分析没有重跑或将其冒称为自己的执行结果。
+
+- **实现对齐。** 创建请求局部拒绝额外字段，Policy、准入、收敛、Reason 输入／digest、完成和当前报告已删除次数额度消费，不是用 null 哨兵绕过旧比较；前端删除预算输入，区分执行停止时间和真实授权。Attempt 归属、原子累计计量、有限 retry、非 report 冻结 deadline、候选接受和新鲜静止完成门仍在。测试内容覆盖超过旧40次后的 discovery／verifier接受与Reason，以及47次后的正常完成；这里只确认覆盖机制，没有执行测试。定位：`cairn/src/cairn/server/services/explore_attempts.py:227`、`assessment_convergence.py:447`、`project_completion.py:99`（后两项同 services 目录），`cairn/tests/test_goal_driven_lifecycle.py:1218`、`test_goal_driven_completion.py:120`（同 tests 目录）。
+- **历史边界。** 当前场景投影不再暴露无效额度，不在读取时修改历史场景或项目快照；新报告不把历史预算当当前配置，旧冻结 Packet 的额度字段仍按历史原义渲染。v1 授权额度解释限定于历史摘要重建，当前 goal-driven 的 v3 范围未增加额度依赖。没有据此把历史停止改写成完成或自动恢复项目。定位：`cairn/src/cairn/server/services/project_authorization.py:57`、`cairn/src/cairn/dispatcher/tasks/report.py:1264`。
+- **当前部署依据。** Server `2092372`／Dispatcher `2092519` 的工作目录、启动方式、PID metadata 和生命周期锁归属一致，仍连接实际 `55433/cairn_isolated`、Schema 47；相关源码修改时间早于启动，应用源码链接指向本仓库，支持按新版源码启动，但没有检查运行内存逐字节内容。实际 `/` 与主 bundle `index-B0IcIHOY.js` 均200且与磁盘一致，主 bundle 不含旧额度字段；`/health` 200仅证明基础连通。本分析未调用项目GET或创建准入接口。
+- **精确 proj_039。** 只读一致性快照确认仍 paused／generation 1，63 Run全部终态、36 Attempt全部completed（32 discovery／4 verifier）、60 candidate／60 outcome、38 Intent；唯一开放 `i036` 无worker、无执行Run或Attempt，依赖 `i034` 已完成。63个历史Run都有对应generation的termination／cleanup确认；执行停止时间与授权到期仍空、epoch仍1，当前目标集合与v3 grant摘要／descriptor一致。当前Server启动后新增Run筛选没有该项目，现存记录支持部署未使其自动续跑；不据一次快照宣称完整历史或未登记外部活动绝对不存在。
+- **更新全局时间点事实与 Worker 解释。** 01:42:48 UTC 已有9个项目（6 paused／2 completed／1 active）；新 `proj_040` 于01:38:00创建，`tr001` Bootstrap于01:38:07启动且快照时running。全局Run／Attempt为219／113，Dispatcher heartbeat新鲜、运行任务1；不能把上文01:31的全局空闲沿用为当前状态。本分析没有创建该项目，也没有检查其目标／会话或宣称它已经成功。启动自检跳过只因 `runtime/dispatch.yaml` 的静态workers为空；数据库实际有3个enabled Tenant Worker，两个项目均已绑定，不能把“无enabled Worker配置”理解为实际没有Worker。依据：`dispatcher/runtime/startup_healthcheck.py:43–46` 与 `dispatcher/scheduler/task_lifecycle.py:37–39`（均在 `cairn/src/cairn/` 下）。
+- **尚未证明与已知额外风险。** 超过旧次数后的真实研究推进、合理收尾与目标达成仍未验收；新Bootstrap在途不能代替这些结论，也不要求为证明删除预算专门消耗超过40次。旧部署metadata异常当前不再存在，启动登记的潜在竞态尚未修复，具体历史根因仍未确定；不将它扩成本轮自动任务。没有固定次数上限后，持续投入与费用仍需由实际使用者掌握，删除预算不保证模型立即收尾或发现能力提升。
+
+本分析沿用 `fix/proj-038-reason-schema`，只增量更新本原方案，保留全部已有业务改动与静态资源；数据库使用显式 `REPEATABLE READ／READ ONLY` 并ROLLBACK。未运行测试、构建、启停、容器执行、项目操作、目标请求或模型调用；未 commit／push。无需新的业务实施提示词，后续按用户的实际运行反馈再决定是否开启下一轮。
+
+## proj_039：有提示的目标达成与探索额度耗尽后的收尾（2026-10-12 UTC；只读核实与设计完成，业务改动未实施）
+
+> **历史建议已替代：** 本节保留首次现场证据与当时预算机制的根因分析；其中“本轮最小完整实施范围”和旧验证方案不再是本轮任务。按上方“proj_039 续议”删除固定逻辑额度，不同时新增预算耗尽局部结算补丁。
+
+### 结论与第一性原理
+
+**用户所说“最终拿到 flag”有原始证据支持，应承认这次目标成果；但这是人工给出关键方向后的成功，不是完全自主解题，项目也尚未完成业务收尾。** 不把目标达成、发现能力、执行可靠性和项目终态合成一个成功率，更不能以当前 active 否定已取得的真实成果。
+
+平台应维护的是“目标、已证事实、尚有价值的问题和真实资源边界”，队列只是可调整的工作安排，不是必须消费完的研究义务。本案例的正向证据是自主发现了可复用的文件读取原语、在得到 CVE 线索后完成利用适配并保留可复核成果；不足是受阻后重复投入、把有限阴性观察推成过强结论、复核安排重叠，以及工程上不可启动的旧任务反而阻止后续决策。
+
+**本轮只建议实现最后一个确定性闭环：普通探索额度耗尽时局部结算不可启动的 discovery，保留复核与既有执行归属，让正常 Reason 基于最新证据收尾。** 这修复执行／决策连续性，不冒称已经改善自主选题。研究反馈利用、重复复核和模型选型留作独立观察，不把本案例展开为全仓改造或默认下一轮待办。
+
+### 只读证据与能力边界
+
+- **实际实例与范围。** 从当前 Server PID `1817480` 的进程环境定位入口 `8001`、cwd 为本仓库、数据库 `127.0.0.1:55433/cairn_isolated`；Dispatcher PID `1817654` 同仓。使用 psycopg 的只读连接与显式 `BEGIN READ ONLY`，未导入应用、调用业务接口或接触目标。PID／地址只用于解释本次证据归属，不是后续部署的永久参数。`docs/analysis-design-handoff.md` 所指 `goal-driven-execution-design.md` 仍不存在，因此继续增量维护本文件，不新建平行方案或顺手修改全局会话规范。
+- **Goal 与人工贡献。** `facts.goal` 等值为“拿到flag”。`h001` 于05:35:42提供旧挑战容器过期后的新实例；`h002` 于06:13:14提示命令执行方向；`h003` 于07:09:23明确给出 `CVE-2024-2961`。新地址是环境修复，后两项是实质研究提示，不能从自主性评价中扣掉。这里均采用DB的UTC记录，不混用宿主日志本地时间；不复制目标地址、flag、凭据或完整利用内容。
+- **成功依据不是模型自报。** 首条接受成果为 `f034/tr059/i034`，08:08:35登记；对应 `a457/a458` 的直接／编码读取HTTP响应值一致，`a451` 命令结果回读含相同值与执行身份。`f035/tr062/i035` 的 `a471/a472/a478` 提供不同构造的读取与命令回读。`f037/tr063/i038` 的 `a518` 投递前回读无该Run标记，`a523` 投递后HTTP200含新标记、uid33与相同值的编码内容，`a524` 提取结果一致，支持有判别性的命令执行复核。定向读取原件的大小／SHA256与DB及登记版本一致；没有全量审计524项Artifact。投递请求 `a450/a477/a522` 自身是HTTP404，成功依据是后续输出文件回读，不能误记成“利用请求直接200返回flag”。08:08:35是业务接受时间，不是精确首次网络获取时间；未向靶场判分端提交，也未重新访问目标。
+- **业务复核。** `f036/tr061/i037` 与 `f037/tr063/i038` 分别于08:16:38、08:21:46记录 confirmed／different_worker；不能只凭该标签宣称独立验证，以上具体响应才是支持。`i035` 是 Reason 预排的普通 discovery，另有系统为 `i034` 和 `i035` 的两条 Observation 各派 verifier，因此确实存在研究目的重叠，不是同一 Observation 被重复调度，也不是 verifier 无限自我繁殖。
+- **自主研究有实质进展，也有明确边界。** CVE提示前，`f004/f005` 已形成并后续复现可控制文件读取的原语；收到提示后，研究继续补足适用性、工具链生成与投递约束，最终取得成果，不能说只是复制一个flag。但 `f008–f017、f019` 共11条事实反复记录目标容器过期；`f018` 是离线分析，不应一并算作无效网络重试。Reason `tr018/tr022/tr025` 已知反复过期仍安排恢复探测／条件读取，说明重排任务未充分改变投入方式。CVE提示前的大量路径、包装器和旁路排查没有自主找到最终方向；本次不能证明缺陷一定来自模型知识、Prompt或某个配置，不能据此直接更换模型或增加固定CVE流程。
+- **阴性证据不能越界。** `f026/f027/f030` 及后续 Reason 出现由有界测试推到“不可达／不存在／穷尽可读路径”等过强表述；错误被抑制的空响应不能单独区分不存在、不可读、构造无效等原因，有限路径枚举也不能排除未测名称。后续成功尤其说明不能把“旧方法未找到”当成“此能力不可能”。`a453/a498` 的目录观察还显示最终文件为普通可读文件，定位名称后既有文件读取原语即可直接取值；因此本次RCE突破了路径定位／可观察性限制，不能写成“已证明flag必须提权才能读”。`f018` 在命令执行提示前已提出可能需要执行／提权的假设，不能绝对化为此前毫无相关认识；但尚未自主找到最终CVE路线。`tr032` 开始于06:07，早于 `h002`，不能仅据结束时间断言它忽略了新Hint；`tr040` 的决策已使用命令执行提示。
+- **上轮修复评价。** 当前 `worker_protocol/submission.py:458–470` 仍以 `allOf` 同时保留完整 Intent 与依赖约束。本项目63个Run为52成功、11失败：Bootstrap 1成功，Reason 15成功／3失败，Explore 36成功／8失败；失败为10次 provider_error、1次 `tr028` 的 strict_json／submission_invalid（3次提交、2次修正），之后同一 `i020` 的 `tr029` 成功。未重现 proj_038 的 result_schema 终局阻断，已有跨轮接受和局部故障后继续的正向信号；未专门证明真实模型再次提交 controls 时的修正效果，不把无错误等同于穷尽验收。63个Run冻结模型均为 `wangsu-ds-flash-latest`，本轮没有模型对照，可靠货币费用未知。
+- **当前仍非 completed。** 09:05 UTC附近快照为 active／generation 0，63个Run全已终结、无Reason claim、未结算candidate为0；最近 `tr059–tr063` 的 termination／cleanup 均确认。仅 `i036` 开放、worker为空、无历史Attempt，依赖已完成的 `i034`。无正式报告请求／finalization记录；报告本来是显式请求，不能据此另判报告调度故障。不要将本次只读查证说成重新跑通项目或全平台验收。
+
+### 首因：探索额度准入与调度／收敛不一致
+
+1. **预算是可解释的真实边界。** 冻结 features 为 assessment contract 2／verifier contract 1、`verification_reserve=8`，总预算 `B=40`；`explore_attempts_started T=36` 包含复核，`verification_attempts_started V=4`。36个charged逻辑Attempt中32个 discovery、4个 verifier，不能误读为36个普通探索再加4个复核。新 discovery 的上限为 `B - max(R - V, 0)=36`，当前没有普通探索额度，仍有4个总额度留给复核；不是总预算40已全部用尽。
+2. **不可派却不结算。** `server/services/explore_attempts.py:227–274` 在上述边界返回409 `discovery_budget_exhausted`，但不结算剩余discovery，也不推进局部收敛。`assessment_convergence.py:534–557` 的 goal-driven 分支只识别总预算、截止与人工停止；当前不进入其中任何分支。不能原样扩充成项目硬停止，否则会误关剩余verifier并禁止Reason。
+3. **队列饥饿了决策。** `dispatcher/scheduler/dispatch_cycle.py:381–432` 按open、worker及前置Intent已收敛选择工作，直接 `return _dispatch_explore(...)`；即使派发返回False，也不到后面的 `:442–457` Reason触发。`scheduler/task_lifecycle.py:474–508` 对 discovery额度拒绝只记录并返回，不像总预算／截止那样处理收敛。`runtime/logs/dispatcher.log:625` 已见 `i036` 的精确409，`:638` 起反复出现；09:05:16的最新项目决策仍是 explore／admission_denied，Dispatcher idle、running_task_count=0。该循环没有产生新Run，不应捏造每次409都产生模型费用。
+4. **旧计划不能替代当前条件。** `i036` 是 `tr060` 在主利用尚未完成时创建的失败兜底，文字写“若i034没有命令执行／flag才执行”，实际 `depends_on=i034` 只表达前项收敛，不表达失败条件。主利用已成功后它并无必要自动执行。本轮不添加自然语言条件解析或新依赖DSL；资源耗尽由确定性实现结算，其他已失去价值的计划由Reason正常abandon。
+5. **纠正旧方案的过宽解读。** `project_completion.py:138–189` 拒绝开放Intent／在途Run／active Attempt／未结算候选，是当前完成门禁；这不等于所有排过的任务必须实际执行完。应先如实撤销不再可启动／无价值的安排，再按证据决定终点。proj_036关于动态完成拒绝的修复无需回退；本项目最后Reason `tr060` 成功，不是同一完成拒绝失败链复发。
+
+### 本轮最小完整实施范围（建议，尚未实施）
+
+**推荐复用 Server 既有收敛服务做局部结算，而非增加调度fallback、扩大预算或改完成门禁。**
+
+1. 在 `assessment_convergence.py` 的现有 goal-driven 收敛入口识别“普通探索剩余额度为0、但不一定总预算耗尽”的情形，与实际准入使用同一现有预算策略／计数语义，不在Dispatcher复制公式或新建预算状态。总预算／截止／人工停止仍按原硬停止语义处理，不因本轮改变为成功。
+2. 仅将没有worker、没有queued/running执行、没有active Attempt归属的未启动 discovery 以原 `conclusion=abandoned`、`conclusion_reason=discovery_budget_exhausted` 结算。保留事实、候选、原件、历史任务和费用；保留verifier、在途接受与既有已计费Attempt的合法retry／补交。原 `_conclude_goal_driven_unrunnable_intents` 不区分role且未要求worker为空，不能原样拿来批量关闭本分支工作。使用当前事务／所有权规则防止与认领并发相互覆盖，不增加新的状态表或后台恢复器。
+3. 从 `explore_attempts.py` 的该409路径贯通局部收口并在错误返回前保存必要结算，不能由请求异常回滚。复用已有结果conclude等收敛调用点及时处理刚好耗尽额度的排队工作；保留准入拒绝作为并发或旧调度快照的最终保障，不只改一处投影使问题暂时看不见。
+4. 局部耗尽不能写项目级 `coverage_stop_reason`、不能将项目直接stopped／completed，且不能从通用收敛入口返回会被 `project_reason.py:41–45` 当作 `assessment_stopping` 的项目硬停止原因。下一tick取得已结算的图后，应依现有事实／开放工作检查点进入正常Reason；同输入的后续tick不重复派付费Reason。Reason根据Goal和证据决定完成或如实受限，Server继续执行新鲜输入、静止、归属和候选门禁。
+5. 检查必要消费者 `dispatch_cycle.py`、`task_lifecycle.py`、Reason trigger／claim、complete门禁是否真正贯通；能够复用的路径不为“完整”而改代码。不用“任意Explore派发失败都改跑Reason”掩盖预算、容量、授权与冲突各自的语义，也不解析 `i036` 文本硬编码跳过本题。仅当本轮上下文说明确实矛盾时改最少相关措辞，不借机加长研究Prompt。
+
+**明确不做：** 增加预算／取消复核保留、重置计数、自动重建或恢复项目、手改历史 `i036`／Run／状态、看到flag关键字自动complete、抹除失败、放宽提交和证据约束；不硬编码CVE或靶场流程；不改模型、SDK、工具权限、去重／Observation／verifier架构、报告/UI、全局规范；不顺带解决过期目标重复探索与复核重叠。后两项是真实改进机会，但本轮未形成足够完整的能力修复方案，不附带授权。
+
+### 直接验证、部署和交接边界
+
+- 本分析没有运行测试。实施优先复用现有隔离数据库／调度fixture，以合成项目构造 `B=40,R=8,T=36,V=4`、一条无执行归属的open discovery与合法已完成成果：生产准入／收敛应如实结算该工作，409事务不丢写；后续真实调度入口不再对同一任务拒绝空转，能经既有Reason路径与合成完成建议进入Server正常完成接受。不能只断言预算函数返回值或手改最终状态。
+- 在同一必要路径中确认verifier仍能使用保留额度，active Attempt合法续作／在途交付不被批量abandon，重复tick不重复收费或生成Reason；预算未耗尽不误关工作，总预算／截止仍不假报completed。不要为这些边界新建测试平台或默认跑全套，只选受影响节点。将“本地机制验证”和“真实模型会不会合理收尾”分开，后者本轮未证，不要求用户新建项目付费验证一个确定性预算错误。
+- 运行代码改动后按现有方式构建完整系统；只涉及宿主时不默认重建Worker镜像。**本项目当前active，修复生效本身可能解除自动派发阻断并产生新的Reason费用。** 实际重载前重新查实例和在途归属，向用户明确这一后果并取得本次自动继续范围的许可；未授权时保留项目／容器和全部材料，报告构建完成但部署待许可，不自行pause/resume来规避该边界，也不把重启解释成零成本烟测。是否让proj_039正常继续由用户决定，不要求重新创建proj_040。
+- 实施会话更新本节实施记录，区分代码、本地验证、实际部署和真实任务终态；完成本轮即停止，不commit／push。下一个新会话读取本节即可独立接手，无需旧聊天。
+- 本分析分支 `fix/proj-038-reason-schema`，只更新本文件；未修改业务代码／测试／配置／数据库／Prompt，未运行测试、构建、启停、容器执行、项目生命周期操作、目标请求或模型调用，未创建commit。原件查证只读且不执行任何项目保存脚本。当前确定的是成果证据和收尾死锁；实施效果、未来自主发现能力、可靠货币成本和靶场判分仍未验证。
 
 ## proj_038：Reason 提交结构与依赖同时有效（2026-10-12 UTC；代码、定向本地接受验证与完整宿主部署完成，真实任务未验收）
 

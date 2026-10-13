@@ -400,7 +400,7 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
             )
         verifier_intents = [item for item in unclaimed_intents if item.assessment_role == "verifier"]
         if verifier_intents:
-            # 复核不再被最新 discovery 挤到共享预算的最后。
+            # 必要复核优先于新增 discovery，避免新工作持续延后复核。
             target = min(verifier_intents, key=lambda item: (item.created_at, item.id))
             return self._dispatch_explore(project, self.client.export_project(summary.id), target)
         view = project.project.assessment_execution

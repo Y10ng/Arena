@@ -1261,23 +1261,25 @@ def _render_report_markdown(
                 for item in selected
             ]),
         ])
-    budget_fields = (
-        "budget", "deadline", "authorization_expires_at", "attempts_started",
-        "verification_reserve", "verification_attempts_started",
-        "remaining_total", "remaining_discovery",
-    ) if goal_driven else (
-        "budget", "deadline", "attempts_started", "verification_reserve",
+    # 旧 goal-driven Packet 也可能已冻结额度字段，必须保留其原义。
+    historical_limits = not goal_driven or any(
+        key in execution for key in ("budget", "verification_reserve", "remaining_total", "remaining_discovery")
+    )
+    execution_fields = (
+        "deadline", "authorization_expires_at", "attempts_started",
+        "verification_attempts_started",
+    ) if not historical_limits else (
+        "budget", "deadline", "authorization_expires_at", "attempts_started", "verification_reserve",
         "verification_attempts_started", "remaining_total", "remaining_discovery",
         "depth_review_fact_id", "accepted_input_digest",
     )
     lines.extend([
-        "## 预算与执行限制（冻结快照）",
-        "预算单位是 logical attempt，不是模型调用次数、token 或 API 费用。未使用的复核保留容量不等于已完成复核。",
-        _report_table(("预算字段", "冻结值"), [
-            (key, "无固定次数上限" if key == "budget" and key in execution and execution[key] is None else execution.get(key))
-            for key in budget_fields
+        "## 历史额度与执行计量（冻结原件）" if historical_limits else "## 执行停止时间与累计计量（冻结快照）",
+        "以下保留历史冻结额度材料，不是当前目标驱动的有效额度政策；历史未执行或未复核工作不能由文字补齐。" if historical_limits else "未设置执行停止时间表示不限期；真实授权期限、单 Run 超时与有界故障恢复仍然有效。累计逻辑 Attempt 次数不是模型调用次数、token 或 API 费用，也不构成次数上限。",
+        _report_table(("执行字段", "冻结值"), [
+            (key, "不限" if not historical_limits and key == "deadline" and key in execution and execution[key] is None else execution.get(key))
+            for key in execution_fields
         ]),
-        "未记录的预算不代表预算为零；budget=null 表示没有固定次数上限。",
         _report_table(("任务类型", "记录的执行次数"), [
             (item.get("task_type"), item.get("execution_count"))
             for item in summary.get("calls_by_task_type", [])
