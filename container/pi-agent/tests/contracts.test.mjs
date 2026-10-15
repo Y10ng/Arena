@@ -20,7 +20,7 @@ from cairn.dispatcher.worker_protocol.submission import build_submit_result_sche
 print(json.dumps({
   'explore': build_submit_result_schema('explore_execute', {'assessment_protocol': 'goal-driven-v1'}),
   'explore_conclude': build_submit_result_schema('explore_conclude', {'assessment_protocol': 'goal-driven-v1'}),
-  'reason': build_submit_result_schema('reason_execute', {'allowed_fact_ids': ['f1'], 'allowed_intent_ids': ['i-closed'], 'max_intents': 2, 'decision_input_digest': 'a' * 64}, inputs={'open_intent_ids': []}),
+  'reason': build_submit_result_schema('reason_execute', {'allowed_fact_ids': ['f1'], 'allowed_intent_ids': ['i-closed'], 'max_intents': 3, 'decision_input_digest': 'a' * 64}, inputs={'open_intent_ids': []}),
 }))`;
   return JSON.parse(execFileSync(process.env.PYTHON_BIN || 'python3', ['-c', code], {
     encoding: 'utf8', env: { ...process.env, PYTHONPATH: source },
@@ -119,33 +119,56 @@ test('goal-driven production Schema accepts missing comparisons and repairs miss
   assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
 });
 
-test('goal-driven Reason production Schema repairs invalid name and rejects forward placeholders', async (t) => {
+test('goal-driven Reason production Schema preserves Intent structure and repairs invalid dependencies', async (t) => {
   const schema = goalSchemas().reason;
   const validator = Compile(schema);
   const intents = [
     { from: ['f1'], description: 'First' },
     { from: ['f1'], description: 'Second', depends_on: '@1' },
+    { from: ['f1'], description: 'Third', depends_on: '@2' },
   ];
   const valid = { accepted: true, data: { intents } };
   const invalid = structuredClone(valid);
   invalid.data.intents[1].depends_on = 'semantic-name';
   assert.equal(validator.Check(valid), true);
   assert.equal(validator.Check(invalid), false);
-  for (const dependency of ['@1', '@2', '@99']) {
-    const forward = structuredClone(valid);
-    forward.data.intents[0].depends_on = dependency;
-    assert.equal(validator.Check(forward), false, dependency);
+  for (let index = 0; index < intents.length; index += 1) {
+    for (const [label, mutate] of [
+      ['extra field', (intent) => { intent.controls = []; }],
+      ['missing from', (intent) => { delete intent.from; }],
+      ['missing description', (intent) => { delete intent.description; }],
+      ['nested from', (intent) => { intent.from = [{ id: 'f1' }]; }],
+      ['unknown fact', (intent) => { intent.from = ['unknown-fact']; }],
+      ['description type', (intent) => { intent.description = {}; }],
+    ]) {
+      const malformed = structuredClone(valid);
+      mutate(malformed.data.intents[index]);
+      assert.equal(validator.Check(malformed), false, `${index + 1}: ${label}`);
+    }
+    const nonObject = structuredClone(valid);
+    nonObject.data.intents[index] = 'not-an-intent';
+    assert.equal(validator.Check(nonObject), false, `${index + 1}: Intent type`);
+    for (const dependency of [null, 'i-closed', ...Array.from({ length: index }, (_, i) => `@${i + 1}`)]) {
+      const allowed = structuredClone(valid);
+      allowed.data.intents[index].depends_on = dependency;
+      assert.equal(validator.Check(allowed), true, `${index + 1}: ${dependency}`);
+    }
+    const independent = structuredClone(valid);
+    delete independent.data.intents[index].depends_on;
+    assert.equal(validator.Check(independent), true);
+    for (const dependency of [`@${index + 1}`, `@${index + 2}`, '@99', 'semantic-name']) {
+      const disallowed = structuredClone(valid);
+      disallowed.data.intents[index].depends_on = dependency;
+      assert.equal(validator.Check(disallowed), false, `${index + 1}: ${dependency}`);
+    }
   }
-  const existing = structuredClone(valid);
-  existing.data.intents[1].depends_on = 'i-closed';
-  assert.equal(validator.Check(existing), true);
   const { request, calls } = await fixture(t, 'openai-chat-completions', [
     { tools: [{ name: 'submit_result', args: invalid }] },
     { tools: [{ name: 'submit_result', args: valid }] },
   ]);
   Object.assign(request, {
     phase: 'reason_execute', result_schema: schema,
-    binding: { allowed_fact_ids: ['f1'], allowed_intent_ids: ['i-closed'], max_intents: 2, decision_input_digest: 'a'.repeat(64) },
+    binding: { allowed_fact_ids: ['f1'], allowed_intent_ids: ['i-closed'], max_intents: 3, decision_input_digest: 'a'.repeat(64) },
   });
   const audit = [];
   const result = await runRequest(request, { audit: (event) => audit.push(event) });

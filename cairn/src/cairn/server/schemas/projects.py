@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from uuid import UUID
 
 from cairn.assessment_contracts import DepthReviewDecision, ExperimentRecord
 from pydantic import ConfigDict
@@ -524,10 +525,13 @@ class ReportCapabilityView(BaseModel):
 class ProjectMeta(BaseModel):
     id: str
     title: str
-    status: Literal["active", "paused", "stopped", "completed"]
+    status: ProjectStatus
+    schedule_id: str | None = None
+    verification_request_id: str | None = None
     execution_generation: int = 0
     authorization_epoch: int = 0
     authorization_scope_digest: str | None = None
+    authorization_scope_descriptor: dict[str, Any] | None = None
     authorization_window_seconds: int | None = None
     authorization_block_reason: str | None = None
     created_at: str
@@ -537,7 +541,6 @@ class ProjectMeta(BaseModel):
     assessment_protocol: str = ""
     vulnerability_fingerprint_version: int | None = None
     report_capability: ReportCapabilityView = Field(default_factory=ReportCapabilityView)
-    explore_budget: int | None = None
     explore_deadline: str | None = None
     authorization_expires_at: str | None = None
     explore_attempts_started: int = 0
@@ -620,11 +623,15 @@ class CreateHintInline(BaseModel):
 
 
 class CreateProjectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: UUID | None = None
     title: str
     origin: str
     goal: str
     scenario: str | None = None
     hints: list[CreateHintInline] | None = None
+    # 缺省或 null 绑定 Origin 原件；显式数组（含 []）保留结构化范围语义。
     targets: list[CreateTargetInline] | None = None
     # resources 保留旧版 JSON 创建兼容；大文件和 ZIP 使用临时批次。
     resources: list[CreateProjectResourceRequest] | None = None
@@ -634,12 +641,11 @@ class CreateProjectRequest(BaseModel):
     tenant_worker_ids: list[str] = Field(min_length=1)
     # 新建项目必须显式绑定同 Tenant 的项目组；存量项目生命周期仍允许为空。
     group_id: str
-    explore_budget: int = Field(default=40, ge=1, le=10_000, strict=True)
     explore_deadline: str | None = None
     # 创建方必须显式选择未来期限或以 null 表示无限期，不能靠字段缺失推导授权。
     authorization_expires_at: str | None
 
-    @field_validator("title", "origin", "goal", "scenario")
+    @field_validator("title", "scenario")
     @classmethod
     def validate_non_empty_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -648,6 +654,13 @@ class CreateProjectRequest(BaseModel):
         if not text:
             raise ValueError("must not be empty")
         return text
+
+    @field_validator("origin", "goal")
+    @classmethod
+    def validate_original_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be empty")
+        return value
 
     @field_validator("resource_batch_id")
     @classmethod

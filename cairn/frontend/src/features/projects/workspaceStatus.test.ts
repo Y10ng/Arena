@@ -301,5 +301,19 @@ describe('authoritative project runtime presentation', () => {
     ).toContain('升级')
     expect(runtimeRequestError(new Error('/secret/token=canary'))).not.toContain('canary')
     expect(runtimeRequestError({ status: 403 })).toContain('权限')
+    for (const code of [
+      'explore_deadline_exceeded',
+      'project_deadline_exceeded',
+      'assessment_deadline_exceeded',
+    ]) {
+      const message = runtimeRequestError({ status: 409, data: { detail: code } })
+      expect(message).toContain('已到执行停止时间')
+      expect(message).toContain('重新授权不会延长此时间')
+      expect(message).toContain(`关联码：${code}`)
+      expect(message).not.toContain('授权时间窗已到期')
+    }
+    expect(runtimeRequestError(new Error('project_authorization_expired'))).toContain(
+      '项目授权已过期',
+    )
   })
 })

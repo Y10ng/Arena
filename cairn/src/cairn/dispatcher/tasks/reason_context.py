@@ -16,11 +16,11 @@ from cairn.assessment_contracts import (
 )
 from cairn.dispatcher.config import DispatchConfig
 from cairn.dispatcher.prompting import (
+    authorization_scope_replacements,
     format_coverage_slots,
     format_fact_ids,
     format_open_intents,
     format_structured_coverage_slots,
-    format_targets,
     knowledge_base_prompt_context,
 )
 from cairn.dispatcher.protocol.client import CairnClient
@@ -53,24 +53,6 @@ def goal_driven_reason_execution(project: ProjectDetail) -> bool:
         or getattr(project.project, "assessment_protocol", None)
         == GOAL_DRIVEN_PROTOCOL
     )
-
-
-def _authorized_targets(project: ProjectDetail) -> list[dict[str, object]]:
-    return [
-        {
-            "id": target.id,
-            "value": target.value,
-            "type": target.type,
-            "status": target.status,
-            "source_fact_id": target.source_fact_id,
-            "discovered_by_run_id": target.discovered_by_run_id,
-        }
-        for target in sorted(
-            getattr(project, "targets", []),
-            key=lambda item: (getattr(item, "created_at", ""), item.id),
-        )
-        if target.status in {"seed", "approved"}
-    ]
 
 
 def _goal_text(project: ProjectDetail) -> str:
@@ -214,7 +196,7 @@ def build_reason_prompt_context(
     if goal_driven:
         coverage_context = (
             "Goal-driven scheduling does not use Coverage Cells; consume Facts, "
-            "Intents, evidence, logical budget, and authorized Targets."
+            "Intents, evidence, execution stop time, and the authoritative authorization scope."
         )
     elif structured_intent_binding is not None:
         coverage_context = (
@@ -243,10 +225,8 @@ def build_reason_prompt_context(
             ],
             ensure_ascii=False,
         )
-    authorized_targets = _authorized_targets(project)
     decision_context = {
-        "logical_budget": {
-            "configured": getattr(project.project, "explore_budget", None),
+        "attempt_statistics": {
             "explore_attempts_started": getattr(
                 project.project,
                 "explore_attempts_started",
@@ -257,9 +237,6 @@ def build_reason_prompt_context(
                 "verification_attempts_started",
                 0,
             ),
-            "remaining_total": execution.get("remaining_total"),
-            "remaining_discovery": execution.get("remaining_discovery"),
-            "remaining_verification": execution.get("remaining_verification"),
         },
         "execution_cutoff": getattr(project.project, "explore_deadline", None),
         "authorization_expires_at": getattr(
@@ -278,8 +255,8 @@ def build_reason_prompt_context(
         },
     }
     replacements = {
+        **authorization_scope_replacements(project),
         "goal": _goal_text(project),
-        "authorized_targets": format_targets(authorized_targets),
         "decision_context": json.dumps(
             decision_context,
             ensure_ascii=False,

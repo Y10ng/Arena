@@ -897,7 +897,7 @@ def mark_slots_skipped(
     reason: str = "coverage tail",
 ) -> int:
     # Phase 4 B/D 收尾：批量把 pending/exploring 的 slot 标 skipped，让 reason 下轮看 pending 空能 complete。
-    # tier=None 收尾所有层（D 预算兜底）；tier='extended' 只收尾过程发现（B 收益递减），core 不动。
+    # tier=None 在执行截止时收尾所有层；tier='extended' 只收尾过程发现（B 收益递减），core 不动。
     clauses = ["project_id = ?", "status IN ('pending', 'exploring')"]
     params: list = [project_id]
     if tier is not None:

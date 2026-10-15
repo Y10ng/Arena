@@ -35,8 +35,9 @@ export interface ReportCapability {
 
 export interface ProjectSummary {
   id: string
+  schedule_id?: string | null
   title: string
-  status: 'active' | 'paused' | 'stopped' | 'completed'
+  status: 'pending' | 'active' | 'paused' | 'stopped' | 'completed'
   created_at: string
   scenario_key: string
   assessment_protocol: string
@@ -60,9 +61,9 @@ export interface ProjectSummary {
   authorization_epoch?: number
   readonly authorization_block_reason?: string | null
   authorization_scope_digest?: string | null
+  readonly authorization_scope_descriptor?: Record<string, unknown> | null
   authorization_window_seconds?: number | null
   authorization_expires_at?: string | null
-  explore_budget?: number | null
   explore_deadline?: string | null
   explore_attempts_started?: number
   verification_attempts_started?: number
@@ -497,17 +498,17 @@ export interface ProjectLibraryBinding {
 }
 
 export interface CreateProjectRequest {
+  request_id?: string
   title: string
   origin: string
   goal: string
   scenario: string
   tenant_worker_ids: string[]
   group_id: string
-  explore_budget: number
-  explore_deadline?: string
+  explore_deadline?: string | null
   authorization_expires_at: string | null
   hints?: Array<{ content: string }>
-  targets?: Array<{ value: string; type: TargetType }>
+  targets?: Array<{ value: string; type: TargetType }> | null
   resources?: CreateProjectResourceRequest[]
   resource_batch_id?: string
   library_keys?: string[]
@@ -516,8 +517,9 @@ export interface CreateProjectRequest {
 export interface ProjectDetail {
   project: {
     id: string
+    schedule_id?: string | null
     title: string
-    status: 'active' | 'paused' | 'stopped' | 'completed'
+    status: 'pending' | 'active' | 'paused' | 'stopped' | 'completed'
     created_at: string
     scenario_key: string
     tenant_workers: ProjectWorkerBinding[]
@@ -536,9 +538,9 @@ export interface ProjectDetail {
     authorization_epoch?: number
     readonly authorization_block_reason?: string | null
     authorization_scope_digest?: string | null
+    readonly authorization_scope_descriptor?: Record<string, unknown> | null
     authorization_window_seconds?: number | null
     authorization_expires_at?: string | null
-    explore_budget?: number | null
     explore_deadline?: string | null
     explore_attempts_started?: number
     verification_attempts_started?: number

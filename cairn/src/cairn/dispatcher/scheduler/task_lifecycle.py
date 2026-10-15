@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from cairn.dispatcher.runtime.browser_sessions import notify_browser_task
 from cairn.dispatcher.tasks.delivery import retained_runner_available
+from cairn.dispatcher.tasks.external_verification import run_external_verification_task
 from cairn.dispatcher.worker_result_gateway import WorkerResultFailure, worker_failure_error_type
+from cairn.server.schemas.tenant_workers import TenantWorkerExecutionBinding
 
 from .common import *
 from .decisions import DispatchDecisionsMixin, claim_failure_code
@@ -73,6 +75,90 @@ class TaskLifecycleMixin(TaskRunFinishMixin, DispatchDecisionsMixin):
         # 原容器旧 runner 或工作区不可核验时，领取前明确阻断，不能先记失败 Run 再回退空会话。
         self._observe_decision(project_id, "execution_continuation_unavailable", task_type=task_type, worker_id=worker.id)
         return False
+
+    def _dispatch_external_verification(self, project: ProjectDetail) -> bool:
+        project_id = project.project.id
+        request_id = project.project.verification_request_id
+        if project.project.status != "active" or project.project.authorization_block_reason is not None:
+            return False
+        if self._project_running_task_count(project_id):
+            return False
+        runs = self.client.list_task_runs(project_id)
+        if not runs.ok or not isinstance(runs.data, list):
+            return False
+        if any(run.get("task_type") == "external_verify" for run in runs.data if isinstance(run, dict)):
+            # 已执行的请求只恢复留存／停止／终结，绝不从新会话再次触碰目标。
+            return False
+        scenario = self._scenario_for_project(project)
+        container_runtime = self._container_runtime_options(scenario, project_id)
+        selection = self._select_worker(project_id, "explore", scenario, project.project.tenant_workers)
+        if selection.worker is None:
+            return False
+        worker = selection.worker
+        # 候选只决定稳定身份；首次 claim 的回执才是本次真正消费的模型与凭据。
+        runtime_context = self._task_run_runtime_context(
+            project, "external_verify", worker, None, scenario=scenario,
+            container_runtime=container_runtime, selection=selection,
+        )
+        admission = self.client.claim_verification(request_id, {
+            "task_type": "external_verify", "worker_name": worker.name,
+            "worker_type": worker.type, "prompt_group": scenario.prompt_group,
+            "execution_profile": self.config.container.execution_profile,
+            "runtime_context": runtime_context,
+            "expected_execution_generation": project.project.execution_generation,
+        })
+        if not admission.ok or not isinstance(admission.data, dict):
+            self._observe_decision(project_id, claim_failure_code(admission), task_type="external_verify", worker_id=worker.id)
+            return False
+        claim = admission.data
+        if claim["replayed"]:
+            return False
+        binding = TenantWorkerExecutionBinding.model_validate(claim["execution_binding"])
+        worker, _provenance, circuit_key = self._materialized_execution_binding(binding)
+        task_run = claim["task_run"]
+        task_run_id = task_run["id"]
+        prior_context = task_run.get("runtime_context") or {}
+        if "execution_delivery" in prior_context or (prior_context.get("execution_lifecycle") or {}).get("process_started") is True:
+            # claim 回执重放不是重复执行许可，现有精确清理与 candidate 恢复链负责收口。
+            return False
+        cancellation = TaskCancellation(generation=claim["execution_generation"])
+        if not self._probe_worker_readiness(
+            project_id, "external_verify", worker, container_runtime, cancellation.generation,
+        ):
+            self._finish_task_run(
+                project_id, task_run_id, "failed", task_type="external_verify",
+                worker_name=worker.name, worker_type=worker.type,
+                error_type="container_failed", error_message="本次验证执行环境未就绪",
+                container_runtime=container_runtime,
+                execution_lifecycle=cancellation.execution_lifecycle(task_finished=True),
+            )
+            return False
+        try:
+            future = self.executor.submit(
+                run_external_verification_task, self.config, self.client,
+                self.container_manager, project, worker, cancellation, task_run_id,
+                claim=claim, container_runtime=container_runtime,
+                candidate_outbox=self.candidate_capture_outbox,
+                checkpoint_staging=self._execution_checkpoints_enabled_for(worker),
+            )
+        except RuntimeError:
+            self._finish_task_run(
+                project_id, task_run_id, "failed", task_type="external_verify",
+                worker_name=worker.name, worker_type=worker.type,
+                error_type="unknown", error_message="Dispatcher 提交验证任务失败",
+                container_runtime=container_runtime,
+                execution_lifecycle=cancellation.execution_lifecycle(task_finished=True),
+            )
+            return False
+        self.futures[future] = RunningTask(
+            project_id, "external_verify", worker.name, worker.type,
+            cancellation, container_runtime, task_run_id=task_run_id,
+            intent_id=claim["intent_id"], binding_circuit_key=circuit_key,
+            execution_generation=claim["execution_generation"],
+        )
+        self.runtime_project_ids.add(project_id)
+        self._observe_decision(project_id, "dispatched", task_type="external_verify", worker_id=worker.id)
+        return True
 
     def _dispatch_reason(self, project: ProjectDetail, export_yaml: str, trigger: str) -> bool:
         if self._candidate_project_blocked(project.project.id):
@@ -481,10 +567,7 @@ class TaskLifecycleMixin(TaskRunFinishMixin, DispatchDecisionsMixin):
                 if isinstance(admission.data, dict)
                 else None
             )
-            if detail in {
-                "explore_budget_exhausted",
-                "explore_deadline_exceeded",
-            }:
+            if detail == "explore_deadline_exceeded":
                 convergence = self.client.advance_coverage_convergence(
                     project.project.id
                 )

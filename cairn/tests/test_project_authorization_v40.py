@@ -119,6 +119,11 @@ def test_v40_backfills_non_user_legacy_grant_and_is_immutable(conn: sqlite3.Conn
     assert grant["actor_type"] == "system"
     assert grant["actor_id"] == "migration-v40"
     assert grant["new_deadline"] == "2026-09-18T02:00:00Z"
+    projection = project_authorization.authorization_scope_projection(conn, project)
+    assert projection.scope_digest == grant["scope_digest"]
+    assert projection.descriptor == json.loads(grant["scope_descriptor_json"])
+    assert projection.descriptor["explore_budget"] == 16
+    assert projection.descriptor["verification_reserve"] == 2
 
     with pytest.raises(sqlite3.IntegrityError, match="immutable"):
         conn.execute(

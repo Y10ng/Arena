@@ -1,14 +1,14 @@
 <template>
-  <DialogRoot :open="open" @update:open="handleOpenChange">
+  <DialogRoot :open="open" :unmount-on-hide="unmountOnHide" @update:open="handleOpenChange">
     <DialogTrigger v-if="$slots.trigger" as-child>
       <slot name="trigger" />
     </DialogTrigger>
 
     <DialogPortal :disabled="portalDisabled">
-      <DialogOverlay class="ui-dialog__overlay" :class="`ui-dialog__overlay--${size}`" />
+      <DialogOverlay class="ui-dialog__overlay" :class="[`ui-dialog__overlay--${size}`, overlayClass]" />
       <DialogContent
         class="ui-dialog__content"
-        :class="`ui-dialog__content--${size}`"
+        :class="[`ui-dialog__content--${size}`, contentClass]"
         @open-auto-focus="handleOpenAutoFocus"
         @close-auto-focus="handleCloseAutoFocus"
         @escape-key-down="handleEscapeKeyDown"
@@ -76,6 +76,9 @@ const props = withDefaults(
     portalDisabled?: boolean
     showClose?: boolean
     closeLabel?: string
+    contentClass?: string
+    overlayClass?: string
+    unmountOnHide?: boolean
   }>(),
   {
     size: 'md',
@@ -84,6 +87,7 @@ const props = withDefaults(
     portalDisabled: false,
     showClose: true,
     closeLabel: '关闭',
+    unmountOnHide: true,
   },
 )
 

@@ -75,9 +75,6 @@ def goal_project():
         "surface_manifest_enabled": True,
         "independent_verifier_enabled": True,
         "outcome_contract_version": 3,
-        "remaining_total": 7,
-        "remaining_discovery": 5,
-        "remaining_verification": 2,
         # 历史字段即使意外存在，也不能重新启用旧深测路径。
         "phase": "depth_review",
     }
@@ -88,7 +85,6 @@ def goal_project():
         assessment_execution=execution,
         execution_generation=4,
         vulnerability_fingerprint_version=1,
-        explore_budget=12,
         explore_deadline="2026-09-22T00:00:00Z",
         authorization_expires_at=None,
         explore_attempts_started=3,
@@ -155,7 +151,12 @@ def test_goal_driven_reason_context_binds_digest_priority_goal_and_scope():
     assessment = json.loads(context.replacements["assessment_execution"])
     assert "selected_depth_obligations" not in assessment
     decision = json.loads(context.replacements["decision_context"])
-    assert decision["logical_budget"]["remaining_discovery"] == 5
+    assert decision["attempt_statistics"] == {
+        "explore_attempts_started": 3,
+        "verification_attempts_started": 2,
+    }
+    assert "logical_budget" not in decision
+    assert decision["execution_cutoff"] == project.project.explore_deadline
     assert decision["concurrency"] == {
         "open_intents": 2,
         "claimed_open_intents": 1,
@@ -174,9 +175,38 @@ def test_goal_driven_decision_digest_ignores_lease_noise_but_tracks_business_inp
     lease_change.project.reason = SimpleNamespace(worker="reasoner")
     assert goal_driven_decision_input_digest(lease_change) == baseline
 
+    historical_budget_change = deepcopy(project)
+    historical_budget_change.project.explore_budget = 1
+    historical_budget_change.project.assessment_execution.update(
+        budget=1, verification_reserve=8, remaining_discovery=0,
+    )
+    assert goal_driven_decision_input_digest(historical_budget_change) == baseline
+
+    cutoff_change = deepcopy(project)
+    cutoff_change.project.explore_deadline = None
+    assert goal_driven_decision_input_digest(cutoff_change) != baseline
+
     business_change = deepcopy(project)
     business_change.intents[0].priority = 0
     assert goal_driven_decision_input_digest(business_change) != baseline
+
+
+@pytest.mark.parametrize(("budget", "reserve"), [(40, 99), ("invalid", "invalid")])
+def test_goal_driven_policy_ignores_invalid_historical_limits(budget, reserve):
+    from cairn.server.services.assessment_policy import policy_from_project_row
+
+    policy = policy_from_project_row({
+        "assessment_protocol": "goal-driven-v1",
+        "explore_budget": budget,
+        "scenario_snapshot_json": json.dumps({"features": {
+            "assessment_contract_version": 2, "verifier_contract_version": 1,
+            "verification_reserve": reserve,
+        }}),
+    })
+    assert policy.goal_driven
+    assert policy.contract_version == 2
+    assert policy.logical_attempts_enabled
+    assert policy.explore_deadline is None
 
 
 def test_goal_driven_reason_accepts_surfaces_and_prioritized_intents_together():
@@ -288,3 +318,80 @@ def test_goal_driven_builtin_prompts_are_executable_without_old_control_model():
     for content in (bootstrap, reason, explore, report):
         assert "submit_result" in content
         assert "register_artifact" in content
+
+
+@pytest.mark.parametrize("origin_source", [True, False])
+def test_research_contexts_share_persisted_scope_and_unchanged_origin(origin_source):
+    from cairn.dispatcher.prompting import render_prompt
+    from cairn.dispatcher.tasks.bootstrap_context import bootstrap_prompt_replacements
+    from cairn.dispatcher.tasks.explore_context import (
+        explore_prompt_replacements,
+        verifier_prompt_replacements,
+    )
+    from cairn.project_authorization_contract import (
+        build_scope_descriptor_v3,
+        build_scope_descriptor_v4,
+        target_scope_v3,
+    )
+
+    project = goal_project()
+    project.project.tenant_id = "tenant-context"
+    origin = "  仅研究提供的资料；{goal} 是资料中的字面片段。\n保留排除项与原始空白。  "
+    project.facts[0].description = origin
+    if origin_source:
+        project.targets = []
+        descriptor = build_scope_descriptor_v4(
+            project_id=project.project.id,
+            tenant_id=project.project.tenant_id,
+            origin_fact_id="origin",
+            origin=origin,
+        )
+    else:
+        descriptor = build_scope_descriptor_v3(
+            project_id=project.project.id,
+            tenant_id=project.project.tenant_id,
+            target_digest=target_scope_v3([vars(target) for target in project.targets])[0],
+            target_ids=["t1"],
+        )
+    project.project.authorization_scope_descriptor = descriptor
+    manager = FakeContainerManager()
+    replacements = {
+        "bootstrap": bootstrap_prompt_replacements(project),
+        "reason": build_reason_prompt_context(
+            SimpleNamespace(tasks=SimpleNamespace(reason=SimpleNamespace(max_intents=4))),
+            manager, "container-p1", project, "facts: []",
+        ).replacements,
+        "explore": explore_prompt_replacements(
+            manager, "container-p1", "facts: []", project.intents[0],
+            phase="explore_execute", project=project,
+        ),
+    }
+    verifier_intent = deepcopy(project.intents[0])
+    verifier_intent.target_observation_id = "observation-1"
+    replacements["verifier"] = verifier_prompt_replacements(
+        verifier_intent,
+        SimpleNamespace(neutral_projection={"version": 1, "observation_id": "observation-1"}),
+        project=project,
+    )
+    for phase, context in replacements.items():
+        assert context["origin"] == origin
+        scope = json.loads(context["authorization_scope"])
+        assert scope["scope_descriptor"] == descriptor
+        assert ("Origin is the authoritative scope source" in scope["instructions"]) == origin_source
+        assert ("legacy or explicit Target authorization" in scope["instructions"]) != origin_source
+        target_index = json.loads(context["authorized_targets"])
+        assert [item["id"] for item in target_index] == ([] if origin_source else ["t1"])
+        names = [f"{phase}.md"]
+        if phase != "reason":
+            names.append(f"{phase}_conclude.md")
+        for name in names:
+            rendered = render_prompt(
+                read_prompt_resource("goal-driven-v1", name, builtin_only=True), context,
+            )
+            assert origin in rendered
+            assert context["authorization_scope"] in rendered
+            assert "{authorization_scope}" not in rendered
+    if origin_source:
+        project.facts[0].description += "改写范围"
+        with pytest.raises(ValueError, match="does not match its grant"):
+            bootstrap_prompt_replacements(project)

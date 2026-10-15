@@ -48,10 +48,11 @@ router = APIRouter(tags=["vulnerabilities"])
 def get_all_vulnerabilities_route(
     severity: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    current_tenant_only: bool = Query(default=False),
     principal: RequestPrincipal = Depends(protect_cookie_request),
 ):
-    # 超级管理员沿用成果列表协议查看全局数据，普通用户仍按所属 Tenant 隔离。
-    tenant_id = None if principal.is_super_admin else principal.tenant_id
+    # 普通成果查看保留超管全局视角；复测候选只取当前创建租户，不接受客户端指定归属。
+    tenant_id = None if principal.is_super_admin and not current_tenant_only else principal.tenant_id
     with get_conn() as conn:
         results = list_all_vulnerabilities(
             conn,

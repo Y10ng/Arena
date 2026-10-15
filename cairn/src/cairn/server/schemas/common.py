@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Worker/Task 的枚举既用于 API 校验，也被 dispatcher client 复用，新增值需同步两端处理逻辑。
 # report 使用冻结的场景报告策略生成持久化成果，不依赖运行时探索 Prompt 组。
-TaskType = Literal["bootstrap", "reason", "explore", "verify", "conclude", "report"]
+TaskType = Literal["bootstrap", "reason", "explore", "verify", "conclude", "report", "external_verify"]
 
 
 WorkerType = Literal["claudecode", "codex", "pi", "mock"]
@@ -22,6 +22,9 @@ CompletedAction = Literal["remove", "stop"]
 
 
 ExecutionProfile = Literal["shared_container", "shared_local"]
+
+
+ProjectStatus = Literal["pending", "active", "paused", "stopped", "completed"]
 
 
 TaskRunStatus = Literal["queued", "running", "succeeded", "failed", "cancelled", "timed_out"]

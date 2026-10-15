@@ -7,7 +7,10 @@ import json
 from typing import Any
 
 from cairn.assessment_contracts import DepthSelection
-from cairn.dispatcher.prompting import format_targets, knowledge_base_prompt_context
+from cairn.dispatcher.prompting import (
+    authorization_scope_replacements,
+    knowledge_base_prompt_context,
+)
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.runtime.containers import ContainerManager
 from cairn.dispatcher.tasks.common import write_graph_snapshot_reference
@@ -142,6 +145,7 @@ def verifier_prompt_replacements(
     intent: Intent,
     target: VulnerabilityVerifierTarget,
     *,
+    project: ProjectDetail,
     knowledge: str | None = None,
     advisory: Any | None = None,
 ) -> dict[str, str]:
@@ -159,6 +163,7 @@ def verifier_prompt_replacements(
     }
     neutral = {key: value for key, value in projection.items() if key in allowed}
     return {
+        **authorization_scope_replacements(project),
         "intent_id": intent.id,
         "intent_description": "独立验证指定 Observation；先检查前提，执行最小复现和正常对照，按实际证据提交结果。",
         "target_observation_id": intent.target_observation_id,
@@ -224,29 +229,17 @@ def explore_prompt_replacements(
     # 图谱快照写入容器文件后再引用，避免超长 YAML 直接塞进命令参数。
     # Explore prompt 只绑定当前 intent，协议校验会阻止 worker 写到其他分支。
     goal = ""
-    authorized_targets: list[dict[str, object]] = []
     if project is not None:
         goal = next(
             (fact.description for fact in project.facts if fact.id == "goal"),
             "",
         )
-        authorized_targets = [
-            {
-                "id": target.id,
-                "value": target.value,
-                "type": target.type,
-                "status": target.status,
-                "source_fact_id": target.source_fact_id,
-            }
-            for target in sorted(
-                project.targets,
-                key=lambda item: (item.created_at, item.id),
-            )
-            if target.status in {"seed", "approved"}
-        ]
     replacements = {
+        **(
+            authorization_scope_replacements(project)
+            if project is not None else {"authorized_targets": "[]"}
+        ),
         "goal": goal,
-        "authorized_targets": format_targets(authorized_targets),
         "graph_yaml": write_graph_snapshot_reference(
             container_manager,
             container_name,

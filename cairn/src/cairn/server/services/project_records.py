@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 import shutil
+from typing import Literal
+
+from pydantic import Field, field_validator
 
 from cairn.assessment_contracts import GOAL_DRIVEN_PROTOCOL
-from cairn.server.db import artifact_root, get_conn
+from cairn.server.db import PostgresConnection, artifact_root, get_conn, schedule_transaction
 from cairn.server.models import (
     CreateProjectRequest,
     Fact,
@@ -56,7 +59,6 @@ from .project_groups import get_project_group_or_404
 from .project_resources import (
     consume_project_resource_batch,
     create_initial_project_resource_records,
-    delete_project_resource_batch_staging,
     delete_project_resource_directory,
     list_project_resource_records,
 )
@@ -64,9 +66,7 @@ from .scenarios import get_scenario_or_404, resolve_scenario_key
 from .tenant_workers import project_worker_bindings, validate_tenant_worker_selection
 from .targets import (
     build_targets,
-    derive_seed_targets_from_origin,
     normalize_target_value,
-    target_exists,
     validate_target_not_duplicate,
 )
 from .time_utils import parse_utc_timestamp, utcnow
@@ -75,26 +75,30 @@ from .time_utils import parse_utc_timestamp, utcnow
 @dataclass(frozen=True)
 class _AuthorizationMeta:
     scope_digest: str | None
+    scope_descriptor: dict | None
     window_seconds: int | None
 
 
 def _authorization_meta(conn, project) -> _AuthorizationMeta:
+    from .project_authorization import authorization_scope_projection, project_authorization_scope_descriptor
+
+    descriptor = project_authorization_scope_descriptor(conn, project)
     policy = policy_from_project_row(project)
     if not policy.goal_driven:
         return _AuthorizationMeta(
             scope_digest=row_value(project, "authorization_scope_digest"),
+            scope_descriptor=descriptor,
             window_seconds=row_value(project, "authorization_window_seconds"),
         )
-    from .project_authorization import authorization_scope_projection
-
     projection = authorization_scope_projection(conn, project)
     return _AuthorizationMeta(
         scope_digest=projection.scope_digest,
+        scope_descriptor=descriptor,
         window_seconds=projection.window_seconds,
     )
 
 
-def list_project_summaries(tenant_id: str | None = None) -> list[ProjectSummary]:
+def list_project_summaries(tenant_id: str | None = None, *, include_verification: bool = True) -> list[ProjectSummary]:
     """列出显式 Tenant 的项目；省略 context 保留内部调用与直接 service 测试。"""
     from .project_authorization import project_authorization_block_reason
 
@@ -102,7 +106,12 @@ def list_project_summaries(tenant_id: str | None = None) -> list[ProjectSummary]
         # 读取列表前先过期失联的 worker/reason 租约，保证摘要计数接近实时状态。
         expire_workers(conn)
         expire_reason_leases(conn)
-        tenant_clause = "" if tenant_id is None else "WHERE p.tenant_id = ?"
+        from .verification_requests import expire_pending_verification_requests
+        expire_pending_verification_requests(conn)
+        clauses = [] if tenant_id is None else ["p.tenant_id = ?"]
+        if not include_verification:
+            clauses.append("NOT EXISTS (SELECT 1 FROM verification_requests vr WHERE vr.project_id = p.id)")
+        tenant_clause = "WHERE " + " AND ".join(clauses) if clauses else ""
         params = () if tenant_id is None else (tenant_id,)
         rows = conn.execute(f"""
             SELECT p.*,
@@ -134,6 +143,7 @@ def list_project_summaries(tenant_id: str | None = None) -> list[ProjectSummary]
                 execution_generation=int(row_value(row, "execution_generation") or 0),
                 authorization_epoch=int(row_value(row, "authorization_epoch") or 0),
                 authorization_scope_digest=(authorization := _authorization_meta(conn, row)).scope_digest,
+                authorization_scope_descriptor=authorization.scope_descriptor,
                 authorization_window_seconds=authorization.window_seconds,
                 authorization_block_reason=project_authorization_block_reason(conn, row),
                 created_at=row["created_at"],
@@ -143,9 +153,10 @@ def list_project_summaries(tenant_id: str | None = None) -> list[ProjectSummary]
                 ),
                 assessment_protocol=str(row_value(row, "assessment_protocol") or ""),
                 assessment_progress=parse_scenario_snapshot(row_value(row, "assessment_progress_json")) or None,
-                assessment_execution=project_meta_from_row(conn, row).assessment_execution,
+                assessment_execution=(meta := project_meta_from_row(conn, row)).assessment_execution,
+                schedule_id=meta.schedule_id,
+                verification_request_id=meta.verification_request_id,
                 verification_attempts_started=int(row_value(row, "verification_attempts_started") or 0),
-                explore_budget=row_value(row, "explore_budget"),
                 explore_deadline=row_value(row, "explore_deadline"),
                 authorization_expires_at=row_value(
                     row, "authorization_expires_at"
@@ -184,23 +195,64 @@ def list_project_summaries(tenant_id: str | None = None) -> list[ProjectSummary]
         ]
 
 
+class _VerificationProjectRequest(CreateProjectRequest):
+    """仅供内部复测服务创建；不改变公开项目必须选组的合同。"""
+
+    group_id: None = None
+    scenario: Literal["goal-driven-v1"] = "goal-driven-v1"
+    tenant_worker_ids: list[str] = Field(min_length=1, max_length=1)
+    goal: str = "在本次授权范围内验证所提交报告的漏洞主张，保留实际观察、证据与限制，不开展无关探索。"
+
+    @field_validator("group_id")
+    @classmethod
+    def validate_group_id(cls, value: None) -> None:
+        return value
+
+
+def create_verification_project_record(
+    conn,
+    *,
+    title: str,
+    origin: str,
+    tenant_id: str,
+    tenant_worker_id: str,
+    creator: str,
+    actor_type: str,
+    execution_deadline: str | None,
+    authorization_expires_at: str | None,
+) -> ProjectDetail:
+    body = _VerificationProjectRequest(
+        title=title, origin=origin, tenant_worker_ids=[tenant_worker_id],
+        explore_deadline=execution_deadline, authorization_expires_at=authorization_expires_at,
+    )
+    if not tenant_id:
+        raise ValueError("tenant_id is required")
+    return _create_project_record(
+        conn, body, tenant_id=tenant_id, creator=creator, initial_status="pending",
+        library_revisions=None, require_all_roles=False, actor_type=actor_type, worker_purpose="verification",
+    )
+
+
 def create_project_record(
     body: CreateProjectRequest,
     conn: sqlite3.Connection | None = None,
     *,
     tenant_id: str,
     creator: str = "system",
+    initial_status: str = "active",
+    library_revisions: list | None = None,
+    require_all_roles: bool = True,
+    actor_type: str = "user",
 ) -> ProjectDetail:
-    """创建普通项目时必须显式指定 Tenant。"""
+    """普通项目与计划必须选择同租户项目组和普通用途 Worker。"""
     if not tenant_id:
         raise ValueError("tenant_id is required")
+    if initial_status not in {"active", "pending"}:
+        raise ValueError("invalid initial project status")
     if conn is not None:
-        return _create_project_record(conn, body, tenant_id=tenant_id, creator=creator)
+        return _create_project_record(conn, body, tenant_id=tenant_id, creator=creator, initial_status=initial_status, library_revisions=library_revisions, require_all_roles=require_all_roles, actor_type=actor_type)
     with get_conn() as owned_conn:
-        result = _create_project_record(owned_conn, body, tenant_id=tenant_id, creator=creator)
-    if body.resource_batch_id is not None:
-        delete_project_resource_batch_staging(body.resource_batch_id)
-    return result
+        return _create_project_record(owned_conn, body, tenant_id=tenant_id, creator=creator, initial_status=initial_status, library_revisions=library_revisions, require_all_roles=require_all_roles, actor_type=actor_type)
 
 
 def _create_project_record(
@@ -209,11 +261,19 @@ def _create_project_record(
     *,
     tenant_id: str,
     creator: str,
+    initial_status: str,
+    library_revisions: list | None,
+    require_all_roles: bool,
+    actor_type: str,
+    worker_purpose: str = "general",
 ) -> ProjectDetail:
     now = utcnow()
     group_id = body.group_id
-    # 在任何计数器或项目关联写入前按 Tenant 校验；跨 Tenant 组按不存在处理。
-    get_project_group_or_404(conn, group_id, tenant_id=tenant_id)
+    # 只有受控复测入口使用空组，普通项目仍先校验同租户的必选组。
+    if worker_purpose == "general":
+        get_project_group_or_404(conn, group_id, tenant_id=tenant_id)
+    elif group_id is not None:
+        raise ValueError("verification project must not have a group")
     scenario_key = resolve_scenario_key(conn, body.scenario)
     scenario = get_scenario_or_404(conn, scenario_key)
     snapshot = scenario_snapshot(scenario)
@@ -228,19 +288,19 @@ def _create_project_record(
     policy = policy_for_scenario(
         scenario,
         created_at=now,
-        explore_budget=body.explore_budget,
         explore_deadline=body.explore_deadline,
     )
-    if policy.logical_attempts_enabled:
-        snapshot["features"]["verification_reserve"] = policy.verification_reserve
     selected_workers = validate_tenant_worker_selection(
         conn,
         tenant_id=tenant_id,
         worker_ids=body.tenant_worker_ids,
+        require_all_roles=require_all_roles,
+        purpose=worker_purpose,
     )
     for library_key in body.library_keys:
         get_library(conn, library_key)
-    library_revisions = resolve_current_library_revisions(conn, body.library_keys)
+    if library_revisions is None:
+        library_revisions = resolve_current_library_revisions(conn, body.library_keys)
     pid = next_project_id(conn)
 
     conn.execute(
@@ -248,19 +308,19 @@ def _create_project_record(
         INSERT INTO projects (
             id, title, status, created_at, scenario_key,
             scenario_snapshot_json, assessment_protocol,
-            vulnerability_fingerprint_version, explore_budget, explore_deadline,
+            vulnerability_fingerprint_version, explore_deadline,
             authorization_expires_at, preferred_workers_json, group_id, tenant_id
-        ) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             pid,
             body.title,
+            initial_status,
             now,
             scenario_key,
             dump_json(snapshot),
             policy.protocol,
             policy.fingerprint_version,
-            policy.explore_budget,
             policy.explore_deadline,
             body.authorization_expires_at,
             "[]",
@@ -303,7 +363,9 @@ def _create_project_record(
             conn,
             pid,
             actor_id=creator,
+            actor_type=actor_type,
             authorized_at=now,
+            origin_fact_id="origin" if body.targets is None else None,
         )
     if body.resource_batch_id is not None:
         resources = consume_project_resource_batch(
@@ -394,9 +456,39 @@ def _project_library_bindings(
     return result
 
 
+def require_unmanaged_project(conn, project_id: str) -> None:
+    linked = conn.execute("SELECT id FROM verification_requests WHERE project_id = ?", (project_id,)).fetchone()
+    if linked is not None:
+        raise HTTPException(409, f"verification_request_managed:{linked['id']}")
+
+
 def delete_project_record(project_id: str) -> None:
-    with get_conn() as conn:
+    with schedule_transaction() as conn:
+        require_unmanaged_project(conn, project_id)
+        # 与计划消费保持“计划→项目”锁序；历史关联保留，只撤销尚未触发的预约。
+        schedule_sql = (
+            "SELECT s.* FROM project_schedules s "
+            "WHERE s.project_id = ? OR s.last_project_id = ? OR EXISTS ("
+            "SELECT 1 FROM project_schedule_occurrences o "
+            "WHERE o.schedule_id = s.id AND o.project_id = ?) ORDER BY s.id"
+        )
+        if isinstance(conn, PostgresConnection):
+            schedule_sql += " FOR UPDATE"
+        schedules = conn.execute(schedule_sql, (project_id, project_id, project_id)).fetchall()
+        conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
         get_project_or_404(conn, project_id)
+        now = utcnow()
+        for schedule in schedules:
+            if (
+                schedule["mode"] == "once"
+                and schedule["project_id"] == project_id
+                and schedule["generated_count"] == 0
+            ):
+                conn.execute(
+                    "UPDATE project_schedules SET status = 'cancelled', next_run_at = NULL, "
+                    "block_reason = NULL, version = version + 1, updated_at = ? WHERE id = ?",
+                    (now, schedule["id"]),
+                )
         conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
     # DB 行已级联删除；磁盘上的 artifact 文件不依赖 LLM 总结，需单独清理，避免删项目后残留。
     # 清理失败不阻断删除流程（DB 已删），best-effort 静默忽略。
@@ -425,6 +517,7 @@ def update_project_group_record(
 ) -> ProjectMeta:
     with get_conn() as conn:
         get_project_or_404(conn, project_id, tenant_id=tenant_id)
+        require_unmanaged_project(conn, project_id)
         group_id = body.group_id
         # 指定 group_id 时必须属于同一 Tenant；跨 Tenant 的具体组按不存在处理。
         if group_id:
@@ -446,6 +539,7 @@ def update_project_workers_record(
     """显式重绑项目 Worker，并刷新绑定 revision 快照。"""
     with get_conn() as conn:
         row = get_project_or_404(conn, project_id, tenant_id=tenant_id)
+        require_unmanaged_project(conn, project_id)
         selected_workers = validate_tenant_worker_selection(
             conn,
             tenant_id=tenant_id,
@@ -567,11 +661,21 @@ def project_lifecycle_actions(conn, project) -> dict[str, dict]:
         project_reauthorization_reason,
     )
 
+    if conn.execute("SELECT 1 FROM verification_requests WHERE project_id = ?", (project["id"],)).fetchone():
+        return {name: {"allowed": False, "reason": "verification_request_managed"}
+                for name in ("pause", "resume", "reauthorize", "reopen", "finish")}
     status = project["status"]
     actions = {
         name: {"allowed": False, "reason": "project_status_invalid"}
         for name in ("pause", "resume", "reauthorize", "reopen", "finish")
     }
+    if status == "pending":
+        # pending 的激活只能由计划事务完成，普通生命周期动作不得绕过预约。
+        for action in actions:
+            actions[action]["reason"] = "project_pending_schedule_required"
+        reason = project_reauthorization_reason(conn, project)
+        actions["reauthorize"] = {"allowed": reason is None, "reason": reason}
+        return actions
     if status == "completed":
         from .project_completion import project_reopen_reason
 
@@ -635,6 +739,7 @@ def project_lifecycle_action(project_id: str, action: str, *, legacy: bool = Fal
         # 与领取、结果接受及报告冻结共用项目写锁。
         conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
         row = get_project_or_404(conn, project_id)
+        require_unmanaged_project(conn, project_id)
         if legacy and action == "resume" and row["status"] == "active":
             return project_meta_from_row(conn, row)
         eligibility = project_lifecycle_actions(conn, row)[action]
@@ -770,27 +875,5 @@ def _insert_project_seed_targets(conn, project_id: str, body: CreateProjectReque
                 created_at=now,
             )
         )
-    for target_type, normalized_value in derive_seed_targets_from_origin(body.origin):
-        # origin 文本中可自动提取 URL/IP/域名，但显式 targets 具有去重优先权。
-        if target_exists(conn, project_id, target_type, normalized_value):
-            continue
-        target_id = next_target_id(conn, project_id)
-        conn.execute(
-            """
-            INSERT INTO targets (id, project_id, value, type, status, source_fact_id, discovered_by_run_id, created_at)
-            VALUES (?, ?, ?, ?, 'seed', 'origin', NULL, ?)
-            """,
-            (target_id, project_id, normalized_value, target_type, now),
-        )
-        targets.append(
-            Target(
-                id=target_id,
-                value=normalized_value,
-                type=target_type,
-                status="seed",
-                source_fact_id="origin",
-                discovered_by_run_id=None,
-                created_at=now,
-            )
-        )
+    # 缺省集合的范围由 Origin 原件持有；背景、参考和排除地址不自动成为 seed。
     return targets

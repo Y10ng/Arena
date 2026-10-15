@@ -82,13 +82,10 @@ def _goal_packet() -> dict[str, object]:
     packet = _packet(empty=True)
     packet["project"].update(assessment_protocol="goal-driven-v1")
     packet["policy"] = {"protocol": "goal-driven-v1"}
+    packet["assessment_summary"]["stop_reason"] = "user_stopped"
     packet["assessment_summary"]["execution"] = {
-        "budget": 8,
-        "attempts_started": 3,
-        "verification_reserve": 2,
+        "attempts_started": 47,
         "verification_attempts_started": 0,
-        "remaining_total": 5,
-        "remaining_discovery": 3,
         "deadline": None,
         "authorization_expires_at": None,
     }
@@ -285,6 +282,12 @@ def test_goal_driven_render_uses_business_work_without_cell_or_depth_review() ->
     assert "depth_review_fact_id" not in markdown
     assert "| Cell |" not in markdown
     assert "工作结果与未完成事项" in markdown
+    assert "执行停止时间与累计计量" in markdown
+    assert "| deadline | 不限 |" in markdown
+    assert "| attempts_started | 47 |" in markdown
+    assert "| budget |" not in markdown
+    assert "verification_reserve" not in markdown
+    assert "remaining_discovery" not in markdown
     assert "已接受实验详情" in markdown
     assert "非所有者请求返回 403" in markdown
     assert "仅验证了一个对象" in markdown
@@ -294,6 +297,21 @@ def test_goal_driven_render_uses_business_work_without_cell_or_depth_review() ->
     assert json.loads(report._packet_coverage_json(json.dumps(packet))) == packet[
         "assessment_summary"
     ]["coverage"]
+
+
+def test_historical_goal_driven_packet_keeps_frozen_limits_without_reinterpreting_policy() -> None:
+    packet = _goal_packet()
+    packet["assessment_summary"]["execution"].update(
+        budget=8, verification_reserve=2, remaining_total=5, remaining_discovery=3,
+    )
+    before = deepcopy(packet)
+    markdown = report._render_report_markdown(_data(), report_packet_json=json.dumps(packet))
+    assert packet == before
+    assert "历史额度与执行计量（冻结原件）" in markdown
+    assert "| budget | 8 |" in markdown
+    assert "| verification_reserve | 2 |" in markdown
+    assert "| remaining_discovery | 3 |" in markdown
+    assert "不是当前目标驱动的有效额度政策" in markdown
 
 
 @pytest.mark.parametrize("status", ["confirmed", "not_reproduced", "environment_changed", "insufficient_evidence", "conflicting", "run_failed", "not_run", "pending", "not_scheduled"])

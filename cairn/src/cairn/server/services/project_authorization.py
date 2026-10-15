@@ -14,17 +14,21 @@ from cairn.project_authorization_contract import (
     AUTHORIZATION_V2_PROTOCOL,
     authorization_scope_digest,
     authorization_scope_digest_v3,
+    authorization_scope_digest_v4,
     authorization_window_seconds,
     build_scope_descriptor,
     build_scope_descriptor_v3,
+    build_scope_descriptor_v4,
     canonical_json,
     canonical_object,
+    scope_source_from_descriptor,
     target_scope_v3,
 )
-from cairn.server.db import get_conn
+from cairn.server.db import schedule_transaction
 from cairn.server.models import ProjectMeta, ReauthorizeProjectRequest
 
 from .assessment_policy import (
+    DEFAULT_COPY_PROTOCOL,
     parse_scenario_snapshot,
     policy_from_project_row,
     row_value,
@@ -53,13 +57,76 @@ def _goal_driven_target_scope(conn, project_id: str) -> tuple[str, list[str]]:
     return target_scope_v3(targets)
 
 
+def _historical_scope_reserve(project, snapshot: dict[str, Any]) -> int:
+    """仅重建 v1 历史授权摘要，不参与当前目标驱动的执行策略。"""
+    features = snapshot.get("features") or {}
+    if int(features.get("assessment_contract_version") or 0) != 2:
+        return 0
+    if row_value(project, "assessment_protocol") != DEFAULT_COPY_PROTOCOL:
+        return 0
+    budget = row_value(project, "explore_budget")
+    configured = features.get("verification_reserve")
+    if budget is None:
+        if configured not in (None, 0):
+            raise ValueError("unlimited budget has no fixed verification reserve")
+        return 0
+    budget = int(budget)
+    if budget < 1:
+        raise ValueError("explore_budget must be positive or null")
+    reserve = min(budget - 1, (budget + 4) // 5) if configured is None else int(configured)
+    if not 0 <= reserve < budget:
+        raise ValueError("verification_reserve must satisfy 0 <= V < B")
+    return reserve
+
+
+def project_authorization_scope_descriptor(conn, project: Mapping[str, Any]) -> dict[str, Any] | None:
+    """投影当前 epoch 的不可变 grant，不用重建范围替换已授权原件。"""
+    table = (
+        "project_authorization_grants_v2"
+        if policy_from_project_row(project).goal_driven
+        else "project_authorization_grants"
+    )
+    grant = conn.execute(
+        f"SELECT scope_descriptor_json FROM {table} WHERE project_id = ? AND authorization_epoch = ?",
+        (project["id"], int(row_value(project, "authorization_epoch") or 0)),
+    ).fetchone()
+    return canonical_object(grant["scope_descriptor_json"]) if grant else None
+
+
 def authorization_scope_projection(
     conn,
     project: Mapping[str, Any],
+    *,
+    origin_fact_id: str | None = None,
 ) -> AuthorizationScopeProjection:
-    """新 scope 使用 v3 的可执行集合语义；v1 保持既有冻结摘要。"""
+    """已有 grant 决定来源；创建首个 grant 时才由显式输入选择来源。"""
     policy = policy_from_project_row(project)
     if policy.protocol == GOAL_DRIVEN_PROTOCOL:
+        descriptor = project_authorization_scope_descriptor(conn, project)
+        if descriptor is not None:
+            origin_fact_id = (
+                str(descriptor["origin_fact_id"])
+                if scope_source_from_descriptor(descriptor) == "origin"
+                else None
+            )
+        if origin_fact_id is not None:
+            origin = conn.execute(
+                "SELECT description FROM facts WHERE project_id = ? AND id = ?",
+                (project["id"], origin_fact_id),
+            ).fetchone()
+            if origin is None:
+                raise HTTPException(409, "project_authorization_origin_missing")
+            descriptor = build_scope_descriptor_v4(
+                project_id=str(project["id"]),
+                tenant_id=str(row_value(project, "tenant_id") or ""),
+                origin_fact_id=origin_fact_id,
+                origin=str(origin["description"]),
+            )
+            return AuthorizationScopeProjection(
+                scope_digest=authorization_scope_digest_v4(descriptor),
+                descriptor=descriptor,
+                window_seconds=None,
+            )
         target_digest, target_ids = _goal_driven_target_scope(
             conn,
             str(project["id"]),
@@ -88,8 +155,12 @@ def authorization_scope_projection(
         target_ids=target_ids,
         assessment_protocol=policy.protocol,
         assessment_contract_version=policy.contract_version,
-        explore_budget=policy.explore_budget,
-        verification_reserve=policy.verification_reserve,
+        explore_budget=(
+            int(project["explore_budget"])
+            if policy.protocol == DEFAULT_COPY_PROTOCOL and row_value(project, "explore_budget") is not None
+            else None
+        ),
+        verification_reserve=_historical_scope_reserve(project, snapshot),
         window_seconds=window_seconds,
     )
     return AuthorizationScopeProjection(
@@ -192,8 +263,10 @@ def initialize_project_authorization(
     *,
     actor_id: str,
     authorized_at: str,
+    origin_fact_id: str | None = None,
+    actor_type: str = "user",
 ) -> None:
-    """seed Target 写入后冻结首个授权范围，不混入预算或执行截止。"""
+    """输入原件写入后冻结首个范围，不混入预算或执行截止。"""
     project = get_project_or_404(conn, project_id)
     policy = policy_from_project_row(project)
     if int(row_value(project, "authorization_epoch") or 0) != 0:
@@ -215,7 +288,7 @@ def initialize_project_authorization(
             project=project,
             epoch=1,
             source="project_creation",
-            actor_type="user",
+            actor_type=actor_type,
             actor_id=actor_id,
             projection=projection,
             previous_deadline=None,
@@ -225,7 +298,7 @@ def initialize_project_authorization(
         )
         return
 
-    projection = authorization_scope_projection(conn, project)
+    projection = authorization_scope_projection(conn, project, origin_fact_id=origin_fact_id)
     updated = conn.execute(
         "UPDATE projects SET authorization_epoch = 1, "
         "authorization_scope_digest = ?, authorization_window_seconds = NULL "
@@ -239,7 +312,7 @@ def initialize_project_authorization(
         project=project,
         epoch=1,
         source="project_creation",
-        actor_type="user",
+        actor_type=actor_type,
         actor_id=actor_id,
         projection=projection,
         authorization_expires_at=row_value(project, "authorization_expires_at"),
@@ -316,7 +389,7 @@ def project_reauthorization_reason(
     policy = policy_from_project_row(project)
     if not (policy.goal_driven or policy.phased):
         return "assessment_contract_unsupported"
-    if project["status"] != "paused":
+    if project["status"] not in {"paused", "pending"}:
         return "project_status_invalid"
     if policy.phased:
         progress = parse_scenario_snapshot(row_value(project, "assessment_progress_json"))
@@ -342,10 +415,12 @@ def reauthorize_project_record(
     now: str | None = None,
 ) -> ProjectMeta:
     authorized_at = now or utcnow()
-    with get_conn() as conn:
-        # 与 Target 修改、Pause/Resume 和执行 admission 串行，防止确认后范围漂移。
+    with schedule_transaction() as conn:
+        # 与 Target 修改、Pause/Resume 和执行 admission 串行，pending 重新授权仍保留待启动状态。
         conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
         project = get_project_or_404(conn, project_id)
+        from .project_records import require_unmanaged_project
+        require_unmanaged_project(conn, project_id)
         epoch = int(row_value(project, "authorization_epoch") or 0)
         if body.expected_authorization_epoch != epoch:
             raise HTTPException(409, "authorization_epoch_mismatch")
@@ -382,7 +457,7 @@ def reauthorize_project_record(
                 SET authorization_epoch = ?, authorization_scope_digest = ?,
                     authorization_window_seconds = NULL,
                     authorization_expires_at = ?, execution_generation = ?
-                WHERE id = ? AND status = 'paused' AND authorization_epoch = ?
+                WHERE id = ? AND status IN ('paused', 'pending') AND authorization_epoch = ?
                   AND execution_generation = ?
                 """,
                 (
@@ -419,7 +494,7 @@ def reauthorize_project_record(
                 SET authorization_epoch = ?, authorization_scope_digest = ?,
                     authorization_window_seconds = ?, explore_deadline = ?,
                     execution_generation = ?
-                WHERE id = ? AND status = 'paused' AND authorization_epoch = ?
+                WHERE id = ? AND status IN ('paused', 'pending') AND authorization_epoch = ?
                   AND execution_generation = ?
                 """,
                 (

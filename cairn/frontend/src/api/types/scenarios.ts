@@ -1,4 +1,5 @@
 export interface ScenarioCatalogEntry {
+  description?: string | null;
   key: string;
   label: string;
   is_default: boolean;

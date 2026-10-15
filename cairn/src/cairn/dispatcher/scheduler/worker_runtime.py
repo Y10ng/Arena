@@ -411,6 +411,9 @@ class WorkerRuntimeMixin(DispatchDecisionsMixin):
                 exc,
             )
             return None
+        return self._materialized_execution_binding(binding)
+
+    def _materialized_execution_binding(self, binding):
         effective = WorkerConfig(
             id=binding.worker_id,
             name=binding.worker_id,
@@ -422,21 +425,7 @@ class WorkerRuntimeMixin(DispatchDecisionsMixin):
             enabled=True,
             model_binding=_pi_model_binding(binding),
         )
-        provenance = {
-            "source": "tenant_worker_binding",
-            "worker_id": binding.worker_id,
-            "worker_revision": binding.worker_revision,
-            "model_id": binding.model_id,
-            "model_revision": binding.model_revision,
-            "credential_version_id": binding.credential_version_id,
-            "credential_version": binding.credential_version,
-            "credential_fingerprint": binding.credential_fingerprint,
-            "engine": binding.engine,
-            "protocol": binding.protocol,
-            "auth_header": binding.auth_header,
-            "inference_endpoint": binding.inference_endpoint,
-        }
-        return effective, provenance, self._binding_circuit_key(binding)
+        return effective, binding.execution_provenance(), self._binding_circuit_key(binding)
 
     @staticmethod
     def _binding_circuit_key(binding: object) -> BindingCircuitKey:

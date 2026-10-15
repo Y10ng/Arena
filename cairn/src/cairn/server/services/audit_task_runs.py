@@ -77,7 +77,7 @@ def insert_task_run_record(
     """在调用方事务内创建 TaskRun，供 claim/reservation 原子编排复用。"""
     owner = authenticated_execution_owner(principal, body.runtime_context.get("dispatcher_id"))
     body = body.model_copy(update={"runtime_context": {**body.runtime_context, "dispatcher_id": owner}})
-    if (SERVER_RESULT_CONTEXT_FIELDS | {"execution_lifecycle", "delivery_retry", "execution_delivery"}).intersection(body.runtime_context):
+    if (SERVER_RESULT_CONTEXT_FIELDS | {"execution_lifecycle", "delivery_retry", "execution_delivery", "external_verification_cleanup"}).intersection(body.runtime_context):
         raise HTTPException(422, "assessment_result_metadata_is_server_owned")
     project = get_project_or_404(conn, project_id)
     generation = int(project["execution_generation"])
@@ -184,6 +184,8 @@ def create_task_run_record(project_id: str, body: CreateTaskRunRequest, *, princ
 
         conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
         project = get_project_or_404(conn, project_id)
+        if body.task_type == "external_verify" or conn.execute("SELECT 1 FROM verification_requests WHERE project_id = ?", (project_id,)).fetchone():
+            raise HTTPException(409, "verification_claim_required")
         require_execution_contract(project)
         if body.worker_type != "pi":
             raise HTTPException(409, "execution_engine_unsupported")
@@ -246,6 +248,8 @@ def update_task_run_record(
         conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
         row = validate_task_run_exists(conn, project_id, task_run_id)
         updates = dict(body.runtime_context or {})
+        if row["task_type"] == "external_verify" and {"execution_binding", "model", "worker_selection"}.intersection(updates):
+            raise HTTPException(422, "verification_execution_binding_is_server_owned")
         if updates and SERVER_RESULT_CONTEXT_FIELDS.intersection(updates):
             raise HTTPException(422, "assessment_result_metadata_is_server_owned")
         runtime_context = raw_task_run_runtime_context(row)
@@ -273,6 +277,22 @@ def update_task_run_record(
             validate_delivery_registration(conn, get_project_or_404(conn, project_id), row, body, updates["execution_delivery"])
         if "dispatcher_id" in updates and updates["dispatcher_id"] != owner:
             raise HTTPException(403, "execution_owner_immutable")
+        if "external_verification_cleanup" in updates:
+            if row["task_type"] != "external_verify":
+                raise HTTPException(422, "verification_cleanup_execution_required")
+            from cairn.server.schemas.verification_requests import VerificationCleanup
+            from pydantic import ValidationError
+            try:
+                cleanup = VerificationCleanup.model_validate(updates["external_verification_cleanup"]).model_dump(mode="json")
+            except ValidationError:
+                raise HTTPException(422, "verification_cleanup_invalid") from None
+            prior_cleanup = runtime_context.get("external_verification_cleanup", {})
+            if prior_cleanup.get("status") == "removed" and cleanup["status"] != "removed":
+                raise HTTPException(409, "verification_cleanup_confirmation_conflict")
+            if cleanup.get("error"):
+                from .verification_requests import _validate_public_text
+                _validate_public_text(cleanup["error"])
+            updates["external_verification_cleanup"] = cleanup
         lifecycle = updates.get("execution_lifecycle")
         if lifecycle is not None:
             if principal is None or principal.kind != "machine":
@@ -287,6 +307,10 @@ def update_task_run_record(
                     raise HTTPException(409, "execution_lifecycle_confirmation_conflict")
             if lifecycle["cleanup_confirmed"] and not lifecycle["termination_confirmed"]:
                 raise HTTPException(422, "execution_cleanup_requires_termination")
+        if updates.get("external_verification_cleanup", {}).get("status") == "removed":
+            proof = lifecycle or runtime_context.get("execution_lifecycle", {})
+            if proof.get("termination_confirmed") is not True or proof.get("cleanup_confirmed") is not True:
+                raise HTTPException(422, "verification_cleanup_requires_confirmation")
         if row["task_type"] == "report" and (
             body.status in TERMINAL_TASK_STATUSES
             or body.exit_code is not None
@@ -395,28 +419,29 @@ def update_task_run_record(
             and values["status"] in TERMINAL_TASK_STATUSES
         ):
             interrupt_pending_injection_payloads(conn, project_id, task_run_id)
-            finalize_non_retryable_assessment_execution(
-                conn,
-                project_id,
-                (
-                    row["assessment_attempt_id"]
-                    if "assessment_attempt_id" in row.keys()
-                    else None
-                ),
-                task_run_id=task_run_id,
-                status=values["status"],
-                error_type=values["error_type"],
-            )
+            if row["task_type"] != "external_verify":
+                finalize_non_retryable_assessment_execution(
+                    conn,
+                    project_id,
+                    (
+                        row["assessment_attempt_id"]
+                        if "assessment_attempt_id" in row.keys()
+                        else None
+                    ),
+                    task_run_id=task_run_id,
+                    status=values["status"],
+                    error_type=values["error_type"],
+                )
             project = get_project_or_404(conn, project_id)
             policy = policy_from_project_row(project)
-            if row["task_type"] != "report" and policy.phased:
+            if row["task_type"] not in {"report", "external_verify"} and policy.phased:
                 if project["status"] == "stopped":
                     stop_assessment(conn, project_id, project["coverage_stop_reason"] or "user_stopped")
                 elif project["status"] == "active" and not row["pause_requested"]:
                     advance_assessment_phase(conn, project_id)
         project = get_project_or_404(conn, project_id)
         if (
-            row["task_type"] != "report"
+            row["task_type"] not in {"report", "external_verify"}
             and policy_from_project_row(project).protocol == GOAL_DRIVEN_PROTOCOL
             and (
                 lifecycle is not None
@@ -441,6 +466,9 @@ def update_task_run_record(
                 if row["task_type"] == "reason" and project["reason_worker"] == row["worker_name"]:
                     clear_project_reason(conn, project_id)
         updated = validate_task_run_exists(conn, project_id, task_run_id)
+        if row["task_type"] == "external_verify":
+            from .verification_requests import finalize_verification_run
+            finalize_verification_run(conn, project_id, updated)
         if body.runtime_context:
             # runtime_context 的增量变更单独落 agent event，方便监控解释配置/环境变化。
             insert_agent_event(

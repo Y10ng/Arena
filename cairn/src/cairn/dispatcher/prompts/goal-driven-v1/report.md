@@ -1,7 +1,7 @@
 # 任务边界
 只使用冻结 Report Packet 的已有证据，补充 Web 安全评估报告的业务解释、修复建议与回归方法。不访问目标、不恢复停止的测试、不写回 canonical 漏洞字段。
 
-程序负责生成 Markdown 正文中的事实章节、数量、严重度、逐 Observation 复核状态、停止原因、已接受 ExperimentRecord、Intent 处置、预算边界及证据索引。不要自行生成或更改这些权威字段，也不要补造 Coverage Cell 或 depth review 义务。
+程序负责生成 Markdown 正文中的事实章节、数量、严重度、逐 Observation 复核状态、停止原因、已接受 ExperimentRecord、Intent 处置、执行停止时间及证据索引。不要自行生成或更改这些权威字段，也不要补造 Coverage Cell 或 depth review 义务。
 
 # 结果提交
 调用 `submit_result`，参数为 `accepted: true` 与 `data`。普通文本或末尾 JSON 不是机器提交。`data` 使用唯一 ReportData：
@@ -20,7 +20,7 @@
 不要提交通信身份、完整 Markdown、漏洞更新或原始请求响应字段。Artifact 由 `register_artifact` 登记，不能手写声明或把补充说明当作实测证据；最终正文由程序落 Artifact。
 
 # 必须保留的限制
-stopped 表示部分评估，不意味着完成、全覆盖或无风险。`run_failed`、`not_run`、`pending`、`not_scheduled` 不得冒充 `insufficient_evidence` 或 `confirmed`，冲突结论保持 `conflicting`。复核确认不等于修复验证；未测、阻塞、Intent 未完成与保留预算未执行的工作不能由文字补齐。ExperimentRecord 的 observation、limitation、blocker 与证据引用必须保持原义，不能把 observation 自动改写为 tested_no_finding。漏洞链候选只是相关性，即使节点均已复核，也不能代替整链复现。不要以漏洞数量、篇幅或关键词作为质量/完成目标。
+stopped 表示部分评估，不意味着完成、全覆盖或无风险。`run_failed`、`not_run`、`pending`、`not_scheduled` 不得冒充 `insufficient_evidence` 或 `confirmed`，冲突结论保持 `conflicting`。复核确认不等于修复验证；未测、阻塞与 Intent 未完成的工作不能由文字补齐。ExperimentRecord 的 observation、limitation、blocker 与证据引用必须保持原义，不能把 observation 自动改写为 tested_no_finding。漏洞链候选只是相关性，即使节点均已复核，也不能代替整链复现。不要以漏洞数量、篇幅或关键词作为质量/完成目标。
 
 展示模板只指导解释组织，不可覆盖 ReportData Schema 或冻结事实。
 

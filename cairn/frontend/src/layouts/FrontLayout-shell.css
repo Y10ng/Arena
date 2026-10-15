@@ -498,7 +498,7 @@
     box-shadow: var(--shadow-pop);
     transform: translateX(0);
     transition: transform var(--dur) var(--ease);
-    z-index: 60;
+    z-index: var(--z-sidebar-overlay);
   }
 
   .app-layout.sidebar-collapsed .sidebar {

@@ -6,7 +6,12 @@ import json
 import logging
 from typing import Any
 
-from cairn.dispatcher.prompting import format_hints, format_targets, knowledge_base_prompt_context
+from cairn.dispatcher.prompting import (
+    authorization_scope_replacements,
+    format_hints,
+    format_targets,
+    knowledge_base_prompt_context,
+)
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.dispatcher.tasks.surface_policy import (
     coverage_scope_disposition_contract,
@@ -314,9 +319,9 @@ def bootstrap_prompt_replacements(
         }
         for target in project.targets
     ]
-    # Bootstrap 只需要 origin/goal、人工 hint、seed/discovered target 和知识库入口。
+    # 范围来源与原文由共用投影提供，Target 索引不覆盖 Origin 授权。
     return {
-        "origin": facts.get("origin", ""),
+        **authorization_scope_replacements(project),
         "goal": facts.get("goal", ""),
         "hints": format_hints(hints),
         "targets": format_targets(targets),

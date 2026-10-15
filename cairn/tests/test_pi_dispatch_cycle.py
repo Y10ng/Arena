@@ -301,9 +301,9 @@ def test_depth_review_lease_prevents_duplicate_reason():
     cycle._dispatch_reason.assert_not_called()
 
 
-def test_runtime_retry_admission_stays_with_server_even_when_remaining_budget_is_zero():
+def test_runtime_retry_admission_stays_with_server_beyond_legacy_attempt_count():
     cycle, _ = setup_cycle(
-        intent("retry"), view=execution_view(remaining_total=0, remaining_discovery=0),
+        intent("retry"), view=execution_view(attempts_started=47),
     )
     assert dispatch(cycle) is True
     assert cycle._dispatch_explore.call_args.args[2].id == "retry"

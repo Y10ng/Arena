@@ -331,7 +331,6 @@ describe('Projects shared control migration', () => {
         authorization_epoch: 7,
         authorization_scope_digest: scopeDigest,
         authorization_window_seconds: 21600,
-        explore_budget: 40,
         explore_attempts_started: 9,
         explore_deadline: '2026-09-18T06:00:00Z',
       },
@@ -350,7 +349,13 @@ describe('Projects shared control migration', () => {
     await chooseMenuItem('重新确认授权')
 
     expect(document.body.querySelector('[role="alertdialog"]')?.textContent).toContain(scopeDigest)
-    expect(document.body.textContent).toContain('9 / 40')
+    const summary = document.body.querySelector('.authorization-summary')!
+    expect(summary.textContent).toContain('累计 Explore 次数')
+    expect(summary.textContent).toContain('执行停止时间')
+    expect([...summary.querySelectorAll('dd')].map((item) => item.textContent?.trim())).toEqual(
+      expect.arrayContaining(['9', '2026-09-18T06:00:00Z']),
+    )
+    expect(summary.textContent).not.toContain('预算')
     expect(bodyButton('确认重新授权').disabled).toBe(true)
     expect(mocks.api).not.toHaveBeenCalled()
 

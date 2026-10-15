@@ -33,6 +33,7 @@ def get_scenario_catalog():
             ScenarioCatalogEntry(
                 key=scenario.key,
                 label=scenario.label,
+                description=scenario.description,
                 is_default=scenario.is_default,
                 origin_template=scenario.origin_template,
                 goal_template=scenario.goal_template,

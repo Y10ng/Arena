@@ -333,6 +333,8 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
         # 重发只返回原事务结果；与项目停止共用行锁，不重新开放目标写入。
         conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
         project_row = get_project_or_404(conn, project_id)
+        from cairn.server.services.project_records import require_unmanaged_project
+        require_unmanaged_project(conn, project_id)
         policy = policy_from_project_row(project_row)
         goal_driven = policy.protocol == GOAL_DRIVEN_PROTOCOL
         require_result_settlement_contract(
@@ -686,7 +688,7 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
                 updated = conn.execute("SELECT * FROM intents WHERE project_id = ? AND id = ?", (project_id, intent_id)).fetchone()
             advance_assessment_phase(conn, project_id)
         if goal_driven:
-            # 结果先原子接受，再记录预算/截止收尾；当前 TaskRun 终态 ACK 后才真正 stopped。
+            # 结果先原子接受，再推进执行截止收尾；当前 TaskRun 终态 ACK 后才真正 stopped。
             advance_goal_driven_convergence(conn, project_id)
         return ConcludeResponse(
             fact=Fact(id=fid, description=body.description, task_run_id=body.task_run_id, creator=body.worker, created_at=now, assessment_record=assessment_record),

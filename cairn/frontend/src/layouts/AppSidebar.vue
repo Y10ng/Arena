@@ -87,7 +87,7 @@
           class="nav-item"
           active-class=""
           exact-active-class="active"
-          :class="{ active: route.name === item.routeName }"
+          :class="{ active: route.name === item.routeName || (item.routeName === 'Verifications' && route.path.startsWith('/verifications/')) }"
           @click="closeSidebarAfterNavigation"
         >
           <span class="icon"

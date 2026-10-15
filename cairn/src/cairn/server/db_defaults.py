@@ -129,6 +129,6 @@ DEFAULT_SCENARIOS: tuple[dict[str, object], ...] = (
         "prompt_group": "goal-driven-v1",
         "knowledge": None,
         "cap_add": ["NET_RAW"],
-        "features": {"sandbox": True, "exploration_limit": "balanced"},
+        "features": {"sandbox": True},
     },
 )

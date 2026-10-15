@@ -767,6 +767,173 @@ END;
 """
 
 
+VERIFICATION_REQUESTS_V50_TABLE_SCHEMA = """\
+CREATE TABLE verification_integrations (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    group_id TEXT REFERENCES project_groups(id) ON DELETE SET NULL,
+    worker_template_id TEXT REFERENCES worker_templates(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_seen_at TEXT
+);
+CREATE INDEX ix_verification_integrations_tenant ON verification_integrations(tenant_id, created_at, id);
+CREATE TABLE verification_requests (
+    id TEXT PRIMARY KEY,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    tenant_id TEXT NOT NULL REFERENCES tenants(id),
+    caller_type TEXT NOT NULL CHECK (caller_type IN ('user', 'integration')),
+    caller_id TEXT NOT NULL,
+    client_request_id TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    external_id TEXT,
+    mode TEXT NOT NULL CHECK (mode IN ('reproduce', 'retest')),
+    project_id TEXT NOT NULL UNIQUE REFERENCES projects(id),
+    intent_id TEXT NOT NULL,
+    report_type TEXT NOT NULL CHECK (report_type IN ('markdown', 'text', 'file')),
+    report_resource_id TEXT NOT NULL,
+    previous_request_id TEXT REFERENCES verification_requests(id),
+    worker_template_id TEXT NOT NULL,
+    current_task_run_id TEXT,
+    claim_token TEXT,
+    cancel_requested_at TEXT,
+    terminal_kind TEXT CHECK (terminal_kind IN ('result', 'failure', 'cancelled')),
+    terminal_digest TEXT,
+    result_json TEXT,
+    error_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    accepted_at TEXT,
+    terminal_at TEXT,
+    UNIQUE (tenant_id, caller_type, caller_id, client_request_id),
+    FOREIGN KEY (intent_id, project_id) REFERENCES intents(id, project_id),
+    FOREIGN KEY (report_resource_id, project_id) REFERENCES project_resources(id, project_id),
+    FOREIGN KEY (current_task_run_id, project_id) REFERENCES task_runs(id, project_id),
+    CHECK (
+        (terminal_kind IS NULL AND result_json IS NULL AND error_json IS NULL AND terminal_at IS NULL)
+        OR (terminal_kind = 'result' AND result_json IS NOT NULL AND error_json IS NULL AND terminal_at IS NOT NULL)
+        OR (terminal_kind = 'failure' AND result_json IS NULL AND error_json IS NOT NULL AND terminal_at IS NOT NULL)
+        OR (terminal_kind = 'cancelled' AND result_json IS NULL AND error_json IS NULL AND terminal_at IS NOT NULL)
+    )
+);
+CREATE INDEX ix_verification_requests_owner ON verification_requests(tenant_id, caller_type, caller_id, created_at, id);
+CREATE INDEX ix_verification_requests_external ON verification_requests(tenant_id, caller_type, caller_id, external_id, created_at);
+ALTER TABLE project_resources ADD COLUMN derived_from_resource_id TEXT;
+ALTER TABLE project_resource_batch_members ADD COLUMN source_resource_id TEXT;
+"""
+
+
+VERIFICATION_CONFIGURATION_V51_TABLE_SCHEMA = """\
+CREATE TABLE verification_configuration (
+    tenant_id TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+    group_id TEXT REFERENCES project_groups(id) ON DELETE SET NULL,
+    tenant_worker_id TEXT REFERENCES tenant_workers(id) ON DELETE SET NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
+
+# 已发布 v50/v51 SQL 保持冻结，专用 Worker 与平台来源只由 v52 增量变更。
+VERIFICATION_CONFIGURATION_V52_TABLE_SCHEMA = """\
+CREATE TABLE verification_configuration (
+    tenant_id TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_worker_id TEXT REFERENCES tenant_workers(id) ON DELETE SET NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+VERIFICATION_REQUESTS_V52_TABLE_SCHEMA = (
+    ("CREATE TABLE verification_requests" + VERIFICATION_REQUESTS_V50_TABLE_SCHEMA.split("CREATE TABLE verification_requests", 1)[1])
+    .split("ALTER TABLE project_resources", 1)[0]
+    .replace("worker_template_id TEXT NOT NULL", "worker_template_id TEXT")
+    .replace("report_type IN ('markdown', 'text', 'file')", "report_type IN ('markdown', 'text', 'file', 'platform_vulnerability')")
+    .replace("    terminal_at TEXT,", "    terminal_at TEXT,\n    source_project_id TEXT,\n    source_vulnerability_id TEXT,")
+    + "CREATE INDEX ix_verification_requests_source ON verification_requests(tenant_id, source_project_id, source_vulnerability_id, created_at);\n"
+)
+
+
+PROJECT_SCHEDULES_V48_TABLE_SCHEMA = """\
+CREATE TABLE project_schedules (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    creator_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    timezone TEXT NOT NULL,
+    start_at TEXT NOT NULL,
+    local_time TEXT,
+    weekdays_json TEXT NOT NULL DEFAULT '[]',
+    end_date TEXT,
+    max_runs INTEGER,
+    next_run_at TEXT,
+    project_id TEXT UNIQUE REFERENCES projects(id) ON DELETE SET NULL,
+    last_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    generated_count INTEGER NOT NULL DEFAULT 0,
+    block_reason TEXT,
+    project_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX ix_project_schedules_due ON project_schedules(status, next_run_at, id);
+CREATE INDEX ix_project_schedules_tenant ON project_schedules(tenant_id, created_at, id);
+CREATE INDEX ix_project_schedules_last_project ON project_schedules(last_project_id);
+
+CREATE TABLE project_schedule_occurrences (
+    id TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL REFERENCES project_schedules(id),
+    occurrence_key TEXT NOT NULL,
+    scheduled_at TEXT NOT NULL,
+    processed_at TEXT NOT NULL,
+    project_id TEXT UNIQUE REFERENCES projects(id) ON DELETE SET NULL,
+    config_version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    reason TEXT,
+    UNIQUE (schedule_id, occurrence_key)
+);
+CREATE INDEX ix_project_schedule_occurrences_history
+ON project_schedule_occurrences(schedule_id, processed_at, id);
+
+CREATE TABLE creation_requests (
+    tenant_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    schedule_id TEXT REFERENCES project_schedules(id),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, user_id, operation, request_id)
+);
+
+CREATE TABLE schedule_resources (
+    id TEXT PRIMARY KEY,
+    schedule_id TEXT NOT NULL REFERENCES project_schedules(id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('note', 'script', 'file')),
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    digest_sha256 TEXT NOT NULL,
+    source_name TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (schedule_id, path)
+);
+
+CREATE TABLE project_schedule_libraries (
+    schedule_id TEXT NOT NULL REFERENCES project_schedules(id) ON DELETE CASCADE,
+    library_key TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    digest_sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (schedule_id, library_key),
+    FOREIGN KEY (library_key, version)
+        REFERENCES advisory_library_versions(library_key, version)
+);
+"""
+
+
 # 轻量隔离测试直接执行 db.SCHEMA；迁移基线仍单独引用上面的冻结 SCHEMA。
 _CURRENT_BASE_SCHEMA = (
     SCHEMA.replace(
@@ -796,4 +963,5 @@ FRESH_SCHEMA = (
     + SQLITE_PROJECT_AUTHORIZATION_GRANTS_V2_IMMUTABLE_SCHEMA
     + TASK_RUN_CANDIDATES_TABLE_SCHEMA
     + SQLITE_TASK_RUN_CANDIDATES_IMMUTABLE_SCHEMA
+    + PROJECT_SCHEDULES_V48_TABLE_SCHEMA
 )

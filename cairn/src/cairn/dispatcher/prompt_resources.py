@@ -13,6 +13,7 @@ from cairn.paths import resolve_source_relative_path
 PROMPTS_ROOT_ENV_VAR = "CAIRN_PROMPTS_ROOT"
 DEFAULT_PROMPTS_ROOT_PATH = "datas/cairn/prompts"
 BUILTIN_PROMPTS_PACKAGE = "cairn.dispatcher.prompts"
+EXTERNAL_VERIFICATION_PROMPT_GROUP = "external-verification"
 DEFAULT_PROMPT_GROUP = "goal-driven-v1"
 RETIRED_PROMPT_GROUP_KEYS = frozenset({
     "default", "default-v2", "default-copy", "default-copy-v2", "pentest",
@@ -27,6 +28,8 @@ PROMPT_GROUP_KEY_RE = re.compile(r"^[a-z0-9_-]+$")
 # 每个 Prompt 文件必须包含这些占位符，避免运行时渲染缺关键上下文。
 DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
     "reason.md": (
+        "{authorization_scope}",
+        "{origin}",
         "{goal}",
         "{authorized_targets}",
         "{decision_context}",
@@ -40,6 +43,8 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
         "{knowledge_base}",
     ),
     "explore.md": (
+        "{authorization_scope}",
+        "{origin}",
         "{goal}",
         "{authorized_targets}",
         "{graph_yaml}",
@@ -49,6 +54,8 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
         "{knowledge_base}",
     ),
     "explore_conclude.md": (
+        "{authorization_scope}",
+        "{origin}",
         "{goal}",
         "{authorized_targets}",
         "{graph_yaml}",
@@ -58,6 +65,7 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
         "{knowledge_base}",
     ),
     "bootstrap.md": (
+        "{authorization_scope}",
         "{origin}",
         "{goal}",
         "{hints}",
@@ -66,6 +74,7 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
         "{knowledge_base}",
     ),
     "bootstrap_conclude.md": (
+        "{authorization_scope}",
         "{origin}",
         "{goal}",
         "{hints}",
@@ -74,6 +83,9 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
         "{knowledge_base}",
     ),
     "verifier.md": (
+        "{authorization_scope}",
+        "{origin}",
+        "{authorized_targets}",
         "{intent_id}",
         "{intent_description}",
         "{target_observation_id}",
@@ -81,6 +93,9 @@ DEFAULT_PROMPT_REQUIRED_TOKENS: dict[str, tuple[str, ...]] = {
         "{knowledge_base}",
     ),
     "verifier_conclude.md": (
+        "{authorization_scope}",
+        "{origin}",
+        "{authorized_targets}",
         "{intent_id}",
         "{intent_description}",
         "{target_observation_id}",
@@ -164,6 +179,16 @@ def validate_prompt_file_name(name: str, *, allow_output_language: bool = True) 
     return text
 
 
+def read_external_verification_instructions() -> str:
+    """只装载随包发布的复测指引，不读取受管覆盖或上传资料中的指令。"""
+    text = resources.files(BUILTIN_PROMPTS_PACKAGE).joinpath(
+        EXTERNAL_VERIFICATION_PROMPT_GROUP, "agent.md",
+    ).read_text(encoding="utf-8")
+    if not text.strip():
+        raise ValueError("复测专用 agent.md 为空")
+    return text
+
+
 def available_builtin_prompt_groups() -> set[str]:
     prompts_dir = resources.files(BUILTIN_PROMPTS_PACKAGE)
     return {
@@ -172,6 +197,7 @@ def available_builtin_prompt_groups() -> set[str]:
         if child.is_dir()
         and PROMPT_GROUP_KEY_RE.fullmatch(child.name)
         and child.name not in RETIRED_PROMPT_GROUP_KEYS
+        and child.name != EXTERNAL_VERIFICATION_PROMPT_GROUP
     }
 
 

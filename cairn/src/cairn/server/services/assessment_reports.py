@@ -1568,6 +1568,8 @@ def build_assessment_report_packet(
         stop_assessment(conn, project_id, row_value(project_row, "coverage_stop_reason") or "user_stopped")
         project_row = get_project_or_404(conn, project_id)
     project = _row_dict(project_row)
+    if policy_from_project_row(project_row).goal_driven:
+        project.pop("explore_budget", None)
     project["assessment_progress"] = _json_value(project.pop("assessment_progress_json", None), {})
     observation_statuses = []
     for observation in conn.execute("SELECT id, vulnerability_id FROM vulnerability_observations WHERE project_id = ? ORDER BY id", (project_id,)):

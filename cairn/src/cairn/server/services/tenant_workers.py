@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
 import sqlite3
 from typing import Any
@@ -36,7 +37,7 @@ def list_tenant_workers(*, tenant_id: str) -> list[TenantWorker]:
     _require_tenant_id(tenant_id)
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM tenant_workers WHERE tenant_id = ? ORDER BY created_at, id",
+            "SELECT * FROM tenant_workers WHERE tenant_id = ? AND purpose = 'general' ORDER BY created_at, id",
             (tenant_id,),
         ).fetchall()
         return [_worker_from_row(conn, row) for row in rows]
@@ -48,10 +49,10 @@ def get_tenant_worker(worker_id: str, *, tenant_id: str) -> TenantWorker:
         return _worker_from_row(conn, get_tenant_worker_row(conn, worker_id, tenant_id=tenant_id))
 
 
-def get_tenant_worker_row(conn: Any, worker_id: str, *, tenant_id: str):
+def get_tenant_worker_row(conn: Any, worker_id: str, *, tenant_id: str, purpose: str = "general"):
     row = conn.execute(
-        "SELECT * FROM tenant_workers WHERE id = ? AND tenant_id = ?",
-        (worker_id, tenant_id),
+        "SELECT * FROM tenant_workers WHERE id = ? AND tenant_id = ? AND purpose = ?",
+        (worker_id, tenant_id, purpose),
     ).fetchone()
     if row is None:
         raise HTTPException(404, "Worker not found")
@@ -72,9 +73,9 @@ def create_tenant_worker(
             conn.execute(
                 """
                 INSERT INTO tenant_workers
-                    (id, tenant_id, display_name, model_id, engine, task_types_json,
+                    (id, tenant_id, purpose, display_name, model_id, engine, task_types_json,
                      max_running, priority, enabled, revision, created_by, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'pi', ?, ?, ?, ?, 1, ?, ?, ?)
+                VALUES (?, ?, 'general', ?, ?, 'pi', ?, ?, ?, ?, 1, ?, ?, ?)
                 """,
                 (
                     worker_id,
@@ -194,15 +195,23 @@ def validate_tenant_worker_selection(
     *,
     tenant_id: str,
     worker_ids: list[str],
+    require_all_roles: bool = False,
+    purpose: str = "general",
 ) -> list[Any]:
-    """在调用方事务内验证 Worker ownership 与当前 deterministic availability。"""
+    """普通入口默认隔离专用用途；复测内部调用必须显式指定用途。"""
     rows: list[Any] = []
+    roles: set[str] = set()
     for worker_id in worker_ids:
-        row = get_tenant_worker_row(conn, worker_id, tenant_id=tenant_id)
+        row = get_tenant_worker_row(conn, worker_id, tenant_id=tenant_id, purpose=purpose)
         worker = _worker_from_row(conn, row)
         if not worker.available:
-            raise HTTPException(422, f"Worker is unavailable: {worker.unavailable_reason}")
+            raise HTTPException(422, f"Worker {worker.display_name} ({worker_id}) 不可用：{worker.unavailable_reason}")
         rows.append(row)
+        roles.update(worker.task_types)
+    if require_all_roles:
+        missing = [role for role in ("bootstrap", "reason", "explore") if role not in roles]
+        if missing:
+            raise HTTPException(422, f"Worker 组合缺少角色：{'、'.join(missing)}")
     return rows
 
 
@@ -211,15 +220,17 @@ def resolve_project_worker_execution_binding(
     worker_id: str,
     *,
     task_type: str,
+    conn: Any | None = None,
 ) -> TenantWorkerExecutionBinding:
-    """从 project durable binding 解析一次性的内存执行配置。"""
-    with get_conn() as conn:
+    """从 project durable binding 解析一次性的内存执行配置，可参与原子认领。"""
+    with (get_conn() if conn is None else nullcontext(conn)) as conn:
         row = conn.execute(
             """
             SELECT w.*, p.status AS project_status, b.tenant_worker_revision,
                    m.protocol, m.base_url, m.auth_header, m.custom_headers_json,
                    m.inference_endpoint, m.model_name, m.enabled AS model_enabled,
-                   m.revision AS model_revision
+                   m.revision AS model_revision,
+                   vr.id AS verification_request_id, vr.current_task_run_id
             FROM projects p
             JOIN project_tenant_workers b
               ON b.project_id = p.id AND b.tenant_id = p.tenant_id
@@ -227,12 +238,18 @@ def resolve_project_worker_execution_binding(
               ON w.id = b.tenant_worker_id AND w.tenant_id = b.tenant_id
             JOIN tenant_models m
               ON m.id = w.model_id AND m.tenant_id = w.tenant_id
+            LEFT JOIN verification_requests vr ON vr.project_id = p.id
             WHERE p.id = ? AND w.id = ?
             """,
             (project_id, worker_id),
         ).fetchone()
         if row is None:
             raise HTTPException(404, "Project Worker binding not found")
+        verification = row["verification_request_id"] is not None
+        if verification and row["current_task_run_id"] is not None:
+            raise HTTPException(409, "复测已首次认领，必须使用当次执行配置，不能重新解析当前 Worker")
+        if row["purpose"] != ("verification" if verification else "general"):
+            raise HTTPException(422, "Worker 用途与项目不匹配")
         if row["engine"] != "pi":
             raise HTTPException(422, "Worker is unavailable: engine_unsupported")
         project_status = str(row["project_status"])
@@ -243,7 +260,7 @@ def resolve_project_worker_execution_binding(
             raise HTTPException(409, "Project is not active")
         if not bool(row["enabled"]):
             raise HTTPException(409, "Worker is disabled")
-        if int(row["revision"]) != int(row["tenant_worker_revision"]):
+        if not verification and int(row["revision"]) != int(row["tenant_worker_revision"]):
             raise HTTPException(409, "Worker binding revision is stale")
         task_types = json.loads(row["task_types_json"])
         if task_type == "report":
@@ -293,7 +310,47 @@ def resolve_project_worker_execution_binding(
         )
 
 
+def refresh_verification_worker_execution_binding(conn: Any, project_id: str) -> TenantWorkerExecutionBinding:
+    """首次 claim 的租户锁、项目锁内刷新；返回值是本次唯一执行配置。"""
+    from .verification_configuration import resolve_verification_configuration
+
+    request = conn.execute("SELECT * FROM verification_requests WHERE project_id = ?", (project_id,)).fetchone()
+    if request is None:
+        raise HTTPException(404, "复测请求不存在")
+    if request["current_task_run_id"] is not None or request["terminal_kind"] is not None or request["cancel_requested_at"] is not None:
+        raise HTTPException(409, "复测不能重新绑定执行配置")
+    worker_id = resolve_verification_configuration(conn, request["tenant_id"])
+    worker = get_tenant_worker_row(conn, worker_id, tenant_id=request["tenant_id"], purpose="verification")
+    conn.execute("DELETE FROM project_tenant_workers WHERE project_id = ?", (project_id,))
+    conn.execute(
+        "INSERT INTO project_tenant_workers(project_id, tenant_id, tenant_worker_id, tenant_worker_revision, position, created_at) "
+        "VALUES (?, ?, ?, ?, 0, ?)",
+        (project_id, request["tenant_id"], worker_id, worker["revision"], utcnow()),
+    )
+    return resolve_project_worker_execution_binding(project_id, worker_id, task_type="explore", conn=conn)
+
+
 def project_worker_bindings(conn: Any, project_id: str) -> list[dict[str, object]]:
+    request = conn.execute(
+        "SELECT current_task_run_id FROM verification_requests WHERE project_id = ?", (project_id,),
+    ).fetchone()
+    verification = request is not None
+    if verification and request["current_task_run_id"] is not None:
+        run = conn.execute(
+            "SELECT runtime_context_json FROM task_runs WHERE project_id = ? AND id = ?",
+            (project_id, request["current_task_run_id"]),
+        ).fetchone()
+        provenance = json.loads(run["runtime_context_json"] or "{}").get("execution_binding", {})
+        # 已认领的项目摘要只展示当次来源，不拿当前 Worker 行冒充历史配置。
+        return [{
+            "id": provenance["worker_id"],
+            "display_name": provenance.get("display_name") or provenance["worker_id"],
+            "engine": provenance["engine"],
+            "revision_at_bind": provenance["worker_revision"],
+            "task_types": ["explore"],
+            "currently_available": False,
+            "unavailable_reason": "verification_already_claimed",
+        }]
     rows = conn.execute(
         """
         SELECT w.*, b.tenant_worker_revision
@@ -308,7 +365,9 @@ def project_worker_bindings(conn: Any, project_id: str) -> list[dict[str, object
     for row in rows:
         worker = _worker_from_row(conn, row)
         reason = worker.unavailable_reason
-        if reason is None and int(row["tenant_worker_revision"]) != int(row["revision"]):
+        if row["purpose"] != ("verification" if verification else "general"):
+            reason = "worker_purpose_mismatch"
+        elif reason is None and not verification and int(row["tenant_worker_revision"]) != int(row["revision"]):
             reason = "binding_stale"
         # 真实引擎和不可用原因必须跨过项目响应 Schema，不能让调度端猜默认值。
         bindings.append({

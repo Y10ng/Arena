@@ -248,7 +248,6 @@ describe('project runtime status and lifecycle with real queries and components'
       authorization_epoch: 4,
       authorization_scope_digest: scopeDigest,
       authorization_window_seconds: 7200,
-      explore_budget: 16,
       explore_attempts_started: 3,
       explore_deadline: '2026-09-18T02:00:00Z',
     })
@@ -268,7 +267,16 @@ describe('project runtime status and lifecycle with real queries and components'
     button('重新确认授权').click()
     await settle()
     expect(document.body.querySelector('[role="alertdialog"]')?.textContent).toContain(scopeDigest)
-    expect(document.body.textContent).toContain('3 / 16')
+    const summary = document.body.querySelector('.authorization-summary')!
+    expect(summary.textContent).toContain('累计 Explore 次数')
+    expect(summary.textContent).toContain('执行停止时间')
+    expect([...summary.querySelectorAll('dd')].map((item) => item.textContent?.trim())).toEqual(
+      expect.arrayContaining(['3', '2026-09-18T02:00:00Z']),
+    )
+    expect(document.querySelector('.workspace-meta')?.textContent).toContain(
+      '执行停止时间：2026-09-18T02:00:00Z',
+    )
+    expect(summary.textContent).not.toContain('预算')
     expect(button('确认重新授权').disabled).toBe(true)
     expect(mocks.api.mock.calls.some((call) => call[0] === 'POST')).toBe(false)
 

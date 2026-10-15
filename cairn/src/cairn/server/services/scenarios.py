@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from .common import *
 
 from .infra import (
@@ -18,9 +20,14 @@ def _scenario_keys(conn: sqlite3.Connection) -> set[str]:
 
 
 def scenario_from_row(row: sqlite3.Row) -> Scenario:
+    features = _loads_json(row["features_json"])
+    # 历史迁移或旧配置可留原件，但不再向当前场景编辑器暴露无效额度。
+    for key in ("explore_budget", "exploration_limit", "verification_reserve"):
+        features.pop(key, None)
     return Scenario(
         key=row["key"],
         label=row["label"],
+        description=row["description"],
         is_default=bool(row["is_default"]),
         profile_id=str(_row_value(row, "profile_id") or ""),
         image=row["image"],
@@ -29,7 +36,7 @@ def scenario_from_row(row: sqlite3.Row) -> Scenario:
         origin_template=_row_value(row, "origin_template") or None,
         goal_template=_row_value(row, "goal_template") or None,
         cap_add=_loads_json_list(row["cap_add_json"]),
-        features=_loads_json(row["features_json"]),
+        features=features,
     )
 
 
@@ -69,7 +76,7 @@ def resolve_scenario_key(conn: sqlite3.Connection, scenario_key: str | None) -> 
 
 def replace_scenarios(conn: sqlite3.Connection, scenarios: list[Scenario]) -> list[Scenario]:
     existing_templates = {
-        scenario.key: (scenario.origin_template, scenario.goal_template)
+        scenario.key: (scenario.origin_template, scenario.goal_template, scenario.description)
         for scenario in list_scenarios(conn)
     }
     merged: list[Scenario] = []
@@ -84,6 +91,8 @@ def replace_scenarios(conn: sqlite3.Connection, scenarios: list[Scenario]) -> li
             updates["origin_template"] = previous[0]
         if "goal_template" not in scenario.model_fields_set:
             updates["goal_template"] = previous[1]
+        if "description" not in scenario.model_fields_set:
+            updates["description"] = previous[2]
         merged.append(scenario.model_copy(update=updates) if updates else scenario)
 
     normalized = normalize_scenario_list(merged)
@@ -101,12 +110,13 @@ def replace_scenarios(conn: sqlite3.Connection, scenarios: list[Scenario]) -> li
         conn.execute(
             """
             INSERT INTO scenarios
-                (key, label, is_default, profile_id, worker_ids_json,
+                (key, label, description, is_default, profile_id, worker_ids_json,
                  image, prompt_group, knowledge, origin_template, goal_template,
                  cap_add_json, features_json, enabled_workers_json, sort_order)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(key) DO UPDATE SET
                 label = excluded.label,
+                description = excluded.description,
                 is_default = excluded.is_default,
                 profile_id = excluded.profile_id,
                 worker_ids_json = excluded.worker_ids_json,
@@ -123,6 +133,7 @@ def replace_scenarios(conn: sqlite3.Connection, scenarios: list[Scenario]) -> li
             (
                 scenario.key,
                 scenario.label,
+                scenario.description,
                 1 if scenario.is_default else 0,
                 scenario.profile_id,
                 dump_json_list([]),
@@ -406,8 +417,11 @@ def scenario_project_counts(conn: sqlite3.Connection) -> dict[str, int]:
 
 
 def scenario_delete_blockers(conn: sqlite3.Connection, new_keys: set[str]) -> list[str]:
-    return [
-        f"{scenario_key}({project_count})"
-        for scenario_key, project_count in scenario_project_counts(conn).items()
-        if scenario_key not in new_keys
-    ]
+    counts = scenario_project_counts(conn)
+    # 周期尚未生成项目也持有场景引用，不能从配置目录中静默移除。
+    rows = conn.execute("SELECT project_json FROM project_schedules WHERE mode != 'once'").fetchall()
+    for row in rows:
+        key = json.loads(row["project_json"]).get("scenario")
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+    return [f"{key}({count})" for key, count in counts.items() if key not in new_keys]

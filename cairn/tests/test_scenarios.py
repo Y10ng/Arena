@@ -101,7 +101,9 @@ def insert_scenario_row(conn: sqlite3.Connection, *, key: str, prompt_group: str
 def test_default_scenarios_are_seeded() -> None:
     conn = make_conn()
     try:
+        raw_features = conn.execute("SELECT features_json FROM scenarios").fetchone()["features_json"]
         scenarios = list_scenarios(conn)
+        assert conn.execute("SELECT features_json FROM scenarios").fetchone()["features_json"] == raw_features
         assert len(scenarios) == 1
         scenario = scenarios[0]
         assert scenario.key == scenario.prompt_group == "goal-driven-v1"
@@ -109,7 +111,7 @@ def test_default_scenarios_are_seeded() -> None:
         assert scenario.is_default is True
         assert scenario.profile_id == "default"
         assert scenario.knowledge is None
-        assert scenario.features == {"sandbox": True, "exploration_limit": "balanced"}
+        assert scenario.features == {"sandbox": True}
         assert replace_scenarios(conn, scenarios) == scenarios
     finally:
         conn.close()
@@ -123,7 +125,7 @@ def test_scenario_configuration_freezes_goal_driven_policy_without_storing_proto
         scenario = Scenario(
             key="custom", label="自定义", profile_id="restricted",
             prompt_group="custom-goal",
-            features={"sandbox": True, "exploration_limit": "thorough", "report_prompt_group": "custom-goal"},
+            features={"sandbox": True, "report_prompt_group": "custom-goal"},
         )
         saved = replace_scenarios(conn, [scenario])[0]
         snapshot = scenario_snapshot(saved)
@@ -136,7 +138,9 @@ def test_scenario_configuration_freezes_goal_driven_policy_without_storing_proto
         assert saved.features == scenario.features
         assert "assessment_protocol" not in saved.features
         assert policy.goal_driven and policy.independent_verifier_enabled
-        assert policy.explore_budget == 80
+        assert policy.explore_deadline is None
+        assert "exploration_limit" not in snapshot["features"]
+        assert "verification_reserve" not in snapshot["features"]
     finally:
         conn.close()
 
@@ -377,10 +381,14 @@ def test_scenario_snapshot_excludes_creation_templates() -> None:
     assert "goal_template" not in snapshot
 
 
-def test_validate_scenario_features_rejects_frozen_protocol_fields() -> None:
+@pytest.mark.parametrize(("field", "value"), [
+    ("assessment_protocol", "goal-driven-v1"),
+    ("explore_budget", 40), ("exploration_limit", "balanced"), ("verification_reserve", 8),
+])
+def test_validate_scenario_features_rejects_frozen_protocol_and_removed_limit_fields(field, value) -> None:
     with pytest.raises(HTTPException, match="Unsupported features"):
         validate_scenario_features([
-            Scenario(key="custom", label="自定义", features={"assessment_protocol": "goal-driven-v1"})
+            Scenario(key="custom", label="自定义", features={field: value})
         ])
 
 

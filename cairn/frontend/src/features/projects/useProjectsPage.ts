@@ -40,6 +40,7 @@ type ReauthorizationConfirmation = {
 
 const segments = [
   { label: '全部项目', value: 'all' },
+  { label: '待启动', value: 'pending' },
   { label: '活跃探索', value: 'active' },
   { label: '暂停中 / 已暂停', value: 'paused' },
   { label: '已结束', value: 'stopped' },

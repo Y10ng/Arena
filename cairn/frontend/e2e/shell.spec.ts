@@ -113,9 +113,7 @@ test('preserves shell navigation, command palette focus, 403, and 404 contracts 
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
   await expect(page).toHaveTitle('Arena')
   await expect(page.locator('nav[aria-label="应用导航"]')).toBeVisible()
-  await expect(
-    page.locator('aside[aria-label="主导航"]').getByText('Arena'),
-  ).toBeVisible()
+  await expect(page.locator('aside[aria-label="主导航"]').getByText('Arena')).toBeVisible()
   await expect(page.getByText('未分组', { exact: true })).toHaveCount(0)
   await expect(page.locator('a[href*="group=ungrouped"]')).toHaveCount(0)
   await expect(page.getByRole('heading', { name: '欢迎使用 Arena' })).toBeVisible()
@@ -211,9 +209,7 @@ test('disables severity segment displacement when reduced motion is requested', 
   await expect(criticalSegment).toHaveCSS('transform', 'none')
 })
 
-test('requires a real project group and includes it in the creation payload', async ({
-  page,
-}, testInfo) => {
+test('requires a real project group and includes it in the creation payload', async ({ page }) => {
   let createPayload: Record<string, unknown> | null = null
   await page.route('**/auth/session', (route) => route.fulfill({ json: session }))
   await page.route('**/auth/csrf', (route) => route.fulfill({ json: session }))
@@ -261,15 +257,15 @@ test('requires a real project group and includes it in the creation payload', as
   )
   await page.route('**/library-catalog', (route) => route.fulfill({ json: [] }))
   await page.route('**/worker-templates', (route) => route.fulfill({ json: [] }))
+  await page.route('**/scenarios', (route) =>
+    route.fulfill({ json: [{ key: 'default', label: '默认场景' }] }),
+  )
 
   await page.goto('/#/projects/new')
-  if (testInfo.project.name === 'mobile-chromium') {
-    await page.getByRole('button', { name: '关闭主导航' }).click()
-  }
+  await expect(page.getByRole('dialog', { name: '新建项目', exact: true })).toBeVisible()
   await page.locator('#np-title').fill('分组创建合同')
-  await page.getByRole('checkbox', { name: '选择 Worker E2E Worker' }).click()
 
-  const createButton = page.getByRole('button', { name: '确认创建项目' })
+  const createButton = page.getByRole('button', { name: '创建并启动' })
   await expect(createButton).toBeDisabled()
   await page.locator('#np-group-select').click()
   await page.getByRole('option', { name: '红队项目组' }).click()
@@ -280,9 +276,7 @@ test('requires a real project group and includes it in the creation payload', as
   expect(createPayload).toMatchObject({ group_id: 'group-e2e' })
 })
 
-test('renders shared Select portals with opaque light and dark surfaces', async ({
-  page,
-}, testInfo) => {
+test('renders shared Select portals with opaque light and dark surfaces', async ({ page }) => {
   await mockAuthenticatedShell(page)
   await page.route('**/scenario-catalog', (route) =>
     route.fulfill({
@@ -313,11 +307,12 @@ test('renders shared Select portals with opaque light and dark surfaces', async 
   )
   await page.route('**/library-catalog', (route) => route.fulfill({ json: [] }))
   await page.route('**/worker-templates', (route) => route.fulfill({ json: [] }))
+  await page.route('**/scenarios', (route) =>
+    route.fulfill({ json: [{ key: 'default', label: '默认场景' }] }),
+  )
 
   await page.goto('/#/projects/new')
-  if (testInfo.project.name === 'mobile-chromium') {
-    await page.getByRole('button', { name: '关闭主导航' }).click()
-  }
+  await page.locator('#np-execution-trigger').click()
   await page.locator('#np-worker-template').click()
 
   const content = page.locator('.ui-select__content')
@@ -325,7 +320,13 @@ test('renders shared Select portals with opaque light and dark surfaces', async 
   await expect(content).toHaveCSS('background-color', 'rgb(255, 255, 255)')
 
   await page.keyboard.press('Escape')
+  await page
+    .getByRole('dialog', { name: '新建项目', exact: true })
+    .getByRole('button', { name: '关闭', exact: true })
+    .click()
   await page.getByRole('button', { name: '切换到深色主题' }).click()
+  await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
+  await page.locator('#np-execution-trigger').click()
   await page.locator('#np-worker-template').click()
   await expect(content).toBeVisible()
   await expect(content).toHaveCSS('background-color', 'rgb(23, 25, 30)')

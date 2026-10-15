@@ -25,6 +25,7 @@ from cairn.server.models import (
     HeartbeatRequest,
     ReasonClaimRequest,
     UpdateTaskRunRequest,
+    VerificationResultInput,
 )
 from cairn.server.routers import intents as intents_router
 from cairn.server.schemas.candidates import (
@@ -273,11 +274,14 @@ def _fail_explore(conn: sqlite3.Connection, run_id: str, error_type: str) -> Non
     conn.commit()
 
 
-def test_provider_explore_retries_keep_one_attempt_candidate_and_budget(lifecycle_db, monkeypatch):
+def test_provider_explore_retries_keep_one_attempt_candidate_and_charge_history(lifecycle_db, monkeypatch):
     from cairn.server.services import assessment_attempts, explore_attempts
 
     conn = lifecycle_db
     _seed_running_goal_driven_explore(conn)
+    conn.execute(
+        "UPDATE projects SET explore_budget=40, explore_attempts_started=45 WHERE id='p'"
+    )
     conn.execute("UPDATE assessment_attempts SET max_runtime_retries=10 WHERE id='attempt-1'")
     conn.commit()
     before = dict(conn.execute(
@@ -1211,41 +1215,158 @@ def test_expired_authorization_blocks_every_new_execution_admission(lifecycle_db
     assert _project_state(conn)["reason_worker"] is None
 
 
-def test_budget_rejects_new_logical_attempt_and_stops_when_quiescent(lifecycle_db):
+def test_legacy_budget_and_reserve_do_not_block_discovery_verifier_or_reason(lifecycle_db):
+    conn = lifecycle_db
+    _seed_running_goal_driven_explore(conn)
+    _remove_seeded_execution(conn)
+    snapshot = json.loads(_project_state(conn)["scenario_snapshot_json"])
+    snapshot["features"]["verification_reserve"] = 8
+    conn.execute(
+        "UPDATE projects SET explore_budget=40, explore_attempts_started=45, "
+        "verification_attempts_started=1, scenario_snapshot_json=? WHERE id='p'",
+        (json.dumps(snapshot),),
+    )
+    discovery = start_explore_attempt(
+        conn, "p", "i1", _explore_start_body(), principal=_DISPATCHER,
+    )
+    audit_task_runs.update_task_run_record(
+        "p", discovery.id, UpdateTaskRunRequest(session_id=_SESSION), principal=_DISPATCHER,
+    )
+    artifact = audit_artifacts.create_artifact_record(
+        "p",
+        CreateArtifactRequest(
+            task_run_id=discovery.id, kind="raw_output",
+            content="synthetic discovery evidence", filename="discovery.txt",
+        ),
+    )
+    evidence = EvidenceRef(artifact_id=artifact.id)
+    accepted = intents_router.conclude(
+        "p", "i1",
+        ConcludeRequest(
+            worker="worker", task_run_id=discovery.id,
+            description="synthetic finding beyond the historical attempt limit",
+            evidence=[evidence],
+            assessment_record={
+                "version": 1, "kind": "experiment",
+                "hypothesis": "The isolated fixture can produce a durable finding",
+                "outcome": "finding", "observations": ["synthetic discovery evidence"],
+                "evidence_refs": [evidence.model_dump(exclude_none=True)],
+            },
+            vulnerability={
+                "title": "合成证据接受测试", "severity": "low",
+                "repro_request": "GET /synthetic HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n",
+                "repro_response": "HTTP/1.1 200 OK\r\n\r\nsynthetic evidence",
+                "identity": {
+                    "vulnerability_class": "synthetic_access_boundary",
+                    "asset": {"host": "fixture.invalid", "protocol": "http"},
+                    "entrypoint": {"method": "GET", "route": "/synthetic"},
+                },
+            },
+        ),
+    )
+    assert accepted.fact.task_run_id == discovery.id
+    audit_task_runs.update_task_run_record(
+        "p", discovery.id, UpdateTaskRunRequest(status="succeeded", exit_code=0),
+        principal=_DISPATCHER,
+    )
+    verifier_intent = conn.execute(
+        "SELECT id, target_observation_id FROM intents "
+        "WHERE project_id='p' AND assessment_role='verifier'"
+    ).fetchone()
+    verifier = start_explore_attempt(
+        conn, "p", verifier_intent["id"],
+        CreateTaskRunRequest(
+            expected_execution_generation=0, intent_id=verifier_intent["id"],
+            task_type="explore", worker_name="verifier", worker_type="pi", status="running",
+            runtime_context={"dispatcher_id": "dispatcher"},
+        ),
+        principal=_DISPATCHER,
+    )
+    audit_task_runs.update_task_run_record(
+        "p", verifier.id,
+        UpdateTaskRunRequest(session_id="pi:33333333-3333-4333-8333-333333333333"),
+        principal=_DISPATCHER,
+    )
+    verifier_artifact = audit_artifacts.create_artifact_record(
+        "p",
+        CreateArtifactRequest(
+            task_run_id=verifier.id, kind="raw_output",
+            content="synthetic independent verification", filename="verification.txt",
+        ),
+    )
+    verified = intents_router.conclude(
+        "p", verifier_intent["id"],
+        ConcludeRequest(
+            worker="verifier", task_run_id=verifier.id,
+            description="synthetic independent result beyond the historical attempt limit",
+            verification_result=VerificationResultInput(
+                observation_id=verifier_intent["target_observation_id"], outcome="confirmed",
+                evidence_refs=[EvidenceRef(artifact_id=verifier_artifact.id)],
+            ),
+        ),
+    )
+    assert verified.fact.task_run_id == verifier.id
+    assert conn.execute(
+        "SELECT fact_id FROM vulnerability_verifications WHERE verifier_task_run_id=?",
+        (verifier.id,),
+    ).fetchone()["fact_id"] == verified.fact.id
+    audit_task_runs.update_task_run_record(
+        "p", verifier.id, UpdateTaskRunRequest(status="succeeded", exit_code=0),
+        principal=_DISPATCHER,
+    )
+    assert advance_goal_driven_convergence(conn, "p") is None
+    reason = project_reason.claim_project_reason_record(
+        "p", ReasonClaimRequest(worker="reasoner", trigger="graph_changed"),
+    )
+    assert reason.reason is not None
+    assert reason.reason.worker == "reasoner"
+    project = _project_state(conn)
+    assert project["status"] == "active"
+    assert project["coverage_stop_reason"] is None
+    assert project["explore_budget"] == 40
+    assert project["explore_attempts_started"] == 47
+    assert project["verification_attempts_started"] == 2
+    assert [tuple(row) for row in conn.execute(
+        "SELECT status, charged, execution_count FROM assessment_attempts WHERE project_id='p' ORDER BY id"
+    )] == [("completed", 1, 1), ("completed", 1, 1)]
+
+
+def test_historical_budget_stop_does_not_automatically_resume(lifecycle_db):
     conn = lifecycle_db
     _seed_running_goal_driven_explore(conn)
     _remove_seeded_execution(conn)
     conn.execute(
-        "UPDATE projects SET explore_budget=1, explore_attempts_started=1 WHERE id='p'"
+        "UPDATE projects SET status='stopped', coverage_stop_reason='budget_exhausted', "
+        "explore_budget=40, explore_attempts_started=45 WHERE id='p'"
+    )
+    conn.execute(
+        "UPDATE intents SET concluded_at=?, conclusion='abandoned', "
+        "conclusion_reason='budget_exhausted' WHERE project_id='p' AND id='i1'",
+        (utcnow(),),
     )
 
-    with pytest.raises(HTTPException) as exhausted:
-        start_explore_attempt(
-            conn,
-            "p",
-            "i1",
-            _explore_start_body(),
-            principal=_DISPATCHER,
+    advance_goal_driven_convergence(conn, "p")
+    with pytest.raises(HTTPException) as stopped:
+        project_reason.claim_project_reason_record(
+            "p", ReasonClaimRequest(worker="reasoner", trigger="graph_changed"),
         )
 
-    assert exhausted.value.detail == "explore_budget_exhausted"
+    assert stopped.value.detail == "Project is stopped"
     project = _project_state(conn)
     assert project["status"] == "stopped"
     assert project["coverage_stop_reason"] == "budget_exhausted"
+    assert project["explore_attempts_started"] == 45
     intent = conn.execute(
         "SELECT conclusion, conclusion_reason FROM intents WHERE project_id='p' AND id='i1'"
     ).fetchone()
-    assert dict(intent) == {
-        "conclusion": "abandoned",
-        "conclusion_reason": "budget_exhausted",
-    }
+    assert dict(intent) == {"conclusion": "abandoned", "conclusion_reason": "budget_exhausted"}
 
 
-def test_charged_attempt_keeps_bounded_runtime_retry_at_budget_limit(lifecycle_db):
+def test_charged_attempt_keeps_bounded_runtime_retry_beyond_legacy_budget(lifecycle_db):
     conn = lifecycle_db
     _seed_running_goal_driven_explore(conn)
     conn.execute(
-        "UPDATE projects SET explore_budget=1, explore_attempts_started=1 WHERE id='p'"
+        "UPDATE projects SET explore_budget=40, explore_attempts_started=45 WHERE id='p'"
     )
     conn.execute(
         "UPDATE intents SET worker=NULL, last_heartbeat_at=NULL WHERE project_id='p' AND id='i1'"
@@ -1272,11 +1393,14 @@ def test_charged_attempt_keeps_bounded_runtime_retry_at_budget_limit(lifecycle_d
     project = _project_state(conn)
     assert project["status"] == "active"
     assert project["coverage_stop_reason"] is None
-    assert project["explore_attempts_started"] == 1
+    assert project["explore_attempts_started"] == 45
     attempt = conn.execute(
-        "SELECT status, execution_count FROM assessment_attempts WHERE id='attempt-1'"
+        "SELECT status, charged, execution_count, max_runtime_retries "
+        "FROM assessment_attempts WHERE id='attempt-1'"
     ).fetchone()
-    assert dict(attempt) == {"status": "active", "execution_count": 2}
+    assert dict(attempt) == {
+        "status": "active", "charged": 1, "execution_count": 2, "max_runtime_retries": 2,
+    }
 
 
 def test_deadline_started_result_is_accepted_before_terminal_stop(lifecycle_db):
@@ -1368,26 +1492,18 @@ def test_deadline_started_result_is_accepted_before_terminal_stop(lifecycle_db):
     assert stopped["coverage_stop_reason"] == "deadline_exceeded"
 
 
-def test_pending_attempt_candidate_and_cleanup_each_block_stopped(lifecycle_db):
+def test_pending_attempt_candidate_and_cleanup_each_block_deadline_stop(lifecycle_db):
     conn = lifecycle_db
     _seed_running_goal_driven_explore(conn)
     conn.execute(
-        "UPDATE projects SET explore_budget=1, explore_attempts_started=1 WHERE id='p'"
+        "UPDATE projects SET explore_deadline='2000-01-01T00:00:00Z' WHERE id='p'"
     )
-    assert advance_goal_driven_convergence(conn, "p") == "budget_exhausted"
+    assert advance_goal_driven_convergence(conn, "p") == "deadline_exceeded"
     assert _project_state(conn)["status"] == "active"
+    assert conn.execute(
+        "SELECT status FROM assessment_attempts WHERE id='attempt-1'"
+    ).fetchone()["status"] == "active"
 
-    conn.execute(
-        "UPDATE task_runs SET status='succeeded', ended_at=? WHERE id='run-1'",
-        (utcnow(),),
-    )
-    assert advance_goal_driven_convergence(conn, "p") == "budget_exhausted"
-    assert _project_state(conn)["status"] == "active"
-
-    conn.execute(
-        "UPDATE assessment_attempts SET status='completed', ended_at=?, outcome='observation' WHERE id='attempt-1'",
-        (utcnow(),),
-    )
     raw = b'{"protocol":"cairn-agent-result-v1"}'
     manifest = _candidate_manifest(raw)
     candidate_store.capture_candidate(
@@ -1398,8 +1514,15 @@ def test_pending_attempt_candidate_and_cleanup_each_block_stopped(lifecycle_db):
         raw,
         principal=_DISPATCHER,
     )
-    assert advance_goal_driven_convergence(conn, "p") == "budget_exhausted"
+    conn.execute(
+        "UPDATE task_runs SET status='succeeded', ended_at=? WHERE id='run-1'",
+        (utcnow(),),
+    )
+    assert advance_goal_driven_convergence(conn, "p") == "deadline_exceeded"
     assert _project_state(conn)["status"] == "active"
+    assert dict(conn.execute(
+        "SELECT status, outcome FROM assessment_attempts WHERE id='attempt-1'"
+    ).fetchone()) == {"status": "failed", "outcome": "deadline_exceeded"}
 
     conn.execute("UPDATE task_runs SET pause_requested=1 WHERE id='run-1'")
     outcome = _outcome_manifest()
@@ -1430,4 +1553,4 @@ def test_pending_attempt_candidate_and_cleanup_each_block_stopped(lifecycle_db):
     )
     stopped = _project_state(conn)
     assert stopped["status"] == "stopped"
-    assert stopped["coverage_stop_reason"] == "budget_exhausted"
+    assert stopped["coverage_stop_reason"] == "deadline_exceeded"

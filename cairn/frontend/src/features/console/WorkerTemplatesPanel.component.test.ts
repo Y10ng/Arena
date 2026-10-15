@@ -34,6 +34,7 @@ const templates: WorkerTemplate[] = [
     owner: 'tester',
     tenant_worker_ids: ['worker-1'],
     worker_names: ['Claude Code Worker'],
+    is_default: false,
     created_at: '2026-08-22T00:00:00Z',
   },
 ]

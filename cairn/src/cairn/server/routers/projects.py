@@ -50,10 +50,8 @@ from cairn.server.services import (
     claim_assessment_report_finalization,
     claim_project_reason_record,
     complete_project_record,
-    create_project_record,
     create_target_record,
     delete_project_record,
-    delete_project_resource_batch_staging,
     finish_assessment_report_finalization,
     get_assessment_report_finalization,
     get_project_detail,
@@ -83,7 +81,7 @@ router = APIRouter(tags=["projects"])
 @router.get("/projects", response_model=list[ProjectSummary])
 def list_projects(principal: RequestPrincipal = Depends(require_dispatcher_protocol)):
     tenant_id = None if principal.kind == "machine" or principal.is_super_admin else principal.tenant_id
-    return list_project_summaries(tenant_id)
+    return list_project_summaries(tenant_id, include_verification=principal.kind == "machine")
 
 
 @router.get("/library-catalog", response_model=list[Library])
@@ -97,16 +95,9 @@ def create_project(
     body: CreateProjectRequest,
     principal: RequestPrincipal = Depends(protect_cookie_request),
 ):
-    with get_conn() as conn:
-        result = create_project_record(
-            body,
-            conn=conn,
-            tenant_id=principal.tenant_id,
-            creator=principal.subject_id,
-        )
-    if body.resource_batch_id is not None:
-        delete_project_resource_batch_staging(body.resource_batch_id)
-    return result
+    from cairn.server.services.creation_requests import create_project_request
+
+    return create_project_request(body, tenant_id=principal.tenant_id, user_id=principal.subject_id)
 
 
 @router.get(

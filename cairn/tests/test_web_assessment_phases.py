@@ -1,4 +1,4 @@
-"""仅使用合成项目与临时数据库验证阶段、原子预算和不可变报告输入。"""
+"""仅使用合成项目与临时数据库验证历史阶段、Attempt 计数和不可变报告输入。"""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -24,7 +24,6 @@ from cairn.server.services.assessment_convergence import (
     advance_assessment_phase, assessment_execution_view, assessment_review_digest,
     require_assessment_completion, stop_assessment,
 )
-from cairn.server.services.assessment_policy import verification_reserve
 from cairn.server.services.assessment_reports import (
     _require_report_request_eligibility, build_assessment_report_packet,
 )
@@ -48,12 +47,13 @@ def conn():
     connection.close()
 
 
-def seed_project(conn, *, budget=10, phase="baseline"):
+def seed_project(conn, *, budget=10, historical_reserve=2, phase="baseline"):
+    # 保留旧项目快照中明确记录的额度与预留值，不再计算现行执行策略。
     features = dict(
         execution_contract_version=1, execution_engine="pi", assessment_contract_version=2,
         outcome_contract_version=2, blocker_cooldown_version=1, surface_manifest_version=1,
         minimum_coverage_version=1, quality_gate_version=1, verifier_contract_version=1,
-        verification_reserve=verification_reserve(budget),
+        verification_reserve=historical_reserve,
     )
     now = utcnow()
     conn.execute(
@@ -190,13 +190,8 @@ def review_body(conn, *, selected=True):
     )
 
 
-@pytest.mark.parametrize("budget,reserve", [(1, 0), (2, 1), (5, 1), (6, 2), (10, 2), (None, 0)])
-def test_reserve_formula(budget, reserve):
-    assert verification_reserve(budget) == reserve
-
-
-def test_budget_reserve_counts_verifier_atomically_and_does_not_charge_retry(conn):
-    seed_project(conn, budget=3)
+def test_attempt_counts_verifier_atomically_and_does_not_charge_retry(conn):
+    seed_project(conn, budget=3, historical_reserve=1)
     for iid in ("d1", "d2", "d3"):
         seed_intent(conn, iid)
     first = start(conn, "d1")
@@ -206,13 +201,12 @@ def test_budget_reserve_counts_verifier_atomically_and_does_not_charge_retry(con
     assert retry.assessment_attempt_id == first.assessment_attempt_id
     finish(conn, retry)
     finish(conn, start(conn, "d2"))
-    with pytest.raises(HTTPException, match="discovery_budget_exhausted"):
-        start(conn, "d3")
     seed_intent(conn, "v", role="verifier")
     start(conn, "v")
     row = conn.execute("SELECT * FROM projects WHERE id='p'").fetchone()
     assert row["explore_attempts_started"] == 3
     assert row["verification_attempts_started"] == 1
+    assert conn.execute("SELECT concluded_at FROM intents WHERE id='d3' AND project_id='p'").fetchone()[0] is None
 
 
 def test_old_execution_is_readable_but_not_claimable(conn):
@@ -456,7 +450,7 @@ def test_stopped_zero_findings_report_retains_untested_and_stop_reason(conn):
 
 
 def test_unlimited_budget_still_stops_at_deadline_and_waits_for_reconciliation(conn):
-    seed_project(conn, budget=None)
+    seed_project(conn, budget=None, historical_reserve=0)
     seed_intent(conn, "running")
     run = start(conn, "running")
     conn.execute("UPDATE projects SET explore_deadline='2000-01-01T00:00:00Z' WHERE id='p'")
@@ -490,7 +484,7 @@ def test_invalid_historical_policy_is_readable_not_executable(conn, features):
 
 
 def test_budget_does_not_discard_paid_retry_or_turn_last_success_into_stop(conn):
-    seed_project(conn, budget=1, phase="deep")
+    seed_project(conn, budget=1, historical_reserve=0, phase="deep")
     seed_cell(conn)
     conn.execute("UPDATE projects SET assessment_progress_json=? WHERE id='p'", (json.dumps({"version": 1, "phase": "deep", "depth_review_fact_id": "baseline"}),))
     seed_intent(conn, "deep", depth="baseline")
@@ -519,19 +513,20 @@ def test_unowned_running_execution_requires_reconciliation_before_retry(conn):
     assert conn.execute("SELECT status FROM task_runs WHERE id=? AND project_id='p'", (run.id,)).fetchone()[0] == "running"
 
 
-def test_unfunded_selected_deep_is_explicit_and_verifier_is_preserved(conn):
-    seed_project(conn, budget=3, phase="deep")
+def test_unexecuted_selected_deep_remains_open_and_verifier_is_preserved(conn):
+    seed_project(conn, budget=3, historical_reserve=1, phase="deep")
     seed_cell(conn)
     conn.execute("UPDATE projects SET explore_attempts_started=2,assessment_progress_json=? WHERE id='p'", (json.dumps({"version": 1, "phase": "deep", "depth_review_fact_id": "baseline"}),))
     seed_intent(conn, "deep", depth="baseline")
     seed_intent(conn, "verify", role="verifier")
     advance_assessment_phase(conn, "p")
     deep = conn.execute("SELECT * FROM intents WHERE id='deep' AND project_id='p'").fetchone()
-    assert deep["conclusion_reason"] == "discovery_budget_exhausted"
+    assert deep["concluded_at"] is None
     assert conn.execute("SELECT concluded_at FROM intents WHERE id='verify' AND project_id='p'").fetchone()[0] is None
     finish(conn, start(conn, "verify"))
     advance_assessment_phase(conn, "p")
-    assert json.loads(conn.execute("SELECT assessment_progress_json FROM projects WHERE id='p'").fetchone()[0])["phase"] == "finalizing"
+    assert conn.execute("SELECT concluded_at FROM intents WHERE id='deep' AND project_id='p'").fetchone()[0] is None
+    assert json.loads(conn.execute("SELECT assessment_progress_json FROM projects WHERE id='p'").fetchone()[0])["phase"] == "deep"
 
 
 def test_terminal_audit_closes_missing_result_and_cannot_forge_acceptance(conn, monkeypatch):

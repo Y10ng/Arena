@@ -31,6 +31,9 @@ class StaleReconcileMixin:
         )
         reconciled_count = 0
         for summary in summaries:
+            if summary.verification_request_id is not None:
+                # 一次性验证由精确 remove 的物理证明收口，不能仅凭缺失 future 推断停止。
+                continue
             response = self.client.list_task_runs(summary.id)
             if not response.ok:
                 LOG.warning(

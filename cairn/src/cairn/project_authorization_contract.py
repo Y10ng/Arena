@@ -12,6 +12,7 @@ AUTHORIZATION_SCOPE_PREFIX = "authorization-scope:"
 TARGET_SCOPE_PREFIX = "target-scope:"
 AUTHORIZATION_V2_PROTOCOL = "cairn-project-authorization-v2"
 AUTHORIZATION_SCOPE_V3_VERSION = 3
+AUTHORIZATION_SCOPE_V4_VERSION = 4
 EXPLORATION_WINDOW_SECONDS = {
     "compact": 2 * 60 * 60,
     "balanced": 6 * 60 * 60,
@@ -150,6 +151,46 @@ def build_scope_descriptor_v3(
 
 def authorization_scope_digest_v3(descriptor: Mapping[str, Any]) -> str:
     material = "cairn-project-authorization-scope-v3\n" + canonical_json(
+        dict(descriptor)
+    )
+    return AUTHORIZATION_SCOPE_PREFIX + sha256(material.encode("utf-8")).hexdigest()
+
+
+def scope_source_from_descriptor(descriptor: Mapping[str, Any]) -> str:
+    """从持久范围版本读取来源，不能用当前 Target 数量推断授权。"""
+    version = descriptor.get("version")
+    if version in {1, 2, AUTHORIZATION_SCOPE_V3_VERSION}:
+        return "targets"
+    if version == AUTHORIZATION_SCOPE_V4_VERSION and descriptor.get("scope_source") == "origin":
+        return "origin"
+    raise ValueError("unsupported authorization scope descriptor")
+
+
+def origin_scope_digest(origin: str) -> str:
+    """摘要绑定 UTF-8 原文，不裁剪空白或改写正文。"""
+    return sha256(origin.encode("utf-8")).hexdigest()
+
+
+def build_scope_descriptor_v4(
+    *,
+    project_id: str,
+    tenant_id: str,
+    origin_fact_id: str,
+    origin: str,
+) -> dict[str, Any]:
+    """正文仍由 Fact 持有；grant 只绑定原件身份及摘要。"""
+    return {
+        "version": AUTHORIZATION_SCOPE_V4_VERSION,
+        "project_id": project_id,
+        "tenant_id": tenant_id,
+        "scope_source": "origin",
+        "origin_fact_id": origin_fact_id,
+        "origin_sha256": origin_scope_digest(origin),
+    }
+
+
+def authorization_scope_digest_v4(descriptor: Mapping[str, Any]) -> str:
+    material = "cairn-project-authorization-scope-v4\n" + canonical_json(
         dict(descriptor)
     )
     return AUTHORIZATION_SCOPE_PREFIX + sha256(material.encode("utf-8")).hexdigest()

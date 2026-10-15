@@ -184,6 +184,69 @@ def test_global_capacity_is_observed_and_next_round_does_not_refresh_old_decisio
     assert loop._dispatcher_runtime_summary()["project_decisions"] == []
 
 
+@pytest.mark.parametrize("full_capacity", [False, True])
+def test_schedule_consumption_precedes_project_list_and_capacity(full_capacity):
+    loop = _loop(max_workers=1, max_running_projects=1, worker_count=0)
+    events = []
+    if full_capacity:
+        loop.futures[object()] = SimpleNamespace(project_id="other", worker_name="w")
+    summaries = [_summary("p1")] if full_capacity else []
+
+    def consume():
+        events.append("consume")
+        return {"processed": 1, "errors": 0}
+
+    def projects():
+        events.append("projects")
+        return summaries
+
+    loop.client.consume_project_schedules = consume
+    loop.client.list_projects = projects
+    loop._record_dispatcher_heartbeat = lambda **_kw: events.append("heartbeat")
+    for method in (
+        "_ensure_config_loaded", "run_startup_healthchecks", "_cancel_inactive_tasks",
+        "_refresh_config", "_reap_futures", "_flush_pending_report_finishes",
+        "_flush_pending_task_run_finishes", "_reap_cleanup_futures",
+        "_initialize_reason_checkpoints", "_refresh_runtime_projects",
+        "_queue_container_cleanups", "close",
+    ):
+        setattr(loop, method, Mock())
+    loop._refresh_candidate_recovery = Mock(return_value=True)
+    loop._settings_checked = loop._startup_healthchecks_checked = loop._startup_reconcile_checked = True
+    dispatch = loop._dispatch_available
+
+    def observe_capacity(projects):
+        events.append("capacity")
+        dispatch(projects)
+
+    loop._dispatch_available = observe_capacity
+    loop.run(once=True)
+    assert events == ["heartbeat", "consume", "projects", "capacity", "heartbeat"]
+    if full_capacity:
+        assert loop._dispatcher_runtime_summary()["project_decisions"][0]["code"] == "global_capacity"
+    else:
+        assert not loop.futures
+
+
+def test_schedule_client_uses_bodyless_post_and_exposes_http_failure(monkeypatch):
+    import requests
+    from cairn.dispatcher.protocol.client import CairnClient
+
+    client = CairnClient("https://server.example.test", token="synthetic-token")
+    response = Mock()
+    response.json.return_value = {"processed": 2, "errors": 1}
+    session = Mock()
+    session.post.return_value = response
+    monkeypatch.setattr(client, "_session", lambda: session)
+    assert client.consume_project_schedules() == {"processed": 2, "errors": 1}
+    session.post.assert_called_once_with(
+        "https://server.example.test/dispatcher/project-schedules/consume", timeout=10.0,
+    )
+    response.raise_for_status.side_effect = requests.HTTPError("synthetic HTTP failure")
+    with pytest.raises(requests.HTTPError):
+        client.consume_project_schedules()
+
+
 def test_no_binding_is_observed_without_creating_a_task_run():
     loop = _loop(max_workers=1, max_running_projects=1, worker_count=0)
     loop._project_generations = {"p1": 7}
@@ -241,6 +304,7 @@ def test_control_observation_continues_after_finish_probe_has_entered():
     loop._finish_runtime_context = lambda *_a: {"python_version": loop._probe_version("exact-container", ["python3", "--version"])}
     loop.client.update_task_run = Mock(return_value=ApiResult(status_code=200))
     loop.client.list_projects = lambda: [_summary("p1", status="paused")]
+    loop.client.consume_project_schedules = Mock(return_value={"processed": 0, "errors": 0})
     token = TaskCancellation()
     token.attach_process(SimpleNamespace(cancel=lambda _reason: cancelled.set()))
     loop.futures[Future()] = SimpleNamespace(project_id="p1", task_type="reason", worker_name="w", cancellation=token)

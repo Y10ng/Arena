@@ -83,6 +83,20 @@ class CairnClient:
     def base_url(self) -> str:
         return self._base_url
 
+    def consume_project_schedules(self) -> dict[str, int]:
+        # 消费失败进入外层循环的可见错误路径，不能作为已处理返回。
+        response = self._session().post(
+            self._url("/dispatcher/project-schedules/consume"), timeout=self._timeout,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict) or any(
+            type(result.get(key)) is not int or result[key] < 0
+            for key in ("processed", "errors")
+        ):
+            raise ValueError("Invalid project schedule consumption response")
+        return {"processed": result["processed"], "errors": result["errors"]}
+
     def list_projects(self) -> list[ProjectSummary]:
         # 调度主循环的读请求使用 raise_for_status，Server 不可用时直接进入本轮异常处理。
         response = self._session().get(self._url("/projects"), timeout=self._timeout)
@@ -93,6 +107,26 @@ class CairnClient:
         response = self._session().get(self._url(f"/projects/{project_id}"), timeout=self._timeout)
         response.raise_for_status()
         return ProjectDetail.model_validate(response.json())
+
+    def get_verification_input(self, request_id: str) -> ApiResult:
+        return self._request_json("GET", f"/api/v1/verification-requests/{request_id}/input")
+
+    def claim_verification(self, request_id: str, task_run: dict[str, Any]) -> ApiResult:
+        return self._request_json(
+            "POST", f"/api/v1/verification-requests/{request_id}/claim", json={"task_run": task_run},
+        )
+
+    def finish_verification(self, request_id: str, action: str, payload: dict[str, Any]) -> ApiResult:
+        if action not in {"result", "failure", "cancel-ack"}:
+            raise ValueError("unsupported verification terminal action")
+        return self._request_json(
+            "POST", f"/api/v1/verification-requests/{request_id}/{action}", json=payload,
+        )
+
+    def verification_heartbeat(self, request_id: str, payload: dict[str, Any]) -> ApiResult:
+        return self._request_json(
+            "POST", f"/api/v1/verification-requests/{request_id}/heartbeat", json=payload,
+        )
 
     def get_container_activation(self, project_id: str) -> ApiResult:
         return self._request_json("GET", f"/projects/{project_id}/container-activation")

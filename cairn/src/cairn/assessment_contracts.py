@@ -62,16 +62,12 @@ def goal_driven_decision_input(project: Any) -> dict[str, object]:
                 "outcome_contract_version",
             )
         },
-        "budget": {
-            "explore_budget": project.project.explore_budget,
+        "execution": {
             "explore_deadline": project.project.explore_deadline,
             "explore_attempts_started": project.project.explore_attempts_started,
             "verification_attempts_started": (
                 project.project.verification_attempts_started
             ),
-            "remaining_total": execution.get("remaining_total"),
-            "remaining_discovery": execution.get("remaining_discovery"),
-            "remaining_verification": execution.get("remaining_verification"),
         },
         "facts": [
             {

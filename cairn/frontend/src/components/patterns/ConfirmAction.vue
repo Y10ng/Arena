@@ -5,6 +5,8 @@
     :description="description"
     :tone="tone"
     :dismissible="!loading"
+    :content-class="contentClass"
+    :overlay-class="overlayClass"
     @update:open="emit('update:open', $event)"
   >
     <template v-if="$slots.trigger" #trigger>
@@ -50,6 +52,8 @@ const props = withDefaults(
     confirmVariant?: ButtonVariant
     loading?: boolean
     confirmDisabled?: boolean
+    contentClass?: string
+    overlayClass?: string
   }>(),
   {
     confirmLabel: '确认',

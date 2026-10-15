@@ -1331,7 +1331,6 @@ describe('dispatcher control client', () => {
       scenario: 'default-copy-v2',
       tenant_worker_ids: ['w1'],
       group_id: 'group-a',
-      explore_budget: 40,
       authorization_expires_at: null,
       resources: [{ kind: 'script' as const, path: 'auth/login.py', content }],
     }

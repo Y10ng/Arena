@@ -67,7 +67,7 @@ const baseProject = {
   authorization_scope_digest: `authorization-scope:${'a'.repeat(64)}`,
   authorization_expires_at: null,
   explore_attempts_started: 3,
-  explore_budget: 12,
+  explore_deadline: null,
   report_capability: {
     supported: true,
     policy_version: 1,
@@ -323,6 +323,14 @@ describe('ProjectWorkspace shared control migration', () => {
     const confirmButton = buttonByText('确认重新授权')
     expect(confirmButton?.disabled).toBe(true)
     expect(document.body.textContent).toContain('不会沿用或静默延长原期限')
+    const summary = document.body.querySelector('.authorization-summary')!
+    expect(summary.textContent).toContain('累计 Explore 次数')
+    expect(summary.textContent).toContain('执行停止时间')
+    expect([...summary.querySelectorAll('dd')].map((item) => item.textContent?.trim())).toEqual(
+      expect.arrayContaining(['3', '不限']),
+    )
+    expect(wrapper.get('.workspace-meta').text()).toContain('执行停止时间：不限')
+    expect(summary.textContent).not.toContain('预算')
 
     document.body.querySelector<HTMLInputElement>('input[aria-label="授权无限期有效"]')?.click()
     document.body

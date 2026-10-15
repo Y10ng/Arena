@@ -8,6 +8,18 @@ Save current-run evidence in worker-local files. Call `register_artifact` with e
 
 On conclude or correction, stop target interaction and waiting. Read or register only existing evidence and resubmit. Local tool acceptance is not final Server acceptance.
 
+# Authorization Scope
+```json
+{authorization_scope}
+```
+# Origin
+```
+{origin}
+```
+# Structured Target Index
+```json
+{authorized_targets}
+```
 # Neutral Bound Observation
 ID: `{target_observation_id}`
 ```json

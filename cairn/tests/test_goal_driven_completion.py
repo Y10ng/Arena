@@ -117,15 +117,28 @@ def complete_body() -> CompleteRequest:
     )
 
 
-def test_goal_driven_completion_accepts_fresh_quiescent_reason(conn):
+def test_goal_driven_completion_accepts_fresh_quiescent_reason_beyond_legacy_budget(conn):
     seed_goal_driven_reason(conn)
+    snapshot = json.loads(conn.execute(
+        "SELECT scenario_snapshot_json FROM projects WHERE id='p'"
+    ).fetchone()["scenario_snapshot_json"])
+    snapshot["features"]["verification_reserve"] = 8
+    conn.execute(
+        "UPDATE projects SET explore_budget=40, explore_attempts_started=47, "
+        "verification_attempts_started=9, scenario_snapshot_json=? WHERE id='p'",
+        (json.dumps(snapshot),),
+    )
+    refresh_reason_digest(conn)
 
     completed = complete_project_record_with_conn(conn, "p", complete_body())
 
     assert completed.to == "goal"
-    assert conn.execute(
-        "SELECT status FROM projects WHERE id = 'p'"
-    ).fetchone()["status"] == "completed"
+    project = conn.execute("SELECT * FROM projects WHERE id='p'").fetchone()
+    assert project["status"] == "completed"
+    assert project["coverage_stop_reason"] is None
+    assert project["explore_budget"] == 40
+    assert project["explore_attempts_started"] == 47
+    assert project["verification_attempts_started"] == 9
 
 
 def test_goal_driven_completion_rejects_stale_reason_input(conn):
@@ -173,22 +186,45 @@ def test_goal_driven_completion_rejects_open_intent_after_fresh_snapshot(conn):
     assert exc.value.detail == "goal_driven_completion_open_intents"
 
 
-def test_goal_driven_completion_rejects_other_running_business_task(conn):
+@pytest.mark.parametrize(
+    ("pending", "detail"),
+    [
+        ("task_run", "goal_driven_completion_execution_pending"),
+        ("attempt", "goal_driven_completion_attempt_active"),
+    ],
+)
+def test_goal_driven_completion_rejects_pending_execution_or_attempt(conn, pending, detail):
     seed_goal_driven_reason(conn)
-    conn.execute(
-        """
-        INSERT INTO task_runs (
-            id, project_id, task_type, worker_name, worker_type, status,
-            execution_generation, runtime_context_json, started_at
-        ) VALUES (
-            'explore-run', 'p', 'explore', 'worker-a', 'pi', 'running',
-            0, '{}', ?
+    now = utcnow()
+    if pending == "task_run":
+        conn.execute(
+            """
+            INSERT INTO task_runs (
+                id, project_id, task_type, worker_name, worker_type, status,
+                execution_generation, runtime_context_json, started_at
+            ) VALUES (
+                'explore-run', 'p', 'explore', 'worker-a', 'pi', 'running',
+                0, '{}', ?
+            )
+            """,
+            (now,),
         )
-        """,
-        (utcnow(),),
-    )
+    else:
+        # 已有业务结果不代表逻辑 Attempt 也已关闭；完成仍须独立检查它。
+        conn.execute(
+            "INSERT INTO intents (id, project_id, description, creator, created_at, to_fact_id) "
+            "VALUES ('i1', 'p', 'accepted observation', 'worker-a', ?, 'f1')",
+            (now,),
+        )
+        conn.execute(
+            "INSERT INTO assessment_attempts "
+            "(id, project_id, intent_id, assessment_role, status, charged, execution_count, started_at) "
+            "VALUES ('attempt-1', 'p', 'i1', 'discovery', 'active', 1, 1, ?)",
+            (now,),
+        )
+        refresh_reason_digest(conn)
 
     with pytest.raises(HTTPException) as exc:
         complete_project_record_with_conn(conn, "p", complete_body())
 
-    assert exc.value.detail == "goal_driven_completion_execution_pending"
+    assert exc.value.detail == detail

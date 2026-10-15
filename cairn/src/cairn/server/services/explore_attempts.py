@@ -1,4 +1,4 @@
-"""Explore attempt 的原子认领、预算预约与 TaskRun 创建。"""
+"""Explore attempt 的原子认领、累计计量与 TaskRun 创建。"""
 
 from __future__ import annotations
 
@@ -225,21 +225,16 @@ def start_explore_attempt(
                 conn.commit()
                 raise HTTPException(409, "assessment_attempt_already_closed")
             verifier_charge = int(intent["assessment_role"] == "verifier")
-            reserve = policy.verification_reserve
             reserved = conn.execute(
                 """
                 UPDATE projects
                 SET explore_attempts_started = explore_attempts_started + 1,
                     verification_attempts_started = verification_attempts_started + ?
                 WHERE id = ? AND status = 'active'
-                  AND (explore_budget IS NULL OR explore_attempts_started < explore_budget -
-                       CASE WHEN ? = 1 THEN 0
-                            WHEN ? > verification_attempts_started THEN ? - verification_attempts_started
-                            ELSE 0 END)
                   AND (explore_deadline IS NULL OR explore_deadline > ?)
                 RETURNING explore_attempts_started
                 """,
-                (verifier_charge, project_id, verifier_charge, reserve, reserve, now),
+                (verifier_charge, project_id, now),
             ).fetchone()
             if reserved is None:
                 if reconciled_attempt:
@@ -247,9 +242,7 @@ def start_explore_attempt(
                     conn.commit()
                 current = conn.execute(
                     """
-                    SELECT explore_attempts_started,
-                           explore_budget,
-                           explore_deadline
+                    SELECT explore_deadline
                     FROM projects
                     WHERE id = ?
                     """,
@@ -270,18 +263,8 @@ def start_explore_attempt(
                         )
                         conn.commit()
                     raise HTTPException(409, "explore_deadline_exceeded")
-                if current is not None and current["explore_budget"] is not None and current["explore_attempts_started"] < current["explore_budget"]:
-                    raise HTTPException(409, "discovery_budget_exhausted")
-                if goal_driven:
-                    from .assessment_convergence import advance_goal_driven_convergence
-
-                    advance_goal_driven_convergence(
-                        conn,
-                        project_id,
-                        reason="budget_exhausted",
-                    )
-                    conn.commit()
-                raise HTTPException(409, "explore_budget_exhausted")
+                check_project_active(conn, project_id)
+                raise HTTPException(409, "Project status changed concurrently")
             assessment_attempt_id = next_assessment_attempt_id(conn, project_id)
             conn.execute(
                 """

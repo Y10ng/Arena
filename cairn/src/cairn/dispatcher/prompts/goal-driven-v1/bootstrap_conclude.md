@@ -10,6 +10,10 @@ Call `register_artifact` only for already available worker-local files using the
 
 {surface_discovery_contract}
 
+# Authorization Scope
+```json
+{authorization_scope}
+```
 # Origin
 ```
 {origin}
@@ -22,7 +26,7 @@ Call `register_artifact` only for already available worker-local files using the
 ```
 {hints}
 ```
-# Authorized Target Candidates
+# Structured Target Index
 ```json
 {targets}
 ```
