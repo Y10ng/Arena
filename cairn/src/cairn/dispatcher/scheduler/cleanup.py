@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from docker.errors import DockerException
+
 from .common import *
 
 
@@ -88,6 +90,85 @@ class CleanupMixin:
             return project.status == "paused" and project.execution_generation == generation
         return False
 
+    def _run_external_verification_cleanup(self, project_id: str, runs: list[dict], cancelled: bool) -> bool:
+        name = self.container_manager.container_name(project_id)
+        if self._candidate_container_blocked(name):
+            return False
+        container_ids = []
+        for run in runs:
+            context = run["runtime_context"]
+            container_ids.extend(context.get("execution_container_ids") or [])
+            if context.get("container_id") not in {None, "", "unknown"}:
+                container_ids.append(context["container_id"])
+            delivery = context.get("execution_delivery") or {}
+            if delivery.get("container_id") not in {None, "", "unknown"}:
+                container_ids.append(delivery["container_id"])
+        try:
+            # 复用既有锁、owner 检查、精确 ID 删除及删除后的不存在复核；不删除 Project。
+            removed = self.container_manager.cleanup_finishing(project_id, container_ids=container_ids)
+        except (DockerException, OSError, RuntimeError) as exc:
+            LOG.warning("verification cleanup deferred project=%s error=%s", project_id, type(exc).__name__)
+            removed = False
+        cleanup = {
+            "status": "removed" if removed else "pending",
+            "error": None if removed else {"code": "container_remove_pending", "message": "本次执行环境尚未确认移除，将继续回收。"},
+        }
+        acknowledged = True
+        for run in runs:
+            context = {"external_verification_cleanup": cleanup}
+            status = run["status"]
+            kwargs = {}
+            if removed:
+                lifecycle = run["runtime_context"].get("execution_lifecycle") or {}
+                context["execution_lifecycle"] = {
+                    **lifecycle, "generation": run["execution_generation"],
+                    "process_started": lifecycle.get("process_started") is True,
+                    "termination_confirmed": True, "cleanup_confirmed": True,
+                }
+                context.update(self.container_manager.runtime_metadata(name))
+                if status in {"queued", "running"}:
+                    status = "cancelled" if cancelled else "failed"
+                    kwargs = {
+                        "error_type": "cancelled" if cancelled else "delivery_unavailable",
+                        "error_message": "本次验证已停止并移除执行环境；未交付的结果不能视为完成。",
+                    }
+            response = self.client.update_task_run(
+                project_id, run["id"], status=status, runtime_context=context, **kwargs,
+            )
+            acknowledged = response.ok and acknowledged
+        return removed and acknowledged
+
+    def _cleanup_external_verification_containers(self, summaries: list[ProjectSummary]) -> None:
+        for summary in summaries:
+            if summary.verification_request_id is None:
+                continue
+            name = self.container_manager.container_name(summary.id)
+            if name in self._cleanup_pending or self._candidate_project_blocked(summary.id):
+                continue
+            if any(task.project_id == summary.id for task in self.futures.values()):
+                continue
+            if any(key[0] == summary.id for key in self._pending_task_run_finishes()):
+                continue
+            response = self.client.list_task_runs(summary.id)
+            if not response.ok or not isinstance(response.data, list):
+                continue
+            runs = [run for run in response.data if isinstance(run, dict) and run.get("task_type") == "external_verify"]
+            if not runs:
+                # 未认领请求从不创建运行环境，没有容器不需要伪造一个 TaskRun 来清理。
+                continue
+            if any(not isinstance(run.get("runtime_context"), dict) or run["runtime_context"].get("dispatcher_id") != self.dispatcher_id for run in runs):
+                continue
+            if all((run["runtime_context"].get("external_verification_cleanup") or {}).get("status") == "removed" for run in runs):
+                continue
+            # 无本地 future 的旧 run 同样先保全 candidate，再物理隔离；不启动重叠替代执行。
+            future = self.cleanup_executor.submit(
+                self._run_candidate_protected_cleanup, name,
+                self._run_external_verification_cleanup, summary.id, runs,
+                summary.status in {"paused", "stopped"},
+            )
+            self.cleanup_futures[future] = (name, summary.id, "external_verify")
+            self._cleanup_pending.add(name)
+
     def _retain_report_delivery_container(self, project_id: str) -> bool:
         try:
             response = self.client.get_assessment_report_finalization(project_id)
@@ -111,7 +192,7 @@ class CleanupMixin:
 
     def _cleanup_completed_containers(self, summaries: list[ProjectSummary]) -> None:
         for summary in summaries:
-            if summary.status != "completed":
+            if summary.status != "completed" or summary.verification_request_id is not None:
                 continue
             if self._inactive_cleanup_done.get(summary.id) == summary.status:
                 continue
@@ -141,7 +222,7 @@ class CleanupMixin:
 
     def _cleanup_stopped_containers(self, summaries: list[ProjectSummary]) -> None:
         for summary in summaries:
-            if summary.status != "stopped":
+            if summary.status != "stopped" or summary.verification_request_id is not None:
                 continue
             if self._inactive_cleanup_done.get(summary.id) == summary.status:
                 continue
@@ -172,6 +253,8 @@ class CleanupMixin:
 
     def _cleanup_paused_containers(self, summaries: list[ProjectSummary]) -> None:
         for summary in summaries:
+            if summary.verification_request_id is not None:
+                continue
             cleanup_state = self._pause_cleanup_state(summary)
             if cleanup_state is None:
                 continue
@@ -281,6 +364,7 @@ class CleanupMixin:
 
     def _queue_container_cleanups(self, summaries: list[ProjectSummary]) -> None:
         # 清理走独立线程池，避免 Docker stop/remove 阻塞调度主循环。
+        self._cleanup_external_verification_containers(summaries)
         self._cleanup_completed_containers(summaries)
         self._cleanup_stopped_containers(summaries)
         self._cleanup_paused_containers(summaries)

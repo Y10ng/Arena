@@ -304,21 +304,28 @@ const refreshData = async () => {
   }
 }
 
+// 仅普通项目工作区的 id 可用于项目加载、命令和快捷键，复测记录不属于该上下文。
+const workspaceProjectId = computed(() =>
+  route.matched.some((record) => record.path === '/projects/:id') && typeof route.params.id === 'string'
+    ? route.params.id
+    : undefined,
+)
+
 // Navigation / Breadcrumbs
 const breadcrumbs = computed(() =>
   breadcrumbsFromRegistry(
     route.name,
-    typeof route.params.id === 'string' ? route.params.id : undefined,
+    workspaceProjectId.value,
     workspaceStore.projectDetail?.project?.title,
   ),
 )
 
-// Watch route to load workspace project if inside workspace
+// 离开普通项目工作区时清除上下文，不为其他详情页发起项目查询。
 watch(
-  () => route.params.id,
+  workspaceProjectId,
   (newVal) => {
     if (newVal) {
-      workspaceStore.loadProject(newVal as string)
+      workspaceStore.loadProject(newVal)
     } else {
       workspaceStore.clearProject()
     }
@@ -335,7 +342,7 @@ const selectedPaletteIdx = ref(0)
 const baseCommands = computed<CommandItem[]>(() =>
   commandItemsFromRegistry(
     authStore.isSuperAdmin,
-    typeof route.params.id === 'string' ? route.params.id : undefined,
+    workspaceProjectId.value,
   ).map((item) => ({
     ...item,
     action: () => router.push(item.to),
@@ -473,8 +480,8 @@ const handleGlobalKeydown = (e: KeyboardEvent) => {
       router.push('/monitoring')
     } else if (key === 's') {
       router.push('/console/models')
-    } else if (route.params.id) {
-      const pId = route.params.id as string
+    } else if (workspaceProjectId.value) {
+      const pId = workspaceProjectId.value
       if (key === 'g') {
         router.push(`/projects/${pId}`)
       } else if (key === 'r') {

@@ -133,9 +133,11 @@ def validate_delivery_registration(conn, project, run, body, snapshot):
             "assessment_protocol",
         },
         "bootstrap": {"assessment_protocol"},
+        "external_verify": {"verification_request_id"},
     }.get(run["task_type"], set())
     allowed_inputs = {
         "reason": {"open_intent_ids"},
+        "external_verify": {"verification_request_id", "report_resource_id", "resource_ids"},
         "report": {
             "snapshot_path", "input_snapshot_artifact_id",
             "input_snapshot_sha256", "generation_token",
@@ -248,6 +250,22 @@ def validate_delivery_registration(conn, project, run, body, snapshot):
             else None
         )
         if binding != expected_binding:
+            raise HTTPException(422, "execution_delivery_invalid")
+    elif run["task_type"] == "external_verify":
+        request = conn.execute("SELECT * FROM verification_requests WHERE project_id = ? AND current_task_run_id = ?", (project["id"], run["id"])).fetchone()
+        resource_ids = [item["id"] for item in conn.execute("SELECT id FROM project_resources WHERE project_id = ? ORDER BY created_at, id", (project["id"],)).fetchall()]
+        if (request is None or request["terminal_kind"] is not None or request["cancel_requested_at"] is not None
+                or request["intent_id"] != run["intent_id"]
+                or binding != {"verification_request_id": request["id"]}
+                or set(inputs) != allowed_inputs
+                or inputs.get("verification_request_id") != request["id"]
+                or inputs.get("report_resource_id") != request["report_resource_id"]
+                or inputs.get("resource_ids") != resource_ids):
+            raise HTTPException(422, "execution_delivery_invalid")
+        from .project_authorization import require_project_authorization_current
+        require_project_authorization_current(conn, project)
+        expiry = parse_utc_timestamp(project["authorization_expires_at"])
+        if expiry and deadline > expiry:
             raise HTTPException(422, "execution_delivery_invalid")
     elif binding is not None:
         raise HTTPException(422, "execution_delivery_invalid")

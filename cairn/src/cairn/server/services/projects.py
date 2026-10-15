@@ -37,6 +37,8 @@ def check_project_active(conn: sqlite3.Connection, project_id: str) -> sqlite3.R
     # 与阶段决策/报告冻结共享项目行锁，避免 PG 并发接受过期输入。
     conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
     row = get_project_or_404(conn, project_id)
+    from .project_records import require_unmanaged_project
+    require_unmanaged_project(conn, project_id)
     if row["status"] != "active":
         raise HTTPException(403, f"Project is {row['status']}")
     return row
@@ -582,7 +584,15 @@ def project_meta_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> Project
     from .project_authorization import project_authorization_block_reason
 
     authorization = _authorization_meta(conn, row)
+    schedule = conn.execute(
+        "SELECT id AS schedule_id FROM project_schedules WHERE project_id = ? "
+        "UNION SELECT schedule_id FROM project_schedule_occurrences WHERE project_id = ?",
+        (row["id"], row["id"]),
+    ).fetchone()
+    verification = conn.execute("SELECT id FROM verification_requests WHERE project_id = ?", (row["id"],)).fetchone()
     return ProjectMeta(
+        verification_request_id=verification["id"] if verification is not None else None,
+        schedule_id=schedule["schedule_id"] if schedule is not None else None,
         assessment_execution=assessment_execution_view(conn, row),
         assessment_progress=assessment_progress(row) or None,
         verification_attempts_started=int(row_value(row, "verification_attempts_started") or 0),
@@ -592,6 +602,7 @@ def project_meta_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> Project
         execution_generation=int(row_value(row, "execution_generation") or 0),
         authorization_epoch=int(row_value(row, "authorization_epoch") or 0),
         authorization_scope_digest=authorization.scope_digest,
+        authorization_scope_descriptor=authorization.scope_descriptor,
         authorization_window_seconds=authorization.window_seconds,
         authorization_block_reason=project_authorization_block_reason(conn, row),
         created_at=row["created_at"],
@@ -726,7 +737,8 @@ def expire_workers(conn: sqlite3.Connection, project_id: str | None = None) -> N
     boot_id, now_ns = lease_clock()
     active = """to_fact_id IS NULL AND worker IS NOT NULL AND last_heartbeat_at IS NOT NULL
         AND EXISTS (SELECT 1 FROM projects p WHERE p.id = intents.project_id
-                    AND p.status != 'paused' AND p.assessment_protocol = ?)"""
+                    AND p.status != 'paused' AND p.assessment_protocol = ?)
+        AND NOT EXISTS (SELECT 1 FROM verification_requests vr WHERE vr.project_id = intents.project_id)"""
     scope = " AND project_id = ?" if project_id is not None else ""
     params = (GOAL_DRIVEN_PROTOCOL, *((project_id,) if project_id is not None else ()))
     # 旧租约或不同 boot 的刻度不可比较；从首次观察起重新计时，不按 UTC 瞬间判死。

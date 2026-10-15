@@ -9,6 +9,7 @@ export const PHASE_RESULT_KINDS = {
   explore_conclude: "explore_conclude_result",
   verifier_execute: "verifier_result",
   verifier_conclude: "verifier_conclude_result",
+  external_verify_execute: "external_verification_result",
   reason_execute: "reason_result",
   report_execute: "report_result",
 } as const;
@@ -82,6 +83,7 @@ export interface AgentRequest {
     surface_key?: string;
     test_family?: string;
     verification_observation_id?: string;
+    verification_request_id?: string;
     review_input_digest?: string;
     max_intents?: number;
     allowed_fact_ids?: string[];
@@ -218,7 +220,7 @@ export function parseRequest(raw: unknown): AgentRequest {
   assert(raw.binding === null || object(raw.binding), "binding");
   if (object(raw.binding)) {
     const binding = raw.binding;
-    for (const key of ["slot_key", "surface_key", "test_family", "verification_observation_id", "review_input_digest"]) assert(binding[key] === undefined || (typeof binding[key] === "string" && binding[key].length > 0), `binding.${key}`);
+    for (const key of ["slot_key", "surface_key", "test_family", "verification_observation_id", "verification_request_id", "review_input_digest"]) assert(binding[key] === undefined || (typeof binding[key] === "string" && binding[key].length > 0), `binding.${key}`);
     assert(binding.max_intents === undefined || (Number.isInteger(binding.max_intents) && (binding.max_intents as number) >= 0), "binding.max_intents");
     assert(binding.allowed_fact_ids === undefined || (Array.isArray(binding.allowed_fact_ids) && binding.allowed_fact_ids.every((id) => typeof id === "string")), "binding.allowed_fact_ids");
     assert(binding.allowed_intent_ids === undefined || (Array.isArray(binding.allowed_intent_ids) && binding.allowed_intent_ids.every((id) => typeof id === "string" && id.length > 0 && id.length <= 256) && new Set(binding.allowed_intent_ids).size === binding.allowed_intent_ids.length), "binding.allowed_intent_ids");

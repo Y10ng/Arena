@@ -145,6 +145,7 @@ export function formatAuditCounts(counts: Record<string, any> = {}, keys: string
 export const PROJECT_FILTER_OPTIONS = Object.freeze([
   { value: 'all', label: '全部' },
   { value: 'active', label: '活跃' },
+  { value: 'pending', label: '待启动' },
   { value: 'paused', label: '暂停' },
   { value: 'stopped', label: '结束' },
   { value: 'completed', label: '完成' },
@@ -263,6 +264,7 @@ export const STATUS_DEFINITIONS: Record<string, StatusMeta> = Object.freeze({
   confirmed: { text: '已确认', tone: 'good' },
   normal: { text: '已确认', tone: 'good' },
   critical_path: { text: '关键路径', tone: 'good' },
+  pending: { text: '待启动', tone: 'info' },
   seed: { text: '种子', tone: 'good' },
   discovered: { text: '发现', tone: 'info' },
   approved: { text: '批准', tone: 'good' },

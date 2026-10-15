@@ -10,11 +10,19 @@ Use only existing evidence. For an already available file, call `register_artifa
 
 {surface_discovery_contract}
 
+# Authorization Scope
+```json
+{authorization_scope}
+```
+# Origin
+```
+{origin}
+```
 # Goal
 ```
 {goal}
 ```
-# Authorized Targets
+# Structured Target Index
 ```json
 {authorized_targets}
 ```

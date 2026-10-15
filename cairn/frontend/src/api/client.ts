@@ -980,10 +980,12 @@ export const listAllVulnerabilities = (
   severity?: string,
   status?: string,
   signal?: AbortSignal,
+  currentTenantOnly = false,
 ) => {
   const params = new URLSearchParams()
   if (severity) params.set('severity', severity)
   if (status) params.set('status', status)
+  if (currentTenantOnly) params.set('current_tenant_only', 'true')
   const qs = params.toString()
   return api<VulnerabilityListItem[]>(
     'GET',

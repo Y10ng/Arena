@@ -188,7 +188,11 @@ export function projectActionAllowed(
     runtime.active_runs.length > 0
   )
     return false
-  if (action === 'reauthorize') return project?.status === 'paused' && runtime.state === 'paused'
+  if (action === 'reauthorize')
+    return (
+      (project?.status === 'paused' && runtime.state === 'paused') ||
+      (project?.status === 'pending' && runtime.project_status === 'pending')
+    )
   return project?.status === 'completed' && runtime.state === 'completed'
 }
 

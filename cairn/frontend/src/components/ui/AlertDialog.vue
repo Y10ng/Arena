@@ -5,10 +5,10 @@
     </AlertDialogTrigger>
 
     <AlertDialogPortal>
-      <AlertDialogOverlay class="ui-alert-dialog__overlay" />
+      <AlertDialogOverlay class="ui-alert-dialog__overlay" :class="overlayClass" />
       <AlertDialogContent
         class="ui-alert-dialog__content"
-        :class="`ui-alert-dialog__content--${tone}`"
+        :class="[`ui-alert-dialog__content--${tone}`, contentClass]"
         @escape-key-down="handleEscapeKeyDown"
       >
         <header class="ui-alert-dialog__header">
@@ -59,6 +59,8 @@ const props = withDefaults(
     description: string
     tone?: AlertDialogTone
     dismissible?: boolean
+    contentClass?: string
+    overlayClass?: string
   }>(),
   {
     tone: 'neutral',

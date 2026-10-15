@@ -6,6 +6,18 @@ Call the SDK `submit_result` tool with `accepted:true` and the business fields a
 
 Call `register_artifact` only for already available worker-local files using their existing absolute `path` and `kind`, then use returned handles in `evidence_refs[].artifact_handle`. Prior evidence cannot substitute for independent current-run evidence. Do not invent handles or Artifact IDs, and do not submit an ordinary assessment record or a new vulnerability candidate. Correction may only repair the submission from existing evidence.
 
+# Authorization Scope
+```json
+{authorization_scope}
+```
+# Origin
+```
+{origin}
+```
+# Structured Target Index
+```json
+{authorized_targets}
+```
 # Neutral Bound Observation
 ID: `{target_observation_id}`
 ```json

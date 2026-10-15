@@ -29,6 +29,7 @@ from cairn.server.routers import (
     models,
     project_groups,
     project_resources,
+    project_schedules,
     project_runtime,
     projects,
     prompt_groups,
@@ -38,6 +39,7 @@ from cairn.server.routers import (
     settings,
     tenant_workers,
     vulnerabilities,
+    verification_requests,
     worker_templates,
 )
 
@@ -81,6 +83,8 @@ app.include_router(knowledge.router)
 app.include_router(prompt_groups.router)
 app.include_router(project_runtime.router)
 app.include_router(projects.router)
+app.include_router(project_schedules.router)
+app.include_router(verification_requests.router)
 app.include_router(project_resources.router)
 app.include_router(project_groups.router)
 app.include_router(worker_templates.router)

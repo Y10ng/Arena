@@ -1,7 +1,6 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 import Overview from '@/features/overview/Overview.vue'
 import Projects from '@/features/projects/Projects.vue'
-import NewProject from '@/features/projects/NewProject.vue'
 import ProjectWorkspace from '@/features/projects/ProjectWorkspace.vue'
 import GraphPage from '@/features/graph/GraphPage.vue'
 import RunsPage from '@/features/runs/RunsPage.vue'
@@ -43,7 +42,31 @@ const routes = [
       },
       { path: 'provenance', name: 'Provenance', component: ProvenancePage },
       { path: 'projects', name: 'Projects', component: Projects },
-      { path: 'projects/new', name: 'NewProject', component: NewProject },
+      {
+        path: 'verifications',
+        name: 'Verifications',
+        component: () => import('@/features/verifications/Verifications.vue'),
+      },
+      {
+        path: 'verifications/new',
+        name: 'NewVerification',
+        component: () => import('@/features/verifications/Verifications.vue'),
+      },
+      {
+        path: 'verifications/:id',
+        name: 'VerificationDetail',
+        component: () => import('@/features/verifications/VerificationDetail.vue'),
+      },
+      {
+        path: 'project-schedules/:id',
+        name: 'ProjectSchedule',
+        component: () => import('@/features/projects/ProjectScheduleDetail.vue'),
+      },
+      {
+        path: 'projects/new',
+        name: 'NewProject',
+        redirect: { path: '/projects', query: { create: '1' } },
+      },
       {
         path: 'projects/:id',
         component: ProjectWorkspace,
@@ -78,6 +101,18 @@ const routes = [
             path: 'workers',
             name: 'ConsoleWorkers',
             component: () => import('@/features/workers/TenantWorkersPage.vue'),
+          },
+          {
+            path: 'verification-integrations',
+            name: 'VerificationIntegrations',
+            redirect: { name: 'VerificationConfiguration' },
+            meta: { superAdmin: true },
+          },
+          {
+            path: 'verification-configuration',
+            name: 'VerificationConfiguration',
+            component: () => import('@/features/verifications/VerificationIntegrations.vue'),
+            meta: { superAdmin: true },
           },
           {
             path: 'users',

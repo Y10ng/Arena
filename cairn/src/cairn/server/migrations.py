@@ -29,6 +29,11 @@ from cairn.server.db_schema import (
     EXECUTION_EVENTS_TABLE_SCHEMA,
     PROJECT_AUTHORIZATION_GRANTS_TABLE_SCHEMA,
     PROJECT_AUTHORIZATION_GRANTS_V2_TABLE_SCHEMA,
+    PROJECT_SCHEDULES_V48_TABLE_SCHEMA,
+    VERIFICATION_REQUESTS_V50_TABLE_SCHEMA,
+    VERIFICATION_CONFIGURATION_V51_TABLE_SCHEMA,
+    VERIFICATION_CONFIGURATION_V52_TABLE_SCHEMA,
+    VERIFICATION_REQUESTS_V52_TABLE_SCHEMA,
     SCHEMA,
     SQLITE_ASSESSMENT_CHARGE_COMPENSATIONS_IMMUTABLE_SCHEMA,
     SQLITE_ASSESSMENT_REPORT_FINISH_RECEIPTS_IMMUTABLE_SCHEMA,
@@ -4169,6 +4174,321 @@ POSTGRES_TASK_RUN_CANDIDATE_CAPACITY = Migration(
 )
 
 
+PROJECT_SCHEDULES_V48 = PROJECT_SCHEDULES_V48_TABLE_SCHEMA + """\
+ALTER TABLE project_resource_batches
+ADD COLUMN consumed_schedule_id TEXT REFERENCES project_schedules(id)
+CHECK (
+    NOT (consumed_project_id IS NOT NULL AND consumed_schedule_id IS NOT NULL)
+    AND (state != 'open' OR (consumed_project_id IS NULL AND consumed_schedule_id IS NULL))
+);
+ALTER TABLE scenarios ADD COLUMN description TEXT;
+UPDATE scenarios
+SET description = '自由描述背景与目标，根据已有信息自主探索。'
+WHERE key = 'goal-driven-v1' AND description IS NULL;
+"""
+
+# 新用途只复用已存在的目标驱动引用；同 key/label 的用户条目保持原样。
+for _key, _label, _description, _origin, _goal in (
+    (
+        "web-api-v1", "Web/API 安全测试",
+        "围绕业务、身份、接口与信任边界验证授权范围内的安全问题。",
+        "说明业务背景、可用角色、接口资料、已有观察及排除项。凭据请通过专用入口提供。",
+        "验证授权范围内的 Web/API 安全问题，保留可复现证据、影响说明和未决事项。",
+    ),
+    (
+        "ctf-v1", "CTF 解题",
+        "结合题目信息与附件研究解题，记录推理、验证和题目要求的产物。",
+        "说明题目描述、已知线索、附件用途、环境限制与允许的操作范围。",
+        "在题目授权范围内研究解题，给出经验证的答案或产物，并如实说明受阻与未确认内容。",
+    ),
+):
+    PROJECT_SCHEDULES_V48 += f"""\
+INSERT INTO scenarios (
+    key, label, description, is_default, profile_id, worker_ids_json,
+    image, prompt_group, knowledge, origin_template, goal_template,
+    cap_add_json, features_json, enabled_workers_json, sort_order
+)
+SELECT {_sql_text_literal(_key)}, {_sql_text_literal(_label)},
+       {_sql_text_literal(_description)}, 0, profile_id, worker_ids_json,
+       image, prompt_group, knowledge, {_sql_text_literal(_origin)}, {_sql_text_literal(_goal)},
+       cap_add_json, features_json, enabled_workers_json,
+       (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM scenarios)
+FROM scenarios
+WHERE key = 'goal-driven-v1'
+  AND NOT EXISTS (
+      SELECT 1 FROM scenarios
+      WHERE key = {_sql_text_literal(_key)} OR label = {_sql_text_literal(_label)}
+  );
+"""
+
+
+def _apply_sqlite_project_schedules_v48(conn) -> None:
+    _execute_sqlite_statements(conn, PROJECT_SCHEDULES_V48)
+
+
+def _apply_postgres_project_schedules_v48(conn) -> None:
+    conn.executescript(PROJECT_SCHEDULES_V48)
+
+
+SQLITE_PROJECT_SCHEDULES = Migration(
+    version=48,
+    name="project-schedules-and-scenario-guidance-v1",
+    checksum=sha256(PROJECT_SCHEDULES_V48.encode("utf-8")).hexdigest(),
+    apply=_apply_sqlite_project_schedules_v48,
+)
+POSTGRES_PROJECT_SCHEDULES = Migration(
+    version=48,
+    name="project-schedules-and-scenario-guidance-v1",
+    checksum=sha256(PROJECT_SCHEDULES_V48.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_project_schedules_v48,
+)
+
+
+WORKER_TEMPLATE_DEFAULT_V49 = """\
+ALTER TABLE worker_templates
+ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1));
+CREATE UNIQUE INDEX ux_worker_templates_tenant_default
+ON worker_templates(tenant_id) WHERE is_default = 1;
+"""
+
+
+def _apply_sqlite_worker_template_default_v49(conn) -> None:
+    _execute_sqlite_statements(conn, WORKER_TEMPLATE_DEFAULT_V49)
+
+
+def _apply_postgres_worker_template_default_v49(conn) -> None:
+    conn.executescript(WORKER_TEMPLATE_DEFAULT_V49)
+
+
+SQLITE_WORKER_TEMPLATE_DEFAULT = Migration(
+    version=49,
+    name="worker-template-default-v1",
+    checksum=sha256(WORKER_TEMPLATE_DEFAULT_V49.encode("utf-8")).hexdigest(),
+    apply=_apply_sqlite_worker_template_default_v49,
+)
+POSTGRES_WORKER_TEMPLATE_DEFAULT = Migration(
+    version=49,
+    name="worker-template-default-v1",
+    checksum=sha256(WORKER_TEMPLATE_DEFAULT_V49.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_worker_template_default_v49,
+)
+
+
+VERIFICATION_BATCHES_V50 = """\
+CREATE TABLE project_resource_batches_v50 (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+    integration_id TEXT REFERENCES verification_integrations(id),
+    state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'consumed')),
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    consumed_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    consumed_schedule_id TEXT REFERENCES project_schedules(id),
+    CHECK ((user_id IS NOT NULL AND integration_id IS NULL) OR (user_id IS NULL AND integration_id IS NOT NULL)),
+    CHECK (NOT (consumed_project_id IS NOT NULL AND consumed_schedule_id IS NOT NULL)
+           AND (state != 'open' OR (consumed_project_id IS NULL AND consumed_schedule_id IS NULL)))
+);
+INSERT INTO project_resource_batches_v50
+    (id, tenant_id, user_id, state, created_at, expires_at, consumed_at, consumed_project_id, consumed_schedule_id)
+SELECT id, tenant_id, user_id, state, created_at, expires_at, consumed_at, consumed_project_id, consumed_schedule_id
+FROM project_resource_batches;
+CREATE TABLE project_resource_batch_members_v50 (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL REFERENCES project_resource_batches_v50(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('note', 'script', 'file')),
+    path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    sha256 TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('file', 'zip')),
+    created_at TEXT NOT NULL,
+    UNIQUE (batch_id, path)
+);
+INSERT INTO project_resource_batch_members_v50 SELECT * FROM project_resource_batch_members;
+DROP TABLE project_resource_batch_members;
+DROP TABLE project_resource_batches;
+ALTER TABLE project_resource_batches_v50 RENAME TO project_resource_batches;
+ALTER TABLE project_resource_batch_members_v50 RENAME TO project_resource_batch_members;
+CREATE INDEX ix_project_resource_batches_owner_expiry ON project_resource_batches(tenant_id, user_id, state, expires_at);
+CREATE INDEX ix_project_resource_batches_integration_expiry ON project_resource_batches(tenant_id, integration_id, state, expires_at);
+CREATE INDEX ix_project_resource_batches_expiry ON project_resource_batches(expires_at);
+CREATE INDEX ix_project_resource_batch_members_batch ON project_resource_batch_members(batch_id, created_at, id);
+"""
+
+VERIFICATION_POSTGRES_BATCHES_V50 = """\
+ALTER TABLE project_resource_batches ALTER COLUMN user_id DROP NOT NULL;
+ALTER TABLE project_resource_batches ADD COLUMN integration_id TEXT REFERENCES verification_integrations(id);
+ALTER TABLE project_resource_batches ADD CONSTRAINT verification_batch_owner_check
+CHECK ((user_id IS NOT NULL AND integration_id IS NULL) OR (user_id IS NULL AND integration_id IS NOT NULL));
+CREATE INDEX ix_project_resource_batches_integration_expiry ON project_resource_batches(tenant_id, integration_id, state, expires_at);
+"""
+
+# 保持已发布授权 SQL/checksum 不变；本轮只扩展真实调用者类型并保留不可变历史。
+VERIFICATION_SQLITE_GRANTS_V50 = ""
+for _table, _schema, _triggers in (
+    ("project_authorization_grants", PROJECT_AUTHORIZATION_GRANTS_TABLE_SCHEMA, SQLITE_PROJECT_AUTHORIZATION_GRANTS_IMMUTABLE_SCHEMA),
+    ("project_authorization_grants_v2", PROJECT_AUTHORIZATION_GRANTS_V2_TABLE_SCHEMA, SQLITE_PROJECT_AUTHORIZATION_GRANTS_V2_IMMUTABLE_SCHEMA),
+):
+    VERIFICATION_SQLITE_GRANTS_V50 += f"""\
+CREATE TABLE {_table}_v50_backup AS SELECT * FROM {_table};
+DROP TRIGGER trg_{_table}_no_update;
+DROP TRIGGER trg_{_table}_no_delete;
+DROP TABLE {_table};
+""" + _schema.replace("actor_type IN ('user', 'system')", "actor_type IN ('user', 'system', 'integration')") + f"""\
+INSERT INTO {_table} SELECT * FROM {_table}_v50_backup;
+DROP TABLE {_table}_v50_backup;
+""" + _triggers
+
+VERIFICATION_POSTGRES_GRANTS_V50 = """\
+ALTER TABLE project_authorization_grants DROP CONSTRAINT project_authorization_grants_actor_type_check;
+ALTER TABLE project_authorization_grants ADD CONSTRAINT project_authorization_grants_actor_type_check CHECK (actor_type IN ('user', 'system', 'integration'));
+ALTER TABLE project_authorization_grants_v2 DROP CONSTRAINT project_authorization_grants_v2_actor_type_check;
+ALTER TABLE project_authorization_grants_v2 ADD CONSTRAINT project_authorization_grants_v2_actor_type_check CHECK (actor_type IN ('user', 'system', 'integration'));
+"""
+
+# Integration 表必须先于批次归属迁移；Request 外键最后建立。
+_VERIFICATION_INTEGRATIONS_SQL, _VERIFICATION_REQUESTS_SQL = VERIFICATION_REQUESTS_V50_TABLE_SCHEMA.split("CREATE TABLE verification_requests", 1)
+SQLITE_VERIFICATION_REQUESTS_V50 = (_VERIFICATION_INTEGRATIONS_SQL + VERIFICATION_BATCHES_V50
+    + "CREATE TABLE verification_requests" + _VERIFICATION_REQUESTS_SQL + VERIFICATION_SQLITE_GRANTS_V50)
+POSTGRES_VERIFICATION_REQUESTS_V50 = (_VERIFICATION_INTEGRATIONS_SQL + VERIFICATION_POSTGRES_BATCHES_V50
+    + "CREATE TABLE verification_requests" + _VERIFICATION_REQUESTS_SQL + VERIFICATION_POSTGRES_GRANTS_V50)
+
+
+def _apply_sqlite_verification_requests_v50(conn) -> None:
+    _execute_sqlite_statements(conn, SQLITE_VERIFICATION_REQUESTS_V50)
+
+
+def _apply_postgres_verification_requests_v50(conn) -> None:
+    conn.executescript(POSTGRES_VERIFICATION_REQUESTS_V50)
+
+
+SQLITE_VERIFICATION_REQUESTS = Migration(
+    version=50,
+    name="external-verification-requests-v1",
+    checksum=sha256(SQLITE_VERIFICATION_REQUESTS_V50.encode("utf-8")).hexdigest(),
+    apply=_apply_sqlite_verification_requests_v50,
+)
+POSTGRES_VERIFICATION_REQUESTS = Migration(
+    version=50,
+    name="external-verification-requests-v1",
+    checksum=sha256(POSTGRES_VERIFICATION_REQUESTS_V50.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_verification_requests_v50,
+)
+
+
+# v50 已部署且 checksum 冻结；SQLite 只重建请求表，原样复制历史与自引用链。
+_VERIFICATION_REQUEST_TABLE_V51, _VERIFICATION_REQUEST_INDEXES_V51 = (
+    ("CREATE TABLE verification_requests" + _VERIFICATION_REQUESTS_SQL)
+    .split("ALTER TABLE project_resources", 1)[0]
+    .split("CREATE INDEX ix_verification_requests_owner", 1)
+)
+SQLITE_VERIFICATION_CONFIGURATION_V51 = (
+    VERIFICATION_CONFIGURATION_V51_TABLE_SCHEMA
+    + _VERIFICATION_REQUEST_TABLE_V51
+        .replace("CREATE TABLE verification_requests (", "CREATE TABLE verification_requests_v51 (")
+        .replace("REFERENCES verification_requests(id)", "REFERENCES verification_requests_v51(id)")
+        .replace("worker_template_id TEXT NOT NULL", "worker_template_id TEXT")
+    + """\
+INSERT INTO verification_requests_v51 SELECT * FROM verification_requests;
+DROP TABLE verification_requests;
+ALTER TABLE verification_requests_v51 RENAME TO verification_requests;
+"""
+    + "CREATE INDEX ix_verification_requests_owner" + _VERIFICATION_REQUEST_INDEXES_V51
+)
+POSTGRES_VERIFICATION_CONFIGURATION_V51 = VERIFICATION_CONFIGURATION_V51_TABLE_SCHEMA + """\
+ALTER TABLE verification_requests ALTER COLUMN worker_template_id DROP NOT NULL;
+"""
+
+
+def _apply_sqlite_verification_configuration_v51(conn) -> None:
+    _execute_sqlite_statements(conn, SQLITE_VERIFICATION_CONFIGURATION_V51)
+
+
+def _apply_postgres_verification_configuration_v51(conn) -> None:
+    conn.executescript(POSTGRES_VERIFICATION_CONFIGURATION_V51)
+
+
+SQLITE_VERIFICATION_CONFIGURATION = Migration(
+    version=51,
+    name="verification-fixed-tenant-worker-v1",
+    checksum=sha256(SQLITE_VERIFICATION_CONFIGURATION_V51.encode("utf-8")).hexdigest(),
+    apply=_apply_sqlite_verification_configuration_v51,
+)
+POSTGRES_VERIFICATION_CONFIGURATION = Migration(
+    version=51,
+    name="verification-fixed-tenant-worker-v1",
+    checksum=sha256(POSTGRES_VERIFICATION_CONFIGURATION_V51.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_verification_configuration_v51,
+)
+
+
+VERIFICATION_WORKER_PURPOSE_V52 = """\
+ALTER TABLE tenant_workers ADD COLUMN purpose TEXT NOT NULL DEFAULT 'general' CHECK (purpose IN ('general', 'verification'));
+CREATE UNIQUE INDEX ux_tenant_verification_worker ON tenant_workers(tenant_id) WHERE purpose = 'verification';
+"""
+_VERIFICATION_REQUEST_COLUMNS_V51 = (
+    "id, schema_version, tenant_id, caller_type, caller_id, client_request_id, request_digest, "
+    "external_id, mode, project_id, intent_id, report_type, report_resource_id, previous_request_id, "
+    "worker_template_id, current_task_run_id, claim_token, cancel_requested_at, terminal_kind, "
+    "terminal_digest, result_json, error_json, created_at, updated_at, accepted_at, terminal_at"
+)
+_VERIFICATION_REQUEST_TABLE_V52, _VERIFICATION_REQUEST_INDEXES_V52 = VERIFICATION_REQUESTS_V52_TABLE_SCHEMA.split(
+    "CREATE INDEX ix_verification_requests_owner", 1,
+)
+SQLITE_VERIFICATION_DEDICATED_WORKER_V52 = (
+    VERIFICATION_WORKER_PURPOSE_V52
+    + VERIFICATION_CONFIGURATION_V52_TABLE_SCHEMA.replace(
+        "CREATE TABLE verification_configuration (", "CREATE TABLE verification_configuration_v52 (",
+    )
+    # 旧配置不再参与新受理；不认领、复制或修改旧普通 Worker，也不改历史任务。
+    + "INSERT INTO verification_configuration_v52(tenant_id, tenant_worker_id, updated_at) "
+      "SELECT tenant_id, NULL, updated_at FROM verification_configuration;\n"
+      "DROP TABLE verification_configuration;\n"
+      "ALTER TABLE verification_configuration_v52 RENAME TO verification_configuration;\n"
+    + _VERIFICATION_REQUEST_TABLE_V52
+        .replace("CREATE TABLE verification_requests (", "CREATE TABLE verification_requests_v52 (")
+        .replace("REFERENCES verification_requests(id)", "REFERENCES verification_requests_v52(id)")
+    + f"INSERT INTO verification_requests_v52({_VERIFICATION_REQUEST_COLUMNS_V51}) "
+      f"SELECT {_VERIFICATION_REQUEST_COLUMNS_V51} FROM verification_requests;\n"
+      "DROP TABLE verification_requests;\n"
+      "ALTER TABLE verification_requests_v52 RENAME TO verification_requests;\n"
+    + "CREATE INDEX ix_verification_requests_owner" + _VERIFICATION_REQUEST_INDEXES_V52
+)
+POSTGRES_VERIFICATION_DEDICATED_WORKER_V52 = VERIFICATION_WORKER_PURPOSE_V52 + """\
+UPDATE verification_configuration SET tenant_worker_id = NULL;
+ALTER TABLE verification_configuration DROP COLUMN group_id;
+ALTER TABLE verification_requests ADD COLUMN source_project_id TEXT;
+ALTER TABLE verification_requests ADD COLUMN source_vulnerability_id TEXT;
+ALTER TABLE verification_requests DROP CONSTRAINT verification_requests_report_type_check;
+ALTER TABLE verification_requests ADD CONSTRAINT verification_requests_report_type_check
+    CHECK (report_type IN ('markdown', 'text', 'file', 'platform_vulnerability'));
+CREATE INDEX ix_verification_requests_source ON verification_requests(tenant_id, source_project_id, source_vulnerability_id, created_at);
+"""
+
+
+def _apply_sqlite_verification_dedicated_worker_v52(conn) -> None:
+    _execute_sqlite_statements(conn, SQLITE_VERIFICATION_DEDICATED_WORKER_V52)
+
+
+def _apply_postgres_verification_dedicated_worker_v52(conn) -> None:
+    conn.executescript(POSTGRES_VERIFICATION_DEDICATED_WORKER_V52)
+
+
+SQLITE_VERIFICATION_DEDICATED_WORKER = Migration(
+    version=52,
+    name="verification-dedicated-worker-and-platform-source-v1",
+    checksum=sha256(SQLITE_VERIFICATION_DEDICATED_WORKER_V52.encode("utf-8")).hexdigest(),
+    apply=_apply_sqlite_verification_dedicated_worker_v52,
+)
+POSTGRES_VERIFICATION_DEDICATED_WORKER = Migration(
+    version=52,
+    name="verification-dedicated-worker-and-platform-source-v1",
+    checksum=sha256(POSTGRES_VERIFICATION_DEDICATED_WORKER_V52.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_verification_dedicated_worker_v52,
+)
+
+
 SQLITE_MIGRATIONS = (
     SQLITE_BASELINE,
     SQLITE_IDENTITY_TENANT,
@@ -4217,6 +4537,11 @@ SQLITE_MIGRATIONS = (
     SQLITE_LEASE_ELAPSED_CLOCK,
     GOAL_DRIVEN_SCENARIO_CATALOG,
     SQLITE_TASK_RUN_CANDIDATE_CAPACITY,
+    SQLITE_PROJECT_SCHEDULES,
+    SQLITE_WORKER_TEMPLATE_DEFAULT,
+    SQLITE_VERIFICATION_REQUESTS,
+    SQLITE_VERIFICATION_CONFIGURATION,
+    SQLITE_VERIFICATION_DEDICATED_WORKER,
 )
 POSTGRES_MIGRATIONS = (
     POSTGRES_BASELINE,
@@ -4266,6 +4591,11 @@ POSTGRES_MIGRATIONS = (
     POSTGRES_LEASE_ELAPSED_CLOCK,
     GOAL_DRIVEN_SCENARIO_CATALOG,
     POSTGRES_TASK_RUN_CANDIDATE_CAPACITY,
+    POSTGRES_PROJECT_SCHEDULES,
+    POSTGRES_WORKER_TEMPLATE_DEFAULT,
+    POSTGRES_VERIFICATION_REQUESTS,
+    POSTGRES_VERIFICATION_CONFIGURATION,
+    POSTGRES_VERIFICATION_DEDICATED_WORKER,
 )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from uuid import UUID
 
 from cairn.assessment_contracts import DepthReviewDecision, ExperimentRecord
 from pydantic import ConfigDict
@@ -524,10 +525,13 @@ class ReportCapabilityView(BaseModel):
 class ProjectMeta(BaseModel):
     id: str
     title: str
-    status: Literal["active", "paused", "stopped", "completed"]
+    status: ProjectStatus
+    schedule_id: str | None = None
+    verification_request_id: str | None = None
     execution_generation: int = 0
     authorization_epoch: int = 0
     authorization_scope_digest: str | None = None
+    authorization_scope_descriptor: dict[str, Any] | None = None
     authorization_window_seconds: int | None = None
     authorization_block_reason: str | None = None
     created_at: str
@@ -621,11 +625,13 @@ class CreateHintInline(BaseModel):
 class CreateProjectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    request_id: UUID | None = None
     title: str
     origin: str
     goal: str
     scenario: str | None = None
     hints: list[CreateHintInline] | None = None
+    # 缺省或 null 绑定 Origin 原件；显式数组（含 []）保留结构化范围语义。
     targets: list[CreateTargetInline] | None = None
     # resources 保留旧版 JSON 创建兼容；大文件和 ZIP 使用临时批次。
     resources: list[CreateProjectResourceRequest] | None = None
@@ -639,7 +645,7 @@ class CreateProjectRequest(BaseModel):
     # 创建方必须显式选择未来期限或以 null 表示无限期，不能靠字段缺失推导授权。
     authorization_expires_at: str | None
 
-    @field_validator("title", "origin", "goal", "scenario")
+    @field_validator("title", "scenario")
     @classmethod
     def validate_non_empty_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -648,6 +654,13 @@ class CreateProjectRequest(BaseModel):
         if not text:
             raise ValueError("must not be empty")
         return text
+
+    @field_validator("origin", "goal")
+    @classmethod
+    def validate_original_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be empty")
+        return value
 
     @field_validator("resource_batch_id")
     @classmethod

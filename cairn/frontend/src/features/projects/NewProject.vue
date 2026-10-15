@@ -1,89 +1,161 @@
 <template>
-  <div class="new-project-container">
-    <main class="new-project-workflow">
-      <Card id="np-section-basic" class="form-section" padding="lg">
-        <div class="section-title-row">
-          <div>
-            <h2>项目配置</h2>
-            <p class="section-desc">选择场景，自由描述已知信息与目标，并确认执行 Worker。</p>
-          </div>
-        </div>
-
-        <FormField label="项目名称" for="np-title" required :error="validationErrors.title">
-          <Input
-            id="np-title"
-            ref="titleInput"
-            v-model="form.title"
-            placeholder="例如: arena-web-recon"
-          />
-        </FormField>
-
-        <FormField
-          id="np-group"
-          class="validation-anchor"
-          label="所属项目组"
-          for="np-group-select"
-          required
-          :error="validationErrors.group"
-          hint="新项目必须加入当前 Tenant 的项目组；可在项目列表页管理项目组。"
+  <Dialog
+    :open="open"
+    :title="schedule ? '编辑未来配置' : '新建项目'"
+    :description="
+      schedule
+        ? '仅影响尚未生成的项目，已生成项目及其资料不变。'
+        : '描述背景与目标，准备资料并选择执行资源。'
+    "
+    size="lg"
+    :dismissible="!isSubmitting && !resourceBusy && !isCancelling && !isSavingDefault"
+    :close-on-outside="false"
+    @update:open="requestClose"
+    @open-auto-focus="focusTitle"
+    @close-auto-focus="restoreFocus"
+    @escape-key-down="closeSettingsOnEscape"
+  >
+    <Alert v-if="creationUnknown" tone="warning" title="保存结果未确认">
+      请求可能已被服务端接受，不要另建请求或取消可能已消费的资料。可正常导航；正文及原始请求仅在本次页面会话内保留，刷新后只能查询请求结果。
+      <p v-if="formError">{{ formError }}</p>
+      <p v-if="recoveryMessage">{{ recoveryMessage }}</p>
+      <template #actions>
+        <Button
+          v-if="pendingSubmission?.operation !== 'update'"
+          variant="secondary"
+          size="sm"
+          :loading="isSubmitting"
+          @click="queryCreationResult"
+          >查询请求结果</Button
         >
-          <div v-if="groupsLoading" aria-label="正在加载项目组">
-            <Skeleton class="select-skeleton" />
+        <Button
+          v-if="pendingSubmission"
+          variant="secondary"
+          size="sm"
+          :loading="isSubmitting"
+          @click="restoreSubmission"
+          >{{
+            pendingSubmission.operation === 'update' ? '按原版本恢复保存' : '用原请求恢复提交'
+          }}</Button
+        >
+        <Button variant="secondary" size="sm" @click="emit('update:open', false)"
+          >查看列表，保留内容</Button
+        >
+      </template>
+    </Alert>
+    <Alert v-if="creationDeleted" tone="warning" title="原请求已保存，但项目已删除">
+      不能用此请求重新创建；关联引用已清除，不会恢复提交或跳转到已删除项目。
+    </Alert>
+    <Alert v-if="createdScheduleId" tone="success" title="计划已保存">
+      {{
+        scheduleDraft.mode === 'once'
+          ? '项目待启动，尚未进入执行调度。'
+          : '已保存未来运行计划，尚未创建首轮项目。'
+      }}{{ navigationError }}
+      <template #actions
+        ><Button size="sm" @click="enterCreatedProject">进入计划详情</Button></template
+      >
+    </Alert>
+    <Alert v-if="createdProjectId" tone="success" title="项目已创建，等待调度">
+      项目与资料已提交，不需要再次创建。{{ navigationError }}
+      <template #actions>
+        <Button size="sm" @click="enterCreatedProject">进入已创建项目</Button>
+      </template>
+    </Alert>
+    <Alert v-if="cacheWarning" tone="warning" title="请求引用缓存提示">{{ cacheWarning }}</Alert>
+    <fieldset
+      ref="formElement"
+      class="new-project-form"
+      :disabled="formDisabled"
+      @input="userEdited = true"
+      @change="userEdited = true"
+    >
+      <div id="np-section-basic" class="creation-content">
+        <details
+          class="scenario-settings"
+          :open="scenarioExpanded"
+          @toggle="scenarioExpanded = ($event.target as HTMLDetailsElement).open"
+        >
+          <summary :aria-label="scenarioExpanded ? '收起探索场景' : '展开探索场景'" :aria-expanded="scenarioExpanded">
+            <span class="scenario-name">探索场景</span>
+            <span class="summary-action"><ChevronDown :size="14" aria-hidden="true" /></span>
+          </summary>
+          <div>
+            <div v-if="scenariosLoading" class="skeleton-scenarios" aria-label="正在加载场景">
+              <Skeleton v-for="i in 2" :key="i" class="skeleton-card" />
+            </div>
+            <ErrorState
+              v-else-if="scenariosError"
+              title="场景目录加载失败"
+              description="场景目录暂不可用，无法创建项目。"
+              @retry="refetchScenarios()"
+            />
+            <EmptyState
+              v-else-if="scenarios.length === 0"
+              title="暂无可用场景"
+              description="场景目录为空，暂时无法创建项目。"
+            />
+            <div v-else class="scenarios-grid">
+              <button
+                v-for="sc in scenarios"
+                :key="sc.key"
+                type="button"
+                class="scenario-card"
+                :class="{ selected: form.scenario === sc.key }"
+                :aria-pressed="form.scenario === sc.key"
+                @click="selectScenario(sc, true)"
+              >
+                <span class="scenario-header">
+                  <span class="scenario-title">{{ sc.label }}</span>
+                  <Badge v-if="sc.is_default" tone="info" size="sm">默认项</Badge>
+                </span>
+              </button>
+            </div>
           </div>
-          <ErrorState
-            v-else-if="groupsError"
-            title="项目组加载失败"
-            description="无法确认当前 Tenant 的项目组，暂时无法创建项目。"
-            @retry="refetchGroups()"
-          />
-          <EmptyState v-else-if="groups.length === 0" title="暂无可用项目组">
-            <template #description>
-              请先前往<router-link to="/projects">项目列表</router-link>创建项目组。
-            </template>
-          </EmptyState>
-          <Select
-            v-else
-            id="np-group-select"
-            v-model="form.group_id"
-            :options="groupOptions"
-            placeholder="请选择项目组"
-            required
-          />
-        </FormField>
+        </details>
+        <div class="project-identity">
+          <FormField label="项目名称" for="np-title" required :error="validationErrors.title">
+            <Input
+              id="np-title"
+              ref="titleInput"
+              v-model="form.title"
+              placeholder="例如: arena-web-recon"
+            />
+          </FormField>
 
-        <FormField label="探索场景 (Scenario)">
-          <div v-if="scenariosLoading" class="skeleton-scenarios" aria-label="正在加载场景">
-            <Skeleton v-for="i in 2" :key="i" class="skeleton-card" />
-          </div>
-          <ErrorState
-            v-else-if="scenariosError"
-            title="场景目录加载失败"
-            description="场景目录暂不可用，无法创建项目。"
-            @retry="refetchScenarios()"
-          />
-          <EmptyState
-            v-else-if="scenarios.length === 0"
-            title="暂无可用场景"
-            description="场景目录为空，暂时无法创建项目。"
-          />
-          <div v-else class="scenarios-grid">
-            <button
-              v-for="sc in scenarios"
-              :key="sc.key"
-              type="button"
-              class="scenario-card"
-              :class="{ selected: form.scenario === sc.key }"
-              :aria-pressed="form.scenario === sc.key"
-              @click="selectScenario(sc)"
-            >
-              <span class="scenario-header">
-                <span class="scenario-title">{{ sc.label }}</span>
-                <Badge v-if="sc.is_default" tone="info" size="sm">默认项</Badge>
-              </span>
-              <span class="scenario-desc">应用对应的执行画像、Prompt 与资源策略。</span>
-            </button>
-          </div>
-        </FormField>
+          <FormField
+            id="np-group"
+            class="validation-anchor"
+            label="所属项目组"
+            for="np-group-select"
+            required
+            :error="validationErrors.group"
+          >
+            <div v-if="groupsLoading" aria-label="正在加载项目组">
+              <Skeleton class="select-skeleton" />
+            </div>
+            <ErrorState
+              v-else-if="groupsError"
+              title="项目组加载失败"
+              description="无法确认当前 Tenant 的项目组，暂时无法创建项目。"
+              @retry="refetchGroups()"
+            />
+            <EmptyState v-else-if="groups.length === 0" title="暂无可用项目组">
+              <template #description>
+                请先前往<router-link to="/projects">项目列表</router-link>创建项目组。
+              </template>
+            </EmptyState>
+            <Select
+              v-else
+              id="np-group-select"
+              v-model="form.group_id"
+              :options="groupOptions"
+              placeholder="请选择项目组"
+              required
+              @update:model-value="userEdited = true"
+            />
+          </FormField>
+        </div>
 
         <FormField
           id="np-origin"
@@ -92,13 +164,12 @@
           for="np-origin-input"
           required
           :error="validationErrors.origin"
-          hint="自由描述已有信息、业务背景、观察、线索或资料情况，无需包含网址。密码、Token、Cookie 等凭据请勿填写在这里。"
         >
           <Textarea
             id="np-origin-input"
             v-model="form.origin"
-            placeholder="例如：已有接口说明和两个测试角色，重点关注订单审批相关功能。"
-            :rows="7"
+            placeholder="描述已知信息、研究对象、授权范围与排除项；例如：核验订单审批资料，不访问生产环境。"
+            :rows="4"
             @input="scenarioTemplateMeta.origin.userTouched = true"
           />
         </FormField>
@@ -110,104 +181,211 @@
           for="np-goal-input"
           required
           :error="validationErrors.goal"
-          hint="自由描述希望达成的目标、要回答的问题、预期结果与明确排除项。"
         >
           <Textarea
             id="np-goal-input"
             v-model="form.goal"
             placeholder="例如：重点检查普通用户之间的数据隔离及审批流程。"
-            :rows="7"
+            :rows="4"
             @input="scenarioTemplateMeta.goal.userTouched = true"
           />
         </FormField>
 
-        <FormField
-          id="np-workers"
-          class="api-config-group validation-anchor"
-          label="Workers"
-          required
-          hint="项目只会使用这里选择的 Tenant Worker，不会回退到 Dispatcher 全局配置。"
-        >
-          <div v-if="workersLoading" class="worker-loading" aria-label="正在加载 Worker">
-            <Skeleton v-for="i in 2" :key="i" class="worker-skeleton" />
-          </div>
-          <ErrorState
-            v-else-if="workersError"
-            title="Worker 加载失败"
-            description="无法确认当前 Tenant 的可用 Worker。"
-            @retry="refetchWorkers()"
-          />
-          <EmptyState v-else-if="workers.length === 0" title="暂无可用 Worker">
-            <template #description>
-              <template v-if="allWorkers.length === 0">
-                当前 Tenant 尚未创建 Worker。请前往
-                <router-link to="/console/workers">Workers</router-link> 新增配置。
-              </template>
-              <template v-else>
-                现有 Worker 配置尚未就绪。请前往
-                <router-link to="/console/workers">Workers</router-link> 查看 Model、Key
-                或启用状态。
-              </template>
-            </template>
-          </EmptyState>
-          <template v-else>
-            <FormField label="Worker 模板" for="np-worker-template">
-              <Skeleton v-if="workerTemplatesLoading" class="select-skeleton" />
-              <ErrorState
-                v-else-if="workerTemplatesError"
-                title="Worker 模板加载失败"
-                description="仍可手动选择 Worker。"
-                @retry="refetchWorkerTemplates()"
-              />
-              <Select
-                v-else
-                id="np-worker-template"
-                v-model="selectedTemplateId"
-                :options="workerTemplateOptions"
-                @update:model-value="applyWorkerTemplate"
-              />
-            </FormField>
-            <div class="worker-options">
+        <details ref="materialsDetails" class="project-materials" aria-label="项目资料">
+          <summary>
+            <Paperclip :size="16" />
+            <span class="materials-summary" aria-live="polite"
+              >资料 · {{ resourceSummary }} · 资料库 {{ form.library_keys.length
+              }}{{ schedule ? ` · 保留原件 ${retainedResourceIds.length}` : '' }}</span
+            >
+            <span class="summary-action">管理资料 <ChevronDown :size="14" /></span>
+          </summary>
+          <div class="materials-content">
+            <div v-if="schedule" class="selected-libraries">
               <div
-                v-for="worker in workers"
-                :key="worker.id"
-                class="worker-option"
-                :class="{
-                  selected: form.tenant_worker_ids.includes(worker.id),
-                  disabled: isSubmitting,
-                }"
+                v-for="resource in schedule.resources"
+                :key="resource.id"
+                class="selected-library"
               >
-                <Checkbox
-                  :id="`np-worker-${worker.id}`"
-                  :model-value="form.tenant_worker_ids.includes(worker.id)"
-                  :disabled="isSubmitting"
-                  :aria-label="`选择 Worker ${worker.display_name}`"
-                  @update:model-value="setWorkerSelection(worker.id, $event)"
-                />
-                <label class="worker-option-content" :for="`np-worker-${worker.id}`">
-                  <span class="worker-option-name">{{ worker.display_name }}</span>
-                  <span class="worker-option-meta"
-                    >{{ worker.engine }} · {{ workerLabel(worker) }}</span
-                  >
-                  <span class="worker-option-tasks">{{ worker.task_types.join('/') }}</span>
-                </label>
+                <label
+                  ><Checkbox
+                    :model-value="retainedResourceIds.includes(resource.id)"
+                    @update:model-value="retainResource(resource.id, $event)"
+                  />
+                  {{ resource.path }} · {{ bytes(resource.size_bytes) }} ·
+                  {{
+                    retainedResourceIds.includes(resource.id) ? '保留服务器原件' : '未来移除'
+                  }}</label
+                >
+              </div>
+              <p class="section-desc">
+                已有原件无需重新上传；取消保留仅从未来配置移除，不改变历史项目。
+              </p>
+            </div>
+            <ProjectResourceBatchUploader
+              ref="resourceUploader"
+              v-model="resourceBatch"
+              :disabled="
+                isSubmitting ||
+                creationUnknown ||
+                Boolean(createdProjectId || createdScheduleId || creationDeleted) ||
+                isCancelling
+              "
+              @busy="resourceBusy = $event"
+              @pending="resourcePending = $event"
+              @summary="resourceSummary = $event"
+            >
+              <template #actions>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  :disabled="
+                    isSubmitting ||
+                    creationUnknown ||
+                    Boolean(createdProjectId || createdScheduleId || creationDeleted) ||
+                    isCancelling
+                  "
+                  @click="libraryPickerOpen = true"
+                  >从资料库选择</Button
+                >
+              </template>
+            </ProjectResourceBatchUploader>
+            <div v-if="form.library_keys.length" class="selected-libraries">
+              <div v-for="key in form.library_keys" :key="key" class="selected-library">
+                <span
+                  >资料库 · {{ libraryCatalog.find((item) => item.key === key)?.name || key }}</span
+                >
+                <span v-if="existingLibraryBinding(key)" class="section-desc">{{
+                  refreshLibraryKeys.includes(key)
+                    ? '保存时更新为当前版本'
+                    : `固定 v${existingLibraryBinding(key)!.version}`
+                }}</span>
+                <Button
+                  v-if="existingLibraryBinding(key)"
+                  size="sm"
+                  variant="ghost"
+                  @click="toggleLibraryRefresh(key)"
+                  >{{ refreshLibraryKeys.includes(key) ? '保留原版本' : '更新为当前版本' }}</Button
+                >
+                <Button size="sm" variant="ghost" @click="toggleLibrary(key)">取消关联</Button>
               </div>
             </div>
-          </template>
-        </FormField>
+          </div>
+        </details>
 
-        <details class="advanced-settings" open>
-          <summary>
-            <span>高级设置</span>
-            <span class="summary-hint">时限与辅助资料</span>
-          </summary>
-
+        <section
+          v-show="settingsPanel === 'execution'"
+          id="np-execution-settings"
+          class="settings-panel"
+          aria-label="执行设置"
+        >
+          <div class="settings-panel-heading">
+            <h3>执行设置</h3>
+            <Button size="sm" variant="ghost" @click="closeSettings">完成设置</Button>
+          </div>
           <div class="advanced-settings-content">
-            <div class="advanced-subsection">
+            <Alert v-if="workerSelectionIssue" tone="warning" title="执行组合需要处理">
+              {{ workerSelectionIssue }}
+            </Alert>
+            <Alert v-if="defaultSaveError" tone="danger" title="默认组合保存未完成">
+              {{ defaultSaveError }}
+              <template #actions>
+                <Button size="sm" variant="secondary" @click="refetchWorkerTemplates()">刷新模板核对</Button>
+              </template>
+            </Alert>
+            <Alert v-if="defaultSaveMessage" tone="success" title="默认组合已保存">
+              {{ defaultSaveMessage }}
+            </Alert>
+            <div v-if="!workersLoading && !workersError && invalidSelectedWorkers.length" class="selected-libraries">
+              <div v-for="item in invalidSelectedWorkers" :key="item.id" class="selected-library">
+                <span>{{ item.name }} · {{ item.reason }}</span>
+                <Button size="sm" variant="ghost" @click="setWorkerSelection(item.id, false)">移除失效绑定</Button>
+              </div>
+            </div>
+            <FormField
+              id="np-workers"
+              class="api-config-group validation-anchor"
+              label="Workers"
+              required
+            >
+              <div v-if="workersLoading" class="worker-loading" aria-label="正在加载 Worker">
+                <Skeleton v-for="i in 2" :key="i" class="worker-skeleton" />
+              </div>
+              <ErrorState
+                v-else-if="workersError"
+                title="Worker 加载失败"
+                description="无法确认当前 Tenant 的可用 Worker。"
+                @retry="refetchWorkers()"
+              />
+              <EmptyState v-else-if="workers.length === 0" title="暂无可用 Worker">
+                <template #description>
+                  <template v-if="allWorkers.length === 0">
+                    当前 Tenant 尚未创建 Worker。请前往
+                    <router-link to="/console/workers">Workers</router-link> 新增配置。
+                  </template>
+                  <template v-else>
+                    现有 Worker 配置尚未就绪。请前往
+                    <router-link to="/console/workers">Workers</router-link> 查看 Model、Key
+                    或启用状态。
+                  </template>
+                </template>
+              </EmptyState>
+              <template v-else>
+                <FormField label="Worker 模板" for="np-worker-template">
+                  <Skeleton v-if="workerTemplatesLoading" class="select-skeleton" />
+                  <ErrorState
+                    v-else-if="workerTemplatesError"
+                    title="Worker 模板加载失败"
+                    description="仍可手动选择 Worker。"
+                    @retry="refetchWorkerTemplates()"
+                  />
+                  <Select
+                    v-else
+                    id="np-worker-template"
+                    v-model="selectedTemplateId"
+                    :options="workerTemplateOptions"
+                    @update:model-value="applyWorkerTemplate"
+                  />
+                </FormField>
+                <div class="template-row">
+                  <Button size="sm" variant="secondary" :disabled="!defaultWorkerTemplate || workerTemplatesError || workerTemplatesFetching" @click="restoreDefaultWorkers">恢复默认组合</Button>
+                  <Button size="sm" variant="secondary" :loading="isSavingDefault" :disabled="!canSaveDefault" @click="saveDefaultWorkers">保存为默认组合</Button>
+                </div>
+                <p class="section-desc">默认只用于以后新建，不改变已保存的项目、计划或当前草稿。并发可在 Workers 设置；三个专职 Worker 建议从 1／1／3 起步，单项目总上限建议为 4。</p>
+                <div class="worker-options">
+                  <div
+                    v-for="worker in workers"
+                    :key="worker.id"
+                    class="worker-option"
+                    :class="{
+                      selected: form.tenant_worker_ids.includes(worker.id),
+                      disabled: isSubmitting,
+                    }"
+                  >
+                    <Checkbox
+                      :id="`np-worker-${worker.id}`"
+                      :model-value="form.tenant_worker_ids.includes(worker.id)"
+                      :disabled="isSubmitting"
+                      :aria-label="`选择 Worker ${worker.display_name}`"
+                      @update:model-value="setWorkerSelection(worker.id, $event)"
+                    />
+                    <label class="worker-option-content" :for="`np-worker-${worker.id}`">
+                      <span class="worker-option-name">{{ worker.display_name }}</span>
+                      <span class="worker-option-meta"
+                        >{{ worker.engine }} · {{ workerLabel(worker) }}</span
+                      >
+                      <span class="worker-option-tasks">{{ worker.task_types.join('/') }}</span>
+                    </label>
+                  </div>
+                </div>
+              </template>
+            </FormField>
+
+            <div v-if="schedule?.project" class="advanced-subsection">
               <div class="section-title-row compact-title-row">
                 <div>
-                  <h3>执行边界</h3>
-                  <p class="section-desc">执行停止时间与真实授权期限相互独立。</p>
+                  <h3>既有期限</h3>
+                  <p class="section-desc">未修改时保留原期限；清空输入才明确取消，仅影响未来项目。日期按浏览器本地时区显示。</p>
                 </div>
               </div>
               <div class="execution-settings-grid">
@@ -237,92 +415,170 @@
                 </FormField>
               </div>
             </div>
-
-            <div class="advanced-subsection">
-              <div class="section-title-row compact-title-row">
-                <div>
-                  <h3>可复用资料库 <Badge tone="info" size="sm">可选</Badge></h3>
-                  <p class="section-desc">创建时冻结当前版本，后续全局更新不会改变本项目。</p>
-                </div>
-              </div>
-              <div v-if="libraryCatalogLoading" class="library-loading" aria-label="正在加载资料库">
-                <Skeleton v-for="i in 2" :key="i" class="library-skeleton" />
-              </div>
-              <ErrorState
-                v-else-if="libraryCatalogError"
-                title="资料库目录加载失败"
-                description="可重试；资料库为可选项。"
-                @retry="refetchLibraryCatalog()"
-              />
-              <div v-else-if="libraryCatalog.length" class="library-options">
-                <button
-                  v-for="library in libraryCatalog"
-                  :key="library.key"
-                  type="button"
-                  class="library-option"
-                  :class="{ selected: form.library_keys.includes(library.key) }"
-                  :aria-pressed="form.library_keys.includes(library.key)"
-                  @click="toggleLibrary(library.key)"
-                >
-                  <span class="library-option-title">{{ library.name }}</span>
-                  <span class="mono"
-                    >{{ library.key }} · v{{ library.latest_version }} ·
-                    {{ library.file_count }} 文件</span
-                  >
-                </button>
-              </div>
-              <EmptyState
-                v-else
-                title="暂无可选资料库"
-                description="无资料库不会影响评估完整性。"
-              />
-            </div>
-
-            <div class="advanced-subsection">
-              <div class="resource-title-row">
-                <div>
-                  <h3>项目本地辅助资料 <Badge tone="info" size="sm">可选</Badge></h3>
-                  <p class="section-desc">任意文件原样上传，可包含授权范围内的凭据。</p>
-                </div>
-              </div>
-              <ProjectResourceBatchUploader
-                ref="resourceUploader"
-                v-model="resourceBatch"
-                :disabled="isSubmitting"
-                @busy="resourceBusy = $event"
-              />
-            </div>
           </div>
-        </details>
-      </Card>
+        </section>
+        <section
+          v-show="settingsPanel === 'timing'"
+          id="np-timing-settings"
+          class="settings-panel"
+          aria-label="时间设置"
+        >
+          <div class="settings-panel-heading">
+            <h3>时间设置</h3>
+            <Button size="sm" variant="ghost" @click="closeSettings">完成设置</Button>
+          </div>
+          <ScheduleTiming
+            ref="scheduleTiming"
+            v-model="scheduleDraft"
+            :show-mode="false"
+            :locked-mode="Boolean(schedule)"
+            :editing="Boolean(schedule)"
+            :boundary-hint="boundaryHint"
+            :project="previewProject"
+          />
+        </section>
+      </div>
+    </fieldset>
 
-      <Card class="form-bottom-bar" padding="md">
-        <Button
-          variant="secondary"
-          :disabled="isSubmitting || resourceBusy"
-          @click="cancelNewProject"
-          >取消</Button
+    <template #footer>
+      <div class="creation-footer">
+        <div
+          class="creation-settings"
+          v-if="!createdProjectId && !createdScheduleId && !creationDeleted"
         >
-        <Button
-          variant="success"
-          :loading="isSubmitting"
-          :disabled="!canSubmitProject"
-          @click="submitProject"
+          <Button
+            id="np-execution-trigger"
+            class="execution-trigger"
+            variant="ghost"
+            :disabled="formDisabled"
+            :aria-expanded="settingsPanel === 'execution'"
+            aria-controls="np-execution-settings"
+            @click="toggleSettings('execution')"
+          >
+            <template #icon><SlidersHorizontal :size="16" /></template>
+            <span class="setting-summary"
+              ><span>{{ workerSummary }}</span
+              ><span class="summary-hint">{{ executionSummary }}</span></span
+            >
+          </Button>
+          <div class="start-settings">
+            <Select
+              id="schedule-mode"
+              :model-value="scheduleDraft.mode"
+              :options="modeOptions"
+              :disabled="formDisabled || Boolean(schedule && scheduleDraft.mode === 'once')"
+              aria-label="启动安排"
+              @update:model-value="setScheduleMode"
+            />
+            <Button
+              v-if="scheduleDraft.mode !== 'immediate'"
+              id="np-timing-trigger"
+              class="timing-trigger"
+              variant="ghost"
+              :disabled="formDisabled"
+              :aria-expanded="settingsPanel === 'timing'"
+              aria-controls="np-timing-settings"
+              @click="toggleSettings('timing')"
+              ><span class="setting-summary"
+                ><span>{{ timingSummary }}</span
+                ><span class="summary-hint"
+                  >{{ scheduleDraft.timezone || '未设置时区' }} · 编辑时间</span
+                ></span
+              ></Button
+            >
+          </div>
+        </div>
+        <p v-if="creationUnknown" class="section-desc">
+          保存结果未确认，仅能查询或按原请求恢复；不要换键重复创建。
+        </p>
+        <p v-else class="section-desc">
+          {{
+            submitBlockReason ||
+            (scheduleDraft.mode === 'immediate'
+              ? '资料绑定成功后进入执行调度，不代表模型已启动。'
+              : schedule
+                ? '保存仅影响未来项目，不会重写已生成项目。'
+                : '保存计划后由后台在计划时刻处理，不会立即启动研究。')
+          }}
+        </p>
+        <Alert v-if="formError && !creationUnknown" tone="danger" title="请检查当前操作">{{
+          formError
+        }}</Alert>
+        <div class="creation-footer-actions">
+          <Button
+            variant="secondary"
+            :disabled="isSubmitting || resourceBusy || isCancelling || isSavingDefault"
+            @click="requestClose(false)"
+            >取消</Button
+          >
+          <Button :loading="isSubmitting" :disabled="!canSubmitProject" @click="submitProject">{{
+            submitLabel
+          }}</Button>
+        </div>
+      </div>
+    </template>
+
+    <Dialog
+      :open="libraryPickerOpen"
+      title="从资料库选择"
+      description="仅关联本次项目，不会删除资料库原件。创建时冻结当前版本。"
+      @update:open="libraryPickerOpen = $event"
+    >
+      <Input v-model="librarySearch" placeholder="搜索资料库" aria-label="搜索资料库" />
+      <Skeleton v-if="libraryCatalogLoading" />
+      <ErrorState
+        v-else-if="libraryCatalogError"
+        title="资料库目录加载失败"
+        description="可重试；资料库为可选项。"
+        @retry="refetchLibraryCatalog()"
+      />
+      <div v-else-if="filteredLibraries.length" class="library-options">
+        <button
+          v-for="library in filteredLibraries"
+          :key="library.key"
+          type="button"
+          class="library-option"
+          :class="{ selected: form.library_keys.includes(library.key) }"
+          :aria-pressed="form.library_keys.includes(library.key)"
+          @click="toggleLibrary(library.key)"
         >
-          确认创建项目
-        </Button>
-      </Card>
-    </main>
-  </div>
+          <span class="library-option-title">{{ library.name }}</span>
+          <span class="mono"
+            >{{ library.key }} · v{{ library.latest_version }} · {{ library.file_count }} 文件</span
+          >
+        </button>
+      </div>
+      <EmptyState v-else title="暂无匹配资料库" description="可不选择资料库创建项目。" />
+      <template #footer><Button @click="libraryPickerOpen = false">完成选择</Button></template>
+    </Dialog>
+
+    <ConfirmAction
+      :open="discardOpen"
+      title="放弃本次填写？"
+      description="未提交内容会丢失，临时上传批次将取消。资料库原件不受影响。"
+      confirm-label="放弃并关闭"
+      cancel-label="继续填写"
+      :loading="isCancelling"
+      @update:open="discardOpen = $event"
+      @confirm="discardProject"
+    >
+      <Alert v-if="cleanupError" tone="danger" title="临时批次取消失败"
+        >{{ cleanupError }}。内容与批次已保留，可重试清理。</Alert
+      >
+    </ConfirmAction>
+  </Dialog>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { useQuery } from '@tanstack/vue-query'
-import { useRouter } from 'vue-router'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useQuery, useQueryClient } from '@tanstack/vue-query'
+import { isNavigationFailure, onBeforeRouteLeave, useRouter } from 'vue-router'
 import {
   api,
+  ApiError,
   createProject,
+  createWorkerTemplate,
+  updateWorkerTemplate,
   listLibraryCatalog,
   listProjectGroups,
   listTenantWorkerOptions,
@@ -338,11 +594,12 @@ import type {
   WorkerTemplate,
 } from '@/api/types'
 import { useUIStore } from '@/stores/ui'
-import { ErrorState } from '@/components/patterns'
+import { ConfirmAction, ErrorState } from '@/components/patterns'
 import {
+  Alert,
   Badge,
   Button,
-  Card,
+  Dialog,
   Checkbox,
   EmptyState,
   FormField,
@@ -354,12 +611,62 @@ import {
 } from '@/components/ui'
 import ProjectResourceBatchUploader from './ProjectResourceBatchUploader.vue'
 import { applyScenarioTemplates, type ScenarioTemplateState } from './newProjectScenarioTemplates'
+import ScheduleTiming from './ScheduleTiming.vue'
+import {
+  draftFromSchedule,
+  newScheduleDraft,
+  scheduleModeOptions,
+  scheduleTimesFromDraft,
+  ScheduleTimeError,
+  type ScheduleDraft,
+} from './scheduleTiming'
+import { weekdayLabels } from '@/api/projectSchedules'
+import { ChevronDown, Paperclip, SlidersHorizontal } from '@lucide/vue'
+import { bytes } from '@/lib/format'
+import {
+  createCreationRequestId,
+  createProjectSchedule,
+  updateProjectSchedule,
+  getCreationRequest,
+  rememberCreationRequest,
+  forgetCreationRequest,
+  type CreateScheduleRequest,
+  type UpdateScheduleRequest,
+  type ProjectSchedule,
+} from '@/api/projectSchedules'
 
+const props = defineProps<{
+  open: boolean
+  returnFocus: HTMLElement | null
+  schedule?: ProjectSchedule
+}>()
+const emit = defineEmits<{
+  'update:open': [open: boolean]
+  discarded: []
+  saved: [schedule: ProjectSchedule]
+}>()
 const router = useRouter()
 const uiStore = useUIStore()
+const queryClient = useQueryClient()
+const isSavingDefault = ref(false)
+const defaultSaveError = ref('')
+const defaultSaveMessage = ref('')
 
+const userEdited = ref(false)
+const isCancelling = ref(false)
+const discardOpen = ref(false)
+const cleanupError = ref('')
+const formError = ref('')
+const creationUnknown = ref(false)
+const creationDeleted = ref(false)
+const createdProjectId = ref<string | null>(null)
+const navigationError = ref('')
+const libraryPickerOpen = ref(false)
+const librarySearch = ref('')
+const resourcePending = ref(false)
 const isSubmitting = ref(false)
 const titleInput = ref<{ focus: (options?: FocusOptions) => void } | null>(null)
+const formElement = ref<HTMLFieldSetElement | null>(null)
 const resourceUploader = ref<{ cancel: () => Promise<void> } | null>(null)
 const resourceBatch = ref<ProjectResourceBatch | null>(null)
 const resourceBusy = ref(false)
@@ -375,12 +682,140 @@ const form = reactive({
   explore_deadline: '',
   authorization_expires_at: '',
 })
-const workerSelectionTouched = ref(false)
-
+const workersInitialized = ref(Boolean(props.schedule))
+const scheduleDraft = ref(props.schedule ? draftFromSchedule(props.schedule) : newScheduleDraft())
+const retainedResourceIds = ref(props.schedule?.resources.map((resource) => resource.id) || [])
+const refreshLibraryKeys = ref<string[]>([])
+watch(
+  scheduleDraft,
+  () => {
+    userEdited.value = true
+  },
+  { deep: true },
+)
+const createdScheduleId = ref<string | null>(null)
+const recoveryMessage = ref('')
+const cacheWarning = ref('')
+type PendingSubmission =
+  | { operation: 'project'; payload: CreateProjectRequest & { request_id: string } }
+  | { operation: 'schedule'; payload: CreateScheduleRequest }
+  | { operation: 'update'; scheduleId: string; payload: UpdateScheduleRequest }
+const pendingSubmission = ref<PendingSubmission | null>(null)
+const scenarioExpanded = ref(true)
+const scheduleTiming = ref<InstanceType<typeof ScheduleTiming> | null>(null)
+const materialsDetails = ref<HTMLDetailsElement | null>(null)
+const resourceSummary = ref('本地文件 0')
+const settingsPanel = ref<'execution' | 'timing' | null>(null)
+const formDisabled = computed(
+  () =>
+    isSavingDefault.value ||
+    isSubmitting.value ||
+    isCancelling.value ||
+    creationUnknown.value ||
+    Boolean(createdProjectId.value || createdScheduleId.value || creationDeleted.value),
+)
+const modeOptions = computed(() =>
+  scheduleModeOptions(scheduleDraft.value.mode, Boolean(props.schedule)),
+)
+const executionSummary = computed(
+  () =>
+    [
+      props.schedule?.project && form.explore_deadline ? `停止 ${form.explore_deadline.replace('T', ' ')}` : '',
+      props.schedule?.project && form.authorization_expires_at
+        ? `授权到期 ${form.authorization_expires_at.replace('T', ' ')}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join(' · ') || '执行设置 · 未设时间边界',
+)
+const timingSummary = computed(() => {
+  const draft = scheduleDraft.value
+  const start = draft.startLocal.replace('T', ' ')
+  if (draft.mode === 'once') return `${start || '未设置启动时间'} · ${draft.stopMode === 'specified' ? `停止 ${draft.stopLocal.replace('T', ' ') || '未设置'}` : '不限制停止时间'}`
+  const days =
+    draft.mode === 'weekly'
+      ? [...draft.weekdays]
+          .sort()
+          .map((day) => weekdayLabels[day])
+          .join('、') || '未选择执行日'
+      : '每天'
+  return `${days} ${draft.localTime || '未设置时刻'} · ${start ? `起始 ${start}` : '未设置起始边界'}${draft.endDate ? ` · 结束 ${draft.endDate}` : ''}${draft.maxRuns ? ` · 最多 ${draft.maxRuns} 次` : ''}`
+})
+async function showSettings(panel: 'execution' | 'timing', anchor?: string) {
+  settingsPanel.value = panel
+  await nextTick()
+  document.getElementById(anchor || `np-${panel}-settings`)?.scrollIntoView({ block: 'start' })
+}
+function closeSettings() {
+  const panel = settingsPanel.value
+  settingsPanel.value = null
+  if (panel) document.getElementById(`np-${panel}-trigger`)?.focus()
+}
+function toggleSettings(panel: 'execution' | 'timing') {
+  if (settingsPanel.value === panel) closeSettings()
+  else void showSettings(panel)
+}
+function setScheduleMode(value: string | number) {
+  scheduleDraft.value.mode = value as ScheduleDraft['mode']
+  if (value === 'immediate') closeSettings()
+  else void showSettings('timing')
+}
+function closeSettingsOnEscape(event: KeyboardEvent) {
+  if (!settingsPanel.value) return
+  event.preventDefault()
+  closeSettings()
+}
+const submitLabel = computed(() =>
+  props.schedule
+    ? '保存未来配置'
+    : scheduleDraft.value.mode === 'immediate'
+      ? '创建并启动'
+      : scheduleDraft.value.mode === 'once'
+        ? '保存单次预约'
+        : '保存重复计划',
+)
+const boundaryHint = computed(() =>
+  props.schedule?.project && (form.explore_deadline || form.authorization_expires_at)
+    ? '执行停止与授权到期仍是原样的绝对边界，可能使计划更早停止；不会按轮次自动续期。'
+    : '',
+)
+if (props.schedule?.project) {
+  const project = props.schedule.project
+  Object.assign(form, {
+    title: project.title,
+    origin: project.origin,
+    goal: project.goal,
+    scenario: project.scenario,
+    tenant_worker_ids: [...project.tenant_worker_ids],
+    group_id: project.group_id,
+    library_keys: props.schedule.library_bindings.map((binding) => binding.library_key),
+    explore_deadline: inputLocalTime(project.explore_deadline),
+    authorization_expires_at: inputLocalTime(project.authorization_expires_at),
+  })
+}
+function inputLocalTime(value?: string | null) {
+  if (!value) return ''
+  const date = new Date(value)
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+}
+const existingLibraryBinding = (key: string) =>
+  props.schedule?.library_bindings.find((binding) => binding.library_key === key)
+function toggleLibraryRefresh(key: string) {
+  userEdited.value = true
+  refreshLibraryKeys.value = refreshLibraryKeys.value.includes(key)
+    ? refreshLibraryKeys.value.filter((item) => item !== key)
+    : [...refreshLibraryKeys.value, key]
+}
+function retainResource(id: string, keep: boolean) {
+  userEdited.value = true
+  retainedResourceIds.value = keep
+    ? [...retainedResourceIds.value, id]
+    : retainedResourceIds.value.filter((item) => item !== id)
+}
 const scenarioTemplateMeta = reactive({
-  selectedKey: null as string | null,
-  origin: { userTouched: false, lastAutoApplied: null as string | null },
-  goal: { userTouched: false, lastAutoApplied: null as string | null },
+  selectedKey: props.schedule?.project?.scenario || (null as string | null),
+  origin: { userTouched: Boolean(props.schedule), lastAutoApplied: null as string | null },
+  goal: { userTouched: Boolean(props.schedule), lastAutoApplied: null as string | null },
 })
 
 const validationErrors = reactive({
@@ -402,13 +837,15 @@ const {
   queryFn: () => api<ScenarioCatalogEntry[]>('GET', '/scenario-catalog'),
 })
 const scenarios = computed(() => scenariosData.value || [])
-const selectedScenarioExists = computed(() =>
-  scenarios.value.some((scenario) => scenario.key === form.scenario),
+const selectedScenario = computed(() =>
+  scenarios.value.find((scenario) => scenario.key === form.scenario),
 )
+const selectedScenarioExists = computed(() => Boolean(selectedScenario.value))
 
 const {
   data: workersData,
   isLoading: workersLoading,
+  isFetching: workersFetching,
   isError: workersError,
   refetch: refetchWorkers,
 } = useQuery<TenantWorker[]>({
@@ -417,7 +854,6 @@ const {
 })
 const allWorkers = computed(() => workersData.value || [])
 const workers = computed(() => allWorkers.value.filter((worker) => worker.available))
-const availableWorkerIds = computed(() => new Set(workers.value.map((worker) => worker.id)))
 
 const {
   data: groupsData,
@@ -448,6 +884,7 @@ const libraryCatalog = computed(() => libraryCatalogData.value || [])
 const {
   data: workerTemplatesData,
   isLoading: workerTemplatesLoading,
+  isFetching: workerTemplatesFetching,
   isError: workerTemplatesError,
   refetch: refetchWorkerTemplates,
 } = useQuery<WorkerTemplate[]>({
@@ -456,30 +893,106 @@ const {
 })
 const workerTemplates = computed(() => workerTemplatesData.value || [])
 const workerTemplateOptions = computed<SelectOption[]>(() => [
-  { value: '__none__', label: '不使用模板' },
+  { value: '__none__', label: '本次自定义' },
   ...workerTemplates.value.map((template) => ({
     value: template.id,
-    label: `${template.name} (${template.tenant_worker_ids.length})`,
+    label: `${template.name}${template.is_default ? ' · 默认' : ''} (${template.tenant_worker_ids.length})`,
   })),
 ])
 const selectedTemplateId = ref('__none__')
 
-const canSubmitProject = computed(
+const filteredLibraries = computed(() =>
+  libraryCatalog.value.filter((library) =>
+    `${library.name} ${library.key}`.toLowerCase().includes(librarySearch.value.toLowerCase()),
+  ),
+)
+const defaultWorkerTemplate = computed(() => workerTemplates.value.find((item) => item.is_default))
+const invalidSelectedWorkers = computed(() =>
+  form.tenant_worker_ids.flatMap((id) => {
+    const worker = allWorkers.value.find((item) => item.id === id)
+    return worker?.available ? [] : [{
+      id,
+      name: worker?.display_name || id,
+      reason: worker?.unavailable_reason || (worker ? '配置不可用，请检查启用状态、Model 或 Key' : 'Worker 已删除或不属于当前 Tenant'),
+    }]
+  }),
+)
+const missingWorkerRoles = computed(() => {
+  const roles = new Set(workers.value
+    .filter((worker) => form.tenant_worker_ids.includes(worker.id))
+    .flatMap((worker) => worker.task_types))
+  return (['bootstrap', 'reason', 'explore'] as const).filter((role) => !roles.has(role))
+})
+const workerSelectionIssue = computed(() => {
+  if (workersLoading.value) return ''
+  if (workersError.value) return 'Worker 查询失败，请重试加载后确认配置。'
+  if (!workersInitialized.value && (workersFetching.value || workerTemplatesFetching.value)) return ''
+  if (selectedTemplateId.value !== '__none__' && !workerTemplatesLoading.value) {
+    if (workerTemplatesError.value) return '无法确认所选模板，请刷新模板核对，或明确选择本次自定义。'
+    if (!workerTemplates.value.some((item) => item.id === selectedTemplateId.value))
+      return '所选 Worker 模板已删除；原成员仍保留，请恢复默认或明确选择本次自定义。'
+  }
+  if (invalidSelectedWorkers.value.length)
+    return invalidSelectedWorkers.value.map((item) => `${item.name}：${item.reason}`).join('；')
+  if (!form.tenant_worker_ids.length) {
+    if (workerTemplatesLoading.value) return ''
+    if (workerTemplatesError.value) return '默认组合查询失败，请重试加载模板，或选择本次自定义。'
+    return defaultWorkerTemplate.value
+      ? '尚未选择 Worker，请主动恢复默认组合或选择本次自定义。'
+      : '尚未设置默认组合，请选择 Worker 后保存为默认组合，或仅用于本次。'
+  }
+  if (missingWorkerRoles.value.length) return `执行组合缺少角色：${missingWorkerRoles.value.join('、')}。请补充支持这些角色的 Worker。`
+  return ''
+})
+const executionNeedsAttention = computed(() => Boolean(workerSelectionIssue.value))
+const workerSummary = computed(() => {
+  if (workersLoading.value || (!workersInitialized.value && (workersFetching.value || workerTemplatesFetching.value)))
+    return '正在加载执行组合'
+  if (workerSelectionIssue.value) return workerSelectionIssue.value
+  const template = workerTemplates.value.find((item) => item.id === selectedTemplateId.value)
+  const names = form.tenant_worker_ids.map((id) => allWorkers.value.find((item) => item.id === id)?.display_name || id)
+  return `${template?.is_default ? '默认组合' : '本次组合'} · ${names.join('、')}`
+})
+const canSaveDefault = computed(
   () =>
-    !isSubmitting.value &&
-    !resourceBusy.value &&
-    !scenariosLoading.value &&
-    !scenariosError.value &&
-    !workersLoading.value &&
+    !formDisabled.value &&
     !workersError.value &&
-    !groupsLoading.value &&
-    !groupsError.value &&
-    selectedGroupExists.value &&
-    selectedScenarioExists.value &&
-    form.tenant_worker_ids.length > 0,
+    !workersFetching.value &&
+    !workerTemplatesFetching.value &&
+    !workerTemplatesError.value &&
+    form.tenant_worker_ids.length > 0 &&
+    invalidSelectedWorkers.value.length === 0 &&
+    missingWorkerRoles.value.length === 0,
 )
 
-const selectScenario = (scenario: ScenarioCatalogEntry) => {
+const submitBlockReason = computed(() => {
+  if (creationDeleted.value) return '原请求已保存但项目已删除，不能用此请求重新创建。'
+  if (resourceBusy.value) return '资料操作尚未完成，请稍候。'
+  if (resourcePending.value) return '仍有未完成或结果未确认的资料，请处理或明确移除后再创建。'
+  if (scenariosLoading.value || workersLoading.value || groupsLoading.value)
+    return '正在加载创建所需配置。'
+  if (scenariosError.value || !selectedScenarioExists.value)
+    return '请选择可用场景，或重试加载场景目录。'
+  if (!workersInitialized.value && (workersFetching.value || workerTemplatesFetching.value || workerTemplatesLoading.value))
+    return '正在加载默认执行组合。'
+  if (workerSelectionIssue.value) return workerSelectionIssue.value
+  if (!form.tenant_worker_ids.length) return '请展开执行设置，配置本次 Worker。'
+  if (groupsError.value || !selectedGroupExists.value) return '请选择有效项目组，或重试加载项目组。'
+  return ''
+})
+const canSubmitProject = computed(
+  () =>
+    !isSavingDefault.value &&
+    !isSubmitting.value &&
+    !isCancelling.value &&
+    !creationUnknown.value &&
+    !createdProjectId.value &&
+    !createdScheduleId.value &&
+    !submitBlockReason.value,
+)
+
+const selectScenario = (scenario: ScenarioCatalogEntry, userSelected = false) => {
+  if (userSelected) userEdited.value = true
   const currentState: ScenarioTemplateState = {
     selectedKey: scenarioTemplateMeta.selectedKey,
     origin: {
@@ -514,30 +1027,43 @@ watch(
       selectScenario(selected)
       return
     }
+    if (props.schedule) return
     selectScenario(list.find((scenario) => scenario.is_default) || list[0])
   },
   { immediate: true },
 )
 
 watch(
-  workers,
-  (list) => {
-    // 刷新时只清理失效绑定；用户操作过选择后，不再擅自补回默认 Worker。
-    form.tenant_worker_ids = form.tenant_worker_ids.filter((workerId) =>
-      availableWorkerIds.value.has(workerId),
-    )
-    if (!workerSelectionTouched.value && form.tenant_worker_ids.length === 0 && list[0]) {
-      form.tenant_worker_ids = [list[0].id]
-    }
+  [workersFetching, workerTemplatesFetching, workersLoading, workerTemplatesLoading, workersError, workerTemplatesError, workerTemplates, allWorkers, formDisabled],
+  () => {
+    if (workersInitialized.value || formDisabled.value || workersLoading.value || workerTemplatesLoading.value ||
+        workersFetching.value || workerTemplatesFetching.value || workersError.value || workerTemplatesError.value) return
+    // 手动资源选择和旧计划已标记初始化；正文编辑不阻止首次默认应用，刷新不覆盖选择。
+    workersInitialized.value = true
+    const template = defaultWorkerTemplate.value
+    if (!template) return
+    selectedTemplateId.value = template.id
+    form.tenant_worker_ids = [...template.tenant_worker_ids]
   },
   { immediate: true },
+)
+
+// 查询加载标志与默认选择可能先后更新，等本轮状态稳定后再显露真正缺资源的错误。
+watch(
+  executionNeedsAttention,
+  async (needsAttention) => {
+    if (!needsAttention || formDisabled.value || !props.open) return
+    await nextTick()
+    if (executionNeedsAttention.value && !formDisabled.value && props.open) void showSettings('execution')
+  },
+  { immediate: true, flush: 'post' },
 )
 
 watch(
   groups,
   () => {
     // 项目组被删除或 Tenant 上下文切换后，不保留已经失效的创建选择。
-    if (form.group_id && !selectedGroupExists.value) form.group_id = ''
+    if (!props.schedule && form.group_id && !selectedGroupExists.value) form.group_id = ''
     if (selectedGroupExists.value) validationErrors.group = ''
   },
   { immediate: true },
@@ -551,7 +1077,10 @@ watch(
 )
 
 const setWorkerSelection = (workerId: string, selected: boolean) => {
-  workerSelectionTouched.value = true
+  userEdited.value = true
+  workersInitialized.value = true
+  selectedTemplateId.value = '__none__'
+  defaultSaveMessage.value = ''
   const index = form.tenant_worker_ids.indexOf(workerId)
   if (selected && index < 0) form.tenant_worker_ids.push(workerId)
   if (!selected && index >= 0) form.tenant_worker_ids.splice(index, 1)
@@ -560,27 +1089,102 @@ const setWorkerSelection = (workerId: string, selected: boolean) => {
 const workerLabel = (worker: TenantWorker) => worker.model_display_name || worker.model_id
 
 const applyWorkerTemplate = () => {
-  workerSelectionTouched.value = true
+  userEdited.value = true
+  workersInitialized.value = true
+  defaultSaveMessage.value = ''
   if (selectedTemplateId.value === '__none__') return
   const template = workerTemplates.value.find((item) => item.id === selectedTemplateId.value)
-  if (!template) return
-
-  form.tenant_worker_ids = template.tenant_worker_ids.filter((workerId) =>
-    availableWorkerIds.value.has(workerId),
-  )
-  if (form.tenant_worker_ids.length < template.tenant_worker_ids.length) {
-    uiStore.showToast('模板中部分 Worker 当前不可用，已自动忽略', 'info')
+  if (template) form.tenant_worker_ids = [...template.tenant_worker_ids]
+}
+function restoreDefaultWorkers() {
+  if (!defaultWorkerTemplate.value || formDisabled.value || workerTemplatesError.value) return
+  selectedTemplateId.value = defaultWorkerTemplate.value.id
+  applyWorkerTemplate()
+}
+async function saveDefaultWorkers() {
+  if (!canSaveDefault.value) return
+  isSavingDefault.value = true
+  defaultSaveError.value = ''
+  defaultSaveMessage.value = ''
+  // 选定模板则设其为默认；手工组合复用已有默认，没有默认时才创建模板。
+  const template = workerTemplates.value.find((item) => item.id === selectedTemplateId.value) || defaultWorkerTemplate.value
+  const input = { tenant_worker_ids: [...form.tenant_worker_ids], is_default: true }
+  try {
+    const saved = template
+      ? await updateWorkerTemplate(template.id, input)
+      : await createWorkerTemplate({ ...input, name: '默认 Worker 组合' })
+    queryClient.setQueryData<WorkerTemplate[]>(['worker-templates'], (current = []) => [
+      ...current.filter((item) => item.id !== saved.id).map((item) => ({ ...item, is_default: false })),
+      saved,
+    ])
+    selectedTemplateId.value = saved.id
+    workersInitialized.value = true
+    defaultSaveMessage.value = '以后新建自动采用此组合；已有项目和计划不变。'
+    await queryClient.invalidateQueries({ queryKey: ['worker-templates'] })
+  } catch (error) {
+    defaultSaveError.value = error instanceof Error ? error.message : '未收到可确认的保存结果'
+    if (!(error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408))
+      defaultSaveError.value += '。结果未确认，请刷新模板核对后再决定是否保存，不要盲目重复创建。'
+  } finally {
+    isSavingDefault.value = false
   }
 }
 
 const toggleLibrary = (key: string) => {
+  userEdited.value = true
   const index = form.library_keys.indexOf(key)
   if (index >= 0) form.library_keys.splice(index, 1)
   else form.library_keys.push(key)
 }
 
-const optionalDateTimeToIso = (value: string) =>
-  value ? new Date(value).toISOString() : undefined
+function retainedDeadline(value: string, original?: string | null) {
+  if (!value) return null
+  return original && value === inputLocalTime(original) ? original : new Date(value).toISOString()
+}
+function effectiveDeadlines() {
+  if (props.schedule?.project) {
+    return {
+      explore_deadline: retainedDeadline(form.explore_deadline, props.schedule.project.explore_deadline),
+      authorization_expires_at: retainedDeadline(form.authorization_expires_at, props.schedule.project.authorization_expires_at),
+    }
+  }
+  return {
+    explore_deadline: scheduleDraft.value.mode === 'once'
+      ? scheduleTimesFromDraft(scheduleDraft.value).deadline
+      : null,
+    authorization_expires_at: null,
+  }
+}
+const previewProject = computed<CreateProjectRequest | undefined>(() => {
+  if (
+    !form.title.trim() ||
+    !form.origin.trim() ||
+    !form.goal.trim() ||
+    !form.group_id ||
+    !form.scenario ||
+    !form.tenant_worker_ids.length
+  )
+    return undefined
+  let deadlines
+  try {
+    deadlines = effectiveDeadlines()
+  } catch (error) {
+    if (error instanceof RangeError || error instanceof ScheduleTimeError) return undefined
+    throw error
+  }
+  return {
+    ...deadlines,
+    title: form.title,
+    origin: form.origin,
+    goal: form.goal,
+    group_id: form.group_id,
+    scenario: form.scenario,
+    tenant_worker_ids: [...form.tenant_worker_ids],
+    ...(props.schedule?.project?.targets != null
+      ? { targets: props.schedule.project.targets.map((target) => ({ ...target })) }
+      : {}),
+  }
+})
 
 const validateForm = (): { valid: boolean; firstErrorAnchor: string | null } => {
   let valid = true
@@ -617,21 +1221,41 @@ const validateForm = (): { valid: boolean; firstErrorAnchor: string | null } => 
     if (timestamp <= Date.now()) return `${label}必须晚于当前时间`
     return ''
   }
-  validationErrors.exploreDeadline = validateFutureDate(form.explore_deadline, '执行停止时间')
-  validationErrors.authorizationExpiresAt = validateFutureDate(
-    form.authorization_expires_at,
-    '授权到期时间',
-  )
+  validationErrors.exploreDeadline = props.schedule?.project
+    ? validateFutureDate(form.explore_deadline, '执行停止时间') : ''
+  validationErrors.authorizationExpiresAt = props.schedule?.project
+    ? validateFutureDate(form.authorization_expires_at, '授权到期时间') : ''
   if (validationErrors.exploreDeadline || validationErrors.authorizationExpiresAt) {
     valid = false
-    firstErrorAnchor = firstErrorAnchor || 'np-section-basic'
+    firstErrorAnchor = firstErrorAnchor || 'np-execution-settings'
   }
 
   return { valid, firstErrorAnchor }
 }
 
 const submitProject = async () => {
-  if (isSubmitting.value) return
+  if (
+    isSavingDefault.value ||
+    isSubmitting.value ||
+    isCancelling.value ||
+    creationUnknown.value ||
+    creationDeleted.value ||
+    createdProjectId.value ||
+    createdScheduleId.value ||
+    !props.open ||
+    libraryPickerOpen.value ||
+    discardOpen.value
+  )
+    return
+  formError.value = ''
+  if (resourcePending.value) {
+    formError.value = '仍有未完成的资料，请补传、核对或明确移除后再创建。'
+    if (materialsDetails.value) {
+      materialsDetails.value.open = true
+      materialsDetails.value.scrollIntoView({ block: 'start' })
+    }
+    return
+  }
   if (!selectedScenarioExists.value) {
     uiStore.showToast(
       scenariosLoading.value ? '场景目录仍在加载，请稍后重试' : '请选择有效的探索场景',
@@ -646,9 +1270,10 @@ const submitProject = async () => {
     )
     return
   }
-  if (form.tenant_worker_ids.length === 0) {
-    uiStore.showToast('请至少选择一个可用 Worker', 'danger')
-    document.getElementById('np-workers')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  if (workerSelectionIssue.value || !form.tenant_worker_ids.length ||
+      (!workersInitialized.value && (workersFetching.value || workerTemplatesFetching.value))) {
+    formError.value = workerSelectionIssue.value || '请等待默认查询完成，或明确选择本次 Worker。'
+    await showSettings('execution', 'np-workers')
     return
   }
   if (groupsLoading.value || groupsError.value) {
@@ -670,76 +1295,458 @@ const submitProject = async () => {
     return
   }
 
-  const { valid, firstErrorAnchor } = validateForm()
-  if (!valid) {
-    uiStore.showToast('请检查表单必填项', 'danger')
-    if (firstErrorAnchor) {
-      document
-        .getElementById(firstErrorAnchor)
-        ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  try {
+    const { valid, firstErrorAnchor } = validateForm()
+    const timing = scheduleDraft.value.mode !== 'immediate' ? scheduleTiming.value!.validate() : null
+    if (!valid || (scheduleDraft.value.mode !== 'immediate' && !timing)) {
+      uiStore.showToast('请检查表单必填项和时间安排', 'danger')
+      // 只展开首个错误所在区域，最终滚动在同一处完成，避免后续时间错误抢走正文定位。
+      const anchor = firstErrorAnchor || 'np-timing-settings'
+      if (anchor === 'np-execution-settings') settingsPanel.value = 'execution'
+      else if (anchor === 'np-timing-settings') settingsPanel.value = 'timing'
+      await nextTick()
+      document.getElementById(anchor)?.scrollIntoView({ block: 'start' })
+      return
     }
+
+    const rules = timing?.rules
+    const {
+      request_id: _requestId,
+      resource_batch_id: _batchId,
+      resources: _resources,
+      ...retainedInput
+    } = props.schedule?.project || ({} as Partial<CreateProjectRequest>)
+    // 旧计划原显式 targets（包括空数组）随原输入保留，新建不补数组或重解释来源。
+    const payload: CreateProjectRequest = {
+      ...retainedInput,
+      title: form.title.trim(),
+      origin: form.origin,
+      goal: form.goal,
+      scenario: form.scenario,
+      tenant_worker_ids: [...form.tenant_worker_ids],
+      group_id: form.group_id,
+      ...effectiveDeadlines(),
+      ...(resourceBatch.value ? { resource_batch_id: resourceBatch.value.id } : {}),
+      library_keys: [...form.library_keys],
+    }
+    if (props.schedule && rules) {
+      pendingSubmission.value = {
+        operation: 'update',
+        scheduleId: props.schedule.id,
+        payload: {
+          ...rules,
+          project: payload,
+          version: props.schedule.version,
+          resource_ids: [...retainedResourceIds.value],
+          refresh_library_keys: refreshLibraryKeys.value.filter((key) => form.library_keys.includes(key)),
+        },
+      }
+    } else {
+      const requestId = createCreationRequestId()
+      pendingSubmission.value = rules
+        ? { operation: 'schedule', payload: { ...rules, project: payload, request_id: requestId } }
+        : { operation: 'project', payload: { ...payload, request_id: requestId } }
+    }
+  } catch (error) {
+    pendingSubmission.value = null
+    formError.value = `请求尚未发出：${error instanceof Error ? error.message : '本地准备失败'}。可保留填写内容后重试。`
     return
   }
+  await sendPendingSubmission()
+}
 
-  const payload: CreateProjectRequest = {
-    title: form.title.trim(),
-    origin: form.origin.trim(),
-    goal: form.goal.trim(),
-    scenario: form.scenario,
-    tenant_worker_ids: [...form.tenant_worker_ids],
-    group_id: form.group_id,
-    ...(form.explore_deadline
-      ? { explore_deadline: optionalDateTimeToIso(form.explore_deadline) }
-      : {}),
-    authorization_expires_at: form.authorization_expires_at
-      ? new Date(form.authorization_expires_at).toISOString()
-      : null,
-    ...(resourceBatch.value ? { resource_batch_id: resourceBatch.value.id } : {}),
-    library_keys: [...form.library_keys],
-  }
-
+async function sendPendingSubmission() {
+  const submission = pendingSubmission.value
+  if (!submission || isSubmitting.value || creationDeleted.value) return
+  isSubmitting.value = true
+  formError.value = ''
+  recoveryMessage.value = ''
   try {
-    isSubmitting.value = true
-    const response = await createProject(payload)
+    if (submission.operation !== 'update') {
+      const cache = rememberCreationRequest({
+        request_id: submission.payload.request_id,
+        operation: submission.operation,
+      })
+      if (cache.warning) cacheWarning.value = cache.warning
+    }
+    let savedSchedule: ProjectSchedule | undefined
+    // 只有业务请求异常能够判为明确拒绝或结果未知；缓存与成功后反馈不拥有这个结局。
+    try {
+      if (submission.operation === 'project') {
+        const response = await createProject(submission.payload)
+        createdProjectId.value = response.project.id
+      } else {
+        savedSchedule = submission.operation === 'update'
+          ? await updateProjectSchedule(submission.scheduleId, submission.payload)
+          : await createProjectSchedule(submission.payload)
+        createdScheduleId.value = savedSchedule.id
+      }
+    } catch (error) {
+      // 恢复请求的拒绝不证明最初请求未提交，仍保留原键和原内容供查询。
+      const definiteRejection =
+        error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408
+      formError.value = error instanceof Error ? error.message : '未收到可确认的保存结果'
+      if (definiteRejection && !creationUnknown.value) {
+        if (submission.operation !== 'update') {
+          const cache = forgetCreationRequest(submission.payload.request_id)
+          if (cache.warning) cacheWarning.value = cache.warning
+        }
+        pendingSubmission.value = null
+      } else creationUnknown.value = true
+      return
+    }
+    creationUnknown.value = false
     resourceBatch.value = null
-    uiStore.showToast('项目已创建，正在等待 Dispatcher 调度。', 'success')
-    await router.push(`/projects/${response.project.id}`)
-  } catch (err: any) {
-    uiStore.showToast(err.message || '项目创建失败，请重试。', 'danger')
+    if (submission.operation !== 'update') {
+      const cache = forgetCreationRequest(submission.payload.request_id)
+      if (cache.warning) cacheWarning.value = cache.warning
+    }
+    try {
+      await nextTick()
+      if (formElement.value?.parentElement) formElement.value.parentElement.scrollTop = 0
+      uiStore.showToast(createdScheduleId.value ? '计划已保存。' : '已创建，等待调度。', 'success')
+      if (submission.operation === 'update') emit('saved', savedSchedule!)
+      else await enterCreatedProject()
+    } catch (error) {
+      navigationError.value = `已确认保存，后续页面反馈未完成：${error instanceof Error ? error.message : '无法显示反馈'}。请使用上方入口。`
+    }
+  } finally {
+    isSubmitting.value = false
+  }
+}
+async function restoreSubmission() {
+  // 未知结果恢复只使用内存中的原始 payload，绝不读取修改后的表单或换请求 ID。
+  await sendPendingSubmission()
+}
+async function queryCreationResult() {
+  const submission = pendingSubmission.value
+  if (!submission || submission.operation === 'update' || isSubmitting.value) return
+  isSubmitting.value = true
+  try {
+    const result = await getCreationRequest({
+      request_id: submission.payload.request_id,
+      operation: submission.operation,
+    })
+    if (result.status === 'committed') {
+      createdScheduleId.value = result.schedule_id
+      createdProjectId.value = result.schedule_id ? null : result.project_id
+      creationUnknown.value = false
+      creationDeleted.value = !result.schedule_id && !result.project_id
+      formError.value = ''
+      resourceBatch.value = null
+      const cache = forgetCreationRequest(result.request_id)
+      if (cache.warning) cacheWarning.value = cache.warning
+      if (creationDeleted.value) pendingSubmission.value = null
+      else await enterCreatedProject()
+    } else recoveryMessage.value = '尚未查到已提交结果，不代表请求失败；可用原请求恢复提交。'
+  } catch (error) {
+    recoveryMessage.value = error instanceof Error ? error.message : '查询失败，请稍后重试'
   } finally {
     isSubmitting.value = false
   }
 }
 
-const cancelNewProject = async () => {
-  if (resourceBusy.value || isSubmitting.value) return
+const enterCreatedProject = async () => {
+  if (!createdProjectId.value && !createdScheduleId.value) return
+  navigationError.value = ''
   try {
-    await resourceUploader.value?.cancel()
-  } catch (err: any) {
-    uiStore.showToast(err.message || '取消临时上传批次失败', 'danger')
+    const result = await router.push(
+      createdScheduleId.value
+        ? `/project-schedules/${createdScheduleId.value}`
+        : `/projects/${createdProjectId.value}`,
+    )
+    if (isNavigationFailure(result)) navigationError.value = '跳转未完成，可再次进入已创建项目。'
+  } catch (error) {
+    navigationError.value = `跳转失败：${error instanceof Error ? error.message : '无法进入项目'}。请使用上方入口。`
   }
-  await router.push('/projects')
 }
 
+const requestClose = (open: boolean) => {
+  if (open || resourceBusy.value || isSubmitting.value || isCancelling.value || isSavingDefault.value) return
+  if (createdProjectId.value || createdScheduleId.value || creationDeleted.value) {
+    emit('discarded')
+  } else if (creationUnknown.value) {
+    emit('update:open', false)
+  } else if (userEdited.value || resourceBatch.value || resourcePending.value) {
+    discardOpen.value = true
+  } else {
+    emit('discarded')
+  }
+}
+
+const discardProject = async () => {
+  if (
+    resourceBusy.value ||
+    isSavingDefault.value ||
+    isSubmitting.value ||
+    isCancelling.value ||
+    creationUnknown.value ||
+    creationDeleted.value ||
+    createdProjectId.value ||
+    createdScheduleId.value
+  )
+    return
+  isCancelling.value = true
+  cleanupError.value = ''
+  try {
+    await resourceUploader.value?.cancel()
+    discardOpen.value = false
+    emit('discarded')
+  } catch (error) {
+    cleanupError.value = error instanceof Error ? error.message : '取消临时上传批次失败'
+  } finally {
+    isCancelling.value = false
+  }
+}
+
+const focusTitle = (event: Event) => {
+  event.preventDefault()
+  void nextTick(() => titleInput.value?.focus())
+}
+const restoreFocus = (event: Event) => {
+  if (props.returnFocus?.isConnected) {
+    event.preventDefault()
+    props.returnFocus.focus()
+  }
+}
+
+onBeforeRouteLeave(() => {
+  if (createdProjectId.value || createdScheduleId.value || creationDeleted.value) return true
+  if (creationUnknown.value && !isSubmitting.value && !resourceBusy.value && !isCancelling.value)
+    return true
+  if (
+    isSavingDefault.value ||
+    resourceBusy.value ||
+    isSubmitting.value ||
+    isCancelling.value ||
+    creationUnknown.value ||
+    userEdited.value ||
+    resourceBatch.value ||
+    resourcePending.value
+  ) {
+    emit('update:open', true)
+    if (!creationUnknown.value && !resourceBusy.value && !isSubmitting.value && !isCancelling.value && !isSavingDefault.value)
+      discardOpen.value = true
+    return false
+  }
+  return true
+})
+
+const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+  if (
+    !createdProjectId.value &&
+    !createdScheduleId.value &&
+    !creationDeleted.value &&
+    (isSavingDefault.value ||
+      isSubmitting.value ||
+      resourceBusy.value ||
+      isCancelling.value ||
+      (!creationUnknown.value &&
+        (userEdited.value || resourceBatch.value || resourcePending.value)))
+  ) {
+    event.preventDefault()
+    event.returnValue = ''
+  }
+}
 const handleKeydown = (event: KeyboardEvent) => {
-  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+  if (
+    (event.metaKey || event.ctrlKey) &&
+    event.key === 'Enter' &&
+    props.open &&
+    !libraryPickerOpen.value &&
+    !discardOpen.value
+  ) {
+    event.preventDefault()
     void submitProject()
   }
 }
 
 onMounted(() => {
-  titleInput.value?.focus()
   window.addEventListener('keydown', handleKeydown)
+  window.addEventListener('beforeunload', handleBeforeUnload)
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeydown)
+  window.removeEventListener('beforeunload', handleBeforeUnload)
 })
 </script>
 
 <style src="./NewProject.css" scoped></style>
 
 <style scoped>
+.new-project-form {
+  min-width: 0;
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.creation-content {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.project-identity {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: var(--space-3);
+}
+.scenario-settings,
+.project-materials {
+  min-width: 0;
+}
+.scenario-settings summary,
+.project-materials summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-block: var(--space-2);
+  cursor: pointer;
+  list-style: none;
+  font-size: var(--text-md);
+}
+.scenario-settings summary::-webkit-details-marker,
+.project-materials summary::-webkit-details-marker {
+  display: none;
+}
+.scenario-settings summary:focus-visible,
+.project-materials summary:focus-visible,
+.scenario-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.scenario-name {
+  font-weight: var(--font-semibold);
+}
+.summary-action {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+[open] > summary .summary-action svg {
+  transform: rotate(180deg);
+}
+.scenarios-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.scenario-card {
+  width: auto;
+  min-width: 0;
+}
+.project-materials {
+  border-top: 1px solid var(--border);
+}
+.materials-summary {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.materials-content {
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-2);
+}
+.settings-panel {
+  min-width: 0;
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  scroll-margin-top: var(--space-3);
+}
+.settings-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.settings-panel-heading h3 {
+  margin: 0;
+  font-size: var(--text-md);
+}
+.creation-settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-3);
+}
+.execution-trigger,
+.timing-trigger {
+  justify-content: flex-start;
+  text-align: left;
+  padding-block: var(--space-2);
+}
+.setting-summary {
+  display: grid;
+  gap: var(--space-1);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.execution-trigger .setting-summary > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.start-settings {
+  display: grid;
+  min-width: 0;
+}
+.creation-footer :deep(.ui-alert) {
+  max-height: 140px;
+  overflow-y: auto;
+}
+@media (max-width: 700px) {
+  .project-identity,
+  .creation-settings,
+  .scenarios-grid {
+    grid-template-columns: 1fr;
+  }
+  .scenario-settings summary {
+    flex-wrap: wrap;
+  }
+  .selected-library {
+    flex-wrap: wrap;
+  }
+}
+
+.project-materials h3 {
+  margin: 0;
+  font-size: var(--text-md);
+}
+
+.project-materials > .section-desc {
+  margin-bottom: var(--space-3);
+}
+
+.selected-libraries {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.selected-library {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  overflow-wrap: anywhere;
+}
+
+.creation-footer {
+  width: 100%;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.creation-footer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
 .new-project-header {
   max-width: 860px;
   margin-right: auto;
@@ -909,25 +1916,6 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
-.advanced-settings {
-  margin-top: var(--space-5);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-inset);
-}
-
-.advanced-settings summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-3);
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 700;
-  cursor: pointer;
-}
-
 .summary-hint {
   color: var(--text-faint);
   font-size: 11px;
@@ -1076,10 +2064,6 @@ onUnmounted(() => {
   }
 
   .resource-size {
-    display: none;
-  }
-
-  .summary-hint {
     display: none;
   }
 }

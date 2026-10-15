@@ -60,8 +60,30 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
 
     def _dispatch_available(self, summaries: list[ProjectSummary]) -> None:
         self._begin_project_decisions(summaries)
+        ordinary = [summary for summary in summaries if summary.verification_request_id is None]
+        self._dispatch_ordinary_available(ordinary)
+        self._dispatch_available_verifications(summaries)
+
+    def _ordinary_task_count(self) -> int:
+        return sum(task.task_type != "external_verify" for task in self.futures.values())
+
+    def _dispatch_available_verifications(self, summaries: list[ProjectSummary]) -> None:
+        # 普通任务仍独占原 max_workers；复测仅用 hard_cap 中额外容量，每个 Dispatcher 最多一条。
+        capacity = min(1, max(0, self.bootstrap.hard_cap - self.config.runtime.max_workers))
+        active = self._ordered_projects([
+            summary for summary in summaries
+            if summary.verification_request_id is not None and summary.status == "active"
+        ])
+        for summary in active:
+            running = sum(task.task_type == "external_verify" for task in self.futures.values())
+            if running >= capacity:
+                self._observe_decision(summary.id, "global_capacity", task_type="external_verify")
+                continue
+            self._try_dispatch_project(summary)
+
+    def _dispatch_ordinary_available(self, summaries: list[ProjectSummary]) -> None:
         # Tenant Worker 来自项目 durable binding，静态 worker pool 为空时仍需进入项目级调度。
-        if len(self.futures) >= self.config.runtime.max_workers:
+        if self._ordinary_task_count() >= self.config.runtime.max_workers:
             for summary in summaries:
                 if summary.status in {"active", "completed", "stopped"}:
                     self._observe_decision(summary.id, "global_capacity")
@@ -69,7 +91,7 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
                 "dispatch/global",
                 logging.INFO,
                 "skip dispatch because max_workers reached running_tasks=%s",
-                len(self.futures),
+                self._ordinary_task_count(),
             )
             return
         active = [summary for summary in summaries if summary.status == "active"]
@@ -88,7 +110,7 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
         # 先尝试让 idle 项目进入运行集，再给已有运行项目补 explore/reason，避免少数项目独占。
         idle_attempted: set[str] = set()
         dispatched = True
-        while dispatched and len(self.futures) < self.config.runtime.max_workers:
+        while dispatched and self._ordinary_task_count() < self.config.runtime.max_workers:
             dispatched = False
             if self._try_dispatch_idle_project(idle_projects, active, idle_attempted):
                 dispatched = True
@@ -96,7 +118,7 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
             for summary in running_projects:
                 if self._try_dispatch_project(summary):
                     dispatched = True
-                    if len(self.futures) >= self.config.runtime.max_workers:
+                    if self._ordinary_task_count() >= self.config.runtime.max_workers:
                         return
             if dispatched:
                 continue
@@ -116,8 +138,10 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
         for summary in self._ordered_projects(
             [item for item in summaries if item.status in {"completed", "stopped"}]
         ):
-            if len(self.futures) >= self.config.runtime.max_workers:
+            if self._ordinary_task_count() >= self.config.runtime.max_workers:
                 return
+            if summary.verification_request_id is not None:
+                continue
             project_tasks = [
                 task for task in self.futures.values() if task.project_id == summary.id
             ]
@@ -352,6 +376,8 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
         generations = getattr(self, "_project_generations", {})
         generations[summary.id] = getattr(project.project, "execution_generation", 0)
         self._project_generations = generations
+        if project.project.verification_request_id is not None:
+            return self._dispatch_external_verification(project)
         if not self._execution_supported(project):
             return False
         if project.project.status != "active":

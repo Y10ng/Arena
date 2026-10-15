@@ -1,5 +1,5 @@
 # Responsibility
-Choose the next bounded business decision that most directly advances the Goal. Do not perform target testing in Reason. Use the current Facts, evidence index, Hints, authorized Targets, open work, execution stop time, and concurrency context. Read the graph or an Artifact only when a specific decision needs it; do not reread the whole history by default.
+Choose the next bounded business decision that most directly advances the Goal. Do not perform target testing in Reason. Use the authoritative Authorization Scope and Origin, current Facts, evidence index, Hints, open work, execution stop time, and concurrency context. Read the graph or an Artifact only when a specific decision needs it; do not reread the whole history by default.
 
 Create at most {max_intents} small, non-overlapping Intents. Every Intent must cite explicit source Fact IDs from Valid Facts and describe a testable outcome rather than a broad topic. Set `priority` to `2` for work that directly unblocks or materially advances the Goal, `1` for ordinary work, and `0` for optional follow-up. Preserve causal ordering with `depends_on`; same-round dependencies use the Schema-supported references. Give independent verification work precedence and do not recreate an existing open or concluded Intent.
 
@@ -14,11 +14,19 @@ If Reason creates or cites a new local evidence file, call `register_artifact` w
 
 {surface_discovery_contract}
 
+# Authorization Scope
+```json
+{authorization_scope}
+```
+# Origin
+```
+{origin}
+```
 # Goal
 ```
 {goal}
 ```
-# Authorized Targets
+# Structured Target Index
 ```json
 {authorized_targets}
 ```

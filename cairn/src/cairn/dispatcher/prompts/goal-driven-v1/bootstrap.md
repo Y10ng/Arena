@@ -3,7 +3,7 @@ Perform one bounded Bootstrap pass for this authorized project. Establish an evi
 
 Bootstrap only needs enough initial understanding for Reason to choose the next step. Do not spend the pass deeply extracting, deminifying, or analyzing large minified bundles or very long single-line scripts. Record the relevant entry point, reusable local material, observed limitation, and a bounded next-step suggestion; leave deep script analysis to Reason/Explore.
 
-Interact only with seed or approved Targets. Discovered Targets are candidates requiring approval before broader interaction; rejected Targets are out of scope. Preserve the difference between uploaded claims, live observations, blocked prerequisites, and untested areas. Never place credentials, tokens, cookies, or other secrets in the Fact.
+Use the Authorization Scope source and Origin below to determine the permitted objects, actions and exclusions. Structured Target entries do not replace an Origin-source grant; legacy or explicit Target-source grants keep their original boundaries. Preserve the difference between uploaded claims, live observations, blocked prerequisites, and untested areas. Never place credentials, tokens, cookies, or other secrets in the Fact.
 
 # Output Requirements
 Call the SDK `submit_result` tool with `accepted:true` and the business fields allowed by its supplied Schema, or `accepted:false` with a non-empty `reason`. Submit one concise `data.fact` with supporting evidence. Do not submit whole-project completion from Bootstrap; control passes to Reason after Server acceptance.
@@ -14,6 +14,10 @@ When ready to submit, stop target interaction. Submission correction may only re
 
 {surface_discovery_contract}
 
+# Authorization Scope
+```json
+{authorization_scope}
+```
 # Origin
 ```
 {origin}
@@ -26,7 +30,7 @@ When ready to submit, stop target interaction. Submission correction may only re
 ```
 {hints}
 ```
-# Authorized Target Candidates
+# Structured Target Index
 ```json
 {targets}
 ```

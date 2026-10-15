@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
+import json
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from cairn.server.schemas.models import CustomModelHeader, ModelAuthHeader, ModelProtocol
 
@@ -40,6 +42,13 @@ class TenantWorker(BaseModel):
 
 
 class CreateTenantWorkerRequest(BaseModel):
+    @model_validator(mode="before")
+    @classmethod
+    def reject_purpose_override(cls, value):
+        if isinstance(value, dict) and "purpose" in value:
+            raise ValueError("Worker 用途由服务端管理，普通入口不能指定 purpose")
+        return value
+
     engine: Literal["pi"] = "pi"
     display_name: str
     model_id: str
@@ -96,6 +105,30 @@ class TenantWorkerExecutionBinding(BaseModel):
     auth_header: ModelAuthHeader
     custom_headers: list[CustomModelHeader] = Field(default_factory=list)
     api_key: str = Field(repr=False)
+
+    def execution_provenance(self) -> dict:
+        """记录当次执行来源，不保存可恢复的凭据或自定义 header 明文。"""
+        headers = json.dumps(
+            [header.model_dump() for header in self.custom_headers],
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        )
+        return {
+            "source": "tenant_worker_binding",
+            "worker_id": self.worker_id,
+            "display_name": self.display_name,
+            "worker_revision": self.worker_revision,
+            "model_id": self.model_id,
+            "model_name": self.model_name,
+            "model_revision": self.model_revision,
+            "credential_version_id": self.credential_version_id,
+            "credential_version": self.credential_version,
+            "credential_fingerprint": self.credential_fingerprint,
+            "engine": self.engine,
+            "protocol": self.protocol,
+            "auth_header": self.auth_header,
+            "inference_endpoint": self.inference_endpoint,
+            "custom_headers_sha256": sha256(headers.encode("utf-8")).hexdigest(),
+        }
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

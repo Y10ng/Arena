@@ -69,6 +69,29 @@
         </div>
 
         <div class="header-right">
+          <Button
+            v-if="project.schedule_id || lifecycleStatus === 'pending'"
+            size="sm"
+            variant="secondary"
+            @click="
+              router.push(
+                project.schedule_id
+                  ? `/project-schedules/${project.schedule_id}`
+                  : pendingSchedule
+                    ? `/project-schedules/${pendingSchedule.id}`
+                    : '/projects?view=schedules',
+              )
+            "
+            >管理启动计划</Button
+          >
+          <Button
+            v-if="lifecycleStatus === 'pending' && runtimeData?.actions?.reauthorize?.allowed"
+            size="sm"
+            variant="warning"
+            :disabled="!canPerform('reauthorize')"
+            @click="openReauthorizationDialog"
+            >重新确认授权</Button
+          >
           <Button size="sm" variant="secondary" @click="reportDialogOpen = true"> 查看成果 </Button>
           <Button
             v-if="lifecycleStatus === 'active'"
@@ -152,6 +175,14 @@
           <span>项目组：{{ project.group_name || '未分组' }}</span>
           <span>场景：{{ getScenarioLabel(project) }}</span>
           <span>执行停止时间：{{ project.explore_deadline || '不限' }}</span>
+          <span v-if="pendingSchedule"
+            >{{ scheduleRuleLabel(pendingSchedule) }} ·
+            {{ scheduleLocalTime(pendingSchedule.next_run_at, pendingSchedule.timezone) }} ·
+            {{ pendingSchedule.timezone }} ·
+            {{ scheduleStatusLabels[pendingSchedule.status] }}</span
+          >
+          <span v-if="pendingSchedule?.block_reason">{{ pendingSchedule.block_reason }}</span>
+          <span v-if="pendingScheduleError">启动计划查询失败，可进入计划任务视图重试。</span>
           <details v-if="authStore.isSuperAdmin" class="workspace-admin-meta">
             <summary>项目信息</summary>
             <dl>
@@ -204,7 +235,7 @@
       <ConfirmAction
         :open="Boolean(reauthorizationTarget)"
         title="重新确认项目授权"
-        description="为当前冻结范围明确设置新的绝对授权期限，或显式选择无限期授权。已有 Facts、Evidence、已接受工作和累计 Explore 次数保持不变；执行停止时间不变，授权更新后项目仍保持暂停，需要单独恢复执行。"
+        :description="`为当前冻结范围明确设置新的绝对授权期限，或显式选择无限期授权。已有事实、证据与累计消耗保持不变；执行停止时间不变，授权更新后项目仍${lifecycleStatus === 'pending' ? '保持待启动，需通过启动计划处理' : '保持暂停，需要单独恢复执行'}。`"
         confirm-label="确认重新授权"
         tone="warning"
         :loading="statusSaving"
@@ -268,7 +299,13 @@
             :disabled="statusSaving"
             aria-label="确认当前项目授权范围"
           />
-          <span>我已核对当前项目范围，并确认重新授权后仍需单独点击“继续项目”。</span>
+          <span
+            >我已核对当前项目范围，并确认重新授权后{{
+              lifecycleStatus === 'pending'
+                ? '仍保持待启动，不会提前激活'
+                : '仍需单独点击“继续项目”'
+            }}。</span
+          >
         </label>
         <Alert v-if="actionError" tone="danger" title="项目操作失败">{{ actionError }}</Alert>
       </ConfirmAction>
@@ -415,6 +452,7 @@
             :existing-bytes="projectResourceBytes"
             :existing-paths="projectResourcePaths"
             @busy="resourceUploadBusy = $event"
+            @pending="resourceUploadPending = $event"
           />
         </div>
 
@@ -424,7 +462,12 @@
           </Button>
           <Button
             :loading="resourceCommitSaving"
-            :disabled="!canMutateResources || resourcesSaving || !resourceBatch?.members.length"
+            :disabled="
+              !canMutateResources ||
+              resourcesSaving ||
+              resourceUploadPending ||
+              !resourceBatch?.members.length
+            "
             @click="saveProjectResources"
           >
             原子导入资料
@@ -554,6 +597,13 @@ import {
   isSupportedProjectRuntime,
 } from './projectRuntime'
 import type { ProjectLifecycleAction } from '@/api/types'
+import {
+  getProjectSchedule,
+  listProjectSchedules,
+  scheduleLocalTime,
+  scheduleRuleLabel,
+  scheduleStatusLabels,
+} from '@/api/projectSchedules'
 
 const authStore = useAuthStore()
 const workspaceStore = useWorkspaceStore()
@@ -572,6 +622,16 @@ const projectId = computed(() => project.value?.id || '')
 
 const { data: runtimeData, unavailable: runtimeUnavailable } = useProjectRuntime(projectId)
 const lifecycleStatus = computed(() => project.value?.status || 'active')
+const { data: pendingSchedule, isError: pendingScheduleError } = useQuery({
+  queryKey: computed(() => ['project-start-schedule', projectId.value, project.value?.schedule_id]),
+  queryFn: async () =>
+    project.value?.schedule_id
+      ? getProjectSchedule(project.value.schedule_id)
+      : (await listProjectSchedules()).find((schedule) => schedule.project_id === projectId.value),
+  enabled: computed(() => lifecycleStatus.value === 'pending'),
+  refetchInterval: 8000,
+  retry: false,
+})
 const projectActiveTasks = computed(() =>
   Array.isArray(runtimeData.value?.active_runs) ? runtimeData.value.active_runs : [],
 )
@@ -932,6 +992,7 @@ const saveProjectWorkers = async () => {
 const showResourcesDialog = ref(false)
 const resourceBatch = ref<ProjectResourceBatch | null>(null)
 const resourceUploadBusy = ref(false)
+const resourceUploadPending = ref(false)
 const resourceCommitSaving = ref(false)
 const resourceMutationSaving = ref(false)
 const resourcesSaving = computed(
@@ -966,6 +1027,7 @@ const saveProjectResources = async () => {
     !project.value ||
     !resourceBatch.value?.members.length ||
     !canMutateResources.value ||
+    resourceUploadPending.value ||
     resourcesSaving.value
   )
     return

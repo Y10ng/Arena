@@ -7,7 +7,7 @@
     <PopoverPortal>
       <PopoverContent
         class="ui-popover__content"
-        :class="`ui-popover__content--${size}`"
+        :class="[`ui-popover__content--${size}`, contentClass]"
         :side="side"
         :align="align"
         :side-offset="sideOffset"
@@ -42,6 +42,7 @@ const props = withDefaults(
     size?: PopoverSize
     modal?: boolean
     dismissible?: boolean
+    contentClass?: string
   }>(),
   {
     open: undefined,

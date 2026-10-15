@@ -9,13 +9,13 @@ import os
 from pathlib import Path
 import shutil
 import stat
-from typing import Any, AsyncIterator, Sequence
+from typing import Any, AsyncIterator, BinaryIO, Sequence
 from uuid import uuid4
 import zipfile
 
 from fastapi import HTTPException
 
-from cairn.server.db import get_conn
+from cairn.server.db import get_conn, register_after_commit, register_after_rollback
 from cairn.server.models import (
     CreateProjectResourceRequest,
     ProjectResource,
@@ -228,6 +228,7 @@ def _batch_member_to_model(row: Any) -> ProjectResourceBatchMember:
         size_bytes=row["size_bytes"],
         sha256=row["sha256"],
         source=row["source"],
+        source_resource_id=row["source_resource_id"],
     )
 
 
@@ -245,6 +246,9 @@ def _batch_to_model(conn: Any, row: Any) -> ProjectResourceBatch:
         state=row["state"],
         created_at=row["created_at"],
         expires_at=row["expires_at"],
+        consumed_at=row["consumed_at"],
+        consumed_project_id=row["consumed_project_id"],
+        consumed_schedule_id=row["consumed_schedule_id"],
         resource_count=len(models),
         total_bytes=sum(member.size_bytes for member in models),
         members=models,
@@ -343,39 +347,54 @@ def _insert_project_resource_records(
     return _insert_prepared_project_resources(conn, project_id, prepared, created_by=created_by)
 
 
+def check_resource_collection(prepared: Sequence[tuple[str, str, int]]) -> None:
+    """项目与计划共用最终资料集合的路径、类型和字节配额。"""
+    limits = project_resource_limits()
+    paths: list[str] = []
+    for kind, path, size_bytes in prepared:
+        if kind not in PROJECT_RESOURCE_KINDS:
+            raise HTTPException(422, "Unsupported project resource kind")
+        try:
+            validate_project_resource_path(path)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if size_bytes < 0:
+            raise HTTPException(409, "Project resource size is invalid")
+        if size_bytes > limits.max_file_bytes:
+            raise HTTPException(413, f"Project resource exceeds the {limits.max_file_bytes}-byte file limit")
+        collision = _find_path_collision(path, paths)
+        if collision is not None:
+            raise _path_collision_error(path, collision)
+        paths.append(path)
+    if len(prepared) > limits.max_active_count:
+        raise HTTPException(409, f"Project resources exceed the maximum {limits.max_active_count} active resources")
+    if sum(item[2] for item in prepared) > limits.max_active_total_bytes:
+        raise HTTPException(413, f"Project resources exceed the {limits.max_active_total_bytes}-byte total limit")
+
+
 def _check_resource_quota_and_collisions(
     conn: Any,
     project_id: str,
     prepared: Sequence[tuple[str, str, int]],
 ) -> None:
-    limits = project_resource_limits()
-    prepared_paths: list[str] = []
-    for _kind, path, size_bytes in prepared:
-        if size_bytes > limits.max_file_bytes:
-            raise HTTPException(413, f"Project resource exceeds the {limits.max_file_bytes}-byte file limit")
-        collision = _find_path_collision(path, prepared_paths)
-        if collision is not None:
-            raise _path_collision_error(path, collision)
-        prepared_paths.append(path)
-
     existing = conn.execute(
         """
-        SELECT path, size_bytes, active FROM project_resources
+        SELECT kind, path, size_bytes, active FROM project_resources
         WHERE project_id = ?
         """,
         (project_id,),
     ).fetchall()
     active_existing = [row for row in existing if bool(row["active"])]
-    existing_paths = [row["path"] for row in existing]
-    for path in prepared_paths:
+    check_resource_collection(
+        [(row["kind"], row["path"], int(row["size_bytes"])) for row in active_existing]
+        + list(prepared)
+    )
+    # 停用资源仍保留原件，不能用同一路径覆盖历史输入。
+    existing_paths = [row["path"] for row in existing if not bool(row["active"])]
+    for _kind, path, _size_bytes in prepared:
         collision = _find_path_collision(path, existing_paths)
         if collision is not None:
             raise _path_collision_error(path, collision)
-    if len(active_existing) + len(prepared) > limits.max_active_count:
-        raise HTTPException(409, f"Project resources exceed the maximum {limits.max_active_count} active resources")
-    total = sum(int(row["size_bytes"]) for row in active_existing) + sum(item[2] for item in prepared)
-    if total > limits.max_active_total_bytes:
-        raise HTTPException(413, f"Project resources exceed the {limits.max_active_total_bytes}-byte total limit")
 
 
 def _insert_prepared_project_resources(
@@ -395,32 +414,179 @@ def _insert_prepared_project_resources(
     try:
         for kind, path, content in prepared:
             resource_id = next_project_resource_id(conn, project_id)
-            digest = sha256(content).hexdigest()
-            now = utcnow()
             disk_path = _project_resource_disk_path(project_id, resource_id, create_parent=True)
             with disk_path.open("xb") as resource_file:
+                created_paths.append(disk_path)
+                register_after_rollback(conn, lambda target=disk_path: delete_resource_copy(target))
                 resource_file.write(content)
-            created_paths.append(disk_path)
-            conn.execute(
-                """
-                INSERT INTO project_resources (
-                    id, project_id, kind, scope, path, size_bytes, sha256,
-                    active, created_by, created_at, deactivated_at
-                ) VALUES (?, ?, ?, 'project', ?, ?, ?, 1, ?, ?, NULL)
-                """,
-                (resource_id, project_id, kind, path, len(content), digest, created_by, now),
+            resources.append(
+                _insert_project_resource_metadata(
+                    conn,
+                    project_id,
+                    resource_id,
+                    kind=kind,
+                    path=path,
+                    size_bytes=len(content),
+                    digest_sha256=sha256(content).hexdigest(),
+                    created_by=created_by,
+                )
             )
-            row = conn.execute(
-                "SELECT * FROM project_resources WHERE id = ? AND project_id = ?",
-                (resource_id, project_id),
-            ).fetchone()
-            assert row is not None
-            resources.append(project_resource_to_model(row))
         return resources
     except Exception:
         for disk_path in reversed(created_paths):
-            disk_path.unlink(missing_ok=True)
+            delete_resource_copy(disk_path)
         raise
+
+
+def _insert_project_resource_metadata(
+    conn: Any,
+    project_id: str,
+    resource_id: str,
+    *,
+    kind: str,
+    path: str,
+    size_bytes: int,
+    digest_sha256: str,
+    created_by: str,
+) -> ProjectResource:
+    conn.execute(
+        """
+        INSERT INTO project_resources (
+            id, project_id, kind, scope, path, size_bytes, sha256,
+            active, created_by, created_at, deactivated_at
+        ) VALUES (?, ?, ?, 'project', ?, ?, ?, 1, ?, ?, NULL)
+        """,
+        (resource_id, project_id, kind, path, size_bytes, digest_sha256, created_by, utcnow()),
+    )
+    row = conn.execute(
+        "SELECT * FROM project_resources WHERE id = ? AND project_id = ?",
+        (resource_id, project_id),
+    ).fetchone()
+    assert row is not None
+    return project_resource_to_model(row)
+
+
+def delete_resource_copy(path: Path) -> None:
+    """仅清本次副本；空的所属目录可移除，不递归触碰其他资料。"""
+    path.unlink(missing_ok=True)
+    try:
+        path.parent.rmdir()
+    except OSError:
+        pass
+
+
+def _stream_verified_resource_content(
+    source: Path,
+    output: BinaryIO | None,
+    *,
+    path: str,
+    size_bytes: int,
+    digest_sha256: str,
+) -> None:
+    if not source.is_file():
+        raise HTTPException(409, f"Resource content not found: {path}")
+    digest = sha256()
+    copied_bytes = 0
+    try:
+        with source.open("rb") as input_file:
+            while True:
+                chunk = input_file.read(64 * 1024)
+                if not chunk:
+                    break
+                copied_bytes += len(chunk)
+                if copied_bytes > size_bytes:
+                    raise HTTPException(409, f"Resource content integrity check failed: {path}")
+                if output is not None:
+                    output.write(chunk)
+                digest.update(chunk)
+    except (FileNotFoundError, PermissionError) as exc:
+        raise HTTPException(409, f"Resource content unavailable: {path}") from exc
+    if copied_bytes != size_bytes or digest.hexdigest() != digest_sha256:
+        raise HTTPException(409, f"Resource content integrity check failed: {path}")
+
+
+def validate_resource_content(
+    source: Path,
+    *,
+    path: str,
+    size_bytes: int,
+    digest_sha256: str,
+) -> None:
+    _stream_verified_resource_content(
+        source, None, path=path, size_bytes=size_bytes, digest_sha256=digest_sha256
+    )
+
+
+def copy_verified_resource_content(
+    conn: Any,
+    source: Path,
+    target: Path,
+    *,
+    path: str,
+    size_bytes: int,
+    digest_sha256: str,
+) -> None:
+    """副本一旦创建就登记外层回滚清理，不能等完整复制或 DB 写入成功。"""
+    with target.open("xb") as output:
+        try:
+            register_after_rollback(conn, lambda: delete_resource_copy(target))
+            _stream_verified_resource_content(
+                source, output, path=path, size_bytes=size_bytes, digest_sha256=digest_sha256
+            )
+        except Exception:
+            delete_resource_copy(target)
+            raise
+
+
+def _copy_project_resource_records(
+    conn: Any,
+    project_id: str,
+    prepared: Sequence[tuple[str, str, int, str, Path]],
+    *,
+    created_by: str,
+) -> list[ProjectResource]:
+    _check_resource_quota_and_collisions(
+        conn, project_id, [(kind, path, size) for kind, path, size, _digest, _source in prepared]
+    )
+    created_paths: list[Path] = []
+    resources: list[ProjectResource] = []
+    try:
+        for kind, path, size_bytes, digest, source in prepared:
+            resource_id = next_project_resource_id(conn, project_id)
+            target = _project_resource_disk_path(project_id, resource_id, create_parent=True)
+            copy_verified_resource_content(
+                conn, source, target, path=path, size_bytes=size_bytes, digest_sha256=digest
+            )
+            created_paths.append(target)
+            resources.append(
+                _insert_project_resource_metadata(
+                    conn,
+                    project_id,
+                    resource_id,
+                    kind=kind,
+                    path=path,
+                    size_bytes=size_bytes,
+                    digest_sha256=digest,
+                    created_by=created_by,
+                )
+            )
+        return resources
+    except Exception:
+        for disk_path in reversed(created_paths):
+            delete_resource_copy(disk_path)
+        raise
+
+
+def validate_project_resource_records(conn: Any, project_id: str) -> None:
+    resources = _list_project_resource_records(conn, project_id, active_only=True)
+    check_resource_collection([(item.kind, item.path, item.size_bytes) for item in resources])
+    for item in resources:
+        validate_resource_content(
+            _project_resource_disk_path(project_id, item.id),
+            path=item.path,
+            size_bytes=item.size_bytes,
+            digest_sha256=item.sha256,
+        )
 
 
 def deactivate_project_resource_record(project_id: str, resource_id: str) -> None:
@@ -443,7 +609,7 @@ def deactivate_project_resource_record(project_id: str, resource_id: str) -> Non
         )
 
 
-def create_project_resource_batch(*, tenant_id: str, user_id: str) -> ProjectResourceBatch:
+def create_project_resource_batch(*, tenant_id: str, user_id: str | None, integration_id: str | None = None) -> ProjectResourceBatch:
     if not tenant_id:
         raise HTTPException(403, "Tenant context required")
     cleanup_expired_project_resource_batches()
@@ -451,15 +617,14 @@ def create_project_resource_batch(*, tenant_id: str, user_id: str) -> ProjectRes
     created = datetime.now(timezone.utc)
     expires = created + timedelta(seconds=project_resource_batch_ttl_seconds())
     with get_conn() as conn:
-        # 用户行锁串行化同一账号的批次创建与跨批次暂存配额检查。
-        conn.execute("UPDATE users SET id = id WHERE id = ?", (user_id,))
+        # 用户与集成分别锁定真实主体，不能用伪造 user_id 混用归属或配额。
+        owner_column, owner_id = _batch_owner(user_id, integration_id)
+        _lock_batch_owner(conn, owner_column, owner_id)
         limits = project_resource_limits()
         open_count = conn.execute(
-            """
-            SELECT COUNT(*) AS value FROM project_resource_batches
-            WHERE tenant_id = ? AND user_id = ? AND state = 'open'
-            """,
-            (tenant_id, user_id),
+            f"SELECT COUNT(*) AS value FROM project_resource_batches "
+            f"WHERE tenant_id = ? AND {owner_column} = ? AND state = 'open'",
+            (tenant_id, owner_id),
         ).fetchone()["value"]
         if int(open_count) >= limits.max_open_batches_per_user:
             raise HTTPException(
@@ -469,20 +634,20 @@ def create_project_resource_batch(*, tenant_id: str, user_id: str) -> ProjectRes
         conn.execute(
             """
             INSERT INTO project_resource_batches
-                (id, tenant_id, user_id, state, created_at, expires_at)
-            VALUES (?, ?, ?, 'open', ?, ?)
+                (id, tenant_id, user_id, integration_id, state, created_at, expires_at)
+            VALUES (?, ?, ?, ?, 'open', ?, ?)
             """,
-            (batch_id, tenant_id, user_id, _format_time(created), _format_time(expires)),
+            (batch_id, tenant_id, user_id, integration_id, _format_time(created), _format_time(expires)),
         )
         row = conn.execute("SELECT * FROM project_resource_batches WHERE id = ?", (batch_id,)).fetchone()
         assert row is not None
         return _batch_to_model(conn, row)
 
 
-def get_project_resource_batch(batch_id: str, *, tenant_id: str, user_id: str) -> ProjectResourceBatch:
+def get_project_resource_batch(batch_id: str, *, tenant_id: str, user_id: str | None, integration_id: str | None = None) -> ProjectResourceBatch:
     cleanup_expired_project_resource_batches()
     with get_conn() as conn:
-        row = _get_owned_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id)
+        row = _get_owned_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
         return _batch_to_model(conn, row)
 
 
@@ -493,13 +658,14 @@ async def upload_project_resource_batch_file(
     path: str,
     kind: str | None,
     tenant_id: str,
-    user_id: str,
+    user_id: str | None,
+    integration_id: str | None = None,
 ) -> ProjectResourceBatchMember:
     path = validate_project_resource_path(path)
     kind = kind or infer_project_resource_kind(path)
     if kind not in PROJECT_RESOURCE_KINDS:
         raise HTTPException(422, "Unsupported project resource kind")
-    get_project_resource_batch(batch_id, tenant_id=tenant_id, user_id=user_id)
+    get_project_resource_batch(batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
     limits = project_resource_limits()
     temp_path = _batch_directory(batch_id, create=True) / f".upload-{uuid4().hex}"
     digest = sha256()
@@ -515,12 +681,13 @@ async def upload_project_resource_batch_file(
                 output.write(chunk)
                 digest.update(chunk)
         with get_conn() as conn:
-            batch = _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id)
+            batch = _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
             _check_batch_additions(conn, batch["id"], [(path, size_bytes)])
             member_id = f"prm_{uuid4().hex}"
             final_path = _batch_member_disk_path(batch_id, member_id, create_parent=True)
             os.replace(temp_path, final_path)
             try:
+                register_after_rollback(conn, lambda: final_path.unlink(missing_ok=True))
                 conn.execute(
                     """
                     INSERT INTO project_resource_batch_members
@@ -547,9 +714,10 @@ async def import_project_resource_batch_zip(
     stream: AsyncIterator[bytes],
     *,
     tenant_id: str,
-    user_id: str,
+    user_id: str | None,
+    integration_id: str | None = None,
 ) -> ProjectResourceBatch:
-    get_project_resource_batch(batch_id, tenant_id=tenant_id, user_id=user_id)
+    get_project_resource_batch(batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
     limits = project_resource_limits()
     directory = _batch_directory(batch_id, create=True)
     archive_path = directory / f".archive-{uuid4().hex}.zip"
@@ -565,7 +733,7 @@ async def import_project_resource_batch_zip(
                 output.write(chunk)
         prepared = _preflight_zip(archive_path, limits)
         with get_conn() as conn:
-            batch = _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id)
+            batch = _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
             _check_batch_additions(conn, batch["id"], [(path, info.file_size) for path, info in prepared])
             extracted: list[tuple[str, str, int, str, Path]] = []
             try:
@@ -591,6 +759,7 @@ async def import_project_resource_batch_zip(
                 for member_id, path, size_bytes, digest_hex, temp_member in extracted:
                     final_path = _batch_member_disk_path(batch_id, member_id, create_parent=True)
                     os.replace(temp_member, final_path)
+                    register_after_rollback(conn, lambda target=final_path: target.unlink(missing_ok=True))
                     conn.execute(
                         """
                         INSERT INTO project_resource_batch_members
@@ -629,10 +798,11 @@ def update_project_resource_batch_member(
     body: UpdateProjectResourceBatchMemberRequest,
     *,
     tenant_id: str,
-    user_id: str,
+    user_id: str | None,
+    integration_id: str | None = None,
 ) -> ProjectResourceBatchMember:
     with get_conn() as conn:
-        _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id)
+        _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
         row = conn.execute(
             "SELECT * FROM project_resource_batch_members WHERE id = ? AND batch_id = ?",
             (member_id, batch_id),
@@ -666,10 +836,11 @@ def delete_project_resource_batch_member(
     member_id: str,
     *,
     tenant_id: str,
-    user_id: str,
+    user_id: str | None,
+    integration_id: str | None = None,
 ) -> None:
     with get_conn() as conn:
-        _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id)
+        _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
         deleted = conn.execute(
             "DELETE FROM project_resource_batch_members WHERE id = ? AND batch_id = ?",
             (member_id, batch_id),
@@ -679,11 +850,11 @@ def delete_project_resource_batch_member(
     _batch_member_disk_path(batch_id, member_id).unlink(missing_ok=True)
 
 
-def delete_project_resource_batch(batch_id: str, *, tenant_id: str, user_id: str) -> None:
+def delete_project_resource_batch(batch_id: str, *, tenant_id: str, user_id: str | None, integration_id: str | None = None) -> None:
     with get_conn() as conn:
-        row = _get_owned_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id)
+        row = _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
         conn.execute("DELETE FROM project_resource_batches WHERE id = ?", (row["id"],))
-    shutil.rmtree(_batch_directory(batch_id), ignore_errors=True)
+        register_after_commit(conn, lambda: delete_project_resource_batch_staging(batch_id))
 
 
 def commit_project_resource_batch(
@@ -691,23 +862,23 @@ def commit_project_resource_batch(
     batch_id: str,
     *,
     tenant_id: str,
-    user_id: str,
+    user_id: str | None,
+    integration_id: str | None = None,
     created_by: str,
     allow_cross_tenant: bool = False,
 ) -> list[ProjectResource]:
     with get_conn() as conn:
-        resources = consume_project_resource_batch(
+        return consume_project_resource_batch(
             conn,
             project_id,
             batch_id,
             tenant_id=tenant_id,
             user_id=user_id,
+            integration_id=integration_id,
             created_by=created_by,
             require_stopped=True,
             allow_cross_tenant=allow_cross_tenant,
         )
-    delete_project_resource_batch_staging(batch_id)
-    return resources
 
 
 def consume_project_resource_batch(
@@ -716,7 +887,8 @@ def consume_project_resource_batch(
     batch_id: str,
     *,
     tenant_id: str,
-    user_id: str,
+    user_id: str | None,
+    integration_id: str | None = None,
     created_by: str,
     require_stopped: bool,
     allow_cross_tenant: bool = False,
@@ -727,76 +899,54 @@ def consume_project_resource_batch(
         project = get_project_or_404(conn, project_id)
     if project["tenant_id"] != tenant_id and not allow_cross_tenant:
         raise HTTPException(404, "Project resource batch not found")
-    batch = _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id)
-    members = conn.execute(
+    _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
+    members = _list_resource_batch_members(conn, batch_id)
+    resources = _copy_project_resource_records(
+        conn,
+        project_id,
+        [
+            (
+                member["kind"], member["path"], int(member["size_bytes"]),
+                member["sha256"], _batch_member_disk_path(batch_id, member["id"]),
+            )
+            for member in members
+        ],
+        created_by=created_by,
+    )
+    _mark_resource_batch_consumed(conn, batch_id, project_id=project_id)
+    return resources
+
+
+def _list_resource_batch_members(conn: Any, batch_id: str) -> list[Any]:
+    return conn.execute(
         """
         SELECT * FROM project_resource_batch_members
         WHERE batch_id = ? ORDER BY path, id
         """,
         (batch_id,),
     ).fetchall()
-    prepared_meta = [(row["kind"], row["path"], int(row["size_bytes"])) for row in members]
-    _check_resource_quota_and_collisions(conn, project_id, prepared_meta)
-    created_paths: list[Path] = []
-    resources: list[ProjectResource] = []
-    try:
-        for member in members:
-            source = _batch_member_disk_path(batch_id, member["id"])
-            if not source.is_file():
-                raise HTTPException(409, f"Project resource batch member content not found: {member['path']}")
-            resource_id = next_project_resource_id(conn, project_id)
-            target = _project_resource_disk_path(project_id, resource_id, create_parent=True)
-            digest = sha256()
-            size_bytes = 0
-            with source.open("rb") as input_file, target.open("xb") as output_file:
-                while True:
-                    chunk = input_file.read(64 * 1024)
-                    if not chunk:
-                        break
-                    size_bytes += len(chunk)
-                    output_file.write(chunk)
-                    digest.update(chunk)
-            created_paths.append(target)
-            if size_bytes != member["size_bytes"] or digest.hexdigest() != member["sha256"]:
-                raise HTTPException(409, f"Project resource batch member integrity check failed: {member['path']}")
-            now = utcnow()
-            conn.execute(
-                """
-                INSERT INTO project_resources (
-                    id, project_id, kind, scope, path, size_bytes, sha256,
-                    active, created_by, created_at, deactivated_at
-                ) VALUES (?, ?, ?, 'project', ?, ?, ?, 1, ?, ?, NULL)
-                """,
-                (
-                    resource_id,
-                    project_id,
-                    member["kind"],
-                    member["path"],
-                    size_bytes,
-                    member["sha256"],
-                    created_by,
-                    now,
-                ),
-            )
-            row = conn.execute(
-                "SELECT * FROM project_resources WHERE id = ? AND project_id = ?",
-                (resource_id, project_id),
-            ).fetchone()
-            assert row is not None
-            resources.append(project_resource_to_model(row))
-        conn.execute(
-            """
-            UPDATE project_resource_batches
-            SET state = 'consumed', consumed_at = ?, consumed_project_id = ?
-            WHERE id = ? AND state = 'open'
-            """,
-            (utcnow(), project_id, batch_id),
-        )
-        return resources
-    except Exception:
-        for path in reversed(created_paths):
-            path.unlink(missing_ok=True)
-        raise
+
+
+def _mark_resource_batch_consumed(
+    conn: Any,
+    batch_id: str,
+    *,
+    project_id: str | None = None,
+    schedule_id: str | None = None,
+) -> None:
+    if (project_id is None) == (schedule_id is None):
+        raise ValueError("Resource batch requires exactly one owner")
+    consumed = conn.execute(
+        """
+        UPDATE project_resource_batches
+        SET state = 'consumed', consumed_at = ?, consumed_project_id = ?, consumed_schedule_id = ?
+        WHERE id = ? AND state = 'open'
+        """,
+        (utcnow(), project_id, schedule_id, batch_id),
+    )
+    if consumed.rowcount != 1:
+        raise HTTPException(409, "Project resource batch has already been consumed")
+    register_after_commit(conn, lambda: delete_project_resource_batch_staging(batch_id))
 
 
 def cleanup_expired_project_resource_batches() -> int:
@@ -836,13 +986,22 @@ def delete_project_resource_directory(project_id: str) -> None:
         pass
 
 
-def _get_owned_batch(conn: Any, batch_id: str, *, tenant_id: str, user_id: str) -> Any:
+def _batch_owner(user_id: str | None, integration_id: str | None) -> tuple[str, str]:
+    if (user_id is None) == (integration_id is None):
+        raise ValueError("资源批次必须且只能归属于一个真实调用者")
+    return ("user_id", user_id) if user_id is not None else ("integration_id", integration_id)
+
+
+def _lock_batch_owner(conn: Any, column: str, owner_id: str) -> None:
+    table = "users" if column == "user_id" else "verification_integrations"
+    conn.execute(f"UPDATE {table} SET id = id WHERE id = ?", (owner_id,))
+
+
+def _get_owned_batch(conn: Any, batch_id: str, *, tenant_id: str, user_id: str | None, integration_id: str | None = None) -> Any:
+    column, owner_id = _batch_owner(user_id, integration_id)
     row = conn.execute(
-        """
-        SELECT * FROM project_resource_batches
-        WHERE id = ? AND tenant_id = ? AND user_id = ?
-        """,
-        (batch_id, tenant_id, user_id),
+        f"SELECT * FROM project_resource_batches WHERE id = ? AND tenant_id = ? AND {column} = ?",
+        (batch_id, tenant_id, owner_id),
     ).fetchone()
     if row is None:
         raise HTTPException(404, "Project resource batch not found")
@@ -851,17 +1010,15 @@ def _get_owned_batch(conn: Any, batch_id: str, *, tenant_id: str, user_id: str) 
     return row
 
 
-def _lock_owned_open_batch(conn: Any, batch_id: str, *, tenant_id: str, user_id: str) -> Any:
-    # 同一用户的所有 open batch 共用暂存配额，先锁用户再锁批次以固定锁顺序。
-    conn.execute("UPDATE users SET id = id WHERE id = ?", (user_id,))
+def _lock_owned_open_batch(conn: Any, batch_id: str, *, tenant_id: str, user_id: str | None, integration_id: str | None = None) -> Any:
+    # 固定主体→批次锁序；集成仅能消费自己的资料，不能借同租户跳过归属。
+    column, owner_id = _batch_owner(user_id, integration_id)
+    _lock_batch_owner(conn, column, owner_id)
     conn.execute(
-        """
-        UPDATE project_resource_batches SET id = id
-        WHERE id = ? AND tenant_id = ? AND user_id = ?
-        """,
-        (batch_id, tenant_id, user_id),
+        f"UPDATE project_resource_batches SET id = id WHERE id = ? AND tenant_id = ? AND {column} = ?",
+        (batch_id, tenant_id, owner_id),
     )
-    row = _get_owned_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id)
+    row = _get_owned_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
     if row["state"] != "open":
         raise HTTPException(409, "Project resource batch has already been consumed")
     return row
@@ -870,18 +1027,16 @@ def _lock_owned_open_batch(conn: Any, batch_id: str, *, tenant_id: str, user_id:
 def _check_batch_additions(conn: Any, batch_id: str, additions: Sequence[tuple[str, int]]) -> None:
     limits = project_resource_limits()
     owner = conn.execute(
-        "SELECT tenant_id, user_id FROM project_resource_batches WHERE id = ?",
+        "SELECT tenant_id, user_id, integration_id FROM project_resource_batches WHERE id = ?",
         (batch_id,),
     ).fetchone()
     assert owner is not None
+    column, owner_id = _batch_owner(owner["user_id"], owner["integration_id"])
     staged_bytes = conn.execute(
-        """
-        SELECT COALESCE(SUM(m.size_bytes), 0) AS value
-        FROM project_resource_batches AS b
-        JOIN project_resource_batch_members AS m ON m.batch_id = b.id
-        WHERE b.tenant_id = ? AND b.user_id = ? AND b.state = 'open'
-        """,
-        (owner["tenant_id"], owner["user_id"]),
+        f"SELECT COALESCE(SUM(m.size_bytes), 0) AS value "
+        f"FROM project_resource_batches AS b JOIN project_resource_batch_members AS m ON m.batch_id = b.id "
+        f"WHERE b.tenant_id = ? AND b.{column} = ? AND b.state = 'open'",
+        (owner["tenant_id"], owner_id),
     ).fetchone()["value"]
     added_bytes = sum(size for _path, size in additions)
     if int(staged_bytes) + added_bytes > limits.max_staged_bytes_per_user:

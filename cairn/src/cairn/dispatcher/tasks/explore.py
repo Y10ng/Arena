@@ -329,6 +329,7 @@ def run_explore_task(
                 prompt_replacements = verifier_prompt_replacements(
                     intent,
                     verifier_target,
+                    project=project,
                     knowledge=knowledge,
                     advisory=container_runtime,
                 )

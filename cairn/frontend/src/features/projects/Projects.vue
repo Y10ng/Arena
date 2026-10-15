@@ -1,20 +1,58 @@
 <template>
   <div class="projects-page">
     <div class="view-header view-header--actions">
+      <div class="segmented-control" aria-label="项目视图">
+        <button
+          type="button"
+          class="segment-btn"
+          :class="{ active: !showSchedules }"
+          :aria-pressed="!showSchedules"
+          @click="setView(false)"
+        >
+          项目
+        </button>
+        <button
+          type="button"
+          class="segment-btn"
+          :class="{ active: showSchedules }"
+          :aria-pressed="showSchedules"
+          @click="setView(true)"
+        >
+          计划任务
+        </button>
+      </div>
       <div class="header-right">
         <div class="refresh-indicator" title="实时刷新">
           <span class="live-dot live-success" :class="{ 'animate-pulse-live': isFetching }"></span>
           <span class="refresh-label text-faint">{{ isFetching ? '正在刷新' : '实时刷新' }}</span>
         </div>
-        <Button @click="$router.push('/projects/new')">
+        <Button @click="openNewProject($event)">
           <template #icon><Plus :size="14" /></template>
           新建项目
         </Button>
       </div>
     </div>
 
+    <CreationRequestRecovery v-if="!newProjectSession" />
+    <Alert v-if="newProjectSession" v-show="!newProjectOpen" tone="warning" title="创建结果未确认">
+      内容仅保留在本次页面会话中，请核实服务端结果；不要按标题猜测项目归属或重复创建。
+      <template #actions
+        ><Button size="sm" variant="secondary" @click="openNewProject($event)"
+          >查看保留内容</Button
+        ></template
+      >
+    </Alert>
+    <NewProject
+      v-if="newProjectSession"
+      :open="newProjectOpen"
+      :return-focus="newProjectTrigger"
+      @update:open="newProjectOpen = $event"
+      @discarded="closeNewProject"
+    />
+
     <!-- 分组已由左侧导航栏（FrontLayout）承载，本页不再重复侧栏，列表区域整宽展示 -->
-    <div class="projects-container">
+    <ProjectSchedules v-if="showSchedules" />
+    <div v-else class="projects-container">
       <FilterBar class="toolbar" label="项目筛选">
         <div class="segmented-control" aria-label="项目状态">
           <button
@@ -117,7 +155,7 @@
           "
         >
           <template v-if="!searchQuery && activeSegment === 'all'" #actions>
-            <Button @click="$router.push('/projects/new')">新建项目</Button>
+            <Button @click="openNewProject($event)">新建项目</Button>
           </template>
         </EmptyState>
 
@@ -201,13 +239,32 @@
 
             <!-- Right Reason Claim & Actions -->
             <div class="row-right">
-              <div class="project-row-status" aria-label="项目运行状态">
+              <div
+                class="project-row-status"
+                :class="{ 'project-row-status--scheduled': p.status === 'pending' }"
+                aria-label="项目运行状态"
+              >
                 <Badge :tone="getProjectRuntime(p).tone" size="sm">
                   {{ getProjectRuntime(p).label }}
                 </Badge>
                 <span class="project-row-reason" :title="getProjectRuntime(p).detail">
                   {{ getProjectRuntime(p).detail }}
                 </span>
+                <router-link
+                  v-if="p.status === 'pending' && scheduleFor(p)"
+                  :to="`/project-schedules/${scheduleFor(p)!.id}`"
+                  class="pending-schedule-summary"
+                  >{{ scheduleLocalTime(scheduleFor(p)!.next_run_at, scheduleFor(p)!.timezone) }} ·
+                  {{ scheduleFor(p)!.timezone }} ·
+                  {{ scheduleStatusLabels[scheduleFor(p)!.status] }}</router-link
+                >
+                <details
+                  v-if="p.status === 'pending' && scheduleFor(p)?.block_reason"
+                  class="pending-schedule-summary"
+                >
+                  <summary>查看受阻原因</summary>
+                  {{ scheduleFor(p)!.block_reason }}
+                </details>
               </div>
 
               <div class="created-at text-faint" :title="p.created_at">
@@ -379,7 +436,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, shallowRef, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { useQuery } from '@tanstack/vue-query'
+import {
+  listProjectSchedules,
+  scheduleLocalTime,
+  scheduleStatusLabels,
+} from '@/api/projectSchedules'
 import {
   Download,
   ExternalLink,
@@ -411,6 +475,45 @@ import {
 import type { DropdownMenuOption, SelectOption } from '@/components/ui'
 import type { ProjectSummary } from '@/api/types'
 import { useProjectsPage } from './useProjectsPage'
+import NewProject from './NewProject.vue'
+import ProjectSchedules from './ProjectSchedules.vue'
+import CreationRequestRecovery from './CreationRequestRecovery.vue'
+
+const route = useRoute()
+const router = useRouter()
+const showSchedules = computed(() => route.query.view === 'schedules')
+function setView(schedules: boolean) {
+  const query = { ...route.query }
+  if (schedules) query.view = 'schedules'
+  else delete query.view
+  void router.replace({ path: '/projects', query })
+}
+const newProjectSession = ref(false)
+const newProjectOpen = ref(false)
+const newProjectTrigger = shallowRef<HTMLElement | null>(null)
+
+function openNewProject(event?: Event) {
+  newProjectTrigger.value = event?.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  newProjectSession.value = true
+  newProjectOpen.value = true
+}
+
+function closeNewProject() {
+  newProjectOpen.value = false
+  newProjectSession.value = false
+}
+
+watch(
+  () => route.query.create,
+  (value) => {
+    if (value !== '1') return
+    openNewProject()
+    const query = { ...route.query }
+    delete query.create
+    void router.replace({ path: '/projects', query })
+  },
+  { immediate: true },
+)
 
 const {
   activeSegment,
@@ -467,6 +570,17 @@ const {
   sortBy,
   tenantOptions,
 } = useProjectsPage()
+const { data: pendingSchedules } = useQuery({
+  queryKey: ['project-schedules'],
+  queryFn: listProjectSchedules,
+  enabled: computed(() => filteredProjects.value.some((project) => project.status === 'pending')),
+  refetchInterval: 8000,
+  retry: false,
+})
+const scheduleFor = (project: ProjectSummary) =>
+  pendingSchedules.value?.find(
+    (schedule) => schedule.id === project.schedule_id || schedule.project_id === project.id,
+  )
 
 const ungroupedOptionValue = '__ungrouped__'
 const sortOptions: SelectOption[] = [
@@ -533,6 +647,7 @@ function handleDeleteDialogOpenChange(open: boolean) {
 
 function getProjectMenuItems(project: ProjectSummary): DropdownMenuOption[] {
   const items: DropdownMenuOption[] = [{ value: 'open', label: '进入工作空间' }]
+  if (project.schedule_id) items.push({ value: 'schedule', label: '查看启动计划' })
 
   if (project.status === 'active') {
     items.push({
@@ -586,7 +701,9 @@ function handleProjectMenuOpenChange(projectId: string, open: boolean) {
 }
 
 function handleProjectMenuSelect(project: ProjectSummary, value: string) {
-  if (value === 'open') navigateToWorkspace(project.id)
+  if (value === 'schedule' && project.schedule_id)
+    void router.push(`/project-schedules/${project.schedule_id}`)
+  else if (value === 'open') navigateToWorkspace(project.id)
   else if (value === 'stop') changeStatus(project.id, 'pause')
   else if (value === 'resume') changeStatus(project.id, 'resume')
   else if (value === 'reauthorize') confirmReauthorization(project)
@@ -603,6 +720,24 @@ void listElement
 <style src="./Projects.css" scoped></style>
 
 <style scoped>
+.view-header--actions {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+.project-row-status--scheduled {
+  display: grid;
+  justify-items: start;
+}
+.pending-schedule-summary {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+.pending-schedule-summary summary {
+  cursor: pointer;
+}
 /* 项目组筛选徽章（左侧导航分组选中后仍展示归属信息） */
 .group-badge {
   background: var(--accent-dim);

@@ -125,6 +125,7 @@ def create_library(conn: sqlite3.Connection, key: str, name: str | None = None) 
 
 
 def archive_library(conn: sqlite3.Connection, key: str) -> None:
+    conn.execute("UPDATE advisory_libraries SET key = key WHERE key = ?", (key,))
     row = conn.execute("SELECT archived_at FROM advisory_libraries WHERE key = ?", (key,)).fetchone()
     if row is None:
         return
@@ -134,6 +135,12 @@ def archive_library(conn: sqlite3.Connection, key: str) -> None:
     ).fetchone()
     if binding is not None:
         raise HTTPException(409, f"Library {key} is bound to project {binding['project_id']}")
+    schedule_binding = conn.execute(
+        "SELECT schedule_id FROM project_schedule_libraries WHERE library_key = ? LIMIT 1",
+        (key,),
+    ).fetchone()
+    if schedule_binding is not None:
+        raise HTTPException(409, f"Library {key} is bound to schedule {schedule_binding['schedule_id']}")
     if row["archived_at"] is None:
         conn.execute("UPDATE advisory_libraries SET archived_at = ? WHERE key = ?", (_utcnow(), key))
 
@@ -174,7 +181,8 @@ def bind_library_revision(
     project_id = project_id.strip()
     if not project_id:
         raise HTTPException(422, "Library binding project_id is required")
-    get_library_version(conn, revision.library_key, revision.version)
+    _lock_library_for_binding(conn, revision.library_key)
+    _check_library_revision(conn, revision)
     created_at = _utcnow()
     conn.execute(
         """INSERT INTO project_advisory_library_bindings
@@ -188,6 +196,68 @@ def bind_library_revision(
         version=revision.version,
         created_at=created_at,
     )
+
+
+def _lock_library_for_binding(conn: sqlite3.Connection, key: str) -> None:
+    # 归档与新增绑定串行，避免归档检查后又提交新的计划引用。
+    conn.execute("UPDATE advisory_libraries SET key = key WHERE key = ?", (key,))
+    get_library(conn, key)
+
+
+def _check_library_revision(conn: sqlite3.Connection, revision: LibraryRevisionRef) -> None:
+    selected = get_library_version(conn, revision.library_key, revision.version)
+    if selected.digest_sha256 != revision.digest_sha256:
+        raise HTTPException(409, f"Library {revision.library_key} version {revision.version} digest mismatch")
+
+
+def bind_schedule_library_revision(
+    conn: sqlite3.Connection,
+    schedule_id: str,
+    revision: LibraryRevisionRef,
+) -> LibraryRevisionRef:
+    _lock_library_for_binding(conn, revision.library_key)
+    _check_library_revision(conn, revision)
+    conn.execute(
+        """INSERT INTO project_schedule_libraries
+           (schedule_id, library_key, version, digest_sha256, created_at)
+           VALUES (?, ?, ?, ?, ?)""",
+        (schedule_id, revision.library_key, revision.version, revision.digest_sha256, _utcnow()),
+    )
+    return revision
+
+
+def list_schedule_library_revisions(
+    conn: sqlite3.Connection,
+    schedule_id: str,
+) -> list[LibraryRevisionRef]:
+    rows = conn.execute(
+        """SELECT library_key, version, digest_sha256 FROM project_schedule_libraries
+           WHERE schedule_id = ? ORDER BY library_key""",
+        (schedule_id,),
+    ).fetchall()
+    revisions = [LibraryRevisionRef(**dict(row)) for row in rows]
+    for revision in revisions:
+        _check_library_revision(conn, revision)
+    return revisions
+
+
+def validate_library_revision_content(
+    conn: sqlite3.Connection,
+    revision: LibraryRevisionRef,
+) -> None:
+    """触发前校验固定版本原件，不把全库读盘放进详情列表。"""
+    _check_library_revision(conn, revision)
+    digest = sha256()
+    for file in sorted(list_library_revision_files(conn, revision), key=lambda item: item.path):
+        try:
+            content = read_library_revision_content(conn, revision, file.path)
+        except (OSError, RuntimeError) as exc:
+            raise HTTPException(
+                409, f"Library {revision.library_key} version {revision.version} content integrity check failed"
+            ) from exc
+        _update_library_digest(digest, file.path, content)
+    if digest.hexdigest() != revision.digest_sha256:
+        raise HTTPException(409, f"Library {revision.library_key} version {revision.version} digest mismatch")
 
 
 def list_library_bindings(
@@ -448,14 +518,18 @@ def _latest_file_writes(conn: sqlite3.Connection, key: str) -> dict[str, Library
     }
 
 
+def _update_library_digest(digest, path: str, content: bytes) -> None:
+    path_bytes = path.encode("utf-8")
+    digest.update(len(path_bytes).to_bytes(8, "big"))
+    digest.update(path_bytes)
+    digest.update(len(content).to_bytes(8, "big"))
+    digest.update(content)
+
+
 def _library_digest(files: dict[str, bytes]) -> str:
     digest = sha256()
     for path, content in sorted(files.items()):
-        path_bytes = path.encode("utf-8")
-        digest.update(len(path_bytes).to_bytes(8, "big"))
-        digest.update(path_bytes)
-        digest.update(len(content).to_bytes(8, "big"))
-        digest.update(content)
+        _update_library_digest(digest, path, content)
     return digest.hexdigest()
 
 

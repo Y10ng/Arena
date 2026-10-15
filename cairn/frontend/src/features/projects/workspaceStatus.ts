@@ -21,6 +21,7 @@ interface RuntimeSnapshot {
 }
 
 const states: Record<string, { label: string; tone: WorkspaceStatusTone }> = {
+  pending: { label: '待启动', tone: 'info' },
   unknown: { label: '尚未观测', tone: 'neutral' },
   blocked: { label: '配置阻塞', tone: 'warning' },
   waiting: { label: '等待调度条件', tone: 'info' },
@@ -95,20 +96,45 @@ export function resolveRuntimeStatus(snapshot: RuntimeSnapshot): WorkspaceStatus
   }
 }
 
-// 不再从 Intent、reason 或租户级截断任务列表推断执行状态。
-export const resolveProjectDetailStatus = (snapshot: RuntimeSnapshot & { detail: ProjectDetail }) =>
-  resolveRuntimeStatus({
-    ...snapshot,
-    runtime:
-      snapshot.runtime?.project_id === snapshot.detail.project.id ? snapshot.runtime : undefined,
-  })
+function pendingStatus(snapshot: RuntimeSnapshot, projectId: string): WorkspaceStatusView {
+  return {
+    code: 'pending',
+    label: '待启动',
+    tone: 'info',
+    workerNames: [],
+    degraded: false,
+    detail:
+      !snapshot.runtimeUnavailable &&
+      isSupportedProjectRuntime(snapshot.runtime) &&
+      snapshot.runtime.project_id === projectId &&
+      snapshot.runtime.project_status === 'pending'
+        ? snapshot.runtime.message
+        : '尚未进入执行调度，请在启动计划中查看时间、原因或管理预约。',
+  }
+}
+// pending 是 Server 已确认的项目状态，不依赖 Dispatcher 观测推断。
+export const resolveProjectDetailStatus = (
+  snapshot: RuntimeSnapshot & { detail: ProjectDetail },
+) =>
+  snapshot.detail.project.status === 'pending'
+    ? pendingStatus(snapshot, snapshot.detail.project.id)
+    : resolveRuntimeStatus({
+        ...snapshot,
+        runtime:
+          snapshot.runtime?.project_id === snapshot.detail.project.id
+            ? snapshot.runtime
+            : undefined,
+      })
 
 export const resolveProjectSummaryStatus = (
   snapshot: RuntimeSnapshot & { project: ProjectSummary },
 ) =>
-  resolveRuntimeStatus({
-    ...snapshot,
-    runtime: snapshot.runtime?.project_id === snapshot.project.id ? snapshot.runtime : undefined,
-  })
+  snapshot.project.status === 'pending'
+    ? pendingStatus(snapshot, snapshot.project.id)
+    : resolveRuntimeStatus({
+        ...snapshot,
+        runtime:
+          snapshot.runtime?.project_id === snapshot.project.id ? snapshot.runtime : undefined,
+      })
 
 export const resolveWorkspaceStatus = resolveProjectDetailStatus

@@ -171,6 +171,36 @@ class VerifierData(ResultModel):
     artifacts: list[ArtifactDeclaration] = Field(default_factory=list)
 
 
+class ExternalVerificationData(ResultModel):
+    """外部资料验证不创建发现 Fact，也不声明内部 Observation 身份。"""
+
+    model_config = ConfigDict(json_schema_extra={
+        "allOf": [{
+            "if": {"properties": {"outcome": {"const": "insufficient_evidence"}}, "required": ["outcome"]},
+            "then": {"properties": {"limitations": {"minItems": 1}}},
+            "else": {"properties": {"evidence_refs": {"minItems": 1}}},
+        }],
+    })
+
+    outcome: Literal["confirmed", "not_reproduced", "environment_changed", "insufficient_evidence"]
+    summary: Text
+    tested_scope: Text
+    notes: Text
+    limitations: list[Text]
+    reason_code: Text | None = None
+    evidence_refs: list[AssessmentEvidenceRef]
+    artifacts: list[ArtifactDeclaration] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_outcome_evidence(self) -> ExternalVerificationData:
+        if self.outcome == "insufficient_evidence":
+            if not self.limitations:
+                raise ValueError("insufficient_evidence requires explicit limitations")
+        elif not self.evidence_refs:
+            raise ValueError("tested outcomes require current execution evidence")
+        return self
+
+
 class IntentDecision(ResultModel):
     from_: list[Text] = Field(alias="from", min_length=1)
     description: Text
@@ -229,6 +259,7 @@ PHASE_DATA_MODELS: dict[str, type[ResultModel]] = {
     "explore_conclude": ExploreData,
     "verifier_execute": VerifierData,
     "verifier_conclude": VerifierData,
+    "external_verify_execute": ExternalVerificationData,
     "report_execute": ReportData,
 }
 _RESULT_DATA_MODELS: dict[str, type[ResultModel]] = {

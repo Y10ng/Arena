@@ -9,6 +9,11 @@ export const productionRouteNames = [
   'Provenance',
   'Projects',
   'NewProject',
+  'Verifications',
+  'NewVerification',
+  'VerificationDetail',
+  'VerificationIntegrations',
+  'VerificationConfiguration',
   'WorkspaceGraph',
   'WorkspaceRuns',
   'WorkspaceHints',
@@ -151,6 +156,40 @@ export const navigationRegistry = [
       subtitle: '集中配置目标和指引事实',
       badge: 'New Task',
       keywords: ['add', 'create'],
+    },
+  }),
+  record({
+    routeName: 'Verifications',
+    label: '漏洞复现与复测',
+    icon: 'vulnerabilities',
+    role: 'authenticated',
+    sidebar: { placement: 'primary', order: 60 },
+    command: {
+      kindLabel: '导航', title: '查看漏洞复现与复测',
+      subtitle: '提交漏洞资料并查看独立复测、证据与历史',
+      badge: '复测', keywords: ['复现', '复测', 'verification', 'retest'],
+    },
+  }),
+  record({
+    routeName: 'NewVerification', label: '新建复测', icon: 'add',
+    role: 'authenticated', breadcrumbParent: 'Verifications',
+  }),
+  record({
+    routeName: 'VerificationDetail', label: '复测详情', icon: 'vulnerabilities',
+    role: 'authenticated', breadcrumbParent: 'Verifications',
+  }),
+  record({
+    routeName: 'VerificationIntegrations', label: '漏洞复测配置', icon: 'auth',
+    role: 'super-admin', breadcrumbParent: 'console-root',
+  }),
+  record({
+    routeName: 'VerificationConfiguration', label: '漏洞复测配置', icon: 'auth',
+    role: 'super-admin', breadcrumbParent: 'console-root',
+    sidebar: { placement: 'system', order: 25 },
+    command: {
+      kindLabel: '系统管理', title: '漏洞复测配置',
+      subtitle: '配置租户固定执行 Worker、内部项目组与外部接入',
+      badge: '复测', keywords: ['集成', '凭据', '复测', 'integration', '配置'],
     },
   }),
   record({
@@ -459,6 +498,8 @@ export function breadcrumbsFromRegistry(
       text: navigationByRouteName.get('Projects')?.label || '任务管理',
       to: { name: 'Projects' },
     })
+  } else if (item.breadcrumbParent === 'Verifications') {
+    crumbs.push({ key: 'verifications', text: '漏洞复现与复测', to: { name: 'Verifications' } })
   } else if (item.breadcrumbParent === 'workspace-project' && projectId) {
     crumbs.push({
       key: 'projects',

@@ -36,6 +36,7 @@ class ProjectResourceBatchMember(BaseModel):
     size_bytes: int
     sha256: str
     source: Literal["file", "zip"]
+    source_resource_id: str | None = None
 
 
 class ProjectResourceBatch(BaseModel):
@@ -43,6 +44,9 @@ class ProjectResourceBatch(BaseModel):
     state: Literal["open", "consumed"]
     created_at: str
     expires_at: str
+    consumed_at: str | None = None
+    consumed_project_id: str | None = None
+    consumed_schedule_id: str | None = None
     resource_count: int
     total_bytes: int
     members: list[ProjectResourceBatchMember] = Field(default_factory=list)

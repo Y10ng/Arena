@@ -17,6 +17,7 @@ PHASE_RESULT_KINDS = {
     "explore_conclude": "explore_conclude_result",
     "verifier_execute": "verifier_result",
     "verifier_conclude": "verifier_conclude_result",
+    "external_verify_execute": "external_verification_result",
     "reason_execute": "reason_result",
     "report_execute": "report_result",
 }

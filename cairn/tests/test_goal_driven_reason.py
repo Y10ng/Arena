@@ -318,3 +318,80 @@ def test_goal_driven_builtin_prompts_are_executable_without_old_control_model():
     for content in (bootstrap, reason, explore, report):
         assert "submit_result" in content
         assert "register_artifact" in content
+
+
+@pytest.mark.parametrize("origin_source", [True, False])
+def test_research_contexts_share_persisted_scope_and_unchanged_origin(origin_source):
+    from cairn.dispatcher.prompting import render_prompt
+    from cairn.dispatcher.tasks.bootstrap_context import bootstrap_prompt_replacements
+    from cairn.dispatcher.tasks.explore_context import (
+        explore_prompt_replacements,
+        verifier_prompt_replacements,
+    )
+    from cairn.project_authorization_contract import (
+        build_scope_descriptor_v3,
+        build_scope_descriptor_v4,
+        target_scope_v3,
+    )
+
+    project = goal_project()
+    project.project.tenant_id = "tenant-context"
+    origin = "  仅研究提供的资料；{goal} 是资料中的字面片段。\n保留排除项与原始空白。  "
+    project.facts[0].description = origin
+    if origin_source:
+        project.targets = []
+        descriptor = build_scope_descriptor_v4(
+            project_id=project.project.id,
+            tenant_id=project.project.tenant_id,
+            origin_fact_id="origin",
+            origin=origin,
+        )
+    else:
+        descriptor = build_scope_descriptor_v3(
+            project_id=project.project.id,
+            tenant_id=project.project.tenant_id,
+            target_digest=target_scope_v3([vars(target) for target in project.targets])[0],
+            target_ids=["t1"],
+        )
+    project.project.authorization_scope_descriptor = descriptor
+    manager = FakeContainerManager()
+    replacements = {
+        "bootstrap": bootstrap_prompt_replacements(project),
+        "reason": build_reason_prompt_context(
+            SimpleNamespace(tasks=SimpleNamespace(reason=SimpleNamespace(max_intents=4))),
+            manager, "container-p1", project, "facts: []",
+        ).replacements,
+        "explore": explore_prompt_replacements(
+            manager, "container-p1", "facts: []", project.intents[0],
+            phase="explore_execute", project=project,
+        ),
+    }
+    verifier_intent = deepcopy(project.intents[0])
+    verifier_intent.target_observation_id = "observation-1"
+    replacements["verifier"] = verifier_prompt_replacements(
+        verifier_intent,
+        SimpleNamespace(neutral_projection={"version": 1, "observation_id": "observation-1"}),
+        project=project,
+    )
+    for phase, context in replacements.items():
+        assert context["origin"] == origin
+        scope = json.loads(context["authorization_scope"])
+        assert scope["scope_descriptor"] == descriptor
+        assert ("Origin is the authoritative scope source" in scope["instructions"]) == origin_source
+        assert ("legacy or explicit Target authorization" in scope["instructions"]) != origin_source
+        target_index = json.loads(context["authorized_targets"])
+        assert [item["id"] for item in target_index] == ([] if origin_source else ["t1"])
+        names = [f"{phase}.md"]
+        if phase != "reason":
+            names.append(f"{phase}_conclude.md")
+        for name in names:
+            rendered = render_prompt(
+                read_prompt_resource("goal-driven-v1", name, builtin_only=True), context,
+            )
+            assert origin in rendered
+            assert context["authorization_scope"] in rendered
+            assert "{authorization_scope}" not in rendered
+    if origin_source:
+        project.facts[0].description += "改写范围"
+        with pytest.raises(ValueError, match="does not match its grant"):
+            bootstrap_prompt_replacements(project)

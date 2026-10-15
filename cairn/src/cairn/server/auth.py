@@ -59,7 +59,7 @@ _password_hasher = PasswordHasher()
 
 @dataclass(frozen=True)
 class RequestPrincipal:
-    kind: Literal["user", "machine"]
+    kind: Literal["user", "machine", "integration"]
     subject_id: str
     tenant_id: str | None = None
     role: str | None = None
@@ -599,6 +599,29 @@ def resolve_machine_token(token: str | None) -> RequestPrincipal | None:
         return RequestPrincipal("machine", row["id"])
 
 
+def require_verification_caller(
+    request: Request,
+    authorization: str | None = Header(default=None, alias="Authorization"),
+    cairn_session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+    csrf_token: str | None = Header(default=None, alias=CSRF_HEADER),
+) -> RequestPrincipal:
+    """集成 Bearer 仅接入复测窄入口；失败不回退 Cookie，也不接受 machine。"""
+    if authorization:
+        scheme, separator, token = authorization.partition(" ")
+        if not separator or scheme.casefold() != "bearer" or not token.strip() or len(token) > MACHINE_TOKEN_MAX_LENGTH:
+            raise HTTPException(401, "复测集成身份认证失败")
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT id, tenant_id FROM verification_integrations WHERE token_hash = ? AND enabled = 1",
+                (hash_secret(token.strip()),),
+            ).fetchone()
+            if row is None:
+                raise HTTPException(401, "复测集成凭据无效或已停用")
+            conn.execute("UPDATE verification_integrations SET last_seen_at = ? WHERE id = ?", (utcnow(), row["id"]))
+            return RequestPrincipal("integration", row["id"], tenant_id=row["tenant_id"])
+    return protect_cookie_request(request, cairn_session, csrf_token)
+
+
 def require_dispatcher(
     authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> RequestPrincipal:
@@ -712,6 +735,7 @@ def require_admin_route_access(
 
 def require_tenant_project(
     project_id: str,
+    request: Request,
     principal: RequestPrincipal = Depends(require_dispatcher_protocol),
 ) -> RequestPrincipal:
     """普通浏览器按 Tenant 隔离；Dispatcher 与超级管理员可访问全部项目。"""
@@ -725,6 +749,9 @@ def require_tenant_project(
                 "SELECT 1 FROM projects WHERE id = ? AND tenant_id = ?",
                 (project_id, principal.tenant_id),
             ).fetchone()
+        if row is not None and principal.kind != "machine" and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+            from .services.project_records import require_unmanaged_project
+            require_unmanaged_project(conn, project_id)
     if row is None:
         # 对具体资源统一返回 404，避免泄漏其他 Tenant 的资源是否存在。
         raise HTTPException(404, "Project not found")
@@ -733,6 +760,7 @@ def require_tenant_project(
 
 def require_user_tenant_project(
     project_id: str,
+    request: Request,
     principal: RequestPrincipal = Depends(protect_cookie_request),
 ) -> RequestPrincipal:
     """项目管理仅接受浏览器用户；超级管理员可管理全部 Tenant 项目。"""
@@ -748,6 +776,9 @@ def require_user_tenant_project(
                 "SELECT 1 FROM projects WHERE id = ? AND tenant_id = ?",
                 (project_id, principal.tenant_id),
             ).fetchone()
+        if row is not None and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+            from .services.project_records import require_unmanaged_project
+            require_unmanaged_project(conn, project_id)
     if row is None:
         raise HTTPException(404, "Project not found")
     return principal

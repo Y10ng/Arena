@@ -10,7 +10,7 @@ from hashlib import sha256
 from json import dumps
 from pathlib import Path
 from threading import Lock
-from typing import Any, Generator
+from typing import Any, Callable, Generator
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse
 
 import psycopg
@@ -50,11 +50,24 @@ _configuring: DatabaseConfig | None = None
 _configure_lock = Lock()
 
 
+class SQLiteConnection(sqlite3.Connection):
+    """托管连接保存文件副作用的事务回调，不改变普通 SQLite 事务模式。"""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.after_commit: list[Callable[[], None]] = []
+        self.after_rollback: list[Callable[[], None]] = []
+        self.callbacks_pending = False
+
+
 class PostgresConnection:
     """保留现有 conn.execute 调用形状，并在边界适配 psycopg 参数与映射行。"""
 
     def __init__(self, connection: psycopg.Connection) -> None:
         self._connection = connection
+        self.after_commit: list[Callable[[], None]] = []
+        self.after_rollback: list[Callable[[], None]] = []
+        self.callbacks_pending = False
 
     def execute(self, sql: str, params: Any = None):
         adapted = _adapt_qmark_sql(sql)
@@ -1166,7 +1179,7 @@ def open_connection(config: DatabaseConfig) -> Any:
     """打开非全局原始连接；调用方负责事务与关闭。"""
     if config.backend == "sqlite":
         assert config.sqlite_path is not None
-        conn = sqlite3.connect(str(config.sqlite_path), timeout=30)
+        conn = sqlite3.connect(str(config.sqlite_path), timeout=30, factory=SQLiteConnection)
         conn.row_factory = sqlite3.Row
         # WAL 让本地 UI 读写和 dispatcher 写入更少互相阻塞；其余约束依赖每连接开启。
         conn.execute("PRAGMA journal_mode=WAL")
@@ -1210,16 +1223,70 @@ def run_migrations(conn: Any, backend: str, *, initialize_runtime: bool = False)
         _ensure_knowledge_root()
 
 
+def register_after_commit(conn, callback: Callable[[], None]) -> None:
+    """仅在托管外层事务成功提交后执行无参数回调。"""
+    if not isinstance(conn, (SQLiteConnection, PostgresConnection)) or not conn.callbacks_pending:
+        raise RuntimeError("Transaction callbacks require a managed connection")
+    conn.after_commit.append(callback)
+
+
+def register_after_rollback(conn, callback: Callable[[], None]) -> None:
+    """外层事务失败时清理本次新副本，不删除已提交的输入。"""
+    if not isinstance(conn, (SQLiteConnection, PostgresConnection)) or not conn.callbacks_pending:
+        raise RuntimeError("Transaction callbacks require a managed connection")
+    conn.after_rollback.append(callback)
+
+
+def _run_transaction_callbacks(conn, *, committed: bool) -> None:
+    callbacks = conn.after_commit if committed else conn.after_rollback
+    conn.callbacks_pending = False
+    errors: list[Exception] = []
+    try:
+        # 一个清理失败不能阻止其他本次副本的清理；错误仍向调用方暴露。
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception as exc:
+                errors.append(exc)
+    finally:
+        conn.after_commit.clear()
+        conn.after_rollback.clear()
+    if errors:
+        raise ExceptionGroup("Transaction callbacks failed", errors)
+
+
 @contextmanager
-def get_conn() -> Generator[Any, None, None]:
+def _managed_connection(*, schedule: bool = False) -> Generator[Any, None, None]:
     active_config = _config or _configuring
     assert active_config is not None
     conn = open_connection(active_config)
+    conn.callbacks_pending = True
     try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+        try:
+            if schedule and active_config.backend == "sqlite":
+                # 计划写事务在读配置前取得写锁，避免 deferred 读快照升级造成并发触发失败。
+                conn.execute("BEGIN IMMEDIATE")
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            _run_transaction_callbacks(conn, committed=False)
+            raise
+        else:
+            # 提交后清理失败不能再走 rollback 回调，以免删除已绑定资料。
+            _run_transaction_callbacks(conn, committed=True)
     finally:
         conn.close()
+
+
+@contextmanager
+def get_conn() -> Generator[Any, None, None]:
+    with _managed_connection() as conn:
+        yield conn
+
+
+@contextmanager
+def schedule_transaction() -> Generator[Any, None, None]:
+    """计划创建、管理和消费共用的写事务；PostgreSQL 行锁由服务按锁序取得。"""
+    with _managed_connection(schedule=True) as conn:
+        yield conn

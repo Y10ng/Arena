@@ -14,6 +14,7 @@ class Scenario(BaseModel):
 
     key: str
     label: str
+    description: str | None = None
     is_default: bool = False
     profile_id: str = ""
     # Legacy fields kept for stored rows and older clients. New routing config
@@ -83,6 +84,7 @@ class ScenarioCatalogEntry(BaseModel):
 
     key: str
     label: str
+    description: str | None = None
     is_default: bool = False
     origin_template: str | None = None
     goal_template: str | None = None

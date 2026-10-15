@@ -14,6 +14,7 @@ class WorkerTemplate(BaseModel):
     tenant_worker_ids: list[str] = Field(default_factory=list)
     # 仅用于历史数据读取兼容，新写路径不再接受全局 Worker 名称。
     worker_names: list[str] = Field(default_factory=list)
+    is_default: bool
     created_at: str
 
 
@@ -22,6 +23,7 @@ class CreateWorkerTemplateRequest(BaseModel):
     # 兼容旧客户端输入；服务端始终以认证主体覆盖该值。
     owner: str | None = None
     tenant_worker_ids: list[str] = Field(min_length=1)
+    is_default: bool = False
 
     @field_validator("name")
     @classmethod
@@ -42,6 +44,7 @@ class CreateWorkerTemplateRequest(BaseModel):
 class UpdateWorkerTemplateRequest(BaseModel):
     name: str | None = None
     tenant_worker_ids: list[str] | None = None
+    is_default: bool | None = None
 
     @field_validator("name")
     @classmethod

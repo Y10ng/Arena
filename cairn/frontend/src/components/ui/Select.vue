@@ -20,7 +20,7 @@
     </SelectTrigger>
 
     <SelectPortal>
-      <SelectContent class="ui-select__content" position="popper" align="start" :side-offset="4">
+      <SelectContent class="ui-select__content" :class="contentClass" position="popper" align="start" :side-offset="4">
         <SelectScrollUpButton class="ui-select__scroll-button" aria-label="向上滚动">
           ↑
         </SelectScrollUpButton>
@@ -81,6 +81,7 @@ const props = withDefaults(
     name?: string
     invalid?: boolean
     ariaLabel?: string
+    contentClass?: string
   }>(),
   {
     open: undefined,

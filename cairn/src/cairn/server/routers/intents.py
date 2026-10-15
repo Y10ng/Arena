@@ -333,6 +333,8 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
         # 重发只返回原事务结果；与项目停止共用行锁，不重新开放目标写入。
         conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
         project_row = get_project_or_404(conn, project_id)
+        from cairn.server.services.project_records import require_unmanaged_project
+        require_unmanaged_project(conn, project_id)
         policy = policy_from_project_row(project_row)
         goal_driven = policy.protocol == GOAL_DRIVEN_PROTOCOL
         require_result_settlement_contract(

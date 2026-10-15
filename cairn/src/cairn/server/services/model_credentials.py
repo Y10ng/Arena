@@ -130,6 +130,25 @@ def decrypt_active_credential(conn: Any, *, tenant_id: str, model_id: str) -> tu
     ).fetchone()
     if row is None:
         raise HTTPException(422, "Model credential is not configured")
+    return _decrypt_credential_row(row, tenant_id=tenant_id)
+
+
+def decrypt_credential_version(conn: Any, *, tenant_id: str, model_id: str,
+                               version_id: str) -> tuple[str, dict[str, object]]:
+    """按当次执行来源读取既有密文版本，不以当前活动凭据冒充历史凭据。"""
+    row = conn.execute(
+        "SELECT c.id AS credential_id, v.id AS active_version_id, v.version_number, v.algorithm, "
+        "v.key_version, v.nonce, v.ciphertext, v.credential_fingerprint "
+        "FROM model_credentials c JOIN model_credential_versions v ON v.credential_id = c.id "
+        "WHERE c.model_id = ? AND c.tenant_id = ? AND v.tenant_id = ? AND v.id = ?",
+        (model_id, tenant_id, tenant_id, version_id),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(422, "执行时的模型凭据版本已不可读取")
+    return _decrypt_credential_row(row, tenant_id=tenant_id)
+
+
+def _decrypt_credential_row(row: Any, *, tenant_id: str) -> tuple[str, dict[str, object]]:
     if row["algorithm"] != ALGORITHM:
         raise CredentialDecryptionError("Unsupported credential algorithm")
     key = _load_key(str(row["key_version"]))

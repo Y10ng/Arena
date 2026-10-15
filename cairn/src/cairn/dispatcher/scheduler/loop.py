@@ -215,6 +215,13 @@ class DispatcherLoop(
                     summaries=[], loop_completed=False,
                 )
                 try:
+                    # 认证后先消费计划，即使没有 active 项目或容量已满也推进到期计划。
+                    consumed = self.client.consume_project_schedules()
+                    if consumed["errors"]:
+                        LOG.error(
+                            "project schedule consumption failed processed=%s errors=%s",
+                            consumed["processed"], consumed["errors"],
+                        )
                     # 控制观察先于配置刷新、收尾和版本探针；取消广播本身不做 Docker I/O。
                     summaries = self.client.list_projects()
                     self._cancel_inactive_tasks(summaries)
