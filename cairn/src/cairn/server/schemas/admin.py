@@ -47,7 +47,6 @@ class AdminProjectView(BaseModel):
     title: str
     status: str
     scenario_key: str | None = None
-    group_id: str | None = None
     created_at: str
 
 

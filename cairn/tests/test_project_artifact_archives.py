@@ -20,8 +20,10 @@ def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(db.SCHEMA)
-    db._ensure_schema_migrations(conn)
+    # 本文件的旧列夹具先落在 v52，再经真实迁移验证历史归档不丢失。
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(db, "SQLITE_MIGRATIONS", tuple(item for item in db.SQLITE_MIGRATIONS if item.version <= 52))
+        db.run_migrations(conn, "sqlite")
     conn.execute(
         """
         INSERT INTO projects (id, title, status, created_at, scenario_key)
@@ -32,6 +34,10 @@ def _make_conn() -> sqlite3.Connection:
 
 
 def _configure_connection(monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection) -> None:
+    conn.commit()
+    db.run_migrations(conn, "sqlite")
+    conn.commit()
+
     @contextmanager
     def fake_get_conn():
         yield conn
@@ -359,6 +365,40 @@ def test_archive_groups_explicit_evidence_and_generates_text(
         assert "a-unlinked" not in calls
         assert calls.count("a-fact") == 1
         assert calls.count("a-shared") == 2
+    finally:
+        conn.close()
+
+
+def test_archive_preserves_item_artifacts_and_exact_historical_text(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    conn = _make_conn()
+    try:
+        _configure_connection(monkeypatch, conn)
+        original = b"GET /actual HTTP/1.1\r\nX-Value: retained  \r\n\r\n \t"
+        historical = "unpaired historical\r\n \t"
+        _insert_artifact(conn, "a-new", "request.http", original)
+        record_items = [{"id": "old", "kind": "text", "role": "supporting", "source": "historical", "text": historical}]
+        observation_items = [{"id": "step", "kind": "http", "source": "capture", "request": {"artifact_id": "a-new", "pointer": "/request"}}]
+        conn.execute(
+            "INSERT INTO vulnerabilities (id, project_id, title, severity, evidence_items_json, created_at, updated_at) "
+            "VALUES ('v-new', 'proj-1', 'new', 'high', ?, 'now', 'now')", (json.dumps(record_items),),
+        )
+        conn.execute(
+            "INSERT INTO vulnerability_observations (id, project_id, vulnerability_id, severity, confidence, evidence_items_json, observed_at) "
+            "VALUES ('o-new', 'proj-1', 'v-new', 'high', 0.8, ?, 'now')", (json.dumps(observation_items),),
+        )
+        _configure_content_files(monkeypatch, tmp_path, {"a-new": ("request.http", original, "text/plain")})
+        result = project_artifact_archives.create_project_vulnerability_evidence_archive("proj-1")
+        try:
+            with zipfile.ZipFile(result.disk_path) as archive:
+                directory = "vulnerabilities/new--v-new"
+                assert archive.read(f"{directory}/artifacts/a-new/request.http") == original
+                assert archive.read(f"{directory}/originals/canonical/0001-text.txt") == historical.encode()
+                manifest = json.loads(archive.read(f"{directory}/evidence-items.json"))
+                assert manifest["canonical"] == record_items
+                assert manifest["observations"][0]["evidence_items"] == observation_items
+                assert "response" not in manifest["observations"][0]["evidence_items"][0]
+        finally:
+            result.cleanup()
     finally:
         conn.close()
 

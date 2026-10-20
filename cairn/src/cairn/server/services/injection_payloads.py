@@ -19,7 +19,7 @@ from cairn.server.models import (
     InjectionPayloadRecord,
 )
 
-from .ids import get_project_or_404, next_injection_payload_id
+from .ids import get_project_or_404, lock_verification_project_write, next_injection_payload_id
 from .time_utils import utcnow
 
 INJECTION_PAYLOAD_MAX_TEXT_BYTES = 1024 * 1024
@@ -256,6 +256,7 @@ def apply_injection_payload_operations(
     project_id: str,
     body: BatchInjectionPayloadOperationsRequest,
 ) -> BatchInjectionPayloadOperationsResponse:
+    lock_verification_project_write(conn, project_id)
     get_project_or_404(conn, project_id)
     _validate_batch_size(body)
     results: list[InjectionPayloadOperationResult] = []

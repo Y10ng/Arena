@@ -6,6 +6,8 @@ from hashlib import sha256
 from fastapi import APIRouter, Depends, HTTPException
 
 from cairn.assessment_contracts import GOAL_DRIVEN_PROTOCOL
+from cairn.evidence_contracts import evidence_refs
+from cairn.server.schemas.projects import HistoricalConcludeVulnerabilityInput
 from cairn.server.services.coverage_slots import validate_assessment_experiment
 from cairn.server.services.assessment_convergence import (
     advance_assessment_phase,
@@ -341,7 +343,12 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
             project_row,
             task_run_id=body.task_run_id,
         )
-        submission_digest = sha256(json.dumps(body.model_dump(by_alias=True, exclude_none=True), sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        receipt_payload = body.model_dump(by_alias=True, exclude_none=True)
+        if isinstance(body.vulnerability, HistoricalConcludeVulnerabilityInput):
+            # 只复现旧回执的摘要算法；不修改请求模型、历史原文或已存 digest。
+            for field in ("repro_request", "repro_response"):
+                receipt_payload["vulnerability"][field] = receipt_payload["vulnerability"][field].rstrip()
+        submission_digest = sha256(json.dumps(receipt_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
         prior = conn.execute("SELECT * FROM intents WHERE project_id = ? AND id = ?", (project_id, intent_id)).fetchone()
         if prior is not None and prior["to_fact_id"] and body.task_run_id:
             prior_run = validate_task_run_exists(conn, project_id, body.task_run_id)
@@ -354,6 +361,10 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
                 raise HTTPException(409, "assessment_result_conflict")
             accepted = conn.execute("SELECT * FROM facts WHERE project_id = ? AND id = ?", (project_id, prior["to_fact_id"])).fetchone()
             return ConcludeResponse(fact=Fact(**dict(accepted), assessment_record=json.loads(accepted["assessment_record_json"]) if accepted["assessment_record_json"] else None), intent=intent_to_model(conn, prior, project_id))
+        # 旧结构仅能命中上方已接受回执，不得作为新发现进入证据链。
+        if isinstance(body.vulnerability, HistoricalConcludeVulnerabilityInput):
+            raise HTTPException(422, "vulnerability_schema_version_2_required")
+        discovery_evidence = evidence_refs(body.vulnerability.evidence_items) if body.vulnerability is not None else []
         check_project_active(conn, project_id)
         validate_execution_generation(
             conn,
@@ -424,7 +435,7 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
                 intent_row,
                 body.coverage_result,
                 body.vulnerability,
-                body.evidence,
+                [*body.evidence, *discovery_evidence],
                 task_run_id=body.task_run_id,
             )
 
@@ -465,7 +476,7 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
             conn,
             project_id,
             fid,
-            [*body.evidence, *scope_evidence, *verification_evidence],
+            [*body.evidence, *scope_evidence, *verification_evidence, *discovery_evidence],
         )
         if body.coverage_scope_disposition is not None:
             if body.task_run_id is None:
@@ -511,7 +522,7 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
             conn,
             project_id,
             fid,
-            [*body.evidence, *surface_evidence, *verification_evidence],
+            [*body.evidence, *surface_evidence, *verification_evidence, *discovery_evidence],
         )
         updated = conn.execute(
             """
@@ -591,11 +602,9 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
                 severity=vin.severity,
                 vuln_type=vin.vuln_type,
                 target=vin.target,
-                packet_artifact_id=vin.packet_artifact_id,
+                evidence_items=vin.evidence_items,
                 remediation=vin.remediation,
                 confidence=vin.confidence,
-                repro_request=vin.repro_request,
-                repro_response=vin.repro_response,
                 source_fact_id=fid,
                 slot_key=slot_key or vin.slot_key,
             )

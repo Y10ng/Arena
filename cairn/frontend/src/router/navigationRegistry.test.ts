@@ -69,6 +69,7 @@ describe('navigation registry', () => {
     expect(sidebarNavigation('system', false).map((item) => item.routeName)).toEqual([
       'ConsoleModels',
       'ConsoleWorkers',
+      'VerificationConfiguration',
     ])
     expect(sidebarNavigation('scenario', false)).toEqual([])
     expect(sidebarNavigation('standalone', false)).toEqual([])
@@ -81,6 +82,49 @@ describe('navigation registry', () => {
     const adminCommands = commandItemsFromRegistry(true)
     expect(adminCommands.some((item) => item.id === 'go:Monitoring')).toBe(true)
     expect(adminCommands.some((item) => item.id === 'go:ConsoleUsers')).toBe(true)
+  })
+
+  it('exposes vulnerabilities and reports as independent authenticated primary routes', async () => {
+    for (const isAdmin of [false, true]) {
+      const primary = sidebarNavigation('primary', isAdmin)
+      expect(
+        primary
+          .filter((item) => ['Findings', 'Reports'].includes(item.routeName))
+          .map((item) => item.label),
+      ).toEqual(['漏洞', '报告'])
+      const commands = commandItemsFromRegistry(isAdmin)
+      expect(commands.find((item) => item.id === 'go:Reports')?.to).toEqual({ name: 'Reports' })
+      expect(commands.some((item) => item.id === 'go:ConsoleReportTemplates')).toBe(isAdmin)
+    }
+    const route = router.resolve('/reports?reportProjectId=project-a&reportId=artifact-a')
+    expect(route.name).toBe('Reports')
+    expect(route.meta.superAdmin).not.toBe(true)
+    const record = router.getRoutes().find((item) => item.name === 'Reports')!
+    const component = await (
+      record.components!.default as () => Promise<{ default: { __file: string } }>
+    )()
+    expect(component.default.__file).toMatch(/features\/findings\/ReportManagement.vue$/)
+    expect(routePageInventory.find((item) => item.routeName === 'Reports')?.file).toBe(
+      'src/features/findings/ReportManagement.vue',
+    )
+    expect(breadcrumbsFromRegistry('Reports').map((crumb) => crumb.text)).toEqual(['Arena', '报告'])
+    expect(router.resolve('/console/report-templates').meta.superAdmin).toBe(true)
+  })
+
+  it('keeps ordinary creation inside task management instead of global navigation or redirects', () => {
+    expect(router.getRoutes().some((route) => route.name === 'NewProject')).toBe(false)
+    expect(
+      router.resolve('/projects/new').matched.some((route) => Boolean(route.redirect)),
+    ).toBe(false)
+    for (const isAdmin of [false, true]) {
+      expect(
+        sidebarNavigation('primary', isAdmin).some((item) => String(item.routeName) === 'NewProject'),
+      ).toBe(false)
+      expect(commandItemsFromRegistry(isAdmin).some((item) => item.id === 'go:NewProject')).toBe(false)
+      expect(commandItemsFromRegistry(isAdmin).find((item) => item.id === 'go:Projects')?.to).toEqual({
+        name: 'Projects',
+      })
+    }
   })
 
   it('adds workspace commands only with project context and uses named destinations', () => {
@@ -96,7 +140,7 @@ describe('navigation registry', () => {
   it('builds semantic breadcrumb ancestors for front, workspace, console, and status routes', () => {
     expect(breadcrumbsFromRegistry('Findings').map((crumb) => crumb.text)).toEqual([
       'Arena',
-      '成果列表',
+      '漏洞',
     ])
     expect(
       breadcrumbsFromRegistry('WorkspaceRuns', 'project-a', 'Project A').map((crumb) => crumb.text),

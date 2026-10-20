@@ -32,7 +32,7 @@
 
             <DialogClose v-if="showClose && dismissible" as-child>
               <IconButton class="ui-dialog__close" :label="closeLabel" size="sm">
-                <span aria-hidden="true">&times;</span>
+                <X :size="16" aria-hidden="true" />
               </IconButton>
             </DialogClose>
           </div>
@@ -51,6 +51,7 @@
 </template>
 
 <script setup lang="ts">
+import { X } from '@lucide/vue'
 import {
   DialogClose,
   DialogContent,
@@ -125,8 +126,6 @@ defineOptions({ name: 'UiDialog' })
   z-index: var(--z-modal);
   inset: 0;
   background: var(--color-overlay);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
 }
 
 .ui-dialog__content {
@@ -144,6 +143,9 @@ defineOptions({ name: 'UiDialog' })
   background: var(--bg-elevated);
   box-shadow: var(--shadow-modal);
   color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
   transform: translate(-50%, -50%);
 }
 
@@ -179,7 +181,9 @@ defineOptions({ name: 'UiDialog' })
 }
 
 .ui-dialog__header {
-  padding: var(--space-5) var(--space-5) var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -213,19 +217,27 @@ defineOptions({ name: 'UiDialog' })
   line-height: var(--leading-normal);
 }
 
+.ui-dialog__description:empty {
+  display: none;
+}
+
 .ui-dialog__close {
   margin: calc(var(--space-1) * -1);
 }
 
 .ui-dialog__body {
   min-height: 0;
-  padding: var(--space-3) var(--space-5) var(--space-5);
+  padding: var(--space-5);
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .ui-dialog__footer {
-  padding: var(--space-3) var(--space-5) var(--space-5);
+  padding: var(--space-4) var(--space-5);
+  border-top: 1px solid var(--border-subtle);
+  flex-shrink: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 from cairn.dispatcher.contracts import extract_declared_artifacts
+from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.prompt_resources import (
     EXTERNAL_VERIFICATION_PROMPT_GROUP,
     read_external_verification_instructions,
@@ -19,15 +21,16 @@ from cairn.dispatcher.tasks.common import (
     record_process_artifacts,
     record_prompt_rendered,
     record_validation_result,
-    resolve_declared_artifact_evidence_refs,
     run_worker_process,
     worker_process_failure,
 )
+from cairn.dispatcher.tasks.artifact_records import resolve_declared_evidence_items
 from cairn.dispatcher.tasks.delivery import (
     DeliveryUnavailable,
     register_delivery,
     remaining_delivery_seconds,
 )
+from cairn.dispatcher.tasks.protocol_records import record_protocol_write
 from cairn.dispatcher.tasks.write_outcomes import classify_write_response
 from cairn.dispatcher.worker_protocol.envelope import validate_result_envelope
 from cairn.dispatcher.worker_protocol.submission import ExternalVerificationData
@@ -38,13 +41,13 @@ from cairn.dispatcher.worker_result_gateway import (
     worker_failure_error_type,
 )
 from cairn.dispatcher.workers.registry import get_driver
-from cairn.server.models import EvidenceRef
 
+LOG = logging.getLogger(__name__)
 PHASE = "external_verify_execute"
 
 
 def _prompt(input_data: dict, instructions: str) -> str:
-    # 资料保留在只读挂载中，不把报告里的地址和指令拼接进授权 Origin。
+    # 来源原文与资料保留在只读挂载中；内部上下文不是第二次授权声明。
     resources = [
         {
             "id": material["id"],
@@ -63,7 +66,7 @@ def _prompt(input_data: dict, instructions: str) -> str:
         "verification_request_id": input_data["id"],
         "mode": input_data["mode"],
         "title": input_data["title"],
-        "origin": input_data["origin"],
+        "source_context": input_data["origin"],
         "report": report,
         "materials": resources,
         "previous_request_id": input_data["previous_request_id"],
@@ -82,17 +85,27 @@ def _validate(payload):
     return "external_verification", ExternalVerificationData.model_validate(data)
 
 
-def _write_terminal(client, request_id, action, payload) -> bool:
-    # 只重放同一写入；任何分支都不重新执行目标操作。
+def _write_terminal(client, request_id, action, payload) -> ApiResult:
+    # 每次回执独立留存，补报和重放不能覆盖首次拒绝；不记录响应正文或 claim_token。
     for attempt in range(3):
         response = client.finish_verification(request_id, action, payload)
-        if response.ok:
-            return True
-        if not classify_write_response(response).retry_same_write:
-            return False
+        disposition = classify_write_response(response)
+        record_protocol_write(
+            client, payload["project_id"], payload["task_run_id"],
+            operation="verification_" + action.replace("-", "_"), phase=PHASE,
+            response=response, disposition=disposition,
+        )
+        if not response.ok:
+            LOG.warning(
+                "verification terminal write rejected project=%s task_run=%s action=%s status=%s disposition=%s code=%s",
+                payload["project_id"], payload["task_run_id"], action,
+                response.status_code, disposition.disposition, disposition.safe_code,
+            )
+        if not disposition.retry_same_write:
+            return response
         if attempt < 2:
             time.sleep(attempt + 1)
-    return False
+    return response
 
 
 def _upload_evidence(client, manager, container, project_id, task_run_id, artifacts):
@@ -136,18 +149,28 @@ def run_external_verification_task(
     lease.start()
     process_result = None
 
-    def fail(outcome, *, message="本次验证未能完成有效结果交付；已保存的材料保留可查。"):
+    def fail(outcome, *, message="本次验证未能完成有效结果交付；已保存的材料保留可查。", uncertain_submission=None):
         error_type = worker_failure_error_type(outcome) if isinstance(outcome, WorkerResultFailure) else outcome
-        # 停止请求与结果接受由 Server 原子竞争；本地取消不冒充物理终止。
         current = client.get_verification_input(request_id)
         cancelled = current.ok and isinstance(current.data, dict) and current.data.get("cancel_requested") is True
         if cancelled:
-            _write_terminal(client, request_id, "cancel-ack", binding)
-            return "cancelled"
-        _write_terminal(client, request_id, "failure", {
+            # future 收口后由真实停止证明触发 finalize，不提前 ACK 或改写执行首因。
+            return outcome
+        response = _write_terminal(client, request_id, "failure", {
             **binding,
             "error": {"code": error_type, "message": message},
         })
+        if not response.ok and uncertain_submission is not None:
+            # 仅结果瞬态重放耗尽且补报未接受时核实原提交；冲突本身不是成功证明。
+            receipt = client.get_verification_receipt(request_id, uncertain_submission)
+            record_protocol_write(
+                client, project_id, task_run_id, operation="verification_receipt", phase=PHASE,
+                response=receipt, disposition=classify_write_response(receipt),
+            )
+            if (receipt.ok and isinstance(receipt.data, dict)
+                    and receipt.data.get("terminal_kind") == "result"
+                    and receipt.data.get("result_matches") is True):
+                return "success"
         return outcome
 
     try:
@@ -228,16 +251,17 @@ def run_external_verification_task(
         )
         if record is None:
             return fail("artifact_write_failed")
-        refs = resolve_declared_artifact_evidence_refs([
-            EvidenceRef(artifact_id=ref.artifact_handle or ref.artifact_id, pointer=ref.pointer)
-            for ref in data.evidence_refs
-        ], record)
-        if any(ref.artifact_id not in record.artifact_ids_by_handle.values() for ref in refs):
-            raise UnresolvedArtifactEvidenceError("external verification requires uploaded current execution evidence")
-        result = data.model_dump(exclude={"artifacts", "evidence_refs"}, exclude_none=True)
-        result["evidence_refs"] = [ref.model_dump(exclude_none=True) for ref in refs]
-        if not _write_terminal(client, request_id, "result", {**binding, "result": result}):
-            return fail("server_write_failed")
+        items = resolve_declared_evidence_items(data.evidence_items, record, require_current_run=True)
+        result = data.model_dump(exclude={"artifacts", "evidence_items"}, exclude_none=True)
+        result["evidence_items"] = [item.model_dump(mode="json", exclude_none=True) for item in items]
+        submission = {**binding, "result": result}
+        response = _write_terminal(client, request_id, "result", submission)
+        if not response.ok:
+            disposition = classify_write_response(response)
+            return fail(
+                disposition.error_type or "business_acceptance",
+                uncertain_submission=submission if disposition.retry_same_write else None,
+            )
         return "success"
     except WorkerRequestError as exc:
         return fail(exc.failure)

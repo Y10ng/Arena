@@ -9,7 +9,9 @@ import sqlite3
 import pytest
 from fastapi import HTTPException
 
-from cairn.server import db
+from cairn.server import db, migrations
+from cairn.evidence_contracts import EvidenceItem, WorkerEvidenceItem, evidence_refs
+from cairn.server.services.vulnerabilities import read_vulnerability_evidence
 from cairn.server.models import (
     ConcludeRequest,
     ConcludeVulnerabilityInput,
@@ -38,8 +40,7 @@ def make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(db.SCHEMA)
-    db._ensure_schema_migrations(conn)
+    db.run_migrations(conn, "sqlite")
     return conn
 
 
@@ -72,6 +73,16 @@ def _seed_project(conn: sqlite3.Connection, project_id: str = "p1") -> None:
     )
 
 
+def _conclude_run(conn: sqlite3.Connection, intent_id: str) -> str:
+    run_id = f"run-{intent_id}"
+    conn.execute(
+        "INSERT INTO task_runs (id, project_id, intent_id, task_type, worker_name, worker_type, status, session_id, started_at) "
+        "VALUES (?, 'p1', ?, 'explore', 'w', 'pi', 'running', ?, '2026-10-15T00:00:00Z')",
+        (run_id, intent_id, f"session-{intent_id}"),
+    )
+    return run_id
+
+
 def test_auto_confirm_vulnerability_on_conclude(monkeypatch: pytest.MonkeyPatch) -> None:
     """conclude 带 vulnerability 字段 → 漏洞自动入库，source_fact_id 绑定新 fact。"""
     conn = make_conn()
@@ -88,8 +99,11 @@ def test_auto_confirm_vulnerability_on_conclude(monkeypatch: pytest.MonkeyPatch)
             ConcludeRequest(
                 worker="w",
                 description="SQLi found in login",
+                task_run_id=_conclude_run(conn, "i001"),
                 evidence=[],
                 vulnerability=ConcludeVulnerabilityInput(
+                    schema_version=2,
+                    evidence_items=[_capture_item(conn, "auto-request", "run-i001", "request")],
                     title="Login SQL Injection",
                     severity="high",
                     vuln_type="SQLi",
@@ -109,6 +123,12 @@ def test_auto_confirm_vulnerability_on_conclude(monkeypatch: pytest.MonkeyPatch)
         assert v.confidence == 0.7
         assert v.status == "new"
         assert v.discovered_by_worker == "w"
+        observation = conn.execute("SELECT * FROM vulnerability_observations WHERE vulnerability_id = ?", (v.id,)).fetchone()
+        assert observation["source_fact_id"] == new_fact_id
+        assert observation["task_run_id"] == "run-i001"
+        assert v.evidence_items == []
+        assert read_vulnerability_evidence(conn, "p1", v.id)["evidence_items"][0]["request"]["artifact_id"] == "auto-request"
+        assert conn.execute("SELECT artifact_id FROM fact_evidence WHERE fact_id = ?", (new_fact_id,)).fetchone()["artifact_id"] == "auto-request"
     finally:
         conn.close()
 
@@ -148,8 +168,10 @@ def test_identity_only_concludes_share_canonical_vulnerability(
                 ConcludeRequest(
                     worker="w",
                     description=title,
+                    task_run_id=_conclude_run(conn, intent_id),
                     evidence=[],
                     vulnerability=ConcludeVulnerabilityInput(
+                        schema_version=2, evidence_items=[],
                         title=title,
                         severity="high",
                         vuln_type="IDOR",
@@ -205,8 +227,10 @@ def test_identity_only_conclude_without_identity_rolls_back(
                 ConcludeRequest(
                     worker="w",
                     description="missing identity",
+                    task_run_id=_conclude_run(conn, "i001"),
                     evidence=[],
                     vulnerability=ConcludeVulnerabilityInput(
+                        schema_version=2, evidence_items=[],
                         title="IDOR",
                         severity="high",
                         confidence=0.8,
@@ -360,6 +384,22 @@ def _structured_identity(
     )
 
 
+def _capture_item(conn: sqlite3.Connection, artifact_id: str, run_id: str, side: str) -> EvidenceItem:
+    conn.execute(
+        "INSERT OR IGNORE INTO task_runs (id, project_id, task_type, worker_name, worker_type, status, session_id, started_at) "
+        "VALUES (?, 'p1', 'explore', 'w', 'pi', 'running', ?, '2026-10-15T00:00:00Z')",
+        (run_id, f"session-{run_id}"),
+    )
+    conn.execute(
+        "INSERT INTO artifacts (id, project_id, task_run_id, kind, category, uri, sha256, size, created_at) "
+        "VALUES (?, 'p1', ?, 'file', 'evidence', ?, 'digest', 1, '2026-10-15T00:00:00Z')",
+        (artifact_id, run_id, f"artifact://projects/p1/runs/{run_id}/{artifact_id}.txt"),
+    )
+    return EvidenceItem.model_validate({
+        "id": artifact_id, "kind": "http", "source": "capture", side: {"artifact_id": artifact_id},
+    })
+
+
 def test_structured_vulnerability_dedupes_alias_and_keeps_observations() -> None:
     """不同标题和 IDOR/BOLA 叫法合并 canonical，但每次发现都保留 observation。"""
     conn = make_conn()
@@ -381,7 +421,7 @@ def test_structured_vulnerability_dedupes_alias_and_keeps_observations() -> None
                 target="GET /api/orders/123",
                 confidence=0.6,
                 source_fact_id="fsrc",
-                repro_request="GET /api/orders/123",
+                evidence_items=[_capture_item(conn, "request-a", "tr1", "request")],
             ),
             _structured_identity("IDOR"),
             fingerprint_version=1,
@@ -404,7 +444,7 @@ def test_structured_vulnerability_dedupes_alias_and_keeps_observations() -> None
                 target="same endpoint, different title",
                 confidence=0.9,
                 source_fact_id="f002",
-                repro_response="HTTP/1.1 200 OK",
+                evidence_items=[_capture_item(conn, "response-b", "tr2", "response")],
             ),
             _structured_identity("BOLA"),
             fingerprint_version=1,
@@ -437,14 +477,35 @@ def test_structured_vulnerability_dedupes_alias_and_keeps_observations() -> None
             "port": 443,
         }
         observations_by_run = {row["task_run_id"]: row for row in observations}
-        assert observations_by_run["tr1"]["repro_request"] == (
-            "GET /api/orders/123"
-        )
-        assert observations_by_run["tr2"]["repro_response"] == (
-            "HTTP/1.1 200 OK"
-        )
+        first_observation = observations_by_run["tr1"]
+        second_observation = observations_by_run["tr2"]
+        conn.execute("UPDATE vulnerability_observations SET observed_at = '2026-10-15T00:01:00Z' WHERE id = ?", (first_observation["id"],))
+        conn.execute("UPDATE vulnerability_observations SET observed_at = '2026-10-15T00:02:00Z' WHERE id = ?", (second_observation["id"],))
+        latest = read_vulnerability_evidence(conn, "p1", first.id)
+        assert latest["observation_id"] == second_observation["id"]
+        assert latest["evidence_items"][0]["response"]["artifact_id"] == "response-b"
+        assert "request" not in latest["evidence_items"][0]
+        selected = read_vulnerability_evidence(conn, "p1", first.id, first_observation["id"])
+        assert selected["evidence_items"][0]["request"]["artifact_id"] == "request-a"
+        assert "response" not in selected["evidence_items"][0]
+        assert vulns[0].evidence_items == []
+        assert all(row["repro_request"] == row["repro_response"] == "" for row in observations)
+        from cairn.server.services.vulnerability_verifications import get_observation_verifier_target
+        target = get_observation_verifier_target(conn, "p1", first_observation["id"])
+        assert target.neutral_projection["evidence_items"] == selected["evidence_items"]
+        assert target.neutral_projection["evidence_refs"][0]["artifact_id"] == "request-a"
+        assert "repro_request" not in target.neutral_projection
+        from cairn.server.services.assessment_reports import _report_discovery_rows
+        report = _report_discovery_rows(conn, "p1")[0]
+        assert report["evidence_items"] == latest["evidence_items"]
+        assert report["record_evidence_items"] == []
+        assert not {"repro_request", "repro_response", "packet_artifact_id"}.intersection(report)
         detail = get_vulnerability_detail(conn, "p1", first.id)
         assert len(detail.observations) == 2
+        assert detail.source_fact.id == "f002"
+        assert get_vulnerability_detail(conn, "p1", first.id, first_observation["id"]).source_fact.id == "fsrc"
+        from cairn.server.services.vulnerabilities import get_vulnerability_for_fact
+        assert get_vulnerability_for_fact(conn, "p1", "f002").id == first.id
         assert {item.task_run_id for item in detail.observations} == {"tr1", "tr2"}
     finally:
         conn.close()
@@ -545,7 +606,7 @@ def test_structured_vulnerability_keeps_distinct_identity_fields(
 
 
 def test_legacy_creation_keeps_nullable_fingerprint_duplicates() -> None:
-    """人工与 legacy 路径不启用语义合并，保持既有重复创建行为。"""
+    """非去重自动发现保持独立 canonical，同时追加真实 Observation。"""
     conn = make_conn()
     try:
         _seed_project(conn)
@@ -563,7 +624,7 @@ def test_legacy_creation_keeps_nullable_fingerprint_duplicates() -> None:
         assert all(vuln.fingerprint is None for vuln in vulns)
         assert conn.execute(
             "SELECT COUNT(*) AS c FROM vulnerability_observations"
-        ).fetchone()["c"] == 0
+        ).fetchone()["c"] == 2
     finally:
         conn.close()
 
@@ -760,7 +821,8 @@ def test_vulnerability_detail_preserves_ordered_project_scoped_verifications() -
 
         detail = get_vulnerability_detail(conn, "p1", vulnerability.id)
 
-        assert [item.id for item in detail.observations] == ["o1", "o2"]
+        assert [item.id for item in detail.observations][:2] == ["o1", "o2"]
+        assert len(detail.observations) == 3
         assert [item.id for item in detail.verifications] == ["vv1", "vv2"]
         assert [
             (
@@ -890,7 +952,7 @@ def test_vulnerability_provenance_aggregates_project_scoped_relations(
                 title="IDOR",
                 severity="high",
                 source_fact_id="finding-fact",
-                packet_artifact_id="packet-artifact",
+                evidence_items=[EvidenceItem(id="original", kind="artifact", source="capture", artifact={"artifact_id": "packet-artifact"})],
             ),
             discovered_by_run_id="discovery-run",
             discovered_by_worker="discoverer",
@@ -910,15 +972,8 @@ def test_vulnerability_provenance_aggregates_project_scoped_relations(
             ),
         )
         conn.execute(
-            """
-            INSERT INTO vulnerability_observations (
-                id, project_id, vulnerability_id, source_fact_id, task_run_id,
-                worker, packet_artifact_id, identity_json, severity,
-                confidence, observed_at
-            ) VALUES ('observation-1', 'p1', ?, 'finding-fact',
-                      'discovery-run', 'discoverer', 'packet-artifact', '{}',
-                      'high', 0.9, '2026-08-25T00:02:00Z')
-            """,
+            "UPDATE vulnerability_observations SET id = 'observation-1', confidence = 0.9, observed_at = '2026-08-25T00:02:00Z' "
+            "WHERE project_id = 'p1' AND vulnerability_id = ?",
             (vulnerability.id,),
         )
         conn.execute(
@@ -1040,6 +1095,147 @@ def test_vulnerability_provenance_aggregates_project_scoped_relations(
         }
         assert all(item.project_id == "p1" for item in provenance.task_runs)
         assert all(item.project_id == "p1" for item in provenance.artifacts)
+    finally:
+        conn.close()
+
+
+def test_evidence_contract_projection_and_inline_boundaries() -> None:
+    from pydantic import ValidationError
+
+    from cairn.dispatcher.contracts import PhaseContractError, extract_evidence_refs
+
+    raw = {"id": "step", "kind": "http", "source": "capture", "request": {"artifact_handle": "h-request"}}
+    item = WorkerEvidenceItem.model_validate(raw)
+    assert [ref.artifact_handle for ref in evidence_refs([item, item])] == ["h-request"]
+    assert item.response is None
+    finding = {"title": "capture", "severity": "high", "schema_version": 2, "evidence_items": [raw]}
+    for section in (None, "fact"):
+        payload = {"fact": {"vulnerability": finding}}
+        assert [ref.artifact_id for ref in extract_evidence_refs(payload, section=section)] == ["h-request"]
+        for duplicate in (
+            {"fact": {"vulnerability": finding, "evidence_refs": []}},
+            {"fact": {"vulnerability": finding}, "evidence_refs": []},
+        ):
+            with pytest.raises(PhaseContractError, match="projected from evidence_items"):
+                extract_evidence_refs(duplicate, section=section)
+    with pytest.raises(ValidationError):
+        WorkerEvidenceItem.model_validate({**raw, "request_text": "GET /\r\n"})
+    with pytest.raises(ValidationError):
+        EvidenceItem(id="bad", kind="http", source="capture", response_text="")
+    for model in (CreateVulnerabilityRequest, UpdateVulnerabilityRequest):
+        with pytest.raises(ValidationError):
+            model.model_validate({"title": "old", "severity": "low", "repro_request": "GET /"})
+    with pytest.raises(ValidationError):
+        ConcludeVulnerabilityInput(title="old", severity="low", schema_version=2, evidence_items=[], packet_artifact_id="a1")
+
+
+def test_manual_evidence_edit_preserves_history_without_fabricated_observation() -> None:
+    conn = make_conn()
+    try:
+        _seed_project(conn)
+        original = EvidenceItem(id="manual", kind="http", source="manual", request_text="GET /\r\n\r\n  ")
+        vulnerability = create_vulnerability(conn, "p1", CreateVulnerabilityRequest(title="manual", severity="low", evidence_items=[original]))
+        assert get_vulnerability_detail(conn, "p1", vulnerability.id).observations == []
+        with pytest.raises(HTTPException, match="automatic_vulnerability_requires_conclude"):
+            vuln_router.create_vulnerability_route("p1", CreateVulnerabilityRequest(title="not manual", severity="low", source_fact_id="fsrc"))
+        assert read_vulnerability_evidence(conn, "p1", vulnerability.id)["evidence_items"][0]["request_text"] == original.request_text
+        history = EvidenceItem(id="legacy", kind="text", source="historical", text="unpaired\r\n \t")
+        missing = EvidenceItem(id="lost-original", kind="artifact", source="historical", artifact={"artifact_id": "missing-legacy"})
+        conn.execute("UPDATE vulnerabilities SET evidence_items_json = ? WHERE id = ?", (json.dumps([item.model_dump(exclude_none=True) for item in [history, missing]]), vulnerability.id))
+        with pytest.raises(HTTPException, match="historical_evidence_is_immutable"):
+            update_vulnerability(conn, "p1", vulnerability.id, UpdateVulnerabilityRequest(evidence_items=[original]))
+        updated = update_vulnerability(conn, "p1", vulnerability.id, UpdateVulnerabilityRequest(evidence_items=[history, missing, original]))
+        assert updated.evidence_items == [history, missing, original]
+        assert get_vulnerability_detail(conn, "p1", vulnerability.id).record_evidence_items == [history, missing, original]
+        assert conn.execute("SELECT count(*) FROM vulnerability_observations").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_explicit_evidence_selection_is_vulnerability_and_project_scoped() -> None:
+    conn = make_conn()
+    try:
+        _seed_project(conn)
+        _seed_project(conn, "p2")
+        first = create_vulnerability(conn, "p1", CreateVulnerabilityRequest(title="first", severity="low", source_fact_id="fsrc"))
+        second = create_vulnerability(conn, "p1", CreateVulnerabilityRequest(title="second", severity="low", source_fact_id="fsrc"))
+        create_vulnerability(conn, "p2", CreateVulnerabilityRequest(title="other", severity="low"))
+        observation = read_vulnerability_evidence(conn, "p1", first.id)["observation_id"]
+        for project_id, vuln_id in (("p1", second.id), ("p2", first.id)):
+            with pytest.raises(HTTPException) as error:
+                read_vulnerability_evidence(conn, project_id, vuln_id, observation)
+            assert error.value.status_code == 404
+    finally:
+        conn.close()
+
+
+def test_v53_migration_preserves_originals_without_pairing_canonical_sides(monkeypatch: pytest.MonkeyPatch) -> None:
+    with monkeypatch.context() as patch:
+        patch.setattr(db, "SQLITE_MIGRATIONS", tuple(item for item in migrations.SQLITE_MIGRATIONS if item.version <= 52))
+        conn = make_conn()
+    try:
+        _seed_project(conn)
+        request, response = "GET /old\r\nX: value  \r\n\r\n \t", "HTTP/1.1 200 OK\r\n\r\nbody \r\n"
+        for vuln_id, fact_id in (("legacy", "fsrc"), ("manual", None)):
+            conn.execute(
+                "INSERT INTO vulnerabilities (id, project_id, title, severity, source_fact_id, repro_request, repro_response, created_at, updated_at) "
+                "VALUES (?, 'p1', 'old', 'high', ?, ?, ?, 'old', 'old')", (vuln_id, fact_id, request, response),
+            )
+        conn.execute(
+            "INSERT INTO vulnerability_observations (id, project_id, vulnerability_id, source_fact_id, severity, confidence, repro_request, observed_at) "
+            "VALUES ('old-observation', 'p1', 'legacy', 'fsrc', 'high', 0.5, ?, 'old')", (request,),
+        )
+        old_registry = [dict(row) for row in conn.execute("SELECT * FROM schema_migrations ORDER BY version")]
+        conn.commit()
+        db.run_migrations(conn, "sqlite")
+        conn.commit()
+        canonical = conn.execute("SELECT * FROM vulnerabilities WHERE id = 'legacy'").fetchone()
+        items = json.loads(canonical["evidence_items_json"])
+        assert [item["kind"] for item in items] == ["text", "text"]
+        assert [item["text"] for item in items] == [request, response]
+        assert canonical["repro_request"] == request and canonical["repro_response"] == response
+        selected = read_vulnerability_evidence(conn, "p1", "legacy")
+        assert selected["source"] == "historical"
+        assert selected["evidence_items"][0]["request_text"] == request
+        assert "response_text" not in selected["evidence_items"][0]
+        manual = read_vulnerability_evidence(conn, "p1", "manual")
+        assert manual["observation_id"] is None and manual["source"] == "manual"
+        assert manual["evidence_items"][0]["response_text"] == response
+        assert [dict(row) for row in conn.execute("SELECT * FROM schema_migrations WHERE version <= 52 ORDER BY version")] == old_registry
+        db.run_migrations(conn, "sqlite")
+        assert conn.execute("SELECT count(*) FROM schema_migrations WHERE version = 53").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_historical_conclude_only_replays_existing_receipt(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hashlib import sha256
+    from cairn.server.schemas.projects import HistoricalConcludeVulnerabilityInput
+
+    conn = make_conn()
+    @contextmanager
+    def fake_get_conn():
+        yield conn
+    monkeypatch.setattr(intents_router, "get_conn", fake_get_conn)
+    try:
+        _seed_project(conn)
+        body = ConcludeRequest(worker="w", description="accepted", task_run_id=_conclude_run(conn, "i001"), vulnerability=HistoricalConcludeVulnerabilityInput(title="historical", severity="low", repro_request="GET /old\r\n"))
+        with pytest.raises(HTTPException) as error:
+            intents_router.conclude("p1", "i001", body)
+        assert error.value.detail == "vulnerability_schema_version_2_required"
+        serialized = body.model_dump(by_alias=True, exclude_none=True)
+        assert "evidence_items" not in serialized["vulnerability"]
+        assert "schema_version" not in serialized["vulnerability"]
+        serialized["vulnerability"]["repro_request"] = "GET /old"
+        digest = sha256(json.dumps(serialized, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+        conn.execute("INSERT INTO facts (id, project_id, description, creator, created_at) VALUES ('accepted', 'p1', 'accepted', 'w', 'old')")
+        conn.execute("UPDATE intents SET to_fact_id = 'accepted', concluded_at = 'old' WHERE id = 'i001'")
+        context = json.dumps({"accepted_result_digest": digest, "accepted_fact_id": "accepted"})
+        conn.execute("UPDATE task_runs SET runtime_context_json = ? WHERE id = ?", (context, body.task_run_id))
+        assert intents_router.conclude("p1", "i001", body).fact.id == "accepted"
+        assert body.vulnerability.repro_request == "GET /old\r\n"
+        assert conn.execute("SELECT runtime_context_json FROM task_runs WHERE id = ?", (body.task_run_id,)).fetchone()[0] == context
+        assert conn.execute("SELECT count(*) FROM vulnerability_observations").fetchone()[0] == 0
     finally:
         conn.close()
 

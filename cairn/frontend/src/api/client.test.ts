@@ -4,7 +4,7 @@ import {
   ApiError,
   api,
   apiRaw,
-  archiveReportTemplate,
+  deleteReportTemplate,
   cancelProjectResourceBatch,
   commitProjectResourceBatch,
   createAdminUser,
@@ -15,7 +15,7 @@ import {
   deleteProjectResourceBatchMember,
   createProjectTarget,
   createReportTemplate,
-  createReportTemplateVersion,
+  updateReportTemplate,
   createTenantModel,
   createVulnerability,
   createTenantWorker,
@@ -36,7 +36,7 @@ import {
   getProjectManagementOptions,
   getProjectMonitoringSummary,
   getProjectInjectionPayload,
-  getReportTemplateVersion,
+  getReportTemplate,
   getTenantMonitoringSummary,
   listAdminUsers,
   listAdvisoryLibraryRevisions,
@@ -55,7 +55,6 @@ import {
   listReports,
   listReportTemplateCatalog,
   listReportTemplates,
-  listReportTemplateVersions,
   listPromptFiles,
   listPromptGroups,
   listTenantWorkerOptions,
@@ -680,48 +679,39 @@ describe('Tenant Workers client', () => {
 describe('Report template client', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('uses catalog, admin version, archive, and manual request endpoints', async () => {
+  it('uses current-template CRUD and only a stable template identity for generation', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse([]))
     vi.stubGlobal('fetch', fetchMock)
     const controller = new AbortController()
+    const body = { name: '安全报告', description: '当前正文', markdown_content: '# Report' }
 
     await listReportTemplateCatalog(controller.signal)
     await listReportTemplates(controller.signal)
-    await createReportTemplate({ key: 'security-report', name: 'Security Report' })
-    await listReportTemplateVersions('security/report', controller.signal)
-    await createReportTemplateVersion('security/report', {
-      markdown_content: '# Report',
-      message: 'Initial',
-    })
-    await getReportTemplateVersion('security/report', 3, controller.signal)
-    await archiveReportTemplate('security/report')
-    await requestAssessmentReportFinalization('project / one', {
-      template_key: 'security-report',
-      template_version: 3,
-    })
+    await createReportTemplate(body)
+    await getReportTemplate('security/report', controller.signal)
+    await updateReportTemplate('security/report', body)
+    await deleteReportTemplate('security/report')
+    await requestAssessmentReportFinalization('project / one', { template_key: 'security-report' })
 
     expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
       '/report-template-catalog',
       '/report-templates',
       '/report-templates',
-      '/report-templates/security%2Freport/versions',
-      '/report-templates/security%2Freport/versions',
-      '/report-templates/security%2Freport/versions/3',
+      '/report-templates/security%2Freport',
+      '/report-templates/security%2Freport',
       '/report-templates/security%2Freport',
       '/projects/project%20%2F%20one/assessment-report-finalization/request',
     ])
     expect(fetchMock.mock.calls[2]?.[1]).toEqual(
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({ key: 'security-report', name: 'Security Report' }),
-      }),
+      expect.objectContaining({ method: 'POST', body: JSON.stringify(body) }),
     )
-    expect(fetchMock.mock.calls[4]?.[1]?.body).toBe(
-      JSON.stringify({ markdown_content: '# Report', message: 'Initial' }),
+    expect(fetchMock.mock.calls[3]?.[1]?.signal).toBe(controller.signal)
+    expect(fetchMock.mock.calls[4]?.[1]).toEqual(
+      expect.objectContaining({ method: 'PUT', body: JSON.stringify(body) }),
     )
-    expect(fetchMock.mock.calls[6]?.[1]?.method).toBe('DELETE')
-    expect(fetchMock.mock.calls[7]?.[1]?.body).toBe(
-      JSON.stringify({ template_key: 'security-report', template_version: 3 }),
+    expect(fetchMock.mock.calls[5]?.[1]?.method).toBe('DELETE')
+    expect(fetchMock.mock.calls[6]?.[1]?.body).toBe(
+      JSON.stringify({ template_key: 'security-report' }),
     )
   })
 })
@@ -1136,8 +1126,7 @@ describe('dispatcher control client', () => {
       target: 'GET /users/2?password=clear-text',
       remediation: '校验资源所有者。',
       confidence: 0.9,
-      repro_request: 'Cookie: session=credential-secret',
-      repro_response: 'HTTP/1.1 200 OK\n\n{"password":"visible"}',
+      evidence_items: [{ id: 'manual-http', kind: 'http' as const, role: 'primary' as const, title: '人工记录', source: 'manual' as const, request: null, response: null, artifact: null, request_text: 'Cookie: session=credential-secret', response_text: 'HTTP/1.1 200 OK\n\n{"password":"visible"}', text: null }],
     }
 
     await listVulnerabilities('project / one', 'high', 'new', controller.signal)
@@ -1330,7 +1319,6 @@ describe('dispatcher control client', () => {
       goal: 'goal',
       scenario: 'default-copy-v2',
       tenant_worker_ids: ['w1'],
-      group_id: 'group-a',
       authorization_expires_at: null,
       resources: [{ kind: 'script' as const, path: 'auth/login.py', content }],
     }

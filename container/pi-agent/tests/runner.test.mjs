@@ -63,7 +63,7 @@ test('Anthropic request preserves the complete submit_result schema after provid
   }
 });
 
-test('text is not JSON fallback; repair is same session and removes target tools', async (t) => {
+test('text is not JSON fallback; normal repair keeps authorized tools in the same session', async (t) => {
   const { request, calls } = await fixture(t, 'openai-chat-completions', [{ text: '```json\n{"accepted":true,"data":{"status":"ok"}}\n```' }, ok]);
   request.phase = 'explore_execute';
   const audit = [];
@@ -71,7 +71,7 @@ test('text is not JSON fallback; repair is same session and removes target tools
   assert.equal(result.status, 'succeeded', JSON.stringify(result));
   assert.equal(calls.length, 2);
   assert.ok(calls[0].body.tools.some((tool) => tool.function.name === 'bash'));
-  assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+  assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name), calls[0].body.tools.map((tool) => tool.function.name));
   assert.equal(audit.filter((e) => e.event === 'result_repair').length, 1);
   assert.equal(new Set(audit.map((e) => e.session)).size, 1);
 });
@@ -137,42 +137,42 @@ test('length continuation cannot extend the original deadline or continue after 
   });
 });
 
-test('length after submit or in conclude_only never restores execution tools', async (t) => {
-  for (const concludeOnly of [false, true]) await t.test(concludeOnly ? 'conclude_only' : 'submitted', async (t) => {
+test('length during correction preserves normal execution or explicit delivery-only permissions', async (t) => {
+  for (const concludeOnly of [false, true]) await t.test(concludeOnly ? 'conclude_only' : 'normal_correction', async (t) => {
     const { request, calls, cwd } = await fixture(t, 'anthropic-messages', [
       ...(concludeOnly ? [] : [{ tools: [{ name: 'submit_result', args: { accepted: true, data: {} } }] }]),
       { thinking: 'synthetic unfinished correction', stopReason: 'max_tokens' },
-      { tools: [{ name: 'bash', args: { command: 'touch forbidden-length-repair' } }] },
+      { tools: [{ name: 'bash', args: { command: 'printf corrected > correction-evidence' } }] },
+      ok,
     ]);
     request.conclude_only = concludeOnly;
     const audit = [];
     const result = await runRequest(request, { audit: (event) => audit.push(event) });
-    assert.equal(result.status, 'failed', JSON.stringify(result));
-    assert.equal(result.error.code, 'tool_permission');
+    assert.equal(result.status, concludeOnly ? 'failed' : 'succeeded', JSON.stringify(result));
+    assert.equal(result.error?.code, concludeOnly ? 'tool_permission' : undefined);
     assert.equal(audit.some((event) => event.event === 'output_continuation'), false);
-    for (const call of calls.slice(concludeOnly ? 0 : 1)) assert.ok(!call.body.tools.some((tool) => tool.name === 'bash'));
-    await assert.rejects(access(join(cwd, 'forbidden-length-repair')));
+    for (const call of calls.slice(concludeOnly ? 0 : 1)) assert.equal(call.body.tools.some((tool) => tool.name === 'bash'), !concludeOnly);
+    if (concludeOnly) await assert.rejects(access(join(cwd, 'correction-evidence')));
+    else assert.equal(await readFile(join(cwd, 'correction-evidence'), 'utf8'), 'corrected');
   });
 });
 
-test('length continuation preserves the soft deadline and cannot restore target tools after it', async (t) => {
+test('length continuation keeps authorized tools after the remaining-time notice', async (t) => {
   const { request, calls, cwd } = await fixture(t, 'anthropic-messages', [
     { thinking: 'synthetic unfinished reasoning', stopReason: 'max_tokens' },
-    { hang: true },
-    { tools: [{ name: 'bash', args: { command: 'touch forbidden-length-soft-deadline' } }] },
+    async () => { await new Promise((resolve) => setTimeout(resolve, 350)); return { tools: [{ name: 'bash', args: { command: 'printf continued > length-evidence' } }] }; },
+    ok,
   ]);
-  request.timeout_seconds = 1.2;
-  request.conclude_timeout_seconds = 0.8;
+  request.timeout_seconds = 2;
+  request.conclude_timeout_seconds = 1.8;
   const audit = [];
   const result = await runRequest(request, { audit: (event) => audit.push(event) });
-  assert.equal(result.status, 'failed', JSON.stringify(result));
-  assert.equal(result.error.code, 'tool_permission');
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
   assert.equal(calls.length, 3);
-  assert.ok(calls[1].body.tools.some((tool) => tool.name === 'bash'));
-  assert.ok(!calls[2].body.tools.some((tool) => tool.name === 'bash'));
+  assert.ok(calls[2].body.tools.some((tool) => tool.name === 'bash'));
   assert.equal(audit.filter((event) => event.event === 'output_continuation').length, 1);
-  assert.equal(audit.filter((event) => event.event === 'exploration_deadline').length, 1);
-  await assert.rejects(access(join(cwd, 'forbidden-length-soft-deadline')));
+  assert.equal(audit.filter((event) => event.event === 'execution_time_notice').length, 1);
+  assert.equal(await readFile(join(cwd, 'length-evidence'), 'utf8'), 'continued');
 });
 
 test('length with partial tool arguments fails without execution continuation or tool replay', async (t) => {
@@ -234,7 +234,7 @@ test('artifact_changed repair never extends the original deadline', async (t) =>
   assert.equal(result.error.submission_attempts, 1);
   assert.equal(result.result, null);
   assert.equal(calls.length, 3);
-  assert.deepEqual(calls[2].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+  assert.ok(calls[2].body.tools.some((tool) => tool.function.name === 'bash'));
 });
 
 test('strict tool arguments reject coercion and allow at most two repair rounds', async (t) => {
@@ -245,18 +245,44 @@ test('strict tool arguments reject coercion and allow at most two repair rounds'
   assert.equal(calls.length, 3);
 });
 
-test('invalid submission followed by bash in the same SDK batch cannot act on target', async (t) => {
+test('invalid submission keeps bash, read and write available for same-session evidence correction', async (t) => {
   const { request, calls, cwd } = await fixture(t, 'openai-chat-completions', [{ tools: [
     { name: 'submit_result', args: { accepted: true, data: {} } },
-    { name: 'bash', args: { command: 'touch should-not-exist' } },
-  ] }, ok]);
-  request.phase = 'explore_execute';
-  const result = await runRequest(request);
-  assert.equal(result.status, 'failed', JSON.stringify(result));
-  assert.equal(result.error.code, 'tool_permission');
-  assert.equal(result.error.repair_rounds, 0);
+    { name: 'bash', args: { command: 'printf original > correction.txt' } },
+  ] },
+  { tools: [{ name: 'read', args: { path: 'correction.txt' } }] },
+  { tools: [{ name: 'write', args: { path: 'corrected.txt', content: 'synthetic corrected evidence' } }] },
+  { tools: [{ name: 'register_artifact', args: { path: 'corrected.txt', kind: 'raw_output' } }] },
+  ok]);
+  const audit = [];
+  const result = await runRequest(request, { audit: (event) => audit.push(event) });
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  assert.equal(calls.length, 5);
+  assert.equal(audit.filter((event) => event.event === 'result_repair').length, 1);
+  assert.equal(audit.filter((event) => event.event === 'tool_execution_start' && event.tool_name === 'bash').length, 1);
+  assert.equal(await readFile(join(cwd, 'correction.txt'), 'utf8'), 'original');
+  assert.match(JSON.stringify(calls[2].body.messages), /original/);
+  assert.equal(await readFile(result.result.data.artifacts[0].path, 'utf8'), 'synthetic corrected evidence');
+  for (const call of calls) assert.ok(call.body.tools.some((tool) => tool.function.name === 'bash'));
+});
+
+test('valid candidate ends execution without running or poisoning trailing SDK tool calls', async (t) => {
+  const { request, calls, cwd } = await fixture(t, 'openai-chat-completions', [{ tools: [
+    ok.tools[0],
+    { name: 'bash', args: { command: 'touch forbidden-after-candidate' } },
+    { name: 'write', args: { path: 'forbidden-after-candidate-write', content: 'forbidden' } },
+    { name: 'register_artifact', args: { path: 'missing', kind: 'file' } },
+  ] }]);
+  const audit = [];
+  const result = await runRequest(request, { audit: (event) => audit.push(event) });
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
   assert.equal(calls.length, 1);
-  await assert.rejects(access(join(cwd, 'should-not-exist')));
+  assert.equal(result.result.data.status, 'ok');
+  assert.equal(audit.filter((event) => event.event === 'submission_tail_skipped').length, 3);
+  assert.equal(audit.some((event) => event.event === 'result_repair'), false);
+  assert.ok(!JSON.stringify(result).includes('tool_permission'));
+  await assert.rejects(access(join(cwd, 'forbidden-after-candidate')));
+  await assert.rejects(access(join(cwd, 'forbidden-after-candidate-write')));
 });
 
 test('no submission fails rather than extracting prose after repairs', async (t) => {
@@ -327,7 +353,7 @@ test('local bash timeout is returned to the model so it can submit a bounded res
   assert.match(JSON.stringify(calls[1].body), /Command timed out after 0\.05 seconds/);
 });
 
-test('exploration soft deadline enters readonly conclusion within the original deadline', async (t) => {
+test('remaining-time notice never aborts a provider stream or extends the hard deadline', async (t) => {
   const { request, calls } = await fixture(t, 'openai-chat-completions', [{ hang: true }, ok]);
   request.timeout_seconds = 1;
   request.conclude_timeout_seconds = 0.6;
@@ -335,65 +361,92 @@ test('exploration soft deadline enters readonly conclusion within the original d
   const started = performance.now();
   const result = await runRequest(parseRequest(request), { audit: (event) => audit.push(event) });
   const elapsed = performance.now() - started;
-  assert.equal(result.status, 'succeeded', JSON.stringify(result));
-  assert.equal(calls.length, 2);
-  assert.ok(calls[0].body.tools.some((tool) => tool.function.name === 'bash'));
-  assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
-  assert.match(JSON.stringify(calls[1].body), /exploration window has ended/i);
-  assert.ok(audit.some((event) => event.event === 'exploration_deadline'));
-  assert.ok(audit.some((event) => event.event === 'readonly_conclusion'));
-  assert.ok(elapsed < 1000, `readonly conclusion exceeded the original deadline: ${elapsed}ms`);
+  assert.equal(result.status, 'cancelled', JSON.stringify(result));
+  assert.equal(result.error.code, 'deadline_exceeded');
+  assert.equal(calls.length, 1);
+  assert.equal(audit.filter((event) => event.event === 'execution_time_notice').length, 1);
+  assert.equal(audit.some((event) => event.event === 'readonly_conclusion'), false);
+  assert.ok(elapsed < 1400, `original deadline was extended: ${elapsed}ms`);
 });
 
-test('authorized bash crossing the soft deadline is stopped without poisoning readonly delivery', async (t) => {
-  const script = "setInterval(()=>{},1000)";
+test('authorized bash crosses the former soft deadline and completes before normal submission', async (t) => {
+  const script = "setTimeout(()=>require('node:fs').writeFileSync('crossed-soft-deadline','completed'),400)";
   const { request, calls, cwd } = await fixture(t, 'openai-chat-completions', [
-    { tools: [{ name: 'bash', args: { command: `printf '%s' "$$" > soft-deadline.pid; exec node -e ${JSON.stringify(script)}` } }] },
+    { tools: [{ name: 'bash', args: { command: `node -e ${JSON.stringify(script)}` } }] },
     ok,
   ]);
-  request.phase = 'explore_execute';
-  request.timeout_seconds = 1.5;
-  request.conclude_timeout_seconds = 1;
+  request.timeout_seconds = 2;
+  request.conclude_timeout_seconds = 1.8;
   const audit = [];
   const result = await runRequest(parseRequest(request), { audit: (event) => audit.push(event) });
   assert.equal(result.status, 'succeeded', JSON.stringify(result));
   assert.equal(calls.length, 2);
-  assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+  assert.ok(calls[1].body.tools.some((tool) => tool.function.name === 'bash'));
   assert.equal(audit.some((event) => event.event === 'result_repair'), false);
   assert.ok(!JSON.stringify({ result, audit }).includes('tool_permission'));
   const start = audit.findIndex((event) => event.event === 'tool_execution_start' && event.tool_name === 'bash');
-  const cutoff = audit.findIndex((event) => event.event === 'exploration_deadline');
+  const notice = audit.findIndex((event) => event.event === 'execution_time_notice');
   const end = audit.findIndex((event) => event.event === 'tool_execution_end' && event.tool_name === 'bash');
-  const conclusion = audit.findIndex((event) => event.event === 'readonly_conclusion');
-  assert.ok(start >= 0 && start < cutoff && cutoff < end && end < conclusion, JSON.stringify(audit));
-  const pid = Number(await readFile(join(cwd, 'soft-deadline.pid'), 'utf8'));
-  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
-  let running = true;
-  for (let attempt = 0; attempt < 50 && running; attempt += 1) {
-    try { process.kill(pid, 0); await new Promise((resolve) => setTimeout(resolve, 20)); }
-    catch (error) { if (error.code === 'ESRCH') running = false; else throw error; }
-  }
-  assert.equal(running, false, `soft-deadline process ${pid} survived the active tool abort`);
+  assert.ok(start >= 0 && start < notice && notice < end, JSON.stringify(audit));
+  assert.equal(await readFile(join(cwd, 'crossed-soft-deadline'), 'utf8'), 'completed');
+  assert.match(JSON.stringify(calls[1].body.messages), /authorized tools remain available/i);
 });
 
-test('new target action after the soft deadline stays blocked', async (t) => {
-  const script = "const fs=require('node:fs');fs.writeFileSync('soft-deadline-started',String(process.pid));setInterval(()=>{},1000)";
+test('new authorized action after the former soft deadline remains available in external verification', async (t) => {
   const { request, calls, cwd } = await fixture(t, 'openai-chat-completions', [
-    { tools: [{ name: 'bash', args: { command: `node -e ${JSON.stringify(script)}` } }] },
-    { tools: [{ name: 'bash', args: { command: 'touch forbidden-after-soft-deadline' } }] },
+    async () => { await new Promise((resolve) => setTimeout(resolve, 350)); return { tools: [{ name: 'bash', args: { command: 'printf verified > after-soft-deadline' } }] }; },
+    ok,
   ]);
-  request.phase = 'explore_execute';
-  request.timeout_seconds = 1.5;
-  request.conclude_timeout_seconds = 1;
-  const result = await runRequest(parseRequest(request));
-  assert.equal(result.status, 'failed', JSON.stringify(result));
-  assert.equal(result.error.code, 'tool_permission');
+  request.phase = 'external_verify_execute';
+  request.timeout_seconds = 2;
+  request.conclude_timeout_seconds = 1.8;
+  const audit = [];
+  const result = await runRequest(parseRequest(request), { audit: (event) => audit.push(event) });
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
   assert.equal(calls.length, 2);
-  assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
-  await access(join(cwd, 'soft-deadline-started'));
-  const pid = Number(await readFile(join(cwd, 'soft-deadline-started'), 'utf8'));
-  t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
-  await assert.rejects(access(join(cwd, 'forbidden-after-soft-deadline')));
+  assert.equal(await readFile(join(cwd, 'after-soft-deadline'), 'utf8'), 'verified');
+  assert.equal(audit.filter((event) => event.event === 'execution_time_notice').length, 1);
+  assert.ok(calls[1].body.tools.some((tool) => tool.function.name === 'bash'));
+});
+
+test('hard deadline and user cancellation stop an in-flight local process before return', async (t) => {
+  for (const cancelled of [false, true]) await t.test(cancelled ? 'user_cancel' : 'hard_deadline', async (t) => {
+    const { request, cwd, calls } = await fixture(t, 'openai-chat-completions', [
+      { tools: [{ name: 'bash', args: { command: `printf '%s' "$$" > active.pid; exec node -e 'setInterval(()=>{},1000)'` } }] },
+      ok,
+    ]);
+    request.timeout_seconds = cancelled ? 2 : 0.6;
+    request.conclude_timeout_seconds = cancelled ? 1.8 : 0.4;
+    const controller = new AbortController();
+    let cancelTimer;
+    t.after(() => clearTimeout(cancelTimer));
+    const result = await runRequest(parseRequest(request), {
+      signal: controller.signal,
+      audit: (event) => {
+        if (cancelled && event.event === 'tool_execution_start' && event.tool_name === 'bash') cancelTimer = setTimeout(() => controller.abort(), 150);
+      },
+    });
+    assert.equal(result.status, 'cancelled', JSON.stringify(result));
+    assert.equal(result.error.code, cancelled ? 'cancelled' : 'deadline_exceeded');
+    assert.equal(calls.length, 1);
+    const pid = Number(await readFile(join(cwd, 'active.pid'), 'utf8'));
+    t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  });
+});
+
+test('explicit conclude and report requests never gain normal execution tools', async (t) => {
+  for (const phase of ['explore_conclude', 'report_execute']) await t.test(phase, async (t) => {
+    const { request, calls, cwd } = await fixture(t, 'openai-chat-completions', [
+      { tools: [{ name: 'bash', args: { command: 'touch forbidden-delivery-action' } }] },
+    ]);
+    request.phase = phase;
+    const result = await runRequest(parseRequest(request));
+    assert.equal(result.status, 'failed', JSON.stringify(result));
+    assert.equal(result.error.code, 'tool_permission');
+    assert.deepEqual(calls[0].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+    await assert.rejects(access(join(cwd, 'forbidden-delivery-action')));
+  });
 });
 
 test('bounded SDK bash timeout terminates the spawned process group', async (t) => {

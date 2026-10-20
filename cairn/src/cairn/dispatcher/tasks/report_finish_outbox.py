@@ -13,7 +13,7 @@ from threading import RLock
 from typing import Iterator, Literal, TypeAlias
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from cairn.dispatcher.protocol.client import ApiResult, CairnClient
 from cairn.server.models import AssessmentReportTaskRunResult
@@ -161,12 +161,16 @@ class ReportOutputMetadata(BaseModel):
     format: Literal["markdown"] = "markdown"
     report_generation_token: str | None = Field(default=None, max_length=256)
     report_template_key: str | None = Field(default=None, max_length=256)
+    # 仅供已有 exact output 原样重放；新生成请求不再写入模板修订号。
     report_template_version: int | None = None
     report_template_digest_sha256: str | None = Field(
         default=None,
         pattern=r"^[a-f0-9]{64}$",
     )
     report_policy_version: int | None = None
+    packet_version: int | None = None
+    output_contract_version: int | None = None
+    report_data_schema_version: int | None = None
     report_execution_plan_sha256: str | None = Field(
         default=None,
         pattern=r"^[a-f0-9]{64}$",
@@ -184,6 +188,11 @@ class ReportOutputMetadata(BaseModel):
         pattern=r"^[a-f0-9]{64}$",
     )
     completeness_rule_version: int | None = None
+
+    @model_serializer
+    def exact_metadata(self) -> dict[str, object]:
+        # 不向历史 exact output 补入新字段或默认 null，否则会改变 checksum 和重放请求。
+        return {key: getattr(self, key) for key in self.model_fields_set}
 
     @field_validator(
         "report_generation_token",

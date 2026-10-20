@@ -127,32 +127,31 @@ test('readonly inputs remain readable but cannot be registered as artifacts', as
   await assert.rejects(registry.register('.cairn/readonly-inputs/request.txt', 'file'), { code: 'artifact_invalid' });
 });
 
-test('managed readonly inputs outside workspace are readable but never registrable', async (t) => {
+test('managed report and project input roots are readable but never registrable or traversable', async (t) => {
   const { request, cwd } = await fixture(t);
   const managedRoot = await mkdtemp(join(tmpdir(), 'cairn-readonly-inputs-'));
+  const projectRoot = await mkdtemp(join(tmpdir(), 'cairn-project-inputs-'));
   const unrelatedRoot = await mkdtemp(join(tmpdir(), 'cairn-unrelated-inputs-'));
+  const roots = [managedRoot, projectRoot];
   t.after(async () => {
-    await rm(managedRoot, { recursive: true, force: true });
-    await rm(unrelatedRoot, { recursive: true, force: true });
+    for (const root of [...roots, unrelatedRoot]) await rm(root, { recursive: true, force: true });
   });
-  const managedFile = join(managedRoot, 'report-packet.json');
   const unrelatedFile = join(unrelatedRoot, 'untrusted.json');
-  await writeFile(managedFile, '{"version":1}');
   await writeFile(unrelatedFile, '{}');
-
-  assert.equal(
-    await evidencePath(cwd, managedFile, request.session_root, managedRoot),
-    managedFile,
-  );
-  await assert.rejects(
-    evidencePath(cwd, unrelatedFile, request.session_root, managedRoot),
-    { code: 'artifact_invalid' },
-  );
-  const registry = new ArtifactRegistry(cwd, request.session_root, managedRoot);
-  await assert.rejects(
-    registry.register(managedFile, 'file'),
-    { code: 'artifact_invalid' },
-  );
+  const registry = new ArtifactRegistry(cwd, request.session_root, roots);
+  for (const root of roots) {
+    const managedFile = join(root, 'report-packet.json');
+    await writeFile(managedFile, '{"version":1}');
+    assert.equal(await evidencePath(cwd, managedFile, request.session_root, roots), managedFile);
+    await assert.rejects(registry.register(managedFile, 'file'), { code: 'artifact_invalid' });
+    await symlink(unrelatedRoot, join(root, 'outside'));
+    await assert.rejects(evidencePath(cwd, join(root, 'outside', 'untrusted.json'), request.session_root, roots), { code: 'artifact_invalid' });
+  }
+  await assert.rejects(evidencePath(cwd, unrelatedFile, request.session_root, roots), { code: 'artifact_invalid' });
+  await mkdir(request.session_root, { recursive: true });
+  const sessionFile = join(request.session_root, 'private.jsonl');
+  await writeFile(sessionFile, '{}');
+  await assert.rejects(evidencePath(cwd, sessionFile, request.session_root, roots), { code: 'artifact_invalid' });
 });
 
 test('malformed tool JSON is not accepted by SDK permissive partial parser', async (t) => {

@@ -4,7 +4,7 @@ worker 输出 fact 带 vulnerability 字段时由 conclude 端点自动确认入
 本 router 提供人工独立创建、列表、详情、状态流转、fact→漏洞查询。
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from cairn.server.auth import (
     RequestPrincipal,
@@ -59,6 +59,7 @@ def get_all_vulnerabilities_route(
             tenant_id=tenant_id,
             severity=severity,
             status=status,
+            principal=principal,
         )
         if principal.is_super_admin:
             # 跨 Tenant 读取仍需保留与显式管理接口一致的审计轨迹。
@@ -116,7 +117,9 @@ def get_duplicate_vulnerability_candidates_route(project_id: str, vuln_id: str):
     dependencies=[Depends(require_user_tenant_project)],
 )
 def create_vulnerability_route(project_id: str, body: CreateVulnerabilityRequest):
-    # 人工独立创建：source_fact_id 为空（body 不传或显式 None）；自动确认路径走 conclude 端点。
+    # 人工入口不能冒充某次自动发现；自动来源由 conclude 事务绑定真实 Fact/TaskRun。
+    if body.source_fact_id is not None:
+        raise HTTPException(422, "automatic_vulnerability_requires_conclude")
     with get_conn() as conn:
         return create_vulnerability(conn, project_id, body)
 
@@ -136,10 +139,10 @@ def get_verifier_target_route(project_id: str, observation_id: str):
     response_model=VulnerabilityDetail,
     dependencies=[Depends(require_tenant_project)],
 )
-def get_vulnerability_route(project_id: str, vuln_id: str):
-    # 详情聚合来源 fact 描述 + 产出 run 日志，即便 packet_artifact_id 为空也能展示复现信息。
+def get_vulnerability_route(project_id: str, vuln_id: str, observation_id: str | None = None):
+    # 主证据和补充资料始终来自服务端选定的同一次发现。
     with get_conn() as conn:
-        return get_vulnerability_detail(conn, project_id, vuln_id)
+        return get_vulnerability_detail(conn, project_id, vuln_id, observation_id)
 
 
 @router.get(

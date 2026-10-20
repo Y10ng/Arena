@@ -2,7 +2,6 @@ export interface ReportTemplateCatalogEntry {
   key: string
   name: string
   description: string
-  version: number
   digest_sha256: string
   compatibility_profiles: string[]
 }
@@ -11,31 +10,20 @@ export interface ReportTemplate {
   key: string
   name: string
   description: string
-  latest_version: number | null
+  markdown_content: string | null
+  digest_sha256: string | null
+  compatibility_profiles: string[]
   created_at: string
-  archived_at: string | null
+  updated_at: string
 }
 
-export interface CreateReportTemplateRequest {
-  key: string
+export interface UpdateReportTemplateRequest {
   name: string
   description?: string
-}
-
-export interface ReportTemplateVersion {
-  template_key: string
-  version: number
-  digest_sha256: string
-  message: string | null
-  created_by: string | null
-  created_at: string
-}
-
-export interface ReportTemplateVersionDetail extends ReportTemplateVersion {
   markdown_content: string
+  compatibility_profiles?: string[]
 }
 
-export interface CreateReportTemplateVersionRequest {
-  markdown_content: string
-  message?: string | null
+export interface CreateReportTemplateRequest extends UpdateReportTemplateRequest {
+  key?: string | null
 }

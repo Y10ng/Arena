@@ -10,12 +10,6 @@ def next_project_id(conn: sqlite3.Connection) -> str:
     return f"proj_{row['value']:03d}"
 
 
-def next_project_group_id(conn: sqlite3.Connection) -> str:
-    conn.execute("UPDATE counters SET value = value + 1 WHERE name = 'project_group'")
-    row = conn.execute("SELECT value FROM counters WHERE name = 'project_group'").fetchone()
-    return f"pg_{row['value']:03d}"
-
-
 def next_worker_template_id(conn: sqlite3.Connection) -> str:
     conn.execute("UPDATE counters SET value = value + 1 WHERE name = 'worker_template'")
     row = conn.execute("SELECT value FROM counters WHERE name = 'worker_template'").fetchone()
@@ -25,6 +19,8 @@ def next_worker_template_id(conn: sqlite3.Connection) -> str:
 def _next_scoped_id(
     conn: sqlite3.Connection, kind: str, prefix: str, project_id: str
 ) -> str:
+    # 复测写入与永久删除共用项目锁；不能让迟到记录越过 pending fence。
+    lock_verification_project_write(conn, project_id)
     # 项目内 ID 独立计数，导出的 fact/intent 序号更短也更容易人工阅读。
     conn.execute(
         "INSERT INTO scoped_counters (project_id, kind, value) VALUES (?, ?, 0) ON CONFLICT DO NOTHING",
@@ -86,6 +82,20 @@ def next_injection_payload_id(conn: sqlite3.Connection, project_id: str) -> str:
     return _next_scoped_id(conn, "injection_payload", "p", project_id)
 
 
+def require_project_not_purging(conn, project_id: str) -> None:
+    row = conn.execute("SELECT purge_state FROM verification_requests WHERE project_id = ?", (project_id,)).fetchone()
+    if row is not None and row["purge_state"] is not None:
+        raise HTTPException(410, "本轮复测已进入永久删除，不能再读取或写入业务记录")
+
+
+def lock_verification_project_write(conn, project_id: str) -> None:
+    if conn.execute("SELECT 1 FROM verification_requests WHERE project_id = ?", (project_id,)).fetchone() is not None:
+        conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
+        require_project_not_purging(conn, project_id)
+        if conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone() is None:
+            raise HTTPException(404, "Project not found")
+
+
 def get_project_or_404(
     conn: sqlite3.Connection,
     project_id: str,
@@ -102,4 +112,5 @@ def get_project_or_404(
         ).fetchone()
     if row is None:
         raise HTTPException(404, "Project not found")
+    require_project_not_purging(conn, project_id)
     return row

@@ -7,10 +7,10 @@
   overflow: hidden;
 }
 
-/* 侧栏使用纯白表面，通过边框与近白工作区建立稳定层次。 */
+/* 侧栏与画布轻微分层，导航选中态使用共享柔蓝，不依赖厚阴影。 */
 .sidebar {
   width: var(--layout-sidebar-width);
-  background-color: var(--bg-surface);
+  background-color: var(--color-sidebar);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -20,7 +20,7 @@
 }
 
 .brand {
-  min-height: 72px;
+  min-height: 64px;
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--border-faint);
   display: flex;
@@ -69,7 +69,7 @@
   margin-top: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: var(--space-1);
   flex-grow: 1;
   overflow-y: auto;
 }
@@ -78,14 +78,15 @@
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding: 10px var(--space-3);
+  min-height: var(--space-7);
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-muted);
   text-decoration: none;
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
   font-weight: var(--font-medium);
-  transition: all var(--dur-fast) var(--ease);
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
   position: relative;
   overflow: hidden;
   cursor: pointer;
@@ -98,20 +99,9 @@
 }
 
 .nav-item.active {
-  background-color: var(--surface-selected);
+  background-color: var(--accent-dim);
   color: var(--accent);
   font-weight: var(--font-semibold);
-}
-
-.nav-item.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 15%;
-  height: 70%;
-  width: 3px;
-  background-color: var(--accent);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 
 .nav-item .icon {
@@ -120,10 +110,6 @@
   justify-content: center;
   flex-shrink: 0;
   transition: transform var(--dur-fast) var(--ease);
-}
-
-.nav-item:hover .icon {
-  transform: scale(1.08);
 }
 
 .nav-item .label {
@@ -171,8 +157,9 @@
 }
 
 .btn-sub-more {
-  width: 24px;
-  height: 24px;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  background: transparent;
   border-radius: var(--radius-sm);
   position: absolute;
   z-index: 1;
@@ -244,13 +231,16 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  padding: 8px var(--space-3);
+  min-height: var(--control-height);
+  padding: var(--space-2) var(--space-3);
   border-radius: var(--radius-md);
   color: var(--text-muted);
   text-decoration: none;
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   font-weight: var(--font-medium);
-  transition: all var(--dur-fast) var(--ease);
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
   position: relative;
   overflow: hidden;
   cursor: pointer;
@@ -279,28 +269,16 @@
 
 .nav-sub-item:hover .icon {
   color: var(--text);
-  transform: scale(1.08);
 }
 
 .nav-sub-item.active {
-  background-color: var(--surface-selected);
+  background-color: var(--accent-dim);
   color: var(--accent);
   font-weight: var(--font-semibold);
 }
 
 .nav-sub-item.active .icon {
   color: var(--accent);
-}
-
-.nav-sub-item.active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 20%;
-  height: 60%;
-  width: 3px;
-  background-color: var(--accent);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 
 /* Dispatcher status bar */
@@ -387,14 +365,23 @@
   position: relative;
 }
 
-/* 顶栏保持白色玻璃表面，以标准边框和轻阴影从画布中分离。 */
+/* 将剩余高度交给工作区内部的列表、编辑器和正文滚动区。 */
+.content-viewport--workspace {
+  display: flex;
+  flex-direction: column;
+}
+
+.content-viewport--workspace > :deep(*) {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 顶栏沿用侧栏表面，避免玻璃效果与阴影叠加干扰正文。 */
 .topbar {
   height: var(--layout-topbar-height);
-  background-color: var(--glass-bg);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--border);
-  box-shadow: var(--shadow-xs);
+  background-color: var(--color-sidebar);
+  border-bottom: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -422,6 +409,8 @@
 }
 
 .collapse-btn {
+  min-width: var(--control-height-sm);
+  min-height: var(--control-height-sm);
   color: var(--text-muted);
   cursor: pointer;
   padding: 6px;
@@ -429,7 +418,10 @@
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-md);
-  transition: all var(--dur-fast) var(--ease);
+  background-color: transparent;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
 }
 
 .collapse-btn:hover {
@@ -441,7 +433,7 @@
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   font-weight: var(--font-medium);
   color: var(--text-muted);
 }
@@ -554,7 +546,8 @@
 
 /* Command Trigger button - Refined Search Capsule */
 .btn-command {
-  background-color: var(--bg-surface);
+  min-height: var(--control-height-sm);
+  background-color: var(--bg-inset);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 6px 10px 6px 12px;
@@ -566,7 +559,10 @@
   cursor: pointer;
   width: 170px;
   justify-content: space-between;
-  transition: all var(--dur-fast) var(--ease);
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
 }
 
 .btn-command:hover {

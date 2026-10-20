@@ -77,48 +77,35 @@ def build_vulnerability_for_conclude(
     slot_key: str | None = None,
     require_current_run_reproduction: bool = False,
 ) -> dict[str, object] | None:
-    """从 Worker payload 提取漏洞并把 packet Artifact handle 映射为 Server ID。"""
-    from .artifact_records import resolve_artifact_id_by_handle
+    """只转换证据条目中的引用，缺失一侧保持缺失，不重新拼接报文。"""
+    from cairn.evidence_contracts import WorkerEvidenceItem, evidence_refs
+    from .artifact_records import resolve_declared_evidence_items
     from ..contracts import extract_vulnerability
+
     vuln = extract_vulnerability(payload) if isinstance(payload, dict) else None
     if vuln is None:
         return None
-    packet_handle = vuln.get("packet_artifact_handle")
-    packet_aid = resolve_artifact_id_by_handle(
-        packet_handle,
-        declared_artifacts,
-    )
-    current_artifact_ids = _current_artifact_ids(declared_artifacts)
-    if packet_handle and packet_aid not in current_artifact_ids:
-        from .artifact_records import UnresolvedArtifactEvidenceError
-
-        raise UnresolvedArtifactEvidenceError(
-            f"unresolved packet artifact handle: {packet_handle}"
+    try:
+        items = resolve_declared_evidence_items(
+            [WorkerEvidenceItem.model_validate(item) for item in vuln["evidence_items"]],
+            declared_artifacts,
+            require_current_run=True,
         )
-    if packet_aid not in current_artifact_ids:
-        packet_aid = None
-    complete_exchange = bool(
-        str(vuln.get("repro_request") or "").strip()
-        and str(vuln.get("repro_response") or "").strip()
-    )
-    if (
-        require_current_run_reproduction
-        and packet_aid is None
-        and not complete_exchange
-    ):
+    except ValueError as exc:
+        raise CoverageEvidenceInsufficientError("finding evidence could not be resolved") from exc
+    if require_current_run_reproduction and not evidence_refs(items):
         raise CoverageEvidenceInsufficientError(
-            "finding requires a current-run packet artifact or complete request/response"
+            "finding requires evidence artifacts from the current execution"
         )
     return {
+        "schema_version": 2,
         "title": vuln["title"],
         "severity": vuln["severity"],
         "vuln_type": vuln["vuln_type"],
         "target": vuln["target"],
         "remediation": vuln["remediation"],
         "confidence": vuln["confidence"],
-        "packet_artifact_id": packet_aid,
-        "repro_request": vuln.get("repro_request", ""),
-        "repro_response": vuln.get("repro_response", ""),
+        "evidence_items": [item.model_dump(exclude_none=True) for item in items],
         "identity": vuln.get("identity"),
         "slot_key": slot_key,
     }
@@ -311,7 +298,7 @@ def write_conclude_result_with_fact_id(
 ) -> ConcludeWriteResult:
     evidence_refs = evidence or []
     # conclude 写回统一入口会同时写协议事件，并在失败时尽力释放 intent。
-    # vulnerability 为 dispatcher resolve 后的 server 格式 dict（含 packet_artifact_id），透传自动确认。
+    # vulnerability 已将同一证据条目的句柄解析成 Server Artifact ID，原样交给接受端校验。
     response = _conclude_with_transient_retries(
         client,
         project_id,

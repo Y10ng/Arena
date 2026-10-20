@@ -58,14 +58,9 @@
               </button>
             </h2>
           </div>
-        </div>
-
-        <div v-if="workspaceStatus" class="header-middle" aria-label="项目运行状态">
-          <Badge :tone="workspaceStatus.tone" size="sm">{{ workspaceStatus.label }}</Badge>
-          <span class="workspace-status-reason">{{ workspaceStatus.detail }}</span>
-          <span v-if="workspaceStatus.degradedMessage" class="workspace-status-warning">
-            {{ workspaceStatus.degradedMessage }}
-          </span>
+          <Badge v-if="projectStatus" :tone="projectStatus.tone" size="sm" aria-label="项目状态">{{
+            projectStatus.label
+          }}</Badge>
         </div>
 
         <div class="header-right">
@@ -170,38 +165,49 @@
             {{ warning.action }}：{{ warning.reason }}
           </span>
         </div>
-
-        <div class="workspace-meta" aria-label="项目归属信息">
-          <span>项目组：{{ project.group_name || '未分组' }}</span>
-          <span>场景：{{ getScenarioLabel(project) }}</span>
-          <span>执行停止时间：{{ project.explore_deadline || '不限' }}</span>
-          <span v-if="pendingSchedule"
-            >{{ scheduleRuleLabel(pendingSchedule) }} ·
-            {{ scheduleLocalTime(pendingSchedule.next_run_at, pendingSchedule.timezone) }} ·
-            {{ pendingSchedule.timezone }} ·
-            {{ scheduleStatusLabels[pendingSchedule.status] }}</span
-          >
-          <span v-if="pendingSchedule?.block_reason">{{ pendingSchedule.block_reason }}</span>
-          <span v-if="pendingScheduleError">启动计划查询失败，可进入计划任务视图重试。</span>
-          <details v-if="authStore.isSuperAdmin" class="workspace-admin-meta">
-            <summary>项目信息</summary>
-            <dl>
-              <div>
-                <dt>Tenant</dt>
-                <dd>{{ project.tenant_name }}</dd>
-              </div>
-              <div>
-                <dt>Tenant ID</dt>
-                <dd class="mono">{{ project.tenant_id }}</dd>
-              </div>
-              <div v-if="project.tenant_owner_login">
-                <dt>所有者</dt>
-                <dd>{{ project.tenant_owner_login }}</dd>
-              </div>
-            </dl>
-          </details>
-        </div>
       </header>
+      <Alert v-if="pendingSchedule?.block_reason || pendingScheduleError" tone="warning">
+        {{ pendingSchedule?.block_reason || '启动计划查询失败，可进入计划任务视图重试。' }}
+      </Alert>
+      <Dialog
+        v-model:open="projectInfoOpen"
+        title="项目信息"
+        description="项目归属、场景与执行期限。"
+        size="sm"
+      >
+        <dl class="workspace-project-information">
+          <div>
+            <dt>场景</dt>
+            <dd>{{ getScenarioLabel(project) }}</dd>
+          </div>
+          <div>
+            <dt>执行停止时间</dt>
+            <dd>{{ project.explore_deadline || '不限' }}</dd>
+          </div>
+          <div v-if="pendingSchedule">
+            <dt>启动计划</dt>
+            <dd>
+              {{ scheduleRuleLabel(pendingSchedule) }} ·
+              {{ scheduleLocalTime(pendingSchedule.next_run_at, pendingSchedule.timezone) }} ·
+              {{ pendingSchedule.timezone }} · {{ scheduleStatusLabels[pendingSchedule.status] }}
+            </dd>
+          </div>
+          <template v-if="authStore.isSuperAdmin">
+            <div>
+              <dt>Tenant</dt>
+              <dd>{{ project.tenant_name }}</dd>
+            </div>
+            <div>
+              <dt>Tenant ID</dt>
+              <dd class="mono">{{ project.tenant_id }}</dd>
+            </div>
+            <div v-if="project.tenant_owner_login">
+              <dt>所有者</dt>
+              <dd>{{ project.tenant_owner_login }}</dd>
+            </div>
+          </template>
+        </dl>
+      </Dialog>
       <Alert
         v-if="workspaceStore.error"
         class="workspace-refresh-warning"
@@ -588,7 +594,7 @@ import {
   projectResourceKindLabel,
 } from './projectResources'
 import ProjectResourceBatchUploader from './ProjectResourceBatchUploader.vue'
-import { resolveWorkspaceStatus } from './workspaceStatus'
+import { resolveProjectStatus } from './workspaceStatus'
 import {
   useProjectRuntime,
   useProjectLifecycle,
@@ -621,7 +627,7 @@ const projectLibraryBindings = computed(() => workspaceStore.projectDetail?.libr
 const projectId = computed(() => project.value?.id || '')
 
 const { data: runtimeData, unavailable: runtimeUnavailable } = useProjectRuntime(projectId)
-const lifecycleStatus = computed(() => project.value?.status || 'active')
+const lifecycleStatus = computed(() => project.value?.status || '')
 const { data: pendingSchedule, isError: pendingScheduleError } = useQuery({
   queryKey: computed(() => ['project-start-schedule', projectId.value, project.value?.schedule_id]),
   queryFn: async () =>
@@ -654,16 +660,9 @@ const resourceMutationMessage = computed(() => {
     ? '项目已安全暂停，资料变更对恢复后的 TaskRun 生效。'
     : '项目已结束，资料变更仅用于后续允许的任务，不会恢复评估。'
 })
-const workspaceStatus = computed(() => {
-  const detail = workspaceStore.projectDetail
-  return detail
-    ? resolveWorkspaceStatus({
-        detail,
-        runtime: runtimeData.value,
-        runtimeUnavailable: runtimeUnavailable.value,
-      })
-    : null
-})
+const projectStatus = computed(() =>
+  project.value ? resolveProjectStatus(project.value.status) : null,
+)
 const canReopen = computed(
   () =>
     project.value?.status === 'completed' &&
@@ -1096,7 +1095,9 @@ const saveReopen = async () => {
 }
 
 const isMoreOpen = ref(false)
+const projectInfoOpen = ref(false)
 const moreMenuItems = computed<readonly DropdownMenuOption[]>(() => [
+  { value: 'project-info', label: '项目信息' },
   { value: 'workers', label: 'Workers' },
   {
     value: 'resources',
@@ -1109,7 +1110,8 @@ const moreMenuItems = computed<readonly DropdownMenuOption[]>(() => [
 
 function handleMoreMenuSelect(value: string) {
   isMoreOpen.value = false
-  if (value === 'workers') void openWorkersDialog()
+  if (value === 'project-info') projectInfoOpen.value = true
+  else if (value === 'workers') void openWorkersDialog()
   else if (value === 'resources') void openResourcesDialog()
   else if (value === 'export-project-yaml') void exportProjectYaml()
   else if (value === 'export-vulnerability-evidence-archive') downloadVulnerabilityEvidenceArchive()

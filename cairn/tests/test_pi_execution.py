@@ -1710,7 +1710,7 @@ def test_pi_audit_retains_full_raw_stream_before_projecting_events(tmp_path):
 def test_report_executes_once_from_frozen_packet_and_never_accepts_failed_process(monkeypatch, failure, retry_lifecycle):
     from cairn.dispatcher.protocol.client import ApiResult
     from cairn.dispatcher.tasks import report
-    from test_report_frozen_rendering import _data, _packet
+    from test_report_frozen_rendering import V3_TEMPLATE, _data, _packet
 
     packet = _packet()
     artifacts, updates, calls = [], [], []
@@ -1797,7 +1797,14 @@ def test_report_executes_once_from_frozen_packet_and_never_accepts_failed_proces
     status = report.run_report_task(
         config, Client(), manager, project, "frozen graph", worker(), prompt_group="default", task_run_id="t",
         durable_request=True, report_generation_token="fixture-generation", report_claim_token="fixture-claim",
-        report_execution_plan={"packet_version": 2, "output_contract_version": 2, "completeness_rule_version": 2},
+        report_execution_plan={
+            "packet_version": 2, "output_contract_version": 3, "completeness_rule_version": 1,
+            "template_profile": "assessment-report-packet-v1",
+        },
+        report_template_key="fixture-v3",
+        report_template_markdown=V3_TEMPLATE,
+        report_template_digest_sha256=sha256(V3_TEMPLATE.encode()).hexdigest(),
+        report_template_compatibility_profiles=["assessment-report-packet-v1"],
         frozen_report_prompt="Use the frozen packet {{report_packet_json}} and submit_result.",
         finish_state=finish_state,
         finish_outbox=ephemeral_report_finish_outbox(),
@@ -1832,7 +1839,23 @@ def test_report_executes_once_from_frozen_packet_and_never_accepts_failed_proces
     assert finish_state.input_snapshot.artifact_id == "a1"
     assert len(calls) == (0 if failure == "startup_request" else 1)
     assert artifacts[0]["filename"] == "report-input-snapshot.json"
-    assert json.loads(artifacts[0]["content"])["report_packet"] == packet
+    frozen_snapshot = json.loads(artifacts[0]["content"])
+    assert frozen_snapshot["report_packet"] == packet
+    assert frozen_snapshot["report_template"] == {
+        "key": "fixture-v3", "markdown_content": V3_TEMPLATE,
+        "digest_sha256": sha256(V3_TEMPLATE.encode()).hexdigest(),
+        "compatibility_profiles": ["assessment-report-packet-v1"],
+    }
+    for artifact in artifacts:
+        if artifact["filename"] in {"report-input-snapshot.json", report.REPORT_ARTIFACT_FILENAME}:
+            assert artifact["metadata"]["packet_version"] == 2
+            assert artifact["metadata"]["output_contract_version"] == 3
+            assert artifact["metadata"]["report_data_schema_version"] == 2
+            assert "report_template_version" not in artifact["metadata"]
+    if calls:
+        assert "<frozen_report_template>" in calls[0]["prompt"]
+        assert V3_TEMPLATE in calls[0]["prompt"]
+        assert "finding:v1" in calls[0]["prompt"] and "finding:v2" in calls[0]["prompt"]
     reports = [artifact for artifact in artifacts if artifact["filename"] == report.REPORT_ARTIFACT_FILENAME]
     assert len(reports) == (1 if failure is None else 0)
     assert finish_state.task_run_result["status"] == (

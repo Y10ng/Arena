@@ -58,7 +58,6 @@ const baseProject = {
   title: '测试项目',
   status: 'stopped',
   scenario_key: 'default-copy-v2',
-  group_name: null,
   tenant_name: 'admin',
   tenant_id: 'tenant_test',
   tenant_owner_login: 'admin',
@@ -262,6 +261,18 @@ afterEach(() => {
 })
 
 describe('ProjectWorkspace shared control migration', () => {
+  it('keeps project status beside its title and moves low-frequency metadata into More', async () => {
+    const wrapper = await mountWorkspace('stopped')
+    expect(wrapper.find('.header-left [aria-label="项目状态"]').exists()).toBe(true)
+    expect(wrapper.find('.header-middle').exists()).toBe(false)
+    expect(wrapper.find('.workspace-meta').exists()).toBe(false)
+    await selectMoreItem(wrapper, '项目信息')
+    const information = document.body.querySelector('.workspace-project-information')!
+    expect(information.textContent).toContain('执行停止时间不限')
+    expect(information.textContent).toContain('项目组未分组')
+    wrapper.unmount()
+  })
+
   it('keeps stale workspace data visible in an Alert', async () => {
     workspaceStore.error = '轮询失败'
     const wrapper = await mountWorkspace()
@@ -329,7 +340,7 @@ describe('ProjectWorkspace shared control migration', () => {
     expect([...summary.querySelectorAll('dd')].map((item) => item.textContent?.trim())).toEqual(
       expect.arrayContaining(['3', '不限']),
     )
-    expect(wrapper.get('.workspace-meta').text()).toContain('执行停止时间：不限')
+    expect(wrapper.find('.workspace-meta').exists()).toBe(false)
     expect(summary.textContent).not.toContain('预算')
 
     document.body.querySelector<HTMLInputElement>('input[aria-label="授权无限期有效"]')?.click()
@@ -475,6 +486,7 @@ describe('ProjectWorkspace shared control migration', () => {
     const items = Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'))
     expect(menu).not.toBeNull()
     expect(items.map((item) => item.textContent)).toEqual([
+      '项目信息',
       'Workers',
       '资料',
       '导出项目配置 YAML',
@@ -482,7 +494,7 @@ describe('ProjectWorkspace shared control migration', () => {
       '彻底删除项目',
     ])
 
-    items[4]?.click()
+    items.find((item) => item.textContent === '彻底删除项目')?.click()
     await flushPromises()
 
     expect(document.body.querySelector('[role="menu"]')).toBeNull()

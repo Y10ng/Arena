@@ -8,6 +8,7 @@ from io import BytesIO
 import re
 from typing import BinaryIO, Iterator
 
+from cairn.evidence_contracts import EvidenceItem, WorkerEvidenceItem
 from cairn.server.schemas.candidates import CANDIDATE_MAX_ARTIFACTS, CANDIDATE_MAX_ARTIFACT_BYTES
 
 from .common_base import *
@@ -68,6 +69,39 @@ def resolve_declared_artifact_evidence_refs(
         _resolve_declared_artifact_evidence_ref(ref, declared_artifacts)
         for ref in refs
     ]
+
+
+def resolve_declared_evidence_items(
+    items: list[WorkerEvidenceItem],
+    declared_artifacts: ProcessArtifactRecord,
+    *,
+    require_current_run: bool = False,
+) -> list[EvidenceItem]:
+    """解析同一条目内各侧引用；本轮证据只允许映射到已完整上传的 Artifact。"""
+    current_ids = set(declared_artifacts.artifact_ids_by_handle.values())
+    resolved: list[EvidenceItem] = []
+    for item in items:
+        value = item.model_dump(exclude_none=True)
+        for side in ("request", "response", "artifact"):
+            ref = getattr(item, side)
+            if ref is None:
+                continue
+            identity = ref.artifact_handle or ref.artifact_id
+            mapped = _resolve_declared_artifact_evidence_ref(
+                EvidenceRef(
+                    artifact_id=identity,
+                    pointer=ref.pointer,
+                    verifier_run_id=ref.verifier_run_id,
+                ),
+                declared_artifacts,
+            )
+            if require_current_run and mapped.artifact_id not in current_ids:
+                raise UnresolvedArtifactEvidenceError(
+                    "evidence item must reference an artifact uploaded by this execution"
+                )
+            value[side] = mapped.model_dump(exclude_none=True)
+        resolved.append(EvidenceItem.model_validate(value))
+    return resolved
 
 
 def resolve_optional_fact_evidence_refs(

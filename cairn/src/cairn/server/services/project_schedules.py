@@ -22,7 +22,6 @@ from .libraries import (
     resolve_current_library_revisions, validate_library_revision_content,
 )
 from .project_authorization import authorization_scope_projection, project_authorization_block_reason
-from .project_groups import get_project_group_or_404
 from .project_records import create_project_record, project_pause_draining
 from .project_resources import validate_project_resource_records
 from .schedule_resources import (
@@ -79,7 +78,6 @@ def _creator_available(conn, row):
 
 
 def _validate_input(conn, project: CreateProjectRequest, tenant_id: str, now: datetime):
-    get_project_group_or_404(conn, project.group_id, tenant_id=tenant_id)
     scenario = get_scenario_or_404(conn, resolve_scenario_key(conn, project.scenario))
     validate_scenario_values(conn, [scenario])
     validate_tenant_worker_selection(conn, tenant_id=tenant_id, worker_ids=project.tenant_worker_ids, require_all_roles=True)
@@ -287,9 +285,6 @@ def _lock_project(conn, project_id):
 
 
 def _validate_pending(conn, project, current, *, require_scope=True):
-    if project["group_id"] is None:
-        raise HTTPException(409, "项目组已失效，请重新指定项目组")
-    get_project_group_or_404(conn, project["group_id"], tenant_id=project["tenant_id"])
     get_scenario_or_404(conn, project["scenario_key"])
     from cairn.server.schemas.scenarios import Scenario
     from .assessment_policy import parse_scenario_snapshot, require_execution_contract

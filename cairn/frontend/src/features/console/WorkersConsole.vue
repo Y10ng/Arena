@@ -504,8 +504,8 @@ function nextId(prefix: string, items: Array<Record<string, unknown>>) {
 
 .kv-row span {
   color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 700;
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
 }
 
 .kv-row code {
@@ -541,7 +541,8 @@ function nextId(prefix: string, items: Array<Record<string, unknown>>) {
 .config-section h3 {
   margin: 0;
   color: var(--text);
-  font-size: 13px;
+  font-size: var(--text-lg);
+  font-weight: var(--font-semibold);
 }
 
 .section-title-row {

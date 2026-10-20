@@ -12,6 +12,7 @@ from hashlib import sha256
 import json
 from dataclasses import dataclass, replace
 import logging
+import re
 import time
 
 from cairn.assessment_contracts import GOAL_DRIVEN_PROTOCOL
@@ -39,7 +40,12 @@ from cairn.dispatcher.tasks.common import (
     retry_graph_write,
     build_report_readonly_input_references,
 )
-from cairn.dispatcher.worker_protocol.submission import ReportData
+from cairn.dispatcher.worker_protocol.submission import (
+    REPORT_DATA_SCHEMA_VERSION,
+    REPORT_FACT_REFS,
+    ReportData,
+    ReportFactReference,
+)
 from cairn.dispatcher.worker_result_gateway import (
     WorkerRequestError,
     WorkerResultFailure,
@@ -314,7 +320,7 @@ def _frozen_execution_error(
         "execution_engine": "pi",
         "report_policy_version": 1,
         "packet_version": 2,
-        "output_contract_version": 2,
+        "output_contract_version": 3,
         "completeness_rule_version": 1,
     }
     for key, expected in required_versions.items():
@@ -623,7 +629,7 @@ def run_post_completion_report(
     generation_token: str | None = None
     claim_token: str | None = None
     template_key: str | None = None
-    template_version: int | None = None
+    template_compatibility_profiles: list[str] | None = None
     template_digest_sha256: str | None = None
     template_markdown: str | None = None
     report_execution_plan_json: str | None = None
@@ -631,7 +637,6 @@ def run_post_completion_report(
     frozen_report_prompt: str | None = None
     report_execution_plan_sha256: str | None = None
     report_prompt_digest_sha256: str | None = None
-    manual_request = False
     delivery_context = None
     authenticated_dispatcher_id = config.dispatcher_id
     if durable:
@@ -711,7 +716,6 @@ def run_post_completion_report(
                     authenticated_dispatcher_id = owner
                 if "delivery_retry" in context:
                     delivery_context = context
-            manual_request = bool(claim.data.get("requested_at"))
             value = claim.data.get("task_run_id")
             if isinstance(value, str) and value:
                 task_run_id = value
@@ -722,7 +726,7 @@ def run_post_completion_report(
             if isinstance(claim_value, str) and claim_value:
                 claim_token = claim_value
             key_value = claim.data.get("template_key")
-            version_value = claim.data.get("template_version")
+            profiles_value = claim.data.get("template_compatibility_profiles")
             digest_value = claim.data.get("template_digest_sha256")
             markdown_value = claim.data.get("template_markdown")
             plan_value = claim.data.get("report_execution_plan_json")
@@ -731,8 +735,8 @@ def run_post_completion_report(
             prompt_digest_value = claim.data.get("report_prompt_digest_sha256")
             if isinstance(key_value, str) and key_value:
                 template_key = key_value
-            if isinstance(version_value, int):
-                template_version = version_value
+            if isinstance(profiles_value, list) and all(isinstance(value, str) and value for value in profiles_value):
+                template_compatibility_profiles = profiles_value
             if isinstance(digest_value, str) and digest_value:
                 template_digest_sha256 = digest_value
             if isinstance(markdown_value, str) and markdown_value:
@@ -789,8 +793,8 @@ def run_post_completion_report(
         knowledge = knowledge_value if isinstance(knowledge_value, str) else None
 
     # 旧尝试即使同 generation 已写出 Artifact，也不能替代本次 claim 的结果。
-    if durable and manual_request:
-        if not all((template_key, template_version, template_digest_sha256, template_markdown)):
+    if durable:
+        if not all((template_key, template_compatibility_profiles, template_digest_sha256, template_markdown)):
             LOG.warning("report finalization template snapshot missing project=%s", project_id)
             finish_disposition = _finish_report_claim(
                 client,
@@ -844,7 +848,7 @@ def run_post_completion_report(
         report_generation_token=generation_token,
         report_claim_token=claim_token,
         report_template_key=template_key,
-        report_template_version=template_version,
+        report_template_compatibility_profiles=template_compatibility_profiles,
         report_template_digest_sha256=template_digest_sha256,
         report_template_markdown=template_markdown,
         durable_request=durable,
@@ -1083,6 +1087,19 @@ def _report_completeness_error(
     missing = sorted(id_to_title.keys() - seen)
     if missing:
         return f"report_vulnerability_missing:{missing[0]}"
+    required_refs = {*REPORT_FACT_REFS, *(f"finding:{key}" for key in id_to_title)}
+    seen_refs: set[str] = set()
+    for item in result.layout:
+        if not isinstance(item, ReportFactReference):
+            continue
+        if item.ref not in required_refs:
+            return f"report_layout_ref_unknown:{item.ref}"
+        if item.ref in seen_refs:
+            return f"report_layout_ref_duplicate:{item.ref}"
+        seen_refs.add(item.ref)
+    missing_refs = sorted(required_refs - seen_refs)
+    if missing_refs:
+        return f"report_layout_ref_missing:{missing_refs[0]}"
     return None
 
 
@@ -1136,10 +1153,130 @@ def _report_evidence_text(value: object) -> str:
     return "; ".join(references)
 
 
+def _report_main_headings(
+    markdown: str, *, require_closed: bool = False,
+) -> list[tuple[int, str]]:
+    """只提取顶层 ATX/Setext 主标题，跳过代码和 HTML 块，不把代码示例当成章节。"""
+    headings: list[tuple[int, str]] = []
+    paragraph: list[str] = []
+    fence = ""
+    fence_length = 0
+    fence_indent = 0
+    comment = False
+    raw_tag: str | None = None
+    html_block = False
+    for original in markdown.splitlines():
+        line = original.expandtabs(4)
+        if fence:
+            if re.fullmatch(
+                r" {" + str(fence_indent) + "," + str(fence_indent + 3) + "}"
+                + re.escape(fence) + "{" + str(fence_length) + r",}[ \t]*", line,
+            ):
+                fence = ""
+            continue
+        if raw_tag:
+            if re.search(r"</" + raw_tag + r"\s*>", line, re.IGNORECASE):
+                raw_tag = None
+            continue
+        if comment:
+            if "-->" not in line:
+                continue
+            line = line.split("-->", 1)[1]
+            comment = False
+        if html_block:
+            if not line.strip():
+                html_block = False
+            continue
+        if line.startswith("    "):
+            paragraph.clear()
+            continue
+        opening = re.match(r" {0,3}((?:[-+*]|\d{1,9}[.)])[ \t]{1,4})?(`{3,}|~{3,})(.*)$", line)
+        if opening and not (opening[2][0] == "`" and "`" in opening[3]):
+            fence, fence_length = opening[2][0], len(opening[2])
+            # 列表内围栏按内容缩进闭合，不把闭围栏误认成新的开围栏。
+            fence_indent = opening.start(2) if opening[1] else 0
+            paragraph.clear()
+            continue
+        leading_comment = line.lstrip().startswith("<!--")
+        cursor = 0
+        while token := re.search(r"`+|<!--", line[cursor:]):
+            start, end = cursor + token.start(), cursor + token.end()
+            if token[0].startswith("`"):
+                # 成对行内代码中的注释标记只是文本，不能把它当成跨片段注释。
+                closing = re.search(r"(?<!`)" + re.escape(token[0]) + r"(?!`)", line[end:])
+                cursor = end + closing.end() if closing else end
+                continue
+            closing = line.find("-->", end)
+            if closing < 0:
+                comment = True
+                line = line[:start]
+                break
+            line = line[:start] + line[closing + 3:]
+            cursor = start
+        # 行首注释不产生标题，但仍须检查同一行剩余注释是否闭合。
+        if leading_comment or not line.strip():
+            paragraph.clear()
+            continue
+        raw = re.match(r" {0,3}<(pre|script|style|textarea)(?:\s|>|$)", line, re.IGNORECASE)
+        if raw:
+            paragraph.clear()
+            if not re.search(r"</" + raw[1] + r"\s*>", line, re.IGNORECASE):
+                raw_tag = raw[1].lower()
+            continue
+        if re.match(
+            r" {0,3}</?(?:address|article|aside|blockquote|details|div|dl|fieldset|figure|footer|form|"
+            r"h[1-6]|header|hr|iframe|li|main|nav|ol|p|section|table|tbody|td|th|thead|tr|ul)(?:\s|/?>|$)",
+            line, re.IGNORECASE,
+        ):
+            html_block = True
+            paragraph.clear()
+            continue
+        atx = re.match(r" {0,3}(#{1,6})(?:[ \t]+(.*)|$)", line)
+        if atx:
+            if len(atx[1]) <= 2:
+                title = re.sub(r"[ \t]+#+[ \t]*$", "", atx[2] or "").strip()
+                headings.append((len(atx[1]), title))
+            paragraph.clear()
+            continue
+        setext = re.fullmatch(r" {0,3}(=+|-+)[ \t]*", line)
+        if setext and paragraph:
+            headings.append((1 if setext[1][0] == "=" else 2, " ".join(paragraph)))
+            paragraph.clear()
+        elif not line.strip() or re.match(r" {0,3}(?:>|[-+*][ \t]+|\d+[.)][ \t]+)", line):
+            paragraph.clear()
+        else:
+            paragraph.append(line.strip())
+    if require_closed and (fence or comment or raw_tag):
+        # 每个片段须独立闭合，不能把随后展开的事实藏进代码或 HTML 注释。
+        raise ValueError("report_layout_unclosed_block")
+    return headings
+
+
+def _validate_report_template_headings(markdown: str, template_markdown: str) -> None:
+    expected = _report_main_headings(template_markdown)
+    if not expected:
+        return
+    actual = _report_main_headings(markdown)
+    if len(expected) != len(actual):
+        raise ValueError("report_template_heading_mismatch")
+    title_placeholder = r"\{\{\s*report_title\s*\}\}"
+    for (expected_level, expected_title), (level, title) in zip(expected, actual):
+        # 只识别既有标题意图；成品必须展开，不能以字面占位符冒充标题。
+        title_parts = re.split(title_placeholder, expected_title)
+        title_pattern = ".+".join(re.escape(part) for part in title_parts)
+        if (
+            expected_level != level or re.search(title_placeholder, title)
+            or re.fullmatch(title_pattern, title) is None
+        ):
+            raise ValueError("report_template_heading_mismatch")
+
+
 def _render_report_markdown(
-    data: dict[str, object], *, report_packet_json: str,
+    data: dict[str, object], *, report_packet_json: str, report_template_markdown: str,
 ) -> str:
-    """事实区仅使用冻结快照，模型补充区不修改事实、复核结论或原始证据。"""
+    """模板决定布局；程序原位展开完整冻结事实及其所属解释，不补回固定章节。"""
+    if not isinstance(report_template_markdown, str) or not report_template_markdown.strip():
+        raise ValueError("report_template_snapshot_missing")
     packet = _frozen_report_packet(report_packet_json)
     vulnerabilities = packet["vulnerabilities"]
     error = _report_completeness_error(
@@ -1170,36 +1307,38 @@ def _render_report_markdown(
             execution.get("phase"), summary.get("stop_reason"),
         )])
     )
-    lines = [
-        "# 安全评估部分报告" if stopped else "# 安全评估报告",
-        "## 报告边界与执行状态（冻结快照）",
-        (
-            "项目已停止（stopped）；本报告为截止快照的部分报告，不代表评估完成或完整覆盖。"
-            if stopped else "报告仅描述冻结快照内的评估记录；项目状态不等于完整覆盖或无剩余风险。"
-        ),
-        "报告交付与目标测试状态独立；本文生成不代表修复已实施或修复已验证。",
-        "事实区由程序生成。模型解释与建议仅供分析，不是新的测试、源码审计或复核证据。",
-        execution_identity,
-        "## 执行摘要（模型解释）",
-        result.executive_summary,
-        "## 授权范围（冻结快照）",
-        _report_table(("Target ID", "类型", "范围"), [
-            (item.get("id"), item.get("type"), item.get("value"))
-            for item in packet.get("targets", [])
-        ]),
-        "## 漏洞与复核计数（冻结快照）",
-        f"Canonical 漏洞记录数：{len(vulnerabilities)}；Observation 数：{len(observations)}。",
-        "同一漏洞的多个 Observation 不重复计入漏洞数；记录状态不替代逐 Observation 的独立复核。",
-        _report_table(("记录严重度", "漏洞记录数"), sorted(severity_counts.items())),
-        _report_table(("Observation 复核状态", "数量"), sorted(status_counts.items())),
-    ]
+    blocks: dict[str, list[str]] = {
+        "scope": [
+            "### 报告边界与授权范围（冻结快照）",
+            (
+                "项目已停止（stopped）；本报告为截止快照的部分报告，不代表评估完成或完整覆盖。"
+                if stopped else "报告仅描述冻结快照内的评估记录；项目状态不等于完整覆盖或无剩余风险。"
+            ),
+            "报告交付与目标测试状态独立；本文生成不代表修复已实施或修复已验证。",
+            "事实区由程序生成。模型解释与建议仅供分析，不是新的测试、源码审计或复核证据。",
+            execution_identity,
+            _report_table(("Target ID", "类型", "范围"), [
+                (item.get("id"), item.get("type"), item.get("value"))
+                for item in packet.get("targets", [])
+            ]),
+            "### 执行摘要（模型解释）",
+            result.executive_summary,
+        ],
+        "counts": [
+            "### 漏洞与复核计数（冻结快照）",
+            f"Canonical 漏洞记录数：{len(vulnerabilities)}；Observation 数：{len(observations)}。",
+            "同一漏洞的多个 Observation 不重复计入漏洞数；记录状态不替代逐 Observation 的独立复核。",
+            _report_table(("记录严重度", "漏洞记录数"), sorted(severity_counts.items())),
+            _report_table(("Observation 复核状态", "数量"), sorted(status_counts.items())),
+        ],
+    }
     if not vulnerabilities:
-        lines.append("冻结快照中没有漏洞记录；未发现已确认漏洞不等于证明目标不存在漏洞。")
-    lines.extend([
+        blocks["counts"].append("冻结快照中没有漏洞记录；未发现已确认漏洞不等于证明目标不存在漏洞。")
+    lines = [
         (
-            "## 工作结果与未完成事项（冻结快照）"
+            "### 工作结果与未完成事项（冻结快照）"
             if goal_driven
-            else "## 覆盖与未完成义务（冻结快照）"
+            else "### 覆盖与未完成义务（冻结快照）"
         ),
         (
             "目标驱动工作按已接受的 ExperimentRecord 和 Intent 结论汇总；已测、阻塞、未测分别列出，不把未执行方向写成安全。"
@@ -1210,7 +1349,7 @@ def _render_report_markdown(
                 else "结构化 Coverage 未启用或未记录；缺失数据不能解释为零工作或完整覆盖。"
             )
         ),
-    ])
+    ]
     coverage = summary.get("coverage") or {}
     cells = {item.get("slot_key"): item for item in packet.get("coverage_cells", [])}
     for key, label in (("tested", "已测"), ("blocked", "阻塞"), ("untested", "未测/未完成")):
@@ -1228,7 +1367,7 @@ def _render_report_markdown(
                  cells.get(item.get("slot_key"), {}).get("test_family"))
                 for item in entries
             ])
-        lines.extend([f"### {label}（{len(entries)}）", table])
+        lines.extend([f"#### {label}（{len(entries)}）", table])
     if goal_driven:
         experiment_entries = [
             item
@@ -1237,7 +1376,7 @@ def _render_report_markdown(
             if item.get("hypothesis")
         ]
         lines.extend([
-            "### 已接受实验详情",
+            "#### 已接受实验详情",
             "以下内容直接来自冻结的 ExperimentRecord；观察、限制和证据引用彼此独立，缺失项不由模型补写。",
             _report_table(("Fact", "假设", "观察", "限制", "尝试策略", "证据"), [
                 (
@@ -1254,13 +1393,14 @@ def _render_report_markdown(
     else:
         selected = summary.get("selected_deep", [])
         lines.extend([
-            "### 已选择的深测义务",
+            "#### 已选择的深测义务",
             _report_table(("Intent", "Cell", "选择 Fact", "结果 Fact", "处置", "处置原因"), [
                 (item.get("id"), item.get("slot_key"), item.get("depth_review_fact_id"),
                  item.get("to_fact_id"), item.get("conclusion"), item.get("conclusion_reason"))
                 for item in selected
             ]),
         ])
+    blocks["work_results"] = lines
     # 旧 goal-driven Packet 也可能已冻结额度字段，必须保留其原义。
     historical_limits = not goal_driven or any(
         key in execution for key in ("budget", "verification_reserve", "remaining_total", "remaining_discovery")
@@ -1273,8 +1413,8 @@ def _render_report_markdown(
         "verification_attempts_started", "remaining_total", "remaining_discovery",
         "depth_review_fact_id", "accepted_input_digest",
     )
-    lines.extend([
-        "## 历史额度与执行计量（冻结原件）" if historical_limits else "## 执行停止时间与累计计量（冻结快照）",
+    blocks["execution_status"] = [
+        "### 历史额度与执行计量（冻结原件）" if historical_limits else "### 执行停止时间与累计计量（冻结快照）",
         "以下保留历史冻结额度材料，不是当前目标驱动的有效额度政策；历史未执行或未复核工作不能由文字补齐。" if historical_limits else "未设置执行停止时间表示不限期；真实授权期限、单 Run 超时与有界故障恢复仍然有效。累计逻辑 Attempt 次数不是模型调用次数、token 或 API 费用，也不构成次数上限。",
         _report_table(("执行字段", "冻结值"), [
             (key, "不限" if not historical_limits and key == "deadline" and key in execution and execution[key] is None else execution.get(key))
@@ -1284,11 +1424,13 @@ def _render_report_markdown(
             (item.get("task_type"), item.get("execution_count"))
             for item in summary.get("calls_by_task_type", [])
         ]),
-        "## 逐 Observation 复核状态（冻结快照）",
+        "### 逐 Observation 复核状态（冻结快照）",
         "run_failed、not_run、pending、not_scheduled 表示尚无对应复核结论；不能改写成 insufficient_evidence 或 confirmed。conflicting 保留相互冲突的实际结论。",
-        _report_table(("Observation", "漏洞 ID", "复核状态", "来源 Fact", "发现 TaskRun", "证据包 Artifact"), [
+        _report_table(("Observation", "漏洞 ID", "复核状态", "来源 Fact", "发现 TaskRun", "证据条目 / 历史包"), [
             (item["id"], item.get("vulnerability_id"), status_by_id[item["id"]]["verification_status"],
-             item.get("source_fact_id"), item.get("task_run_id"), item.get("packet_artifact_id"))
+             item.get("source_fact_id"), item.get("task_run_id"),
+             json.dumps(item["evidence_items"], ensure_ascii=False) if "evidence_items" in item
+             else f"历史冻结 packet Artifact: {item.get('packet_artifact_id') or '未记录'}")
             for item in observations
         ]),
         _report_table(("Observation", "Verification", "实际结论", "Verifier TaskRun"), [
@@ -1299,14 +1441,12 @@ def _render_report_markdown(
             (item["id"], intent.get("id"), intent.get("conclusion"), intent.get("conclusion_reason"), intent.get("to_fact_id"))
             for item in statuses for intent in item.get("intents", [])
         ]),
-        "## 漏洞解释、修复建议与回归方法",
-        "以下仅补充解释与建议。复现说明基于已有证据，报告阶段不执行目标测试；回归方法未执行，不能视为修复已验证。",
-    ])
-    severity_order = {name: index for index, name in enumerate(("critical", "high", "medium", "low", "info"))}
-    for vulnerability in sorted(vulnerabilities, key=lambda item: (severity_order.get(item.get("severity"), 5), item["id"])):
+    ]
+    for vulnerability in vulnerabilities:
         finding = findings[vulnerability["id"]]
-        lines.extend([
+        blocks[f"finding:{vulnerability['id']}"] = [
             f"### 漏洞 {vulnerability['id']}",
+            "以下仅补充解释与建议。复现说明基于已有证据，报告阶段不执行目标测试；回归方法未执行，不能视为修复已验证。",
             _report_table(("漏洞 ID", "标题", "严重度", "目标", "记录状态", "来源 Fact"), [(
                 vulnerability["id"], vulnerability.get("title"), vulnerability.get("severity"),
                 vulnerability.get("target"), vulnerability.get("status"), vulnerability.get("source_fact_id"),
@@ -1317,12 +1457,14 @@ def _render_report_markdown(
             "#### 修复建议（未实施）", finding.remediation,
             "#### 修复后回归方法（未执行）", finding.regression_steps,
             "#### 本项限制（模型解释）", finding.limitations or "未补充；冻结快照中的限制仍适用。",
-        ])
-    lines.extend([
-        "## 限制与剩余风险",
+        ]
+    blocks["limitations"] = [
+        "### 限制与剩余风险",
         "未测范围、阻塞条件、未运行或冲突的复核均保留为缺口，不能由文字补齐。黑盒证据不足以证明具体源码文件、行号或修复效果。",
         result.limitations or "模型未补充限制；这不表示不存在限制。",
-        "## 证据索引（冻结快照）",
+    ]
+    blocks["evidence_index"] = [
+        "### 证据索引（冻结快照）",
         "索引只列出输入快照中的 Artifact 与来源绑定，不把模型生成的说明作为新增实测证据。原始请求、响应和复现记录保持不变。",
         _report_table(("Artifact", "类型", "TaskRun", "URI", "SHA-256"), [
             (item.get("id"), item.get("kind"), item.get("task_run_id"), item.get("uri"), item.get("sha256"))
@@ -1336,10 +1478,17 @@ def _render_report_markdown(
             (item.get("id"), item.get("observation_id"), evidence.get("artifact_id"), evidence.get("pointer"), item.get("verifier_task_run_id"))
             for item in packet.get("verifications", []) for evidence in item.get("evidence", [])
         ]),
-        "### 漏洞链候选",
+        "#### 漏洞链候选",
         f"快照包含 {len(packet.get('chain_candidates', []))} 项候选关联；候选关联不等于已复现的利用链。",
-    ])
-    return "\n\n".join(lines) + "\n"
+    ]
+    expanded: list[str] = []
+    for item in result.layout:
+        fragment = "\n\n".join(blocks[item.ref]) if isinstance(item, ReportFactReference) else item.markdown
+        _report_main_headings(fragment, require_closed=True)
+        expanded.append(fragment)
+    markdown = "\n\n".join(expanded) + "\n"
+    _validate_report_template_headings(markdown, report_template_markdown)
+    return markdown
 
 
 def _prepare_report_output(
@@ -1347,9 +1496,9 @@ def _prepare_report_output(
     *,
     data: dict[str, object],
     report_packet_json: str,
+    report_template_markdown: str,
     report_generation_token: str | None = None,
     report_template_key: str | None = None,
-    report_template_version: int | None = None,
     report_template_digest_sha256: str | None = None,
     report_policy_version: object = None,
     report_execution_plan_sha256: str | None = None,
@@ -1366,6 +1515,7 @@ def _prepare_report_output(
         report_markdown = _render_report_markdown(
             data,
             report_packet_json=report_packet_json,
+            report_template_markdown=report_template_markdown,
         )
     except (TypeError, ValueError) as exc:
         LOG.warning("report render rejected project=%s error=%s", project_id, exc)
@@ -1375,7 +1525,9 @@ def _prepare_report_output(
         "format": "markdown",
         "report_generation_token": report_generation_token,
         "report_template_key": report_template_key,
-        "report_template_version": report_template_version,
+        "packet_version": packet["version"],
+        "output_contract_version": 3,
+        "report_data_schema_version": REPORT_DATA_SCHEMA_VERSION,
         "report_template_digest_sha256": report_template_digest_sha256,
         "report_policy_version": report_policy_version,
         "report_execution_plan_sha256": report_execution_plan_sha256,
@@ -1393,9 +1545,9 @@ def _write_report_results(
     *,
     data: dict[str, object],
     report_packet_json: str,
+    report_template_markdown: str,
     report_generation_token: str | None = None,
     report_template_key: str | None = None,
-    report_template_version: int | None = None,
     report_template_digest_sha256: str | None = None,
     report_policy_version: object = None,
     report_execution_plan_sha256: str | None = None,
@@ -1409,9 +1561,9 @@ def _write_report_results(
         project_id,
         data=data,
         report_packet_json=report_packet_json,
+        report_template_markdown=report_template_markdown,
         report_generation_token=report_generation_token,
         report_template_key=report_template_key,
-        report_template_version=report_template_version,
         report_template_digest_sha256=report_template_digest_sha256,
         report_policy_version=report_policy_version,
         report_execution_plan_sha256=report_execution_plan_sha256,
@@ -1474,9 +1626,9 @@ def run_report_task(
     report_generation_token: str | None = None,
     report_claim_token: str | None = None,
     report_template_key: str | None = None,
-    report_template_version: int | None = None,
     report_template_digest_sha256: str | None = None,
     report_template_markdown: str | None = None,
+    report_template_compatibility_profiles: list[str] | None = None,
     durable_request: bool = False,
     report_execution_plan: dict[str, object] | None = None,
     report_execution_plan_sha256: str | None = None,
@@ -1507,6 +1659,21 @@ def run_report_task(
         return "report_execution_plan_missing"
     if not task_run_id or not report_generation_token:
         return "report_claim_identity_missing"
+    for key, expected in (("packet_version", 2), ("output_contract_version", 3)):
+        if report_execution_plan.get(key) != expected:
+            return f"report_execution_plan_unsupported:{key}"
+    if not all((report_template_key, report_template_markdown, report_template_digest_sha256, report_template_compatibility_profiles)):
+        return "report_template_snapshot_missing"
+    if sha256(report_template_markdown.encode("utf-8")).hexdigest() != report_template_digest_sha256:
+        return "report_template_digest_mismatch"
+    if report_execution_plan.get("template_profile") not in report_template_compatibility_profiles:
+        return "report_template_profile_mismatch"
+    frozen_template = {
+        "key": report_template_key,
+        "markdown_content": report_template_markdown,
+        "digest_sha256": report_template_digest_sha256,
+        "compatibility_profiles": report_template_compatibility_profiles,
+    }
     requires_authoritative_packet = True
     cancellation = TaskCancellation(generation=getattr(project.project, "execution_generation", 0))
     execution_timeout = config.tasks.report.timeout
@@ -1562,6 +1729,8 @@ def run_report_task(
                     if sha256(snapshot_json.encode("utf-8")).hexdigest() != frozen_inputs["input_snapshot_sha256"]:
                         raise DeliveryUnavailable
                     frozen = json.loads(snapshot_json)
+                    if frozen.get("report_template") != frozen_template:
+                        raise DeliveryUnavailable
                     report_packet_json = json.dumps(frozen["report_packet"], ensure_ascii=False)
                     export_yaml = frozen["graph_yaml"]
                     if _frozen_report_packet(report_packet_json)["project"]["id"] != project_id:
@@ -1582,6 +1751,7 @@ def run_report_task(
                     {
                         "version": 1,
                         "report_packet": json.loads(report_packet_json),
+                        "report_template": frozen_template,
                         "graph_yaml": frozen_graph_yaml,
                     }
                 )
@@ -1603,8 +1773,9 @@ def run_report_task(
                         "format": "json",
                         "report_generation_token": report_generation_token,
                         "report_template_key": report_template_key,
-                        "report_template_version": report_template_version,
                         "report_template_digest_sha256": report_template_digest_sha256,
+                        "output_contract_version": report_execution_plan["output_contract_version"],
+                        "report_data_schema_version": REPORT_DATA_SCHEMA_VERSION,
                         "report_execution_plan_sha256": report_execution_plan_sha256,
                         "report_prompt_digest_sha256": report_prompt_digest_sha256,
                         "report_policy_version": (
@@ -1696,6 +1867,11 @@ def run_report_task(
             runtime_context["report_inputs"] = {
                 "input_snapshot_artifact_id": snapshot_id,
                 "input_snapshot_sha256": snapshot_digest,
+                "report_template_key": report_template_key,
+                "report_template_digest_sha256": report_template_digest_sha256,
+                "packet_version": report_execution_plan["packet_version"],
+                "output_contract_version": report_execution_plan["output_contract_version"],
+                "report_data_schema_version": REPORT_DATA_SCHEMA_VERSION,
             }
             updated = retry_graph_write(
                 lambda: client.update_task_run(
@@ -1733,11 +1909,24 @@ def run_report_task(
             )
         )
         vulns_json, id_to_title = _packet_vulnerability_context(report_packet_json)
+        layout_context = (
+            "\n\n---\n\n"
+            "本次报告使用 ReportData schema_version=2 和单一 layout。每个以下事实 ref 恰好引用一次，"
+            "逐漏洞解释仍通过 findings 按稳定 ID 提交；Markdown 片段负责模板章节、静态说明与整体建议，"
+            "不得手写替代事实块。片段须独立闭合代码块或 HTML 注释，不能遮蔽事实。可用 ref：\n\n"
+            + format_json_block([*REPORT_FACT_REFS, *(f"finding:{key}" for key in id_to_title)])
+            + "\n\n以下是本次受理时冻结的自由 Markdown 展示模板。由它决定最终主要标题和顺序，"
+            "不要追加旧固定十章；{{ report_title }} 是标题意图，使用本次报告的实际标题。"
+            "正文中的排版指示应执行，不要当成结论照抄。事实内部为 H3/H4，不改变模板 H1/H2：\n\n"
+            "<frozen_report_template>\n"
+            + report_template_markdown
+            + "\n</frozen_report_template>\n"
+        )
         if delivery_context is not None:
             prompt = (
                 f"{DELIVERY_PROMPT}\n\n"
                 "如需恢复原冻结输入，只能通过以下只读引用重新读取：\n\n"
-                f"{packet_reference}\n\n{graph_reference}"
+                f"{packet_reference}\n\n{graph_reference}{layout_context}"
             )
             session = frozen_delivery["session_id"]
         else:
@@ -1761,16 +1950,7 @@ def run_report_task(
                 if durable_request and frozen_report_prompt is not None
                 else load_prompt(prompt_group, "report.md")
             )
-            prompt = render_prompt(prompt_source, replacements)
-            if report_template_markdown is not None:
-                prompt += (
-                    "\n\n---\n\n"
-                    "以下是本次生成已冻结的 Markdown 展示模板。必须保留其章节意图，"
-                    "但不得用模板覆盖 Report Packet 的事实、证据或验证状态：\n\n"
-                    "<frozen_report_template>\n"
-                    f"{report_template_markdown}\n"
-                    "</frozen_report_template>\n"
-                )
+            prompt = render_prompt(prompt_source, replacements) + layout_context
             record_prompt_rendered(
                 client,
                 project_id,
@@ -1944,9 +2124,9 @@ def run_report_task(
         output_arguments = {
             "data": data,
             "report_packet_json": report_packet_json,
+            "report_template_markdown": report_template_markdown,
             "report_generation_token": report_generation_token,
             "report_template_key": report_template_key,
-            "report_template_version": report_template_version,
             "report_template_digest_sha256": report_template_digest_sha256,
             "report_policy_version": (
                 report_execution_plan.get("report_policy_version")

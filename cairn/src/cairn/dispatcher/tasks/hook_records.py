@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from io import BytesIO
+import re
 from typing import BinaryIO, Iterator
 
 from .common_base import *
@@ -47,6 +48,16 @@ def _pi_tool_events(
         )):
             continue
         name = event.get("event")
+        if name == "instructions_loaded":
+            digest, size = event.get("prompt_hash"), event.get("prompt_bytes")
+            if (event.get("prompt_name") == "AGENTS.md" and isinstance(digest, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", digest) and type(size) is int and size > 0):
+                yield {
+                    "hook_source": "pi", "hook_event_name": name, "session_id": session,
+                    "phase": phase, "artifact_id": artifact_id, "prompt_group": "runner",
+                    "prompt_name": "AGENTS.md", "prompt_hash": digest, "prompt_bytes": size,
+                }
+            continue
         if name not in {"tool_execution_start", "tool_execution_end"}:
             continue
         tool = event.get("tool_name")
@@ -107,8 +118,9 @@ def record_pi_tool_events(
                 stream, project_id=project_id, task_run_id=task_run_id,
                 phase=phase, session=session, artifact_id=artifact_id,
             ):
+                kind = "prompt_rendered" if payload["hook_event_name"] == "instructions_loaded" else "hook_operation"
                 response = client.create_agent_event(
-                    project_id, task_run_id=task_run_id, kind="hook_operation", payload=payload,
+                    project_id, task_run_id=task_run_id, kind=kind, payload=payload,
                 )
                 if not response.ok:
                     LOG.warning("pi audit projection failed project=%s task_run=%s phase=%s", project_id, task_run_id, phase)

@@ -1,16 +1,5 @@
 <template>
   <div class="vuln-page">
-    <div class="vuln-header vuln-header--actions">
-      <div class="vuln-header-actions">
-        <Button size="sm" :disabled="!currentProjectDetail || createOpen" @click="openReport">
-          生成报告
-        </Button>
-        <Button variant="secondary" size="sm" :disabled="reportDialogOpen" @click="openCreate">
-          ＋ 录入漏洞
-        </Button>
-      </div>
-    </div>
-
     <FilterBar label="漏洞筛选">
       <FormField label="严重度">
         <template #default="{ controlAttrs }">
@@ -31,6 +20,12 @@
       <template #actions>
         <Button variant="secondary" size="sm" :loading="isFetching" @click="refetch()">
           刷新
+        </Button>
+        <Button variant="secondary" size="sm" :disabled="reportDialogOpen" @click="openCreate">
+          录入漏洞
+        </Button>
+        <Button size="sm" :disabled="!currentProjectDetail || createOpen" @click="openReport">
+          生成报告
         </Button>
       </template>
     </FilterBar>
@@ -60,52 +55,12 @@
       </template>
     </EmptyState>
 
-    <template v-else>
-      <ErrorState
-        v-if="isError"
-        title="漏洞同步失败"
-        :description="queryErrorMessage"
-        @retry="refetch()"
-      />
-
-      <Card padding="none" class="vuln-table-card">
-        <DataTable
-          :rows="vulns"
-          :columns="vulnerabilityColumns"
-          :row-key="vulnerabilityRowKey"
-          caption="项目漏洞列表"
-          density="compact"
-          :is-row-active="isVulnerabilityActive"
-          active-row-aria="current"
-          :action-label="vulnerabilityActionLabel"
-          action-column-label="详情"
-          @row-action="selectVuln"
-        >
-          <template #cell-vulnerability="{ row }">
-            <div class="vuln-summary-cell">
-              <Badge :tone="vulnerabilitySeverityMeta(row.severity).tone" size="sm">
-                {{ vulnerabilitySeverityMeta(row.severity).label }}
-              </Badge>
-              <span class="vuln-title">{{ row.title }}</span>
-              <span v-if="row.vuln_type" class="vuln-type">{{ row.vuln_type }}</span>
-            </div>
-          </template>
-          <template #cell-confidence="{ row }">
-            <Badge :tone="vulnerabilityConfidenceMeta(row.confidence).tone" size="sm">
-              {{ vulnerabilityConfidenceMeta(row.confidence).label }}
-            </Badge>
-          </template>
-          <template #cell-status="{ row }">
-            <Badge :tone="vulnerabilityStatusMeta(row.status).tone" size="sm">
-              {{ vulnerabilityStatusMeta(row.status).label }}
-            </Badge>
-          </template>
-          <template #cell-created="{ row }">
-            <span class="vuln-time">{{ formatRelativeTime(row.created_at) }}</span>
-          </template>
-        </DataTable>
-      </Card>
-    </template>
+    <ErrorState
+      v-else-if="isError"
+      title="漏洞同步失败"
+      :description="queryErrorMessage"
+      @retry="refetch()"
+    />
 
     <ProjectReportDialog
       v-if="currentProjectDetail"
@@ -116,13 +71,12 @@
       @close-auto-focus="restoreReportTriggerFocus"
     />
 
-    <!-- 详情抽屉：复用组件，聚合复现数据包/来源分析/执行日志 -->
-    <VulnerabilityDrawer
-      :project-id="projectId"
-      :vuln-id="selectedId"
-      :open="Boolean(selectedId)"
-      @close="selectedId = null"
-      @select-vulnerability="selectVulnerabilityById"
+    <VulnerabilityTable
+      v-if="vulns.length || selectedId"
+      :rows="vulns"
+      :selected-project-id="projectId"
+      :selected-id="selectedId"
+      @select="selectVuln"
       @status-changed="onStatusChanged"
     />
 
@@ -193,7 +147,7 @@
         <FormField label="复现请求（原始 HTTP 包，可选）">
           <template #default="{ controlAttrs }">
             <Textarea
-              v-model="createForm.repro_request"
+              v-model="createForm.requestText"
               v-bind="controlAttrs"
               class="mono"
               :rows="4"
@@ -205,7 +159,7 @@
         <FormField label="复现响应（原始 HTTP 包，可选）">
           <template #default="{ controlAttrs }">
             <Textarea
-              v-model="createForm.repro_response"
+              v-model="createForm.responseText"
               v-bind="controlAttrs"
               class="mono"
               :rows="3"
@@ -250,10 +204,14 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { createVulnerability, listVulnerabilities, type Vulnerability } from '@/api/client'
-import { DataTable, ErrorState, FilterBar, type DataTableColumn } from '@/components/patterns'
 import {
-  Badge,
+  createVulnerability,
+  listVulnerabilities,
+  type CreateVulnerabilityRequest,
+  type Vulnerability,
+} from '@/api/client'
+import { ErrorState, FilterBar } from '@/components/patterns'
+import {
   Button,
   Card,
   Dialog,
@@ -265,14 +223,12 @@ import {
   Textarea,
 } from '@/components/ui'
 import ProjectReportDialog from '@/features/reports/ProjectReportDialog.vue'
-import { formatRelativeTime } from '@/lib/format'
 import { useUIStore } from '@/stores/ui'
 import { useWorkspaceStore } from '@/stores/workspace'
-import VulnerabilityDrawer from './VulnerabilityDrawer.vue'
+import VulnerabilityTable from './VulnerabilityTable.vue'
 import {
   VULNERABILITY_SEVERITIES,
   VULNERABILITY_STATUSES,
-  vulnerabilityConfidenceMeta,
   vulnerabilitySeverityMeta,
   vulnerabilityStatusMeta,
 } from './vulnerabilityMetadata'
@@ -285,8 +241,8 @@ interface CreateVulnerabilityDraft {
   target: string
   remediation: string
   confidence: number
-  repro_request: string
-  repro_response: string
+  requestText: string
+  responseText: string
 }
 
 interface VulnerabilityListSnapshot {
@@ -398,36 +354,9 @@ const queryErrorMessage = computed(() =>
     : '请稍后重试。',
 )
 
-const vulnerabilityColumns = [
-  { key: 'vulnerability', label: '漏洞' },
-  { key: 'confidence', label: '可信度' },
-  { key: 'status', label: '状态' },
-  { key: 'created', label: '发现时间' },
-] satisfies readonly DataTableColumn<
-  Vulnerability,
-  'vulnerability' | 'confidence' | 'status' | 'created'
->[]
-
-function vulnerabilityRowKey(vulnerability: Vulnerability): string {
-  return vulnerability.id
-}
-
 const selectedId = ref<string | null>(null)
-
-function selectVuln(vulnerability: Vulnerability) {
-  selectedId.value = vulnerability.id
-}
-
-function selectVulnerabilityById(vulnerabilityId: string) {
-  selectedId.value = vulnerabilityId
-}
-
-function isVulnerabilityActive(vulnerability: Vulnerability): boolean {
-  return selectedId.value === vulnerability.id
-}
-
-function vulnerabilityActionLabel(vulnerability: Vulnerability): string {
-  return `查看详情：${vulnerability.title}`
+function selectVuln(_projectId: string, id: string | null) {
+  selectedId.value = id
 }
 
 function onStatusChanged() {
@@ -451,8 +380,8 @@ function createDefaultDraft(): CreateVulnerabilityDraft {
     target: '',
     remediation: '',
     confidence: 0.6,
-    repro_request: '',
-    repro_response: '',
+    requestText: '',
+    responseText: '',
   }
 }
 
@@ -502,15 +431,31 @@ async function submitCreate() {
   const requestProjectId = projectId.value
   const requestVisitGeneration = projectVisitGeneration.value
   const requestToken = ++createRequestToken
-  const body: CreateVulnerabilityDraft = {
+  const body: CreateVulnerabilityRequest = {
     title: createForm.value.title,
     severity: createForm.value.severity,
     vuln_type: createForm.value.vuln_type,
     target: createForm.value.target,
     remediation: createForm.value.remediation,
     confidence: createForm.value.confidence,
-    repro_request: createForm.value.repro_request,
-    repro_response: createForm.value.repro_response,
+    evidence_items:
+      createForm.value.requestText || createForm.value.responseText
+        ? [
+            {
+              id: 'manual-http',
+              kind: 'http',
+              role: 'primary',
+              title: '人工记录',
+              source: 'manual',
+              request: null,
+              response: null,
+              artifact: null,
+              text: null,
+              request_text: createForm.value.requestText || null,
+              response_text: createForm.value.responseText || null,
+            },
+          ]
+        : [],
   }
 
   creating.value = true

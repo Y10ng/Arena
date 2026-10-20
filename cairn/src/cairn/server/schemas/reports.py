@@ -15,7 +15,10 @@ class ReportInventoryItem(BaseModel):
     artifact_size: int
     created_at: str
     template_key: str
-    template_version: int
+    template_version: int | None = None
+    packet_version: int | None = None
+    output_contract_version: int | None = None
+    report_data_schema_version: int | None = None
     template_digest_sha256: str
     report_policy_version: int
     report_execution_plan_sha256: str

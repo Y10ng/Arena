@@ -11,7 +11,7 @@
   background-color: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  box-shadow: none;
   min-width: 0;
 }
 
@@ -27,6 +27,7 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-3);
   margin-bottom: var(--space-5);
   border-bottom: 1px solid var(--border);
@@ -41,21 +42,24 @@
 }
 
 .section-header h1 {
-  font-size: 18px;
-  font-weight: 700;
+  font-size: var(--text-2xl);
+  font-weight: var(--font-semibold);
+  line-height: var(--leading-snug);
   color: var(--text);
-  letter-spacing: 0;
+  letter-spacing: var(--tracking-tight);
 }
 
 .subtitle {
-  font-size: 12px;
+  font-size: var(--text-sm);
   color: var(--text-muted);
 }
 
 .header-actions,
 .header-right {
+  min-width: 0;
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-2);
 }
 
@@ -70,7 +74,7 @@
 }
 
 .refresh-label {
-  font-size: 9.5px;
+  font-size: var(--text-xs);
 }
 
 .live-dot {
@@ -92,8 +96,9 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: var(--text-md);
   padding: var(--space-3);
+  overflow-wrap: anywhere;
 }
 
 .state-banner.error {
@@ -106,6 +111,7 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-3);
   margin-bottom: var(--space-4);
   border-bottom: 1px solid var(--border);
@@ -119,8 +125,8 @@
 }
 
 .partition-header h2 {
-  font-size: 14px;
-  font-weight: 700;
+  font-size: var(--text-lg);
+  font-weight: var(--font-semibold);
 }
 
 .pane-form {

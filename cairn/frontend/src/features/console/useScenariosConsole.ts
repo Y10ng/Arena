@@ -1,46 +1,23 @@
 import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import {
-  api,
-  listInfrastructureCapabilities,
-  listInfrastructureImages,
-  listInfrastructureWorkers,
-  listPromptGroups,
-} from '@/api/client'
-import type {
-  InfrastructureCapability,
-  InfrastructureImage,
-  InfrastructureWorker,
-  PromptGroup,
-  Scenario,
-  ScenarioFeatureSchemaItem,
-  ScenarioOptions,
-  ScenarioValidationResult,
-} from '@/api/types'
+import { api, listPromptGroups } from '@/api/client'
+import type { PromptGroup, Scenario, ScenarioOptions } from '@/api/types'
 import { useUIStore } from '@/stores/ui'
 import {
   DEFAULT_PROFILE_ID,
-  buildAvailableCaps,
-  buildAvailableImageOptions,
   buildAvailableProfileOptions,
   ensureDefaultScenario,
   profileLabel,
   profileSummary,
 } from '@/features/settings/scenarioOptions'
-import {
-  featureDraftFromScenario,
-  featurePayloadFromDraft,
-  invalidCaps,
-  isKnownImage,
-  validateFeaturesAgainstSchema,
-} from '@/features/settings/featuresSchema'
+import { validateFeaturesAgainstSchema } from '@/features/settings/featuresSchema'
 import {
   buildPromptGroupSelectOptions,
   isPromptGroupReferenceValid,
   normalizePromptGroups,
 } from '@/features/settings/promptGroupOptions'
-import { clonePlain, formatError, formatInfraList } from './consoleCommon'
+import { clonePlain, formatError } from './consoleCommon'
 import {
   normalizeScenarioForm,
   scenarioPayloadFromForm,
@@ -51,65 +28,44 @@ export const useScenariosConsole = () => {
   const uiStore = useUIStore()
   const queryClient = useQueryClient()
   const router = useRouter()
-
+  const selectedScenarioKey = ref<string | null>(null)
+  const scenarioDraft = ref<Scenario | null>(null)
+  const draftMode = ref<'create' | 'edit'>('edit')
+  const savedDraftSnapshot = ref('')
+  const saveError = ref('')
+  const deleteError = ref('')
   const deleteScenarioKey = ref<string | null>(null)
-  const isAddingScenario = ref(false)
   const isSavingScenarios = ref(false)
   const isDeletingScenario = ref(false)
   const isScenarioMutationPending = computed(
-    () => isAddingScenario.value || isSavingScenarios.value || isDeletingScenario.value,
+    () => isSavingScenarios.value || isDeletingScenario.value,
   )
-  const scenarioPreflightMessage = ref('')
-  const scenarioPreflightTone = ref<'success' | 'error'>('success')
-  const selectedScenarioKey = ref<string | null>(null)
-  const selectedScenario = ref<Scenario | null>(null)
-  const scenarioFeatureDraft = ref<Record<string, unknown>>({})
-  const selectedScenarioSavedSnapshot = ref('')
-  let scenarioDraftGeneration = 0
-
-  watch(
-    [selectedScenarioKey, selectedScenario, scenarioFeatureDraft],
-    () => {
-      scenarioDraftGeneration++
-    },
-    { deep: true, flush: 'sync' },
-  )
+  const isScenarioEditorOpen = computed(() => scenarioDraft.value !== null)
+  const isCreatingScenario = computed(() => draftMode.value === 'create')
 
   const {
     data: scenariosData,
     isLoading: isLoadingScenarios,
     isError: isScenariosError,
     error: scenariosError,
-    refetch: refetchScenarios,
   } = useQuery<Scenario[]>({
     queryKey: ['scenarios'],
-    queryFn: () => api<Scenario[]>('GET', '/scenarios'),
+    queryFn: ({ signal }) => api<Scenario[]>('GET', '/scenarios', undefined, signal),
   })
-
-  const { data: scenarioOptionsData } = useQuery<ScenarioOptions>({
+  const {
+    data: scenarioOptionsData,
+    isLoading: isLoadingScenarioOptions,
+    isError: isScenarioOptionsError,
+    error: scenarioOptionsError,
+  } = useQuery<ScenarioOptions>({
     queryKey: ['scenarioOptions'],
     queryFn: () => api<ScenarioOptions>('GET', '/scenarios/options'),
   })
-
-  const { data: infrastructureWorkersData } = useQuery<InfrastructureWorker[]>({
-    queryKey: ['infrastructureWorkers'],
-    queryFn: listInfrastructureWorkers,
-  })
-
-  const { data: infrastructureImagesData } = useQuery<InfrastructureImage[]>({
-    queryKey: ['infrastructureImages'],
-    queryFn: listInfrastructureImages,
-  })
-
-  const { data: infrastructureCapabilitiesData } = useQuery<InfrastructureCapability[]>({
-    queryKey: ['infrastructureCapabilities'],
-    queryFn: listInfrastructureCapabilities,
-  })
-
   const {
     data: promptGroupsData,
     isLoading: isLoadingPromptGroups,
     isError: isPromptGroupsError,
+    error: promptGroupsError,
   } = useQuery<PromptGroup[]>({
     queryKey: ['promptGroups'],
     queryFn: ({ signal }) => listPromptGroups(signal),
@@ -117,374 +73,211 @@ export const useScenariosConsole = () => {
 
   const scenarios = computed(() => scenariosData.value || [])
   const promptGroups = computed(() => normalizePromptGroups(promptGroupsData.value || []))
-  const persistedSelectedScenario = computed(
+  const selectedScenario = computed(
     () => scenarios.value.find((scenario) => scenario.key === selectedScenarioKey.value) || null,
   )
-
-  const scenarioFeatureSchema = computed<ScenarioFeatureSchemaItem[]>(
-    () => scenarioOptionsData.value?.features || [],
-  )
-
-  const featureValidation = computed(() => {
-    return validateFeaturesAgainstSchema(scenarioFeatureDraft.value, scenarioFeatureSchema.value)
-  })
-
-  const featureError = computed(() => featureValidation.value.errors.join('; '))
-
-  const loadScenario = (key: string) => {
-    const matched = scenarios.value.find((s) => s.key === key)
-    if (!matched) return
-
-    selectedScenarioKey.value = key
-    const draft = normalizeScenarioForm(clonePlain(matched))
-    selectedScenario.value = draft
-    scenarioFeatureDraft.value = featureDraftFromScenario(
-      draft.features || {},
-      scenarioFeatureSchema.value,
-    )
-    selectedScenarioSavedSnapshot.value = scenarioSnapshot(draft, scenarioFeatureDraft.value)
-  }
-
-  const clearSelectedScenario = () => {
-    selectedScenarioKey.value = null
-    selectedScenario.value = null
-    selectedScenarioSavedSnapshot.value = ''
-    scenarioFeatureDraft.value = featureDraftFromScenario({}, scenarioFeatureSchema.value)
-  }
-
-  const isScenarioDirty = computed(() => {
-    return Boolean(
-      selectedScenario.value &&
-      scenarioSnapshot(selectedScenario.value, scenarioFeatureDraft.value) !==
-        selectedScenarioSavedSnapshot.value,
-    )
-  })
-
-  const confirmDiscardScenarioChanges = () => {
-    if (!isScenarioDirty.value) return true
-    return window.confirm('当前场景有未保存修改，确定放弃这些修改吗？')
-  }
-
-  const selectScenario = (key: string, options: { force?: boolean } = {}) => {
-    if (!options.force && key === selectedScenarioKey.value) return
-    if (!options.force && !confirmDiscardScenarioChanges()) return
-    loadScenario(key)
-  }
-
   watch(
     scenarios,
     (list) => {
-      if (list.length === 0) {
-        clearSelectedScenario()
-        return
-      }
-
-      const selectedKey = selectedScenarioKey.value
-      if (!selectedKey) {
-        selectScenario(list[0].key, { force: true })
-        return
-      }
-      if (!list.some((s) => s.key === selectedKey)) {
-        if (!isScenarioDirty.value) selectScenario(list[0].key, { force: true })
-        return
-      }
-
-      if (!isScenarioDirty.value) {
-        selectScenario(selectedKey, { force: true })
+      if (!list.some((scenario) => scenario.key === selectedScenarioKey.value)) {
+        selectedScenarioKey.value = list[0]?.key || null
       }
     },
     { immediate: true },
   )
 
-  watch(scenarioFeatureSchema, () => {
-    if (selectedScenario.value && !isScenarioDirty.value) {
-      scenarioFeatureDraft.value = featureDraftFromScenario(
-        selectedScenario.value.features || {},
-        scenarioFeatureSchema.value,
-      )
-      selectedScenarioSavedSnapshot.value = scenarioSnapshot(
-        selectedScenario.value,
-        scenarioFeatureDraft.value,
-      )
-    }
-  })
-
-  const nextScenarioKey = () => {
-    const keys = new Set(scenarios.value.map((s) => s.key))
+  const isScenarioDirty = computed(() =>
+    Boolean(
+      scenarioDraft.value &&
+      scenarioSnapshot(scenarioDraft.value, scenarioDraft.value.features) !==
+        savedDraftSnapshot.value,
+    ),
+  )
+  const confirmDiscardScenarioChanges = () => {
+    if (isScenarioMutationPending.value) return false
+    return !isScenarioDirty.value || window.confirm('当前场景有未保存修改，确定放弃这些修改吗？')
+  }
+  const closeScenarioEditor = () => {
+    if (!confirmDiscardScenarioChanges()) return
+    scenarioDraft.value = null
+    saveError.value = ''
+  }
+  const handleEditorOpenChange = (open: boolean) => {
+    if (!open) closeScenarioEditor()
+  }
+  const openScenarioEditor = (scenario: Scenario, mode: 'create' | 'edit') => {
+    if (isScenarioMutationPending.value || !confirmDiscardScenarioChanges()) return
+    scenarioDraft.value = normalizeScenarioForm(clonePlain(scenario))
+    draftMode.value = mode
+    savedDraftSnapshot.value = scenarioSnapshot(scenarioDraft.value, scenarioDraft.value.features)
+    saveError.value = ''
+  }
+  const selectScenario = (key: string) => {
+    selectedScenarioKey.value = key
+    deleteError.value = ''
+  }
+  const editSelectedScenario = () => {
+    if (selectedScenario.value) openScenarioEditor(selectedScenario.value, 'edit')
+  }
+  const addNewScenario = () => {
+    const keys = new Set(scenarios.value.map((scenario) => scenario.key))
     let index = 1
-    while (keys.has(`custom-scen-${index}`)) {
-      index += 1
-    }
-    return `custom-scen-${index}`
+    while (keys.has(`custom-scen-${index}`)) index++
+    openScenarioEditor(
+      {
+        key: `custom-scen-${index}`,
+        label: '自定义安全探索方案',
+        is_default: scenarios.value.length === 0,
+        profile_id: scenarioOptionsData.value?.profiles[0]?.id || DEFAULT_PROFILE_ID,
+        image: '',
+        prompt_group: 'goal-driven-v1',
+        knowledge: null,
+        origin_template: null,
+        goal_template: null,
+        cap_add: [],
+        features: {},
+      },
+      'create',
+    )
   }
 
-  const infraWorkers = computed(() => infrastructureWorkersData.value || [])
-  const infraImages = computed(() => infrastructureImagesData.value || [])
-  const infraCapabilities = computed(() => infrastructureCapabilitiesData.value || [])
-  const infraWorkerNames = computed(() => infraWorkers.value.map((item) => item.worker_name))
-  const infraImageNames = computed(() => infraImages.value.map((item) => item.image))
-  const infraCapNames = computed(() => infraCapabilities.value.map((item) => item.name))
-
-  const availableImageOptions = computed(() => {
-    const images = infraImages.value.map((item) => item.image)
-    if (images.length > 0) return images
-    return buildAvailableImageOptions({
-      scenarios: scenarios.value,
-      options: scenarioOptionsData.value,
-      selectedScenario: selectedScenario.value,
-    })
-  })
-
-  const availableCaps = computed(() => {
-    const caps = infraCapabilities.value.map((item) => item.name)
-    if (caps.length > 0) return caps
-    return buildAvailableCaps({
-      scenarios: scenarios.value,
-      options: scenarioOptionsData.value,
-      selectedScenario: selectedScenario.value,
-    })
-  })
-
-  const selectedScenarioImageValid = computed(() => {
-    if (!selectedScenario.value || availableImageOptions.value.length === 0) return true
-    return isKnownImage(selectedScenario.value.image, availableImageOptions.value)
-  })
-
-  const selectedScenarioInvalidCaps = computed(() => {
-    if (!selectedScenario.value || !scenarioOptionsData.value) return []
-    return invalidCaps(selectedScenario.value.cap_add, availableCaps.value)
-  })
-
-  const selectedScenarioCapsValid = computed(() => selectedScenarioInvalidCaps.value.length === 0)
-
-  const scenarioPromptGroupOptions = computed(() => {
-    return buildPromptGroupSelectOptions({
-      groups: promptGroups.value,
-      selectedPromptGroup: selectedScenario.value?.prompt_group,
-      capability: 'exploration',
-    })
-  })
-
-  const selectedScenarioPromptGroupValid = computed(() => {
-    if (!selectedScenario.value || isLoadingPromptGroups.value || isPromptGroupsError.value)
-      return true
-    const preserved =
-      persistedSelectedScenario.value?.prompt_group === selectedScenario.value.prompt_group
-        ? (['compatibility-only', 'test-only'] as const)
-        : []
-    return isPromptGroupReferenceValid(
-      selectedScenario.value.prompt_group,
-      promptGroups.value,
-      'exploration',
-      [...preserved],
-    )
-  })
-
-  const reportPromptGroup = computed(() => {
-    const value = scenarioFeatureDraft.value.report_prompt_group
-    return typeof value === 'string' ? value : ''
-  })
-  const persistedReportPromptGroup = computed(() => {
-    const value = persistedSelectedScenario.value?.features?.report_prompt_group
-    return typeof value === 'string' ? value : ''
-  })
-  const reportPromptGroupOptions = computed(() =>
+  const featureError = computed(() =>
+    scenarioDraft.value
+      ? validateFeaturesAgainstSchema(
+          scenarioDraft.value.features,
+          scenarioOptionsData.value?.features,
+        ).errors.join('; ')
+      : '',
+  )
+  const scenarioPromptGroupOptions = computed(() =>
     buildPromptGroupSelectOptions({
       groups: promptGroups.value,
-      selectedPromptGroup: reportPromptGroup.value,
-      capability: 'durable-report',
+      selectedPromptGroup: scenarioDraft.value?.prompt_group,
+      capability: 'exploration',
     }),
   )
-  const reportPolicyEnabled = computed(
-    () => scenarioFeatureDraft.value.report_policy_version === '1',
-  )
-  const selectedReportPromptGroupValid = computed(() => {
-    if (!reportPolicyEnabled.value || isLoadingPromptGroups.value || isPromptGroupsError.value)
-      return true
-    const preserved =
-      persistedReportPromptGroup.value === reportPromptGroup.value
-        ? (['compatibility-only'] as const)
-        : []
+  const promptGroupValid = (scenario: Scenario | null) => {
+    if (!scenario || isLoadingPromptGroups.value || isPromptGroupsError.value) return true
+    const persisted = scenarios.value.find((item) => item.key === scenario.key)
     return isPromptGroupReferenceValid(
-      reportPromptGroup.value,
+      scenario.prompt_group,
       promptGroups.value,
-      'durable-report',
-      [...preserved],
+      'exploration',
+      persisted?.prompt_group === scenario.prompt_group ? ['compatibility-only', 'test-only'] : [],
     )
-  })
-  const setReportPolicyVersion = (value: string) => {
-    scenarioFeatureDraft.value.report_policy_version = value
-    if (value !== '1') scenarioFeatureDraft.value.report_prompt_group = ''
   }
-  const setReportPromptGroup = (value: string) => {
-    scenarioFeatureDraft.value.report_prompt_group = value
-  }
-
-  const availableProfileOptions = computed(() => {
-    return buildAvailableProfileOptions({
+  const scenarioDraftPromptGroupValid = computed(() => promptGroupValid(scenarioDraft.value))
+  const selectedScenarioPromptGroupValid = computed(() => promptGroupValid(selectedScenario.value))
+  const availableProfileOptions = computed(() =>
+    buildAvailableProfileOptions({
       scenarios: scenarios.value,
       options: scenarioOptionsData.value,
-      selectedScenario: selectedScenario.value,
-    })
-  })
-
-  const availableProfileIds = computed(() =>
-    availableProfileOptions.value.map((profile) => profile.id),
+      selectedScenario: scenarioDraft.value,
+    }),
   )
   const profileSelectionReadOnly = computed(() => availableProfileOptions.value.length <= 1)
-
-  const selectedScenarioProfileValid = computed(() => {
-    if (!selectedScenario.value || availableProfileIds.value.length === 0) return true
-    return availableProfileIds.value.includes(selectedScenario.value.profile_id)
-  })
-
-  const selectedScenarioCanSave = computed(() => {
-    return Boolean(
+  const profileValid = (scenario: Scenario | null) =>
+    !scenario ||
+    !scenarioOptionsData.value ||
+    scenarioOptionsData.value.profiles.some((profile) => profile.id === scenario.profile_id)
+  const scenarioDraftProfileValid = computed(() => profileValid(scenarioDraft.value))
+  const selectedScenarioProfileValid = computed(() => profileValid(selectedScenario.value))
+  const selectedProfile = computed(() =>
+    availableProfileOptions.value.find(
+      (profile) => profile.id === selectedScenario.value?.profile_id,
+    ),
+  )
+  const scenarioDraftCanSave = computed(() =>
+    Boolean(
+      scenarioDraft.value?.label.trim() &&
       !featureError.value &&
-      selectedScenarioPromptGroupValid.value &&
-      selectedReportPromptGroupValid.value &&
-      selectedScenarioProfileValid.value &&
+      scenarioDraftPromptGroupValid.value &&
+      scenarioDraftProfileValid.value &&
+      !isLoadingScenarioOptions.value &&
+      !isScenarioOptionsError.value &&
+      !isLoadingScenarios.value &&
+      !isScenariosError.value &&
+      !isLoadingPromptGroups.value &&
+      !isPromptGroupsError.value &&
       !isScenarioMutationPending.value,
-    )
-  })
+    ),
+  )
 
   const scenarioUsageCount = (key: string) => scenarioOptionsData.value?.project_counts?.[key] || 0
-  const selectedScenarioUsageCount = computed(() => {
-    if (!selectedScenario.value || !scenarioOptionsData.value) return null
-    return scenarioUsageCount(selectedScenario.value.key)
-  })
-  const canDeleteSelectedScenario = computed(() => {
-    return Boolean(
+  const selectedScenarioUsageCount = computed(() =>
+    selectedScenario.value && scenarioOptionsData.value
+      ? scenarioUsageCount(selectedScenario.value.key)
+      : null,
+  )
+  const canDeleteSelectedScenario = computed(() =>
+    Boolean(
       selectedScenario.value &&
       !selectedScenario.value.is_default &&
       scenarios.value.length > 1 &&
       selectedScenarioUsageCount.value === 0 &&
+      !isScenariosError.value &&
+      !isLoadingScenarios.value &&
+      !isScenarioOptionsError.value &&
       !isScenarioMutationPending.value,
-    )
-  })
-  const selectedScenarioDeleteTitle = computed(() => {
-    if (!selectedScenario.value) return '请选择场景'
-    if (selectedScenario.value.is_default) return '默认场景不可删除，请先将其他场景设为默认'
-    if (scenarios.value.length <= 1) return '至少需要保留一个场景'
-    if (selectedScenarioUsageCount.value === null) return '正在读取场景使用情况'
+    ),
+  )
+  const selectedScenarioDeleteReason = computed(() => {
+    if (!selectedScenario.value) return ''
+    if (selectedScenario.value.is_default) return '默认场景不可删除，请先将其他场景设为默认。'
+    if (scenarios.value.length <= 1) return '至少需要保留一个场景。'
+    if (isScenarioOptionsError.value) return '无法读取场景使用情况，暂不能删除。'
+    if (selectedScenarioUsageCount.value === null) return '正在读取场景使用情况。'
     if (selectedScenarioUsageCount.value > 0)
-      return `当前有 ${selectedScenarioUsageCount.value} 个项目使用该场景，无法删除`
-    return '删除当前场景'
+      return `当前有 ${selectedScenarioUsageCount.value} 个项目使用该场景，无法删除。`
+    return ''
   })
-
   const openPromptManagerForScenario = () => {
-    const key = selectedScenario.value?.prompt_group
-    void router.push({
-      name: 'ConsolePrompts',
-      query: key ? { focus: key } : undefined,
-    })
+    const key = scenarioDraft.value?.prompt_group || selectedScenario.value?.prompt_group
+    if (!confirmDiscardScenarioChanges()) return
+    scenarioDraft.value = null
+    void router.push({ name: 'ConsolePrompts', query: key ? { focus: key } : undefined })
   }
-
-  const addNewScenario = async () => {
-    if (isScenarioMutationPending.value || !confirmDiscardScenarioChanges()) return
-
-    const startingDraftGeneration = scenarioDraftGeneration
-    const startingSelectedKey = selectedScenarioKey.value
-    const newKey = nextScenarioKey()
-    const defaultProfile = availableProfileOptions.value[0]?.id || DEFAULT_PROFILE_ID
-    const newScen: Scenario = {
-      key: newKey,
-      label: '自定义安全探索方案',
-      is_default: false,
-      profile_id: defaultProfile,
-      image: '',
-      prompt_group: 'goal-driven-v1',
-      knowledge: null,
-      origin_template: null,
-      goal_template: null,
-      cap_add: [],
-      features: {},
-    }
-
-    try {
-      isAddingScenario.value = true
-      const updatedList = ensureDefaultScenario([
-        ...scenarios.value.map((s) => normalizeScenarioForm(clonePlain(s))),
-        newScen,
-      ])
-      await api<Scenario[]>('PUT', '/scenarios', updatedList.map(scenarioPayloadFromForm))
-      await refetchScenarios()
-      void queryClient.invalidateQueries({ queryKey: ['scenarioOptions'] })
-      void queryClient.invalidateQueries({ queryKey: ['scenario-catalog'] })
-      if (
-        scenarioDraftGeneration === startingDraftGeneration &&
-        selectedScenarioKey.value === startingSelectedKey
-      ) {
-        selectScenario(newKey, { force: true })
-      }
-      uiStore.showToast('新方案已建立，请在右侧修改详细属性并保存。', 'success')
-    } catch (err: unknown) {
-      uiStore.showToast(`新建场景失败: ${formatError(err)}`, 'danger')
-    } finally {
-      isAddingScenario.value = false
-    }
+  const invalidateScenarioCatalog = () => {
+    void queryClient.invalidateQueries({ queryKey: ['scenarioOptions'] })
+    void queryClient.invalidateQueries({ queryKey: ['scenario-catalog'] })
   }
-
   const saveScenarios = async () => {
-    if (isScenarioMutationPending.value || !selectedScenario.value || featureError.value) return
-    if (!selectedScenarioPromptGroupValid.value) {
-      uiStore.showToast('当前场景引用的模板组不存在、不可用或不支持探索', 'danger')
-      return
+    if (!scenarioDraftCanSave.value || !scenarioDraft.value) return
+    const draft = scenarioPayloadFromForm(clonePlain(scenarioDraft.value))
+    const mode = draftMode.value
+    const buildPayload = () => {
+      const exists = scenarios.value.some((scenario) => scenario.key === draft.key)
+      if (mode === 'create' && exists) throw new Error('场景键值已被占用，请取消后重新新建。')
+      if (mode === 'edit' && !exists) throw new Error('该场景已不在最新列表中，不能覆盖保存。')
+      const list = scenarios.value.map((scenario) =>
+        scenario.key === draft.key
+          ? draft
+          : {
+              ...clonePlain(scenario),
+              ...(draft.is_default ? { is_default: false } : {}),
+            },
+      )
+      if (mode === 'create') list.push(draft)
+      return ensureDefaultScenario(list).map(scenarioPayloadFromForm)
     }
-    if (!selectedReportPromptGroupValid.value) {
-      uiStore.showToast('当前场景引用的报告模板组不存在、不可用或不支持报告', 'danger')
-      return
-    }
-    if (!selectedScenarioProfileValid.value) {
-      uiStore.showToast('当前场景引用的执行环境画像不存在', 'danger')
-      return
-    }
-
-    const draft = normalizeScenarioForm({
-      ...clonePlain(selectedScenario.value),
-      knowledge: null,
-      features: featurePayloadFromDraft(scenarioFeatureDraft.value, scenarioFeatureSchema.value),
-    })
-
-    const updatedList = scenarios.value.map((s) => {
-      const scenario = normalizeScenarioForm(clonePlain(s))
-      if (scenario.key === draft.key) {
-        return draft
-      }
-      if (draft.is_default) {
-        return { ...scenario, is_default: false }
-      }
-      return scenario
-    })
-    const payload = ensureDefaultScenario(updatedList).map(scenarioPayloadFromForm)
-    const targetKey = draft.key
-    const acceptedSnapshot = scenarioSnapshot(selectedScenario.value, scenarioFeatureDraft.value)
-
+    isSavingScenarios.value = true
+    saveError.value = ''
+    let stage = '保存预检失败'
     try {
-      isSavingScenarios.value = true
-      const preflight = await api<ScenarioValidationResult>('POST', '/scenarios/validate', payload)
-      if (
-        selectedScenarioKey.value === targetKey &&
-        selectedScenario.value &&
-        scenarioSnapshot(selectedScenario.value, scenarioFeatureDraft.value) === acceptedSnapshot
-      ) {
-        scenarioPreflightTone.value = 'success'
-        scenarioPreflightMessage.value = `保存预检通过：${preflight.scenario_count} 个场景，当前场景影响 ${preflight.project_counts[targetKey] || 0} 个项目。`
-      }
-      await api<Scenario[]>('PUT', '/scenarios', payload)
-      await refetchScenarios()
-      void queryClient.invalidateQueries({ queryKey: ['scenarioOptions'] })
-      void queryClient.invalidateQueries({ queryKey: ['scenario-catalog'] })
-      if (selectedScenarioKey.value === targetKey && selectedScenario.value) {
-        selectedScenarioSavedSnapshot.value = acceptedSnapshot
-      }
-      uiStore.showToast('当前场景配置已成功保存！', 'success')
+      await api('POST', '/scenarios/validate', buildPayload())
+      stage = '写入场景失败'
+      // 预检期间可能刷新列表；写入前重新合并，服务端仍会校验实际写入内容。
+      await queryClient.cancelQueries({ queryKey: ['scenarios'] }, { revert: false })
+      const saved = await api<Scenario[]>('PUT', '/scenarios', buildPayload())
+      // PUT 等待期间仍可刷新；先取消迟到读取，再写入权威结果。
+      await queryClient.cancelQueries({ queryKey: ['scenarios'] }, { revert: false })
+      queryClient.setQueryData(['scenarios'], saved)
+      selectedScenarioKey.value = draft.key
+      scenarioDraft.value = null
+      invalidateScenarioCatalog()
+      uiStore.showToast(mode === 'create' ? '场景已创建' : '场景已保存', 'success')
     } catch (err: unknown) {
-      if (selectedScenarioKey.value === targetKey) {
-        scenarioPreflightTone.value = 'error'
-        scenarioPreflightMessage.value = `保存预检失败：${formatError(err)}`
-        uiStore.showToast(`保存场景方案失败: ${formatError(err)}`, 'danger')
-      }
+      saveError.value = `${stage}：${formatError(err)}`
     } finally {
       isSavingScenarios.value = false
     }
@@ -493,18 +286,19 @@ export const useScenariosConsole = () => {
   const confirmDeleteScenario = () => {
     if (selectedScenario.value && canDeleteSelectedScenario.value) {
       deleteScenarioKey.value = selectedScenario.value.key
+      deleteError.value = ''
     }
   }
-
   const handleDeleteScenarioOpenChange = (open: boolean) => {
-    if (!open && !isDeletingScenario.value) {
-      deleteScenarioKey.value = null
-    }
+    if (!open && !isDeletingScenario.value) deleteScenarioKey.value = null
   }
-
   const saveDeleteScenario = async () => {
-    if (isScenarioMutationPending.value) return
-
+    if (
+      isScenarioMutationPending.value ||
+      !scenarioOptionsData.value ||
+      isScenarioOptionsError.value
+    )
+      return
     const key = deleteScenarioKey.value
     const target = scenarios.value.find((scenario) => scenario.key === key)
     if (
@@ -515,54 +309,27 @@ export const useScenariosConsole = () => {
       scenarios.value.length <= 1
     )
       return
-
-    const startingDraftGeneration = scenarioDraftGeneration
-    const startingSelectedKey = selectedScenarioKey.value
-    const updatedList = ensureDefaultScenario(
-      scenarios.value.filter((s) => s.key !== key).map((s) => normalizeScenarioForm(clonePlain(s))),
-    )
-
+    isDeletingScenario.value = true
     try {
-      isDeletingScenario.value = true
-      await api<Scenario[]>('PUT', '/scenarios', updatedList.map(scenarioPayloadFromForm))
-      await refetchScenarios()
-      void queryClient.invalidateQueries({ queryKey: ['scenarioOptions'] })
-      void queryClient.invalidateQueries({ queryKey: ['scenario-catalog'] })
+      await queryClient.cancelQueries({ queryKey: ['scenarios'] }, { revert: false })
+      const payload = ensureDefaultScenario(
+        scenarios.value.filter((scenario) => scenario.key !== key),
+      ).map(scenarioPayloadFromForm)
+      const saved = await api<Scenario[]>('PUT', '/scenarios', payload)
+      await queryClient.cancelQueries({ queryKey: ['scenarios'] }, { revert: false })
+      queryClient.setQueryData(['scenarios'], saved)
+      invalidateScenarioCatalog()
       uiStore.showToast('场景已成功删除', 'success')
-      if (
-        scenarioDraftGeneration === startingDraftGeneration &&
-        selectedScenarioKey.value === startingSelectedKey
-      ) {
-        if (updatedList.length > 0) {
-          selectScenario(updatedList[0].key, { force: true })
-        } else {
-          clearSelectedScenario()
-        }
-      }
       deleteScenarioKey.value = null
     } catch (err: unknown) {
-      uiStore.showToast(`删除场景失败: ${formatError(err)}`, 'danger')
+      deleteError.value = `删除场景失败：${formatError(err)}`
     } finally {
       isDeletingScenario.value = false
     }
   }
-
-  const resetSelectedScenario = () => {
-    if (selectedScenarioKey.value) {
-      selectScenario(selectedScenarioKey.value, { force: true })
-    }
-  }
-
-  const deleteTargetScenario = computed(() => {
-    if (!deleteScenarioKey.value) return null
-    return scenarios.value.find((s) => s.key === deleteScenarioKey.value) || null
-  })
-  const deleteScenarioDescription = computed(() => {
-    return deleteScenarioKey.value
-      ? `您确定要永久删除场景配置「${deleteScenarioKey.value}」吗？`
-      : '您确定要永久删除此场景配置吗？'
-  })
-
+  const deleteScenarioDescription = computed(
+    () => `确定永久删除场景「${deleteScenarioKey.value || ''}」吗？`,
+  )
   watch(
     () => uiStore.globalRefreshKey,
     () => {
@@ -574,60 +341,52 @@ export const useScenariosConsole = () => {
 
   return {
     addNewScenario,
-    availableCaps,
-    canDeleteSelectedScenario,
-    availableImageOptions,
     availableProfileOptions,
+    canDeleteSelectedScenario,
+    closeScenarioEditor,
     confirmDeleteScenario,
     confirmDiscardScenarioChanges,
+    deleteError,
     deleteScenarioDescription,
     deleteScenarioKey,
-    deleteTargetScenario,
+    editSelectedScenario,
     featureError,
     formatError,
-    formatInfraList,
     handleDeleteScenarioOpenChange,
-    infraCapNames,
-    infraImageNames,
-    infraWorkerNames,
-    isAddingScenario,
+    handleEditorOpenChange,
+    isCreatingScenario,
     isDeletingScenario,
+    isLoadingPromptGroups,
+    isLoadingScenarioOptions,
     isLoadingScenarios,
-    isScenarioDirty,
+    isPromptGroupsError,
+    isScenarioEditorOpen,
     isScenarioMutationPending,
     isSavingScenarios,
+    isScenarioOptionsError,
     isScenariosError,
     openPromptManagerForScenario,
-    reportPolicyEnabled,
-    reportPromptGroup,
-    reportPromptGroupOptions,
-    resetSelectedScenario,
-    saveDeleteScenario,
-    saveScenarios,
-    scenarioFeatureDraft,
-    scenarioFeatureSchema,
-    scenarioOptionsData,
-    scenarioPreflightMessage,
-    scenarioPreflightTone,
-    scenarioPromptGroupOptions,
-    scenarioUsageCount,
-    scenarios,
-    scenariosError,
-    selectScenario,
-    selectedScenario,
-    selectedScenarioCanSave,
-    selectedScenarioCapsValid,
-    selectedScenarioDeleteTitle,
-    selectedScenarioImageValid,
-    selectedScenarioInvalidCaps,
-    selectedScenarioKey,
-    selectedReportPromptGroupValid,
-    selectedScenarioProfileValid,
-    selectedScenarioPromptGroupValid,
-    setReportPolicyVersion,
-    setReportPromptGroup,
     profileLabel,
     profileSelectionReadOnly,
     profileSummary,
+    promptGroupsError,
+    saveDeleteScenario,
+    saveError,
+    saveScenarios,
+    scenarioDraft,
+    scenarioDraftCanSave,
+    scenarioDraftProfileValid,
+    scenarioDraftPromptGroupValid,
+    scenarioOptionsError,
+    scenarioPromptGroupOptions,
+    scenarios,
+    scenariosError,
+    selectScenario,
+    selectedProfile,
+    selectedScenario,
+    selectedScenarioDeleteReason,
+    selectedScenarioKey,
+    selectedScenarioProfileValid,
+    selectedScenarioPromptGroupValid,
   }
 }

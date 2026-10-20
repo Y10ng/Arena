@@ -1,4 +1,3 @@
-import type { ProjectGroup } from './groups'
 import type { TenantWorker } from './workers'
 
 export interface ProjectReason {
@@ -49,8 +48,6 @@ export interface ProjectSummary {
   tenant_id: string
   tenant_name: string
   tenant_owner_login?: string | null
-  group_id?: string | null
-  group_name?: string | null
   reason?: ProjectReason | null
   fact_count: number
   intent_count: number
@@ -173,7 +170,6 @@ export interface ProjectRuntimeV2 extends ProjectRuntimeBase {
 export type ProjectRuntime = ProjectRuntimeV1 | ProjectRuntimeV2
 
 export interface ProjectManagementOptions {
-  groups: ProjectGroup[]
   tenant_workers: TenantWorker[]
 }
 
@@ -333,6 +329,45 @@ export interface EvidenceRef {
   verifier_run_id?: string | null
 }
 
+export type EvidenceSource = 'capture' | 'manual' | 'historical'
+
+interface EvidenceItemBase {
+  id: string
+  role: 'primary' | 'supporting'
+  title: string
+  source: EvidenceSource
+}
+
+export type EvidenceItem = EvidenceItemBase & (
+  | {
+      kind: 'http'
+      request?: EvidenceRef | null
+      response?: EvidenceRef | null
+      request_text?: string | null
+      response_text?: string | null
+      artifact?: null
+      text?: null
+    }
+  | {
+      kind: 'artifact'
+      artifact: EvidenceRef
+      request?: null
+      response?: null
+      request_text?: null
+      response_text?: null
+      text?: null
+    }
+  | {
+      kind: 'text'
+      artifact?: EvidenceRef | null
+      text?: string | null
+      request?: null
+      response?: null
+      request_text?: null
+      response_text?: null
+    }
+)
+
 export interface SurfaceManifestEntry {
   entry_id: string
   project_id: string
@@ -381,7 +416,6 @@ export interface CoverageCell {
 
 export interface AssessmentReportGenerationRequest {
   template_key: string
-  template_version: number
 }
 
 export interface AssessmentReportFinalization {
@@ -402,6 +436,7 @@ export interface AssessmentReportFinalization {
   template_key: string | null
   template_version: number | null
   template_digest_sha256: string | null
+  template_compatibility_profiles?: string[]
   input_snapshot_artifact_id?: string | null
   input_snapshot_sha256?: string | null
   report_policy_version?: number | null
@@ -504,7 +539,6 @@ export interface CreateProjectRequest {
   goal: string
   scenario: string
   tenant_worker_ids: string[]
-  group_id: string
   explore_deadline?: string | null
   authorization_expires_at: string | null
   hints?: Array<{ content: string }>
@@ -527,8 +561,6 @@ export interface ProjectDetail {
     tenant_id: string
     tenant_name: string
     tenant_owner_login?: string | null
-    group_id?: string | null
-    group_name?: string | null
     reason?: ProjectReason | null
     assessment_protocol: string
     report_capability: ReportCapability

@@ -73,12 +73,13 @@ defineOptions({ name: 'UiCheckbox', inheritAttrs: false })
 <style scoped>
 .ui-checkbox {
   width: fit-content;
+  min-height: var(--control-height);
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
   color: var(--text);
   cursor: pointer;
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
 }
 
 .ui-checkbox__control {

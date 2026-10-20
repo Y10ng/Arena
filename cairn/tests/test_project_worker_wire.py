@@ -11,14 +11,13 @@ from cairn.server import db
 from cairn.server.auth import protect_cookie_request, require_dispatcher_protocol
 from cairn.server.routers import projects
 from cairn.server.schemas.projects import ProjectWorkerBinding
-from test_project_creation_workers import configured_database, _group, _principal, _worker
+from test_project_creation_workers import configured_database, _principal, _worker
 
 
 @pytest.mark.parametrize("engine", ["pi", "legacy-engine"])
 def test_project_http_binding_reaches_real_worker_selection(monkeypatch, engine):
     principal = _principal("wire-owner")
     worker = _worker(principal, "Wire Worker")
-    group = _group(principal)
     app = FastAPI()
     app.include_router(projects.router)
     app.dependency_overrides[protect_cookie_request] = lambda: principal
@@ -29,7 +28,6 @@ def test_project_http_binding_reaches_real_worker_selection(monkeypatch, engine)
             "origin": "https://example.test",
             "goal": "Synthetic authorization fixture",
             "scenario": "default",
-            "group_id": group.id,
             "tenant_worker_ids": [worker.id],
         })
         assert created.status_code == 201, created.text

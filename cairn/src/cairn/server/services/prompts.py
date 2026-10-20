@@ -320,25 +320,16 @@ def _managed_prompt_group_contents(key: str) -> dict[str, str]:
 
 def _prompt_group_references(conn: sqlite3.Connection) -> dict[str, list[str]]:
     rows = conn.execute(
-        "SELECT key, prompt_group, features_json FROM scenarios ORDER BY key"
+        "SELECT key, prompt_group FROM scenarios ORDER BY key"
     ).fetchall()
     references: dict[str, set[str]] = {}
     for row in rows:
         scenario_key = str(row["key"] or "").strip()
         if not scenario_key:
             continue
-        prompt_groups = {str(row["prompt_group"] or "").strip()}
-        try:
-            features = loads(row["features_json"] or "{}")
-        except (TypeError, ValueError):
-            features = {}
-        if isinstance(features, dict):
-            report_prompt_group = features.get("report_prompt_group")
-            if isinstance(report_prompt_group, str):
-                prompt_groups.add(report_prompt_group.strip())
-        for prompt_group in prompt_groups:
-            if prompt_group:
-                references.setdefault(prompt_group, set()).add(scenario_key)
+        prompt_group = str(row["prompt_group"] or "").strip()
+        if prompt_group:
+            references.setdefault(prompt_group, set()).add(scenario_key)
     return {
         prompt_group: sorted(scenario_keys)
         for prompt_group, scenario_keys in references.items()

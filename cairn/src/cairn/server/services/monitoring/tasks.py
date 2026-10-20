@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from cairn.server.auth import RequestPrincipal, verification_project_access_clause
+
 from .common import *
 
 def _active_task_summaries(
@@ -12,9 +14,15 @@ def _active_task_summaries(
     intent_timeout_seconds: int | None,
     reason_timeout_seconds: int | None,
     tenant_id: str | None = None,
+    principal: RequestPrincipal | None = None,
 ) -> tuple[list[MonitoringTaskRun], list[MonitoringTaskRun], list[MonitoringTaskRun]]:
     # active task 同时读 intent/reason 心跳，监控页能区分进程运行和租约失联。
     tenant_clause = " AND p.tenant_id = ?" if tenant_id is not None else ""
+    params = (tenant_id,) if tenant_id is not None else ()
+    if principal is not None:
+        access_clause, access_params = verification_project_access_clause(principal)
+        tenant_clause += f" AND ({access_clause})"
+        params += access_params
     running_rows = conn.execute(
         f"""
         SELECT tr.*, p.title AS project_title, p.status AS project_status,
@@ -43,7 +51,7 @@ def _active_task_summaries(
         WHERE tr.status = 'running'{tenant_clause}
         ORDER BY tr.started_at, tr.project_id, tr.id
         """,
-        (now, now, now, tenant_id) if tenant_id is not None else (now, now, now),
+        (now, now, now, *params),
     ).fetchall()
     running_tasks = [
         _task_run_summary(
@@ -74,7 +82,7 @@ def _active_task_summaries(
         ORDER BY p.created_at, tr.project_id, tr.id
         LIMIT 10
         """,
-        (tenant_id,) if tenant_id is not None else (),
+        params,
     ).fetchall()
     queued_tasks = [_task_run_summary(row, now=now) for row in queued_rows]
     return running_tasks, long_running_tasks, queued_tasks
@@ -85,8 +93,14 @@ def _recent_failure_summaries(
     now: str,
     *,
     tenant_id: str | None = None,
+    principal: RequestPrincipal | None = None,
 ) -> list[MonitoringTaskRun]:
     tenant_clause = " AND p.tenant_id = ?" if tenant_id is not None else ""
+    params = (tenant_id,) if tenant_id is not None else ()
+    if principal is not None:
+        access_clause, access_params = verification_project_access_clause(principal)
+        tenant_clause += f" AND ({access_clause})"
+        params += access_params
     rows = conn.execute(
         f"""
         SELECT tr.*, p.title AS project_title, p.status AS project_status,
@@ -106,7 +120,7 @@ def _recent_failure_summaries(
         ORDER BY COALESCE(tr.ended_at, tr.started_at, tr.id) DESC, tr.project_id, tr.id
         LIMIT 20
         """,
-        (now, tenant_id) if tenant_id is not None else (now,),
+        (now, *params),
     ).fetchall()
     return [_task_run_summary(row) for row in rows]
 

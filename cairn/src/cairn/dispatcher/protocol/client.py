@@ -123,6 +123,11 @@ class CairnClient:
             "POST", f"/api/v1/verification-requests/{request_id}/{action}", json=payload,
         )
 
+    def get_verification_receipt(self, request_id: str, payload: dict[str, Any]) -> ApiResult:
+        return self._request_json(
+            "POST", f"/api/v1/verification-requests/{request_id}/receipt", json=payload,
+        )
+
     def verification_heartbeat(self, request_id: str, payload: dict[str, Any]) -> ApiResult:
         return self._request_json(
             "POST", f"/api/v1/verification-requests/{request_id}/heartbeat", json=payload,
@@ -658,17 +663,14 @@ class CairnClient:
         project_id: str,
         vuln_id: str,
         *,
-        repro_request: str | None = None,
-        repro_response: str | None = None,
+        evidence_items: list[dict] | None = None,
         repro_steps: str | None = None,
         remediation: str | None = None,
     ) -> ApiResult:
-        # 报告阶段按稳定漏洞 ID 回写干净复现包；None 字段不改动。
+        # 证据关系整体替换，不允许分别补齐不同来源的请求与响应。
         body: dict[str, object] = {}
-        if repro_request is not None:
-            body["repro_request"] = repro_request
-        if repro_response is not None:
-            body["repro_response"] = repro_response
+        if evidence_items is not None:
+            body["evidence_items"] = evidence_items
         if repro_steps is not None:
             body["repro_steps"] = repro_steps
         if remediation is not None:

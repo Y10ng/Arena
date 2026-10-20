@@ -8,6 +8,11 @@ import sqlite3
 from typing import Any
 
 from cairn.server.schemas.reports import ReportInventoryItem, ReportInventoryPage
+from cairn.server.services.report_policy import (
+    REPORT_DATA_SCHEMA_VERSION,
+    REPORT_OUTPUT_CONTRACT_VERSION,
+    REPORT_PACKET_VERSION,
+)
 
 _REPORT_FILENAME_SUFFIX = "vulnerability-report.md"
 _REPORT_PREFIXED_FILENAME_SUFFIX = f"-{_REPORT_FILENAME_SUFFIX}"
@@ -62,6 +67,21 @@ def _report_provenance(metadata_json: object) -> dict[str, Any] | None:
     generation_token = _non_empty_text(metadata.get("report_generation_token"))
     template_key = _non_empty_text(metadata.get("report_template_key"))
     template_version = _positive_integer(metadata.get("report_template_version"))
+    protocol_versions = {
+        "packet_version": _positive_integer(metadata.get("packet_version")),
+        "output_contract_version": _positive_integer(metadata.get("output_contract_version")),
+        "report_data_schema_version": _positive_integer(metadata.get("report_data_schema_version")),
+    }
+    if "report_template_version" in metadata:
+        # 历史成品沿用原有修订身份；不能把损坏版本或新合同伪装成旧报告。
+        if template_version is None or any(key in metadata for key in protocol_versions):
+            return None
+    elif protocol_versions != {
+        "packet_version": REPORT_PACKET_VERSION,
+        "output_contract_version": REPORT_OUTPUT_CONTRACT_VERSION,
+        "report_data_schema_version": REPORT_DATA_SCHEMA_VERSION,
+    }:
+        return None
     template_digest = _digest(metadata.get("report_template_digest_sha256"))
     policy_version = _positive_integer(metadata.get("report_policy_version"))
     execution_digest = _digest(metadata.get("report_execution_plan_sha256"))
@@ -74,7 +94,6 @@ def _report_provenance(metadata_json: object) -> dict[str, Any] | None:
         for value in (
             generation_token,
             template_key,
-            template_version,
             template_digest,
             policy_version,
             execution_digest,
@@ -90,6 +109,7 @@ def _report_provenance(metadata_json: object) -> dict[str, Any] | None:
     return {
         "template_key": template_key,
         "template_version": template_version,
+        **protocol_versions,
         "template_digest_sha256": template_digest,
         "report_policy_version": policy_version,
         "report_execution_plan_sha256": execution_digest,

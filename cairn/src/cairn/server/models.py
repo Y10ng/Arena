@@ -15,7 +15,6 @@ from .schemas.libraries import *
 from .schemas.report_templates import *
 from .schemas.prompts import *
 from .schemas.projects import *
-from .schemas.groups import *
 from .schemas.worker_templates import *
 from .schemas.tenant_workers import *
 from .schemas.tasks import *

@@ -334,6 +334,13 @@ def test_completed_report_dispatches_only_claimable_finalization() -> None:
             },
         ),
         "legacy": ApiResult(status_code=404, data=None),
+        "unrequested-pending": ApiResult(
+            status_code=200, data={"status": "pending", "requested_at": None},
+        ),
+        "unrequested-failed": ApiResult(
+            status_code=200, data={"status": "failed", "requested_at": None},
+        ),
+        "missing-request-time": ApiResult(status_code=200, data={"status": "pending"}),
     }
     loop.client = SimpleNamespace(
         get_assessment_report_finalization=lambda project_id: states[project_id]

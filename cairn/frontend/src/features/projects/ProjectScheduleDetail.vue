@@ -148,7 +148,7 @@
         <pre>{{ schedule.project.origin }}</pre>
         <h3>Goal</h3>
         <pre>{{ schedule.project.goal }}</pre>
-        <p>场景：{{ schedule.project.scenario }} · 项目组：{{ schedule.project.group_id }}</p>
+        <p>场景：{{ schedule.project.scenario }}</p>
         <p>Worker：{{ schedule.project.tenant_worker_ids.join('、') }}</p>
         <p>
           授权到期：{{ schedule.project.authorization_expires_at || '不限' }} · 执行停止：{{

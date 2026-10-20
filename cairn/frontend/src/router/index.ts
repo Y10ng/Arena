@@ -1,4 +1,4 @@
-import { createRouter, createWebHashHistory } from 'vue-router'
+import { createRouter, createWebHashHistory, type RouteLocation } from 'vue-router'
 import Overview from '@/features/overview/Overview.vue'
 import Projects from '@/features/projects/Projects.vue'
 import ProjectWorkspace from '@/features/projects/ProjectWorkspace.vue'
@@ -40,6 +40,11 @@ const routes = [
         name: 'Findings',
         component: () => import('@/features/findings/FindingsPage.vue'),
       },
+      {
+        path: 'reports',
+        name: 'Reports',
+        component: () => import('@/features/findings/ReportManagement.vue'),
+      },
       { path: 'provenance', name: 'Provenance', component: ProvenancePage },
       { path: 'projects', name: 'Projects', component: Projects },
       {
@@ -61,11 +66,6 @@ const routes = [
         path: 'project-schedules/:id',
         name: 'ProjectSchedule',
         component: () => import('@/features/projects/ProjectScheduleDetail.vue'),
-      },
-      {
-        path: 'projects/new',
-        name: 'NewProject',
-        redirect: { path: '/projects', query: { create: '1' } },
       },
       {
         path: 'projects/:id',
@@ -105,14 +105,12 @@ const routes = [
           {
             path: 'verification-integrations',
             name: 'VerificationIntegrations',
-            redirect: { name: 'VerificationConfiguration' },
-            meta: { superAdmin: true },
+            redirect: (to: RouteLocation) => ({ name: 'VerificationConfiguration', query: to.query }),
           },
           {
             path: 'verification-configuration',
             name: 'VerificationConfiguration',
             component: () => import('@/features/verifications/VerificationIntegrations.vue'),
-            meta: { superAdmin: true },
           },
           {
             path: 'users',

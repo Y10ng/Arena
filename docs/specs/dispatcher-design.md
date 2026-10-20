@@ -1,6 +1,164 @@
 # Dispatcher
 
-> 本文保留了历史执行器与旧协议设计，不代表各段均已与当前实现对齐。本轮“创建体验补充：授权到期时间默认不限，无需手动确认”已实现、定向验证并完成静态交付，记录见本节；上一轮删除 Explore 固定逻辑预算的实现及复核记录保留在其后，不重复实施。“探索额度耗尽后的收尾”的旧补丁已被替代；`proj_038` 及更早记录以各节实际实施记录为准，不自动成为本轮待办。不要据旧 driver、失败处理或示例输出重建当前系统。
+> 当前轮次（2026-10-15）：按 [漏洞发现、关键证据与独立复测重设方案](vulnerability-evidence-retest-redesign.md) 实施，以下当前合同按工作区源码核对；本次实施与验证事实集中记录于该方案第11节，不在本文重复一份记录。代码合同不表示已部署或真实 pi 任务已验收。下方 `proj_044` 等章节保留各轮历史，不据旧 driver、示例或 [原复测方案](vulnerability-retest-design.md) 第12节历史提示词接续任务。
+
+## 当前合同：共享证据、Finding v2 与独立复测结果 v2
+
+### 单一证据关系与实际采集
+
+- `cairn/evidence_contracts.py` 是发现、漏洞详情、平台来源和独立复测共用的 `EvidenceItem` 权威类型；不再各自复制一套同义模型。条目使用有序 `id/kind/role/title/source` 与 `request/response/artifact` 引用。`kind=http/artifact/text`，`role=primary/supporting`，`source=capture/manual/historical`；缺失的一侧保持缺失。人工／历史原文可用 `request_text/response_text/text` 保存，capture 禁止内联正文，WorkerEvidenceItem 只提供已登记原件引用。
+- `evidence_refs()` 按条目及请求／响应／附件顺序去重生成引用投影。Worker Finding 不同时填写 `data.evidence_refs` 或 `fact.evidence_refs`，也不在 vulnerability 内重复提交引用清单；Dispatcher 使用条目派生底层 Fact／实验引用，不让模型维护两套配对事实。
+- pi customTools 的 `capture_http_evidence` 实际调用已有 curl，发送 HTTP/1.1 请求，按 curl trace 的实际字节登记各次交互的请求／响应及 trace、可用错误输出、采集状态，返回可直接用于 Finding 或独立复测的 `evidence_items` 和登记信息。这是应用层工具表示，不是网络帧；没有把模型重写的报文标成采集原件。
+- 参数为必填 `url`，可选 `method/headers/body_path/timeout_seconds/title/role`；默认30秒、最高120秒且受原执行期限限制，请求体上限1 MiB、响应限制4 MiB。不自动跟随重定向，后续已授权 Location 独立调用。超时／失败保留实际部分和缺侧，不补造响应，不把响应正文复制进工具回执。原有合法 Shell／脚本／浏览器等方法不因此关闭。
+
+### Finding、Observation 与 v53
+
+生产 Worker Finding 使用 `schema_version:2`，保留漏洞元数据与必填 `identity`，主证据只填 `evidence_items`。`build_vulnerability_for_conclude()` 通过已有登记／上传映射逐侧转换 handle 为服务端 Artifact ID，要求引用本轮已上传原件；不再接收 `packet_path/packet_artifact_handle/packet_artifact_id/repro_request/repro_response`。服务端新 conclude 只接受 v2，旧 Finding 结构仅能精确重放已经接受的原摘要回执，不能成为新发现。
+
+SQLite／PostgreSQL 登记 v53 `vulnerability-evidence-items-v2`：在漏洞和 Observation 原表增加 `evidence_items_json`，旧列原样留档。旧 Observation 两侧保存为 historical HTTP，人工记录为 manual，自动 canonical 旧请求／响应分别保存成未配对历史文本，不能推断为一次交互。登记迁移不证明运行库已经迁移。
+
+详情、来源预览和受理共用 `read_vulnerability_evidence()`：显式 `observation_id` 必须归属该漏洞，默认按 `observed_at DESC, id DESC` 选最新真实发现，无 Observation 时才用记录层条目。保留完整选中来源及缺口，不从 canonical、其他发现或复测补齐一侧；其他历史仍通过独立入口查看。
+
+### 独立复测的输入与结果
+
+创建请求 `CreateVerificationRequest.schema_version` 仍为1，`origin` 可省略／可为 `null`，仅作修复变化、环境说明或资料导航等补充，不是授权目标。`report.type=platform_vulnerability` 可携带真实 `observation_id`；平台来源自动读取源项目背景和已有范围，外部来源由 Agent 从主资料识别漏洞对象，不额外要求 URL／范围表或授权确认。原排除项、到期及费用边界继续适用，无关链接与附件指令不是新增范围。
+
+受理服务自动构造内部 Origin：基础为 `mode/report`，平台来源增加 `project_context/observation_id/vulnerability`，可选原文 `origin` 放入 `additional_context`。平台快照与清单为v2，主证据指向单一选中来源；`project_context` 保留源 Origin／Goal 原文、Target、实际授权记录和原文明确引用的 ProjectResource 导航。导航未复制正文时标为 `copied:false` 并列缺项，不搬整包项目目录或推断凭据；合法直接 Artifact 作为历史输入原字节复制，不登记成本轮证据。平台来源本次到期不晚于源项目到期。
+
+`external_verify` 仍走独立 pi session／专用指引，不进入 Bootstrap／Reason／内部 Verifier／自动报告。新 `external_verification_result.data` 和 Server `VerificationResult` 均固定v2，只提交 `evidence_items`，不能另填 `evidence_refs` 或内联历史文本。Dispatcher 上传／解析本轮引用后提交；查询响应派生只读 `evidence_refs` 供下载导航，不反写权威结果。旧已接受v1仅用于精确终结重放或 receipt 核实，不接受新v1结果、不重写旧摘要。
+
+四态 `confirmed/not_reproduced/environment_changed/insufficient_evidence` 不变：前三态要求本轮原件，证据不足允许空条目但说明真实缺口；均只表述本次结论，不改原漏洞状态、不复制新漏洞或再写内部复核结论。执行绑定、首次claim、取消／真实终态、已接受证据读取与未知回执核实继续沿已有路径，结构通过或采集完成不替代 Server 业务接受或真实判断验收。
+
+## 当前报告合同：冻结自由 Markdown 布局与真实成品（15.13，本地实施，未部署／真实模型未验收）
+
+- 新报告使用 `ReportData.schema_version=2`，Report Packet 保持2，冻结执行方案的 `output_contract_version=3`；执行方案自身仍为2，`execution_contract_version/report_policy_version/completeness_rule_version` 仍为1。Server 与 Dispatcher 拒绝旧输出合同作为新生成输入，不升级或改写历史已受理快照。
+- Worker 保留 `executive_summary/findings/limitations` 解释字段，并提交唯一有序 `layout`。元素仅有 `{type:"markdown",markdown:"..."}` 与 `{type:"fact",ref:"..."}`；没有第二份整篇 Markdown、用户 slot 或通用模板引擎。普通模板编辑者只写自由 Markdown，内部引用由 Worker 按本次冻结输入组织。
+- `scope/counts/work_results/execution_status/limitations/evidence_index` 与每个 `finding:<稳定漏洞ID>` 都须恰好一次；逐漏洞解释数组也必须精确覆盖 Packet 的完整稳定 ID 集合，同标题不合并。未知、重复或缺失引用以及漏漏洞明确拒绝，不回退为旧固定十章。冻结范围、边界、计数、状态、工作结果、逐漏洞事实、证据索引及限制按 `layout` 原位展开，事实块内部仅使用 H3/H4 或正文。
+- 主要 H1/H2 静态标题、级别与顺序必须对应冻结模板；既有 `{{ report_title }}` 仅表达实际报告标题，不扩展为变量语言。局部 Markdown 扫描识别 ATX/Setext 主标题并跳过代码和 HTML 块，不能将示例代码内标题误认为章节。片段的代码块及 HTML 注释等须独立闭合，不能遮蔽随后展开的事实。四章模板因此产生四个主章节，而不是四章指引后再追加旧十章。
+- 受理冻结模板 `key/markdown_content/digest_sha256/compatibility_profiles`；输入快照外层仍为1，含相同的 `report_template`、Packet2及冻结图谱。交付恢复必须使用原快照并核对模板一致，不能读取实时模板补齐。TaskRun 的 `report_inputs` 记录模板身份／摘要、快照身份／摘要及三项输出版本。新快照和最终 Markdown Artifact metadata 都写 `packet_version=2/output_contract_version=3/report_data_schema_version=2`，不写 `report_template_version`。
+- 既有 execution → validated output → finish durable outbox 不变；历史 exact output metadata 按原字段集合序列化，不因新增可选字段补 `null` 或改变 checksum、正文及重放请求。新库存记录模板修订为 `null`，历史修订3等保留原义并可共存，不改写历史 Artifact。
+- 定向受控验证覆盖同一 Packet 经两份模板的真实 renderer、Artifact 文件／登记、Server finish 与实际 `list_report_inventory`，并覆盖 v3 四章、必要事实、引用拒绝、上下文及新旧 exact outbox。隔离 PostgreSQL 仅使用本轮新建临时 Unix-socket实例，验证后关停清理；不依赖 SQLite、不调用模型、不重跑实际项目。程序链通过不表示真实模型已遵循模板。
+- 当前活动 Prompt 来源核查由协调会话完成：没有受管覆盖，默认 `goal-driven-v1/report.md` 即实际来源；本轮只改该默认文件，没有创建受管 Prompt。Server/Dispatcher editable 代码需经授权重启后生效；动态 `result_schema` 不依赖镜像内静态合同 JSON，但 `container/AGENTS.md` 由 Dockerfile 固化到 `/opt/cairn/AGENTS.md`，更新这份 Worker 指引仍需重建镜像并按授权更新实际容器。本轮未构建、迁移运行库、重启或执行真实报告。
+
+## proj_044：删除执行中的自动工具收权，纠正 Reason 空动作语义（2026-10-15 本地实施，未部署／真实任务未验收）
+
+### 实际证据与判断边界
+
+本轮分析阶段按“分析、设计与实施交接”模式工作，只读源码、运行元信息及必要记录；数据库用只读事务。以下证据与定位保留修复前含义，本地实施结果另列于本节末。实际实例为本工作区的 Server/Dispatcher，Server 入口为 8001、实际数据库为 loopback 55433，并非另一个 55432 实例。端口和时间只是本次定位依据，部署前须重新确认；进程 cwd、启动时间不能单独证明所加载代码／镜像版本。以下时间均为 2026-10-15 UTC，不保留目标正文、命令正文、凭据或完整候选。
+
+| 对象 | 实际记录 | 结论 |
+| --- | --- | --- |
+| `proj_044/tr003/i002` | 06:51:31.781 `exploration_deadline` → 31.790 `readonly_conclusion`，剩余 599 秒 → 06:52:03.547 `bash` 立即失败 → `tool_permission` → TaskRun `policy_denied`；提交与修正次数均 0 | 正常执行被软截止强制收权，再因一次调用永久失败。不是供应商拒绝，也不是已有结果后重复探索；未读取命令正文，不判断该命令具体用途 |
+| `proj_044/tr011` | 本地候选 `cnd_d5eca106f6ce417294eea573e088474f` 的 complete 为对象、intents 为 **空数组**，无 abandon/discovered_surfaces；`ev548` 为 `phase_contract_invalid / business_acceptance`，错误 `complete and intents cannot coexist` | 平台把空动作当成实际冲突；不是模型同时要求完成和新建任务，也不是完成 API 已拒绝 |
+| 项目整体 | 11 个 Run：9 成功、2 失败；2 漏洞和2内部复核均有 confirmed 记录。07:25 最后 Explore 结束，07:46:50 快照未结 Task/Intent/Attempt 均0，但项目仍 active，Dispatcher idle | 有已接受发现，不是全链失败；没有完成项目收尾。数据库 confirmed 不替代本会话对漏洞技术真实性的独立验证 |
+
+工具事件原件定位：`runtime/data/artifacts/projects/proj_044/runs/tr003/a013-explore_execute-pi-events.jsonl:45–51`；Reason 为数据库精确项目／Run 的候选及 `ev548`，以及 `runtime/logs/dispatcher.log:137–142`。不复制原件正文到方案。
+
+**首因与放大因素分开。** `worker_protocol/submission.py` 的 ReasonData／生产 Schema 允许 complete 和空 intents；`dispatcher/contracts.py:1105–1118` 却用 `intents is not None` 判冲突。本地 valid 后，尚未进入 `reason_writes.py` 的完成写入就失败。当前 `assessment_attempts.py:500–561,834–895` 只允许带 Server `completion_rejection` 且权威输入确实变化的受控新决策；本次 tr011 没有该标记，business_acceptance 也不在普通重试集合。按现行代码，这条失败链阻止重入，与“之后有新事实但无新 Reason”的实际现象一致；没有调用 claim 重放来验证。不要伪造 completion_rejection、改历史 failed 为 success，或把所有业务拒绝加入自动重试。
+
+### 第一性原理与本轮取舍
+
+研究工具是完成授权任务的手段，收尾时间只是时间管理提示，不是权限变化的依据。局部提交错误也不证明模型失去继续整理／补证的资格。**本轮删除正常执行中的自动工具收权，不扩充工具白名单、不把600秒改成更大数字，也不吞掉权限错误伪装成功。** 保留目标范围、真实授权到期／撤销、用户停止、单 Run 硬截止、证据与凭据边界；这里的授权边界不是对每次工具调用新增审批。
+
+同样，`intents=[]` 表示没有新任务，不是需要禁止的第二种动作。修复应删除错误的业务限制，并使真正非空动作冲突在本地可修正，而不是要求模型靠 Prompt 省略一个无害空字段。此轮改善执行与交付连续性，不宣称增强了漏洞发现策略或保证模型判断正确。
+
+### 最小完整实施范围
+
+1. **正常 execute 保持研究工具可用。** 对普通 Bootstrap/Reason/Explore、内部 Verifier 和 `external_verify_execute` 的非 delivery-only 执行，取消因探索软截止、首次 submit_result 尝试、Schema 失败或同执行修正而 `narrow()/setActiveToolsByName(SAFE_TOOLS)` 的路径。不要只删 `beforeToolCall` 的一个判断而留下工具列表、事件回调或修正提示中的另一份收权。已有收尾窗口最多用于一次不阻断的剩余时间提示，不主动 abort 仍在硬截止内的正常调用，不延长原冻结 deadline；同步其直接配置／协议说明，不能留下仍宣称强制只读但已无效的配置语义。不得自动重放先前已执行的工具来修提交。
+2. **有效候选后是结束执行，不是新的权限失败。** 候选按原机制落盘、冻结并进入交付后，不继续新的目标动作；同一响应里剩余工具调用不能再执行，也不能把已成功固定的候选毒化为 `tool_permission`。复用既有 SDK 结束／取消及候选交付机制，保留冲突候选、捕获失败、原字节校验、取消竞争与物理停止确认，不另造执行状态平台。
+3. **显式交付重试与正常执行分开。** `resume + conclude_only`、显式 `_conclude` 和报告任务不是重新研究的授权，仍只能消费已有材料并交付，不因本轮取消软收权而自动恢复目标动作。保留原 session、输入、绑定与截止，失败不得 fresh 重跑。不能把“正常执行可以修正”实现为“所有恢复模式可执行 bash”。共享 runner 改动需覆盖普通任务和专用复测，而不是只修 Explore 分支。
+4. **Reason 按非空业务动作判断冲突。** complete 配合 intents 缺省、null 或 [] 语义等价，可进入正常完成接受；complete 加非空 intents 仍是冲突，complete 加非空 abandon 等既有真实冲突也不能放行。统一生产 Schema／本地校验和 Dispatcher 消费语义，在同执行有限修正中处理确定性格式问题，不能再让本地 valid 的同一形状必然被下游拒绝。不得改写候选原件，把 [] 偷删后覆盖历史；这是解释语义，不是脱敏／归一化权威信息。保留结构化 Intent、依赖引用、空队列禁止无动作及非空队列合法 noop 等既有正确合同。
+5. **沿既有完成门禁收尾，不扩大恢复器。** 修复后 complete 进入真实 Server 接受：开放工作、陈旧决策、在途执行／候选、真实目标完成证据仍按原规则裁决。覆盖开放工作拒绝后生产者结算、新输入触发新 Reason 的既有受控路径；不因为 `tr011` 是平台缺陷就全局放开失败链。历史 `proj_044` 已落下的失败不会因改空值判断而自动修复，本轮不做数据补丁、自动恢复或重跑，不能宣称部署即可使旧项目 completed。若定向验证再证明这条新运行路径存在其他阻断，先回填具体证据，不扩成通用重试重构。
+6. **直接消费者与定位。** 重点为 `container/pi-agent/src/runner.ts`、同目录 `submission.ts/protocol.ts` 的必要接缝、`cairn/src/cairn/dispatcher/worker_protocol/submission.py`、`dispatcher/contracts.py`；核对 `dispatcher/workers/adapters/pi.py`、`dispatcher/tasks/delivery.py` 和普通／专用任务的实际调用参数。只有相关语义确实改变时才同步配置说明／协议／短指引，不加长研究 Prompt，不改模型、SDK 或依赖。上述 Python 相对目录均以 `cairn/src/cairn/` 为根；旧行号仅供导航。
+
+### 最直接验证与交付边界
+
+- 在现有 runner 假 provider／实际 SDK 工具测试中，以缩短的本地时间模拟本案：跨过原软截止但未到硬截止，正常 bash 仍能执行并最终提交；首次格式无效后仍可读取／写本地证据并修正；有效候选后的尾随调用不执行且不抹掉候选。另覆盖硬截止、用户取消、显式交付重试仍不能重新研究、在途工具真实结束。使用无网络副作用的临时本地文件，不访问目标或调用模型。
+- 复用 `cairn/tests/test_pi_submission_receipts.py`、`test_pi_result_protocol.py` 及现有完成／新决策用例的具体节点，贯通生产 Schema → 本地提交 → Dispatcher validate → 真正完成服务：complete+[]／null／缺省可达正确接受或动态业务拒绝；complete+非空 intents 在本地修正；原件不变；开放 Intent 时不能强行完成，结算后新输入可沿既有受控路径再次决策。不能只测一个 `if` 或 mock 掉消费者。按实际受影响点选择最少验证，不跑全仓矩阵。
+- 专用复测证据与回执的本轮范围及直接检查见 [复测原方案第2.5节](vulnerability-retest-design.md)，完整新会话提示词见其第12节；本文件不复制第二份提示词。
+- 实施修改 runner 后必须构建对应 Worker 镜像并核对实际镜像身份；同名 tag 更新不改变既有容器，不直接往旧容器塞源码、不自行删除用户容器。宿主代码也需实际 Server/Dispatcher 加载后才算部署。**调查时 proj_044 仍 active；任务数为0不等于部署没有副作用。** 交付前重新核对活动项目、计划、候选、在途执行及加载新调度代码是否会自动启动模型／目标操作；需要中断或可能触发业务时先说明并取得许可，未获许可止于本地验证／构建，明确部署待办，不自动 pause/resume。
+- 本轮分析分支 `fix/proj-038-reason-schema`，编辑前工作区干净；仅更新两份原方案。未改业务代码／配置／Prompt／运行记录，未测试、构建、启停、访问目标、调用模型、操作项目或 commit/push。新实施会话在本节追加真实实施结果，区分源码、本地检查、部署和真实运行验收，完成本轮即停止。
+
+### 本轮实施记录（2026-10-15 UTC）
+
+**范围与源码。** 在 `fix/proj-038-reason-schema` 上增量实施，保护会话开始已有的两份原方案修改。没有修改历史项目／结果、模型、依赖、数据库 Schema、通用失败重试或回收架构。
+
+- `container/pi-agent/src/runner.ts` 删除 `narrow()` 及软窗口、首次提交、事件回调和格式修正中的自动收权。正常 execute 保持原工具；`conclude_timeout_seconds` 只发一次 `execution_time_notice` 并非阻断 steer，bash 时限使用原硬截止，不中断在途调用、不重放已完成动作。显式 `conclude_only`、`*_conclude`、report 仍用 SAFE_TOOLS。
+- 有效候选固定后，同批尾随非提交工具在 SDK 入口跳过，不改变 SubmissionState；沿既有 turn_end abort／session 收尾结束执行。重复同内容提交、冲突提交、捕获失败、取消竞争、原件完整性及真实物理停止保持。
+- `worker_protocol/submission.py` 的 ReasonData 增加完成与非空动作冲突的模型／生产 Schema 约束；`dispatcher/contracts.py` 按非空 intents 判冲突。complete 配合 intents 缺省／null／[] 原形保留，可到达真实完成 API；非空 intents／abandon／discovered_surfaces 等真实冲突仍拒绝。使用原权威导出器更新 `container/pi-agent/contracts/submission-v1.json`，同时补齐源码已支持而旧导出遗漏的 `external_verify_execute`；没有新增执行阶段。
+- `container/AGENTS.md`、pi-agent README、`deploy/dispatch.yaml.example` 和本文件配置表同步实际语义，没有新增长研究 Prompt。`src/artifacts.ts` 只补实际只读输入根 `/cairn/advisory/project`，保留 realpath／session／穿越及输入禁登记边界。
+- 专用复测的证据与安全回执实现／定向命令集中记录在 [复测原方案第13节](vulnerability-retest-design.md#13-实施与验收记录)，不复制另一份实施提示词。
+
+**隔离定向验证，不是真实任务验收。** 使用 loopback 假 provider、真实 pi SDK、临时本地材料及内存 SQLite；不调用真实模型、不访问目标、不在业务库造夹具。最终 TypeScript 编译 `npm --prefix container/pi-agent run build` 通过。仅选中的 Node 实例通过：runner 19、artifacts 4、contracts 12、candidate-capture 1；未运行整个 JS／Python 套件。实际命令：
+
+```bash
+node --test --test-name-pattern='normal repair keeps|length during correction|length continuation keeps|artifact_changed repair|invalid submission keeps|valid candidate ends|remaining-time notice never|authorized bash crosses|new authorized action|hard deadline and user cancellation|explicit conclude and report|resume verifies phase|conflicting submissions' container/pi-agent/tests/runner.test.mjs
+node --test --test-name-pattern='readonly inputs remain|managed report and project|duplicate identical submissions|cancellation synchronously observed' container/pi-agent/tests/artifacts.test.mjs
+node --test --test-name-pattern='goal-driven production Schema accepts missing comparisons|production Schema SDK pre-execute|bootstrap scope conflict|auxiliary .* failure preserves second repair|production Schema repairs successfully|second repair still expires|production cross-TaskRun readonly delivery' container/pi-agent/tests/contracts.test.mjs
+node --test --test-name-pattern='artifact injection failure preserves' container/pi-agent/tests/candidate-capture.test.mjs
+```
+
+Reason 最短链贯通生产冻结 Schema → 真实 SDK 本地候选／spool → Dispatcher decode／validate → 写回 → 真实 Server 完成门禁。下列 16 个参数实例最终通过：三种空 intents 形状正常完成；有开放工作时合法候选得到真实 `goal_driven_completion_open_intents`；非空 intents／abandon 在同 session 本地修正；候选 raw_bytes 不变；空队列无动作拒绝及开放队列 noop；结构化 Intent／依赖；受控完成拒绝后，生产者真实结算与新 Fact 才释放新输入 Reason，最终完成。后者复用原服务链，未扩大恢复器或伪造 completion_rejection。
+
+```bash
+cairn/.venv/bin/python -I -c 'import sys; sys.path.append("/usr/lib/python3/dist-packages"); import pytest; raise SystemExit(pytest.main(sys.argv[1:]))' -q \
+  cairn/tests/test_pi_result_protocol.py::test_reason_completion_rejects_nonempty_actions_in_python_and_dispatcher \
+  cairn/tests/test_pi_result_protocol.py::test_every_executable_phase_schema_and_export_are_current \
+  cairn/tests/test_pi_submission_receipts.py::test_goal_reason_completion_empty_intents_reaches_real_completion_gate \
+  cairn/tests/test_pi_submission_receipts.py::test_goal_reason_conflicting_completion_repairs_locally \
+  cairn/tests/test_pi_submission_receipts.py::test_goal_reason_empty_work_rejects_no_actions_but_allows_explicit_rejection \
+  cairn/tests/test_pi_submission_receipts.py::test_goal_reason_open_work_rationale_only_is_runner_noop_without_graph_write \
+  'cairn/tests/test_pi_submission_receipts.py::test_goal_reason_structure_repairs_in_session_and_server_accepts_intent_receipts[first-independent]' \
+  cairn/tests/test_delivery_retry.py::test_http_verifier_fact_releases_fresh_reason_after_controlled_completion_rejection
+```
+
+初次执行并非全绿：项目 venv 无 pytest，离线临时 pytest 环境又缺 httpx，之后复用系统已有测试包，没有修改依赖或 lock；一次参数 node ID 顺序错误导致未收集。正式限定链首次为 14 passed／1 failed／1 error：旧导出断言仍计8阶段而当前为9；授权 fixture 仍 patch 已删除的 get_conn，现用 schedule_transaction。只修这两个陈旧接缝，并仅重跑对应导出节点与既有完成／新决策节点，2 passed，58 条 Starlette TestClient timeout 弃用警告保留。没有将 fixture 修正算作生产授权放宽。
+
+**构建结果，不等于实际加载。**
+
+- 宿主首次 `uv build --offline --wheel` 因缓存缺少已声明的 `uv-build>=0.8.9,<0.9.0` 失败；随后 `uv build --wheel --out-dir /tmp/arena-proj044-host-build-20261015 cairn` 正常隔离构建成功，产物为 `cairn-0.2.1-py3-none-any.whl`。没有安装 wheel、修改运行 venv、迁移或启动服务。
+- Worker 执行 `docker build --pull=false -t arena-worker:proj044-20261015 container`，使用构建前不存在的独立候选 tag，未覆盖正式 tag。pi-agent builder 内 `npm run build && npm run self-check && npm prune --omit=dev --no-audit --no-fund` 成功，离线自检返回 status=ok／SDK 0.73.0；但完整镜像在既有 worker-runtime 工具层下载 Katana v1.6.1 时耗尽原 curl 重试并超时，`curl: (28)`，Docker build 退出1，**没有生成候选镜像**。未修改 Dockerfile、依赖、下载策略或重试次数来绕过；完整 Worker 镜像构建仍是待办，不能把 builder 成功算作镜像成功。
+- 构建失败后只读复核，候选 tag 仍不存在。正式 `arena-worker:local` 及原容器实际镜像均为 `sha256:69cf7f730db191d3f7c5698e389ee0db6ecc7d8c522a21283b0f21fa557c8dfd`；原容器 `32612cc93894`（`cairn-pi-dispatch-1498abdc625d6723-proj_044`）仍 running。`deploy/status.sh` 显示 Server／Dispatcher running、8001 ready、heartbeat idle；这不证明加载了本轮源码，没有重载或替换。
+
+**最后只读业务核对与未部署原因。** 2026-10-15 08:23:07 UTC，从实际 Server 进程身份定位 `127.0.0.1:55433/cairn_isolated`，用只读重复读事务核对，未输出凭据或连接串。`proj_044` 仍 active／generation0；`proj_037/038/039/040` 为 paused，其中 proj_039 有1个开放 Intent、proj_040 有2个开放 Intent及1个 active Attempt。该时刻 queued/running TaskRun、数据库未结候选、未终结复测请求和已终结但未确认物理停止的进程均为空；所见 once 计划已 completed／next_run_at为空。这里的未结候选仅指数据库检查，不声称已核验所有本地 outbox。
+
+任务数为0、heartbeat idle 都不是无副作用重载许可。Server／Dispatcher 重载或替换容器可能影响 active 项目并自动触发决策／模型／目标操作，本轮未取得该许可，且完整 Worker 镜像构建未完成，因此**明确未部署**。没有停止／恢复／重跑 `proj_044` 或 `proj_045`，没有修改历史失败、伪造 completion_rejection、清库、commit 或 push。源码与隔离检查不代表真实任务验收，旧项目不会因本轮修复自动完成；交回分析会话核对后，本轮停止。
+
+### 实施结果只读核对（2026-10-15，下一轮仅纠偏复测）
+
+- **认可的限定范围。** 当前 runner 与实际安装 SDK 0.73 的顺序工具钩子一致：有效候选后跳过尾随调用且不毒化 SubmissionState；正常 execute 的自动收权已移除，显式交付边界保留。Reason complete＋intents 缺省／null／[] 的生产 Schema、Python 模型与 Dispatcher 消费一致，未发现确定返工项。不重写这两部分，也不把只读审阅说成亲自跑过实施者测试。
+- **复测尚需纠偏。** 同字节内部流误排合法日志、未登记指引原样副本漏识别、提前取消ACK误记Run失败、已接受结果回执全丢后Run误记失败，详见 [复测原方案第2.6节](vulnerability-retest-design.md)。下一轮仅执行其第12节，不重做本节全部首轮范围；两个终结问题均不能说成Request结果被覆盖或取消未完成。
+- **独立核对的交付事实。** 约08:40 UTC只读检查：候选 `arena-worker:proj044-20261015` 不存在；正式tag与原运行容器仍为上文旧镜像，Server／Dispatcher仍是原进程，未见重载／替换。既有wheel内7个受影响生产Python模块与当前源码字节一致；这是只读包内容比较，不是测试、安装或运行加载证明。本核对未重新查询业务库，08:23的active／任务数仍仅指上一实施会话快照。
+- **验证边界。** advisory测试直接使用可替换临时根的 evidencePath／ArtifactRegistry，未贯通默认 `/cairn/advisory/project` 挂载与runner read_evidence入口；记录为未验收范围，不凭此断言实现有错或新增测试矩阵。完整镜像未成功、未部署、真实任务未验收；历史失败不会自动恢复。
+- **本分析轮操作。** 只读源码／diff／测试源码及必要运行元信息，仅更新本文件与复测原方案，保护已有业务改动和实施记录；未运行测试、构建、启停、容器执行、模型／目标访问或项目操作，未commit／push。
+
+### 四项纠偏实施记录（2026-10-15 UTC，本地已验证，未部署／真实任务未验收）
+
+**只执行复测原方案第12节四项。** 编辑前已核对status／branch，仍在 `fix/proj-038-reason-schema`，保护全部既有tracked及untracked改动；没有重做工具权限／Reason，不新增依赖、通用恢复器、写回重试或目标执行次数，不改正式配置、业务数据、历史失败／候选／漏洞／completion_rejection，不commit／push。
+
+- **证据来源与内容身份。** `server/services/verification_sources.py` 区分Harness原流与受保护文件；`verification_requests.py` 不再将任意内部stdout／stderr的同摘要传播为独立材料来源。Runner在真实 `/opt/cairn/AGENTS.md` 加载点发 `instructions_loaded` hash／大小，Dispatcher `tasks/hook_records.py` 校验本次执行绑定后复用 `prompt_rendered`，Server按同项目真实TaskRun的冻结／加载身份识别原样副本，不复制指引正文。原件、当次秘密、绑定session、已接受证据读取边界保留。
+- **取消由既有终态路径收口。** `tasks/external_verification.py` 删除future返回前的cancel-ack；保留执行outcome，沿 `_reap_futures → _send_task_run_finish → audit_task_runs → finalize_verification_run` 传递终态与停止证明。不改scheduler／cleanup，不提前伪造停止或把正常取消写成业务失败。
+- **回执全丢只向权威核实一次。** 原同一result最多3次写回不变；消费failure补报的ApiResult。仅结果接受状态未知且补报未接受时，经 `protocol/client.py` 调新增 `POST /api/v1/verification-requests/{id}/receipt`；Server router／service复用提交Schema、Request／Project／TaskRun／generation／claim／Dispatcher owner，返回最小只读投影及no-store。与Server接受时同一完整Pydantic结果／规范摘要匹配才success，不同结果、错误绑定、查询失败或任意409都不是成功证明；不另建终结状态，安全事件不记录响应正文或claim。
+- **本轮文件。** Python6个运行文件（上面services2个、tasks2个、client、router）＋ `container/pi-agent/src/runner.ts`；增量修改原有两个未跟踪验证文件 `test_external_verification_evidence.py`／`test_external_verification_receipts.py`；同步 `docs/specs/server-protocol.md`、pi-agent README和这两份原方案。其余已有改动保留，不混成本轮重做。Python路径根为 `cairn/src/cairn/`。
+
+**四场景直接证据。** 新证据2节点最终 `2 passed in 8.77s`：真实Runner／SDK登记、Dispatcher上传、Server详情／下载原件／历史复制／结果接受，独立target.log与Harness stderr均为 `b"OK\n"` 仍允许；真实默认路径加载的未登记AGENTS原样复制成proof.txt，使用真实副本realpath与加载审计，结果422、下载404、历史复制缺项。真实Server取消＋既有TaskCancellation／lifecycle和全3次result响应丢弃共 `5 passed in 7.59s`；同结果Run succeeded／Request completed、原accepted_at／result不变，取消两者cancelled，其他结果／错误claim／查询失败均不假成功。直接受影响的原回执节点 `6 passed in 2.57s`。只执行这些节点，没有重复Reason或全套runner；完整命令及节点在 [复测原方案第13节最后一轮](vulnerability-retest-design.md#13-实施与验收记录)。材料／DB隔离、loopback假provider、合成进程仅启动一次，不调用真实模型／目标。
+
+**实际失败与验证边界。** 证据夹具通过SDK bash生成／复制文件时先2 failed（12.29s），局部诊断两次各1 failed（3.96s、4.78s），真实工具回执 `spawn /bin/bash EACCES` 后登记无法读取；未修改生产权限或SDK，也未声称定位系统调用根因。最终在假provider首回调、实际指引加载后用本地writeFile／copyFile准备原字节，仍走真实工具登记／提交和上传／筛选，不手填内部metadata。`npm --prefix container/pi-agent run build` 单独执行通过（此前无匹配rg接 `&&` 的命令没有运行build）。PID首次按整数读失败，改按现有JSON字段后完成只读定位。取消验证由合成执行替身经生产TaskCancellation生成停止事实，不是实际Docker进程停止验收；SQLite和服务返回原件读取也不冒称PostgreSQL／HTTP传输／真实业务验收。
+
+**必要构建，不等于部署。**
+
+- 本轮 `uv build --wheel --out-dir /tmp/arena-proj044-corrections-host-20261015 cairn` 成功；独立wheel为 `cairn-0.2.1-py3-none-any.whl`，SHA256=`9d6f18f62968542a3ed6a9ca587763869ac2677595f7546f4f0e941a04aab081`，包内上述6个Python模块与源码逐字节一致。未安装／改venv／迁移，不把旧包当本轮结果。
+- **完整Worker镜像失败，未生成候选。** 执行 `docker build --pull=false --progress=plain -t arena-worker:proj044-corrections-20261015 container`，启动前确认tag不存在。pi-agent builder的编译／离线self-check／prune成功（status=ok、SDK 0.73.0），但worker-runtime第3/19层的Katana v1.6.1下载四次均达到原300秒超时，最后仅收到 `17386692/31373279` 字节，curl退出28，原重试耗尽。09:36:03 UTC构建日志结束，Docker build退出1；随后inspect确认候选tag不存在，正式 `arena-worker:local` 与原运行容器仍为上文 `sha256:69cf7f…c8dfd`。builder成功不是完整镜像成功。不再自行重复构建，不覆盖正式tag、不更改下载源／工具／依赖／重试策略、不重建无改动前端。
+
+**后续下载超时调整（2026-10-15，用户明确授权）。** `container/Dockerfile` 原有3处 `--max-time 300` 改为 `--max-time 3600`，覆盖Katana／nuclei／dalfox／ripgrep／fd下载；连接超时20秒、原3次重试、下载源与工具版本不变。每次下载尝试最多1小时，初次加重试单文件最坏可接近4小时，不是整个构建限时1小时，也不增加下载缓存或断点续传。上文300秒参数下的失败记录保留；本次仅改配置，由用户自行在终端重新构建，尚无新构建结果，未部署。已启动的构建不会采用新参数。
+
+**再次构建成功（2026-10-15，用户明确授权；未部署）。** 用户随后要求“再重新构建试试”，于10:07:24 UTC使用3600秒下载超时启动 `docker build --pull=false --progress=plain -t arena-worker:proj044-corrections-20261015 /root/桌面/Arena/container`，最终退出0并成功导出完整镜像。启动前确认候选tag不存在、未发现其他 `docker build` 进程；构建后inspect确认候选为linux/amd64，ID=`sha256:4ce6bd47cd7a29a9f95d90aa04f825c11b57c9e420dbdbe67d02f96fd092e832`，Created=`2026-10-15T10:11:41.304209415Z`，标签engine=pi／SDK=0.73.0。Katana／nuclei／dalfox下载及版本检查所在层成功（151.7s）；ripgrep／fd的SHA256校验均OK、版本检查所在层成功（11.8s）。pi-agent builder复用原成功缓存；本次实际运行层的 `cairn-agent --self-check` 返回status=ok／offline=true／SDK=0.73.0，Playwright补丁的 `node --check` 与初始化均通过。构建后只读inspect确认正式 `arena-worker:local` 和原 `cairn-pi-dispatch-1498abdc625d6723-proj_044` 容器仍为旧镜像 `sha256:69cf7f730db191d3f7c5698e389ee0db6ecc7d8c522a21283b0f21fa557c8dfd`，原容器running、StartedAt未变。保留此前300秒参数下的失败；本次仅构建，不覆盖正式tag、不部署／替换运行容器、不触发真实任务。未新增代码改动或重跑自动测试，未commit／push；完整镜像成功不等于新代码已加载或真实复测验收。
+
+**实际加载前只读复核与明确不部署。** 09:21:49 UTC按运行Server PID `1564685`、cwd本工作区定位实际 `127.0.0.1:55433/cairn_isolated`，使用只读重复读事务。项目1 active／4 completed／4 paused，proj_044 active／generation0，proj_037/038/039/040 paused；proj_039有1个开放Intent，proj_040有2个及1个active Attempt。queued/running TaskRun、Reason owner、未终结复测、无outcome数据库候选、终态但缺同generation停止证明Run均0；唯一once计划completed／next_run_at为空；现存candidate／report两个outbox活动文件均0。未读取候选／目标正文，不输出凭据或连接串。
+
+`deploy/status.sh`仍running、ownership=tracked、8001 ready、heartbeat idle；Dispatcher PID `1564881`，Server／Dispatcher JSON proc_start_time分别 `51832533`／`51833014`。原容器 `32612cc938941f3bc1a33dc673fe52b448fa7925837c6f684aa3cd3fcd32dd35`（`cairn-pi-dispatch-1498abdc625d6723-proj_044`）仍running，started=`2026-10-15T06:38:04.851152856Z`，实际镜像仍 `sha256:69cf7f730db191d3f7c5698e389ee0db6ecc7d8c522a21283b0f21fa557c8dfd`。未停止／替换进程或容器，ready不是新代码加载证明。
+
+**active项目和可能自动触发的决策／模型／目标操作仍阻止无许可加载。** 无在途任务不等于无业务副作用；未取得具体许可，止于本地验证／构建，不自行pause／resume、恢复／重跑proj_044或proj_045。历史首拒绝码仍未知。可信加载审计沿现有best-effort上传，不增加可靠发布平台；原样内容身份不承诺任意改写／跨项目检测，advisory默认挂载→read_evidence仍未直接验收。实际加载及明确目标／费用授权下的真实任务、物理停止／回收全链留给后续决定，本轮完成后停止并交回分析会话，不接续其他历史待办。
 
 ## 创建体验补充：授权到期时间默认不限，无需手动确认（2026-10-13 UTC 已实现、定向验证、静态交付；真实项目未验收）
 
@@ -1683,13 +1841,15 @@ codex exec resume "{session}" --dangerously-bypass-approvals-and-sandbox --model
 
 ### `tasks.*`
 
+当前 pi 执行使用原冻结 `timeout` 硬截止；`conclude_timeout` 在正常 execute 中只触发一次非阻断提示。显式 `_conclude`、`resume + conclude_only` 和报告任务仍为仅交付，不因提示窗口而获得目标工具或新的执行预算。下方其他历史双阶段描述不作为恢复研究／重置截止的依据。
+
 | 字段 | 必填 | 含义 |
 | --- | --- | --- |
 | `tasks.bootstrap.timeout` | 是 | `bootstrap` 第一阶段超时 |
-| `tasks.bootstrap.conclude_timeout` | 是 | `bootstrap` 双阶段收尾超时 |
+| `tasks.bootstrap.conclude_timeout` | 是 | 正常 pi execute 的一次剩余时间提示窗口；不收权、不打断在途调用、不延长冻结硬截止 |
 | `tasks.reason.timeout` | 是 | `reason` 的超时 |
 | `tasks.explore.timeout` | 是 | `explore` 第一阶段超时 |
-| `tasks.explore.conclude_timeout` | 是 | `explore` 双阶段收尾超时 |
+| `tasks.explore.conclude_timeout` | 是 | Explore／Verifier／专用复测正常 execute 的一次剩余时间提示窗口；不是目标动作权限截止 |
 
 ### `workers.*`
 

@@ -31,6 +31,7 @@ from cairn.server.schemas.execution_events import (
 )
 
 from .audit_task_runs import authenticated_execution_owner
+from .ids import require_project_not_purging
 from .time_utils import utcnow
 
 EXECUTION_EVENTS_ENABLED_ENV = "CAIRN_EXECUTION_EVENTS_ENABLED"
@@ -159,6 +160,7 @@ def append_execution_event(
         )
         if locked.rowcount != 1:
             raise HTTPException(404, "Project not found")
+        require_project_not_purging(conn, project_id)
         project = conn.execute(
             "SELECT execution_generation FROM projects WHERE id = ?",
             (project_id,),

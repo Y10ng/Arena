@@ -118,31 +118,23 @@ def test_default_scenarios_are_seeded() -> None:
 
 
 def test_scenario_configuration_freezes_goal_driven_policy_without_storing_protocol() -> None:
-    from cairn.server.services.prompts import create_prompt_group
-    conn = make_conn()
-    try:
-        create_prompt_group(conn, "custom-goal")
-        scenario = Scenario(
-            key="custom", label="自定义", profile_id="restricted",
-            prompt_group="custom-goal",
-            features={"sandbox": True, "report_prompt_group": "custom-goal"},
-        )
-        saved = replace_scenarios(conn, [scenario])[0]
-        snapshot = scenario_snapshot(saved)
-        policy = policy_for_scenario(saved, created_at="2026-09-28T00:00:00Z")
-        assert snapshot["prompt_group"] == "custom-goal"
-        assert snapshot["features"]["report_prompt_group"] == "custom-goal"
-        assert snapshot["features"]["assessment_protocol"] == "goal-driven-v1"
-        assert snapshot["features"]["execution_engine"] == "pi"
-        assert snapshot["features"]["report_policy_version"] == "1"
-        assert saved.features == scenario.features
-        assert "assessment_protocol" not in saved.features
-        assert policy.goal_driven and policy.independent_verifier_enabled
-        assert policy.explore_deadline is None
-        assert "exploration_limit" not in snapshot["features"]
-        assert "verification_reserve" not in snapshot["features"]
-    finally:
-        conn.close()
+    scenario = Scenario(
+        key="custom", label="自定义", profile_id="restricted",
+        prompt_group="custom-goal", features={"sandbox": True},
+    )
+    validate_scenario_features([scenario])
+    snapshot = scenario_snapshot(scenario)
+    policy = policy_for_scenario(scenario, created_at="2026-09-28T00:00:00Z")
+    assert snapshot["prompt_group"] == "custom-goal"
+    assert snapshot["features"]["assessment_protocol"] == "goal-driven-v1"
+    assert snapshot["features"]["execution_engine"] == "pi"
+    assert "report_policy_version" not in snapshot["features"]
+    assert "report_prompt_group" not in snapshot["features"]
+    assert scenario.features == {"sandbox": True}
+    assert policy.goal_driven and policy.independent_verifier_enabled
+    assert policy.explore_deadline is None
+    assert "exploration_limit" not in snapshot["features"]
+    assert "verification_reserve" not in snapshot["features"]
 
 
 def test_resolve_scenario_key_falls_back_to_default() -> None:
@@ -192,7 +184,6 @@ def test_create_project_persists_requested_scenario(monkeypatch: pytest.MonkeyPa
                 goal="Audit the target",
                 scenario="default",
                 tenant_worker_ids=["twr_test"],
-                group_id="grp_test",
                 authorization_expires_at=None,
             ),
             principal,
@@ -429,19 +420,32 @@ def test_replace_scenarios_rejects_new_compatibility_group_for_exploration() -> 
         conn.close()
 
 
-def test_replace_scenarios_accepts_independent_report_prompt_role() -> None:
-    from cairn.server.services.prompts import create_prompt_group
-    conn = make_conn()
-    try:
-        create_prompt_group(conn, "custom-report")
-        scenarios = replace_scenarios(conn, [Scenario(
-            key="split-prompt-roles", label="自定义报告", profile_id="default",
-            features={"report_prompt_group": "custom-report"},
-        )])
-        assert scenarios[0].prompt_group == "goal-driven-v1"
-        assert scenario_snapshot(scenarios[0])["features"]["report_prompt_group"] == "custom-report"
-    finally:
-        conn.close()
+@pytest.mark.parametrize(("field", "value"), [
+    ("report_policy_version", "1"), ("report_prompt_group", "custom-report"),
+])
+def test_scenarios_reject_retired_report_features(field, value) -> None:
+    with pytest.raises(HTTPException, match="Unsupported features"):
+        validate_scenario_features([
+            Scenario(key="custom", label="自定义", features={field: value})
+        ])
+
+
+def test_prompt_references_only_use_live_exploration_group() -> None:
+    from types import SimpleNamespace
+    from cairn.server.services.prompts import _prompt_group_references
+
+    rows = [
+        {"key": "custom", "prompt_group": "exploration", "features_json": '{"report_prompt_group":"retired-report"}'},
+        {"key": "other", "prompt_group": "exploration"},
+    ]
+    queries = []
+
+    def execute(sql):
+        queries.append(sql)
+        return SimpleNamespace(fetchall=lambda: rows)
+
+    assert _prompt_group_references(SimpleNamespace(execute=execute)) == {"exploration": ["custom", "other"]}
+    assert queries == ["SELECT key, prompt_group FROM scenarios ORDER BY key"]
 
 
 def test_replace_scenarios_rejects_unknown_prompt_group() -> None:

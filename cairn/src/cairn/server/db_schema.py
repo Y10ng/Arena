@@ -854,6 +854,50 @@ VERIFICATION_REQUESTS_V52_TABLE_SCHEMA = (
 )
 
 
+VERIFICATION_REQUEST_DELETION_V54_SCHEMA = """\
+ALTER TABLE verification_requests ADD COLUMN deleted_at TEXT;
+"""
+
+
+# v54 的隐藏记录不自动清理；仅明确发起的永久删除可以解除业务绑定。
+VERIFICATION_REQUEST_PURGE_V55_TABLE_SCHEMA = (
+    VERIFICATION_REQUESTS_V52_TABLE_SCHEMA
+    .replace("mode TEXT NOT NULL", "mode TEXT")
+    .replace("project_id TEXT NOT NULL UNIQUE", "project_id TEXT UNIQUE")
+    .replace("intent_id TEXT NOT NULL", "intent_id TEXT")
+    .replace("report_type TEXT NOT NULL", "report_type TEXT")
+    .replace("report_resource_id TEXT NOT NULL", "report_resource_id TEXT")
+    .replace("    source_vulnerability_id TEXT,", """    source_vulnerability_id TEXT,
+    deleted_at TEXT,
+    purge_state TEXT CHECK (purge_state IN ('pending', 'completed')),
+    purge_error TEXT,
+    purge_batch_ids_json TEXT,
+    deleted_execution_owner_id TEXT,
+    CHECK (
+        (purge_state IS NULL AND purge_error IS NULL AND purge_batch_ids_json IS NULL AND deleted_execution_owner_id IS NULL)
+        OR (purge_state = 'pending' AND deleted_at IS NOT NULL AND purge_batch_ids_json IS NOT NULL)
+        OR (purge_state = 'completed' AND deleted_at IS NOT NULL AND purge_error IS NULL AND purge_batch_ids_json IS NULL)
+    ),
+    CHECK (
+        ((purge_state IS NULL OR purge_state = 'pending') AND project_id IS NOT NULL AND intent_id IS NOT NULL
+            AND report_resource_id IS NOT NULL AND report_type IS NOT NULL AND mode IS NOT NULL)
+        OR (purge_state = 'completed' AND project_id IS NULL AND intent_id IS NULL AND report_resource_id IS NULL
+            AND report_type IS NULL AND mode IS NULL AND external_id IS NULL AND worker_template_id IS NULL
+            AND current_task_run_id IS NULL AND claim_token IS NULL AND cancel_requested_at IS NULL
+            AND terminal_kind IS NULL AND terminal_digest IS NULL AND result_json IS NULL AND error_json IS NULL
+            AND accepted_at IS NULL AND terminal_at IS NULL AND source_project_id IS NULL AND source_vulnerability_id IS NULL)
+    ),""")
+)
+
+
+# v55 已应用的文本保持冻结；显式判别 NULL，避免 CHECK 将未知值当作通过。
+VERIFICATION_REQUEST_PURGE_V56_TABLE_SCHEMA = (
+    VERIFICATION_REQUEST_PURGE_V55_TABLE_SCHEMA
+    .replace("purge_state = 'pending'", "(purge_state IS NOT NULL AND purge_state = 'pending')")
+    .replace("purge_state = 'completed'", "(purge_state IS NOT NULL AND purge_state = 'completed')")
+)
+
+
 PROJECT_SCHEDULES_V48_TABLE_SCHEMA = """\
 CREATE TABLE project_schedules (
     id TEXT PRIMARY KEY,
@@ -931,6 +975,85 @@ CREATE TABLE project_schedule_libraries (
     FOREIGN KEY (library_key, version)
         REFERENCES advisory_library_versions(library_key, version)
 );
+"""
+
+
+# 当前模板只维护一份正文；已发布基线及旧迁移文本不参与修改。
+POSTGRES_CURRENT_REPORT_TEMPLATES_V58_GUARD_SCHEMA = """\
+LOCK TABLE projects, task_runs, report_templates, report_template_versions,
+    report_template_version_profiles, assessment_report_finalizations IN ACCESS EXCLUSIVE MODE;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM report_templates WHERE archived_at IS NOT NULL) THEN
+        RAISE EXCEPTION 'report_template_archive_resolution_required';
+    END IF;
+    IF EXISTS (SELECT 1 FROM assessment_report_finalizations WHERE status IN ('pending', 'running')) THEN
+        RAISE EXCEPTION 'report_template_outstanding_generation_resolution_required';
+    END IF;
+END;
+$$;
+"""
+
+
+POSTGRES_CURRENT_REPORT_TEMPLATES_V58_SCHEMA = """\
+ALTER TABLE report_templates ADD COLUMN markdown_content TEXT;
+ALTER TABLE report_templates ADD COLUMN digest_sha256 TEXT;
+ALTER TABLE report_templates ADD COLUMN updated_at TEXT;
+UPDATE report_templates AS template
+SET markdown_content = latest.markdown_content,
+    digest_sha256 = latest.digest_sha256,
+    updated_at = latest.created_at
+FROM report_template_versions AS latest
+WHERE latest.template_key = template.key
+  AND latest.version = (
+      SELECT MAX(candidate.version) FROM report_template_versions AS candidate
+      WHERE candidate.template_key = template.key
+  );
+UPDATE report_templates SET updated_at = created_at WHERE updated_at IS NULL;
+ALTER TABLE report_templates ALTER COLUMN updated_at SET NOT NULL;
+ALTER TABLE report_templates ADD CONSTRAINT report_templates_content_digest_pair
+CHECK ((markdown_content IS NULL AND digest_sha256 IS NULL)
+    OR (markdown_content IS NOT NULL AND digest_sha256 IS NOT NULL));
+CREATE TABLE report_template_profiles (
+    template_key TEXT NOT NULL REFERENCES report_templates(key) ON DELETE CASCADE,
+    profile_id TEXT NOT NULL,
+    PRIMARY KEY (template_key, profile_id)
+);
+CREATE INDEX ix_report_template_profiles_profile ON report_template_profiles(profile_id, template_key);
+INSERT INTO report_template_profiles (template_key, profile_id)
+SELECT profile.template_key, profile.profile_id
+FROM report_template_version_profiles AS profile
+WHERE profile.template_version = (
+    SELECT MAX(candidate.version) FROM report_template_versions AS candidate
+    WHERE candidate.template_key = profile.template_key
+);
+ALTER TABLE assessment_report_finalizations ADD COLUMN template_profiles_json TEXT;
+DROP TABLE report_template_version_profiles;
+DROP TABLE report_template_versions;
+ALTER TABLE report_templates DROP COLUMN archived_at;
+"""
+
+
+# 仅清理退场分类与实时场景配置，不改冻结快照或历史请求身份材料。
+POSTGRES_PROJECT_GROUP_RETIREMENT_V59_SCHEMA = """\
+UPDATE project_schedules
+SET project_json = (project_json::jsonb - 'group_id')::text
+WHERE mode IN ('daily', 'weekly')
+  AND jsonb_typeof(project_json::jsonb) = 'object'
+  AND jsonb_exists(project_json::jsonb, 'group_id');
+
+ALTER TABLE projects DROP CONSTRAINT fk_projects_group;
+ALTER TABLE projects DROP COLUMN group_id;
+ALTER TABLE verification_integrations DROP CONSTRAINT verification_integrations_group_id_fkey;
+ALTER TABLE verification_integrations DROP COLUMN group_id;
+DROP TABLE project_groups;
+DELETE FROM counters WHERE name = 'project_group';
+
+UPDATE scenarios
+SET features_json = (features_json::jsonb - 'report_policy_version' - 'report_prompt_group')::text
+WHERE jsonb_typeof(features_json::jsonb) = 'object'
+  AND (jsonb_exists(features_json::jsonb, 'report_policy_version')
+       OR jsonb_exists(features_json::jsonb, 'report_prompt_group'));
 """
 
 

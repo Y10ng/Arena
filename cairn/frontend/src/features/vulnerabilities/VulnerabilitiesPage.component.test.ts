@@ -36,7 +36,7 @@ vi.mock('@tanstack/vue-query', () => ({
 vi.mock('vue-router', async () => {
   const { reactive } = await import('vue')
   mocks.route = reactive({ params: { id: 'project-a' } })
-  return { useRoute: () => mocks.route }
+  return { useRoute: () => mocks.route, onBeforeRouteLeave: vi.fn(), onBeforeRouteUpdate: vi.fn() }
 })
 
 vi.mock('@/stores/ui', () => ({
@@ -56,13 +56,14 @@ vi.mock('@/features/reports/ProjectReportDialog.vue', () => ({
   },
 }))
 
-vi.mock('./VulnerabilityDrawer.vue', () => ({
+vi.mock('./VulnerabilityDetail.vue', () => ({
   default: {
-    name: 'VulnerabilityDrawer',
-    props: ['projectId', 'vulnId', 'open'],
+    name: 'VulnerabilityDetail',
+    props: ['projectId', 'vulnId'],
+    setup: (_props: unknown, { expose }: { expose: (value: unknown) => void }) => { expose({ canLeave: () => true }) },
     emits: ['close', 'select-vulnerability', 'status-changed'],
     template:
-      '<div data-testid="vulnerability-drawer"><button type="button" data-testid="select-candidate" @click="$emit(\'select-vulnerability\', \'vuln-filtered\')">打开候选</button></div>',
+      '<div data-testid="vulnerability-detail"><button type="button" data-testid="select-candidate" @click="$emit(\'select-vulnerability\', \'vuln-filtered\')">打开候选</button></div>',
   },
 }))
 
@@ -76,10 +77,8 @@ const vulnerability: Vulnerability = {
   confidence: 0.9,
   status: 'new',
   source_fact_id: null,
-  packet_artifact_id: null,
   remediation: '',
-  repro_request: '',
-  repro_response: '',
+  evidence_items: [],
   repro_steps: '',
   discovered_by_run_id: null,
   discovered_by_worker: null,
@@ -176,6 +175,7 @@ beforeEach(() => {
   HTMLElement.prototype.hasPointerCapture = () => false
   HTMLElement.prototype.setPointerCapture = () => undefined
   HTMLElement.prototype.releasePointerCapture = () => undefined
+  Element.prototype.scrollIntoView = vi.fn()
   mocks.createVulnerability.mockReset().mockResolvedValue({ id: 'vuln-a' })
   mocks.invalidateQueries.mockReset().mockResolvedValue(undefined)
   mocks.listVulnerabilities.mockReset().mockResolvedValue([])
@@ -254,7 +254,7 @@ describe('VulnerabilitiesPage migration', () => {
     )
   })
 
-  it('isolates A→B→A visits and clears the local Drawer selection', async () => {
+  it('isolates A→B→A visits and clears the local inline selection', async () => {
     setQueryState({
       data: {
         projectId: 'project-a',
@@ -270,10 +270,10 @@ describe('VulnerabilitiesPage migration', () => {
     }
 
     document.body
-      .querySelector<HTMLButtonElement>(`button[aria-label="查看详情：${vulnerability.title}"]`)
+      .querySelector<HTMLButtonElement>(`button[aria-label="展开漏洞详情：${vulnerability.title}"]`)
       ?.click()
     await flushPromises()
-    expect(wrapper.getComponent({ name: 'VulnerabilityDrawer' }).props('open')).toBe(true)
+    expect(wrapper.findAllComponents({ name: 'VulnerabilityDetail' })).toHaveLength(1)
 
     mocks.route.params.id = 'project-b'
     await flushPromises()
@@ -285,9 +285,7 @@ describe('VulnerabilitiesPage migration', () => {
       '',
       1,
     ])
-    expect(wrapper.getComponent({ name: 'VulnerabilityDrawer' }).props()).toEqual(
-      expect.objectContaining({ projectId: 'project-b', vulnId: null, open: false }),
-    )
+    expect(wrapper.findComponent({ name: 'VulnerabilityDetail' }).exists()).toBe(false)
 
     mocks.route.params.id = 'project-a'
     await flushPromises()
@@ -331,14 +329,14 @@ describe('VulnerabilitiesPage migration', () => {
     expect(document.body.querySelector('[role="region"][tabindex="0"]')).not.toBeNull()
 
     const action = document.body.querySelector<HTMLButtonElement>(
-      `button[aria-label="查看详情：${vulnerability.title}"]`,
+      `button[aria-label="展开漏洞详情：${vulnerability.title}"]`,
     )
-    expect(action?.textContent?.trim()).toBe('详情')
+    expect(action?.textContent?.trim()).toBe('展开')
     action?.click()
     await flushPromises()
     expect(wrapper.get('tbody tr').attributes('aria-current')).toBe('true')
-    expect(wrapper.getComponent({ name: 'VulnerabilityDrawer' }).props()).toEqual(
-      expect.objectContaining({ projectId: 'project-a', vulnId: 'vuln-a', open: true }),
+    expect(wrapper.getComponent({ name: 'VulnerabilityDetail' }).props()).toEqual(
+      expect.objectContaining({ projectId: 'project-a', vulnId: 'vuln-a' }),
     )
   })
 
@@ -355,16 +353,17 @@ describe('VulnerabilitiesPage migration', () => {
     const wrapper = mountPage()
 
     document.body
-      .querySelector<HTMLButtonElement>(`button[aria-label="查看详情：${vulnerability.title}"]`)
+      .querySelector<HTMLButtonElement>(`button[aria-label="展开漏洞详情：${vulnerability.title}"]`)
       ?.click()
     await flushPromises()
     await wrapper.get('[data-testid="select-candidate"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.getComponent({ name: 'VulnerabilityDrawer' }).props()).toEqual(
-      expect.objectContaining({ projectId: 'project-a', vulnId: 'vuln-filtered', open: true }),
+    expect(wrapper.getComponent({ name: 'VulnerabilityDetail' }).props()).toEqual(
+      expect.objectContaining({ projectId: 'project-a', vulnId: 'vuln-filtered' }),
     )
-    expect(wrapper.get('tbody tr').attributes('aria-current')).toBeUndefined()
+    expect(wrapper.text()).toContain('当前定位漏洞（不在当前列表结果中）')
+    expect(wrapper.get('tbody tr').attributes('aria-current')).toBe('true')
   })
 
   it('distinguishes initial loading, initial failure, and filtered empty states', async () => {
@@ -398,7 +397,7 @@ describe('VulnerabilitiesPage migration', () => {
 
   it('opens an accessible Dialog, focuses the title, and restores trigger focus', async () => {
     mountPage()
-    const trigger = buttonByText('＋ 录入漏洞')
+    const trigger = buttonByText('录入漏洞')
 
     trigger.click()
     await flushPromises()
@@ -423,9 +422,9 @@ describe('VulnerabilitiesPage migration', () => {
     expect(document.body.querySelector('[role="dialog"]')).toBeNull()
   })
 
-  it('submits the complete default eight-field payload and preserves query invalidation', async () => {
+  it('submits the default payload without legacy HTTP fields and preserves query invalidation', async () => {
     mountPage()
-    buttonByText('＋ 录入漏洞').click()
+    buttonByText('录入漏洞').click()
     await flushPromises()
 
     setValue(controlByLabel<HTMLInputElement>('漏洞名称'), '登录接口 SQL 注入')
@@ -439,8 +438,7 @@ describe('VulnerabilitiesPage migration', () => {
       target: '',
       remediation: '',
       confidence: 0.6,
-      repro_request: '',
-      repro_response: '',
+      evidence_items: [],
     })
     expect(Object.keys(mocks.createVulnerability.mock.calls[0]?.[1] ?? {})).toEqual([
       'title',
@@ -449,8 +447,7 @@ describe('VulnerabilitiesPage migration', () => {
       'target',
       'remediation',
       'confidence',
-      'repro_request',
-      'repro_response',
+      'evidence_items',
     ])
 
     expect(mocks.invalidateQueries.mock.calls).toEqual([
@@ -465,7 +462,7 @@ describe('VulnerabilitiesPage migration', () => {
 
   it('preserves edited severity, confidence, and HTTP evidence fields', async () => {
     mountPage()
-    buttonByText('＋ 录入漏洞').click()
+    buttonByText('录入漏洞').click()
     await flushPromises()
 
     setValue(controlByLabel<HTMLInputElement>('漏洞名称'), '水平越权')
@@ -504,8 +501,7 @@ describe('VulnerabilitiesPage migration', () => {
       target: 'GET /api/users/2',
       remediation: '校验资源所有者。',
       confidence: 0.9,
-      repro_request: 'GET /api/users/2 HTTP/1.1\nHost: example.test',
-      repro_response: 'HTTP/1.1 200 OK\n\n{"id":2}',
+      evidence_items: [{ id: 'manual-http', kind: 'http', role: 'primary', title: '人工记录', source: 'manual', request: null, response: null, artifact: null, text: null, request_text: 'GET /api/users/2 HTTP/1.1\nHost: example.test', response_text: 'HTTP/1.1 200 OK\n\n{"id":2}' }],
     })
   })
 
@@ -513,7 +509,7 @@ describe('VulnerabilitiesPage migration', () => {
     const pending = deferred<unknown>()
     mocks.createVulnerability.mockReturnValue(pending.promise)
     mountPage()
-    buttonByText('＋ 录入漏洞').click()
+    buttonByText('录入漏洞').click()
     await flushPromises()
 
     setValue(controlByLabel<HTMLInputElement>('漏洞名称'), '并发创建保护')
@@ -541,7 +537,7 @@ describe('VulnerabilitiesPage migration', () => {
     const pending = deferred<unknown>()
     mocks.createVulnerability.mockReturnValueOnce(pending.promise)
     mountPage()
-    buttonByText('＋ 录入漏洞').click()
+    buttonByText('录入漏洞').click()
     await flushPromises()
 
     setValue(controlByLabel<HTMLInputElement>('漏洞名称'), '旧项目漏洞')
@@ -552,7 +548,7 @@ describe('VulnerabilitiesPage migration', () => {
     await flushPromises()
     expect(document.body.querySelector('[role="dialog"]')).toBeNull()
 
-    buttonByText('＋ 录入漏洞').click()
+    buttonByText('录入漏洞').click()
     await flushPromises()
     const newTitle = controlByLabel<HTMLInputElement>('漏洞名称')
     setValue(newTitle, '新项目草稿')
@@ -578,7 +574,7 @@ describe('VulnerabilitiesPage migration', () => {
   it('retains the draft after failure and guards whitespace-only titles', async () => {
     mocks.createVulnerability.mockRejectedValueOnce(new Error('漏洞写入失败'))
     mountPage()
-    buttonByText('＋ 录入漏洞').click()
+    buttonByText('录入漏洞').click()
     await flushPromises()
 
     const title = controlByLabel<HTMLInputElement>('漏洞名称')

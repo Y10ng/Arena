@@ -54,7 +54,7 @@ defineOptions({ name: 'UiButton', inheritAttrs: false })
   justify-content: center;
   gap: var(--space-2);
   cursor: pointer;
-  font-weight: var(--font-semibold);
+  font-weight: var(--font-medium);
   line-height: var(--leading-tight);
   text-decoration: none;
   transition:
@@ -97,8 +97,7 @@ defineOptions({ name: 'UiButton', inheritAttrs: false })
 
 .ui-button--secondary {
   border-color: var(--border);
-  background: var(--bg-surface);
-  box-shadow: var(--shadow-xs);
+  background: var(--bg-elevated);
   color: var(--text);
 }
 

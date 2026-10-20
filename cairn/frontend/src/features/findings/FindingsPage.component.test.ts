@@ -12,62 +12,41 @@ vi.mock('vue-router', () => ({
   useRoute: () => ({ query: mocks.query }),
   useRouter: () => ({ replace: mocks.replace }),
 }))
-
 vi.mock('./VulnerabilityManagement.vue', () => ({
   default: defineComponent({
     template: '<div data-testid="vulnerability-management">漏洞管理内容</div>',
   }),
 }))
 
-vi.mock('./ReportManagement.vue', () => ({
-  default: defineComponent({ template: '<div data-testid="report-management">报告管理内容</div>' }),
-}))
-
 beforeEach(() => {
   Object.keys(mocks.query).forEach((key) => delete mocks.query[key])
-  mocks.replace
-    .mockReset()
-    .mockImplementation(({ query }: { query: Record<string, string | undefined> }) => {
-      Object.keys(mocks.query).forEach((key) => delete mocks.query[key])
-      Object.assign(mocks.query, query)
-      return Promise.resolve()
-    })
+  mocks.replace.mockReset()
 })
 
-describe('FindingsPage 成果中心 shell', () => {
-  it('defaults to vulnerability management and exposes URL-backed tabs', () => {
+describe('FindingsPage 漏洞入口', () => {
+  it('only mounts vulnerability management without business-switching tabs', () => {
     const wrapper = mount(FindingsPage)
 
-    expect(wrapper.text()).not.toContain('成果中心')
-    expect(wrapper.text()).not.toContain('ENTERPRISE DELIVERABLES')
-    expect(wrapper.find('.findings-route-tabs').exists()).toBe(true)
-    expect(wrapper.text()).toContain('漏洞管理')
-    expect(wrapper.text()).toContain('报告管理')
+    expect(wrapper.get('h1').text()).toBe('漏洞')
     expect(wrapper.find('[data-testid="vulnerability-management"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="report-management"]').exists()).toBe(false)
+    expect(wrapper.find('[role="tablist"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('报告管理')
   })
 
-  it('opens report management from the URL and preserves unrelated query values on tab changes', async () => {
-    mocks.query.view = 'reports'
-    mocks.query.keep = 'yes'
-    mocks.query.reportQ = 'old-filter'
-    mocks.query.reportId = 'old-report'
-    mocks.query.reportProjectId = 'old-project'
+  it('does not interpret legacy view or alter composite vulnerability deep links', async () => {
+    const query = {
+      view: 'reports',
+      vulnerabilityProjectId: 'project-a',
+      vulnerabilityId: 'vulnerability-a',
+      vulnerabilityQ: '保留筛选',
+      keep: 'yes',
+    }
+    Object.assign(mocks.query, query)
     const wrapper = mount(FindingsPage)
-
-    expect(wrapper.find('[data-testid="report-management"]').exists()).toBe(true)
-    wrapper.findComponent({ name: 'UiTabs' }).vm.$emit('update:modelValue', 'vulnerabilities')
     await flushPromises()
 
-    expect(mocks.replace).toHaveBeenLastCalledWith({ query: { keep: 'yes' } })
-  })
-
-  it('normalizes an invalid view without dropping unrelated query values', async () => {
-    mocks.query.view = 'unknown'
-    mocks.query.keep = 'yes'
-    mount(FindingsPage)
-    await flushPromises()
-
-    expect(mocks.replace).toHaveBeenCalledWith({ query: { keep: 'yes' } })
+    expect(wrapper.find('[data-testid="vulnerability-management"]').exists()).toBe(true)
+    expect(mocks.replace).not.toHaveBeenCalled()
+    expect(mocks.query).toEqual(query)
   })
 })

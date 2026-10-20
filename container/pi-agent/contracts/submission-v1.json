@@ -5,6 +5,7 @@
     "bootstrap_execute": "bootstrap_result",
     "explore_conclude": "explore_conclude_result",
     "explore_execute": "explore_result",
+    "external_verify_execute": "external_verification_result",
     "reason_execute": "reason_result",
     "report_execute": "report_result",
     "verifier_conclude": "verifier_conclude_result",
@@ -218,6 +219,27 @@
         },
         "FactResult": {
           "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "vulnerability": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "vulnerability"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "evidence_refs"
+                  ]
+                }
+              }
+            }
+          ],
           "properties": {
             "description": {
               "minLength": 1,
@@ -259,36 +281,25 @@
               "title": "Confidence",
               "type": "number"
             },
+            "evidence_items": {
+              "items": {
+                "$ref": "#/$defs/WorkerEvidenceItem"
+              },
+              "title": "Evidence Items",
+              "type": "array"
+            },
             "identity": {
               "$ref": "#/$defs/VulnerabilityIdentityInput"
-            },
-            "packet_artifact_handle": {
-              "anyOf": [
-                {
-                  "minLength": 1,
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Packet Artifact Handle"
             },
             "remediation": {
               "default": "",
               "title": "Remediation",
               "type": "string"
             },
-            "repro_request": {
-              "default": "",
-              "title": "Repro Request",
-              "type": "string"
-            },
-            "repro_response": {
-              "default": "",
-              "title": "Repro Response",
-              "type": "string"
+            "schema_version": {
+              "const": 2,
+              "title": "Schema Version",
+              "type": "integer"
             },
             "severity": {
               "enum": [
@@ -318,9 +329,11 @@
             }
           },
           "required": [
+            "schema_version",
             "title",
             "severity",
-            "identity"
+            "identity",
+            "evidence_items"
           ],
           "title": "Finding",
           "type": "object"
@@ -577,6 +590,181 @@
           },
           "title": "VulnerabilityVectorIdentity",
           "type": "object"
+        },
+        "WorkerEvidenceItem": {
+          "additionalProperties": false,
+          "description": "Worker 只提交已登记原件的引用，不生成或内联复现报文。",
+          "oneOf": [
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "request": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "request"
+                  ]
+                },
+                {
+                  "properties": {
+                    "response": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "response"
+                  ]
+                }
+              ],
+              "properties": {
+                "artifact": {
+                  "type": "null"
+                },
+                "kind": {
+                  "const": "http"
+                }
+              }
+            },
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "artifact": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "artifact"
+                  ]
+                }
+              ],
+              "properties": {
+                "kind": {
+                  "const": "artifact"
+                },
+                "request": {
+                  "type": "null"
+                },
+                "response": {
+                  "type": "null"
+                }
+              }
+            },
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "artifact": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "artifact"
+                  ]
+                }
+              ],
+              "properties": {
+                "kind": {
+                  "const": "text"
+                },
+                "request": {
+                  "type": "null"
+                },
+                "response": {
+                  "type": "null"
+                }
+              }
+            }
+          ],
+          "properties": {
+            "artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AssessmentEvidenceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "id": {
+              "minLength": 1,
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "http",
+                "artifact",
+                "text"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "request": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AssessmentEvidenceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "response": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AssessmentEvidenceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "role": {
+              "default": "primary",
+              "enum": [
+                "primary",
+                "supporting"
+              ],
+              "title": "Role",
+              "type": "string"
+            },
+            "source": {
+              "enum": [
+                "capture",
+                "manual",
+                "historical"
+              ],
+              "title": "Source",
+              "type": "string"
+            },
+            "title": {
+              "default": "",
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "source"
+          ],
+          "title": "WorkerEvidenceItem",
+          "type": "object"
         }
       },
       "additionalProperties": false,
@@ -613,6 +801,32 @@
         "data": {
           "additionalProperties": false,
           "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "fact": {
+                    "properties": {
+                      "vulnerability": {
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "vulnerability"
+                    ]
+                  }
+                },
+                "required": [
+                  "fact"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "evidence_refs"
+                  ]
+                }
+              }
+            },
             {
               "if": {
                 "required": [
@@ -890,6 +1104,27 @@
         },
         "FactResult": {
           "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "vulnerability": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "vulnerability"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "evidence_refs"
+                  ]
+                }
+              }
+            }
+          ],
           "properties": {
             "description": {
               "minLength": 1,
@@ -931,36 +1166,25 @@
               "title": "Confidence",
               "type": "number"
             },
+            "evidence_items": {
+              "items": {
+                "$ref": "#/$defs/WorkerEvidenceItem"
+              },
+              "title": "Evidence Items",
+              "type": "array"
+            },
             "identity": {
               "$ref": "#/$defs/VulnerabilityIdentityInput"
-            },
-            "packet_artifact_handle": {
-              "anyOf": [
-                {
-                  "minLength": 1,
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Packet Artifact Handle"
             },
             "remediation": {
               "default": "",
               "title": "Remediation",
               "type": "string"
             },
-            "repro_request": {
-              "default": "",
-              "title": "Repro Request",
-              "type": "string"
-            },
-            "repro_response": {
-              "default": "",
-              "title": "Repro Response",
-              "type": "string"
+            "schema_version": {
+              "const": 2,
+              "title": "Schema Version",
+              "type": "integer"
             },
             "severity": {
               "enum": [
@@ -990,9 +1214,11 @@
             }
           },
           "required": [
+            "schema_version",
             "title",
             "severity",
-            "identity"
+            "identity",
+            "evidence_items"
           ],
           "title": "Finding",
           "type": "object"
@@ -1249,6 +1475,181 @@
           },
           "title": "VulnerabilityVectorIdentity",
           "type": "object"
+        },
+        "WorkerEvidenceItem": {
+          "additionalProperties": false,
+          "description": "Worker 只提交已登记原件的引用，不生成或内联复现报文。",
+          "oneOf": [
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "request": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "request"
+                  ]
+                },
+                {
+                  "properties": {
+                    "response": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "response"
+                  ]
+                }
+              ],
+              "properties": {
+                "artifact": {
+                  "type": "null"
+                },
+                "kind": {
+                  "const": "http"
+                }
+              }
+            },
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "artifact": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "artifact"
+                  ]
+                }
+              ],
+              "properties": {
+                "kind": {
+                  "const": "artifact"
+                },
+                "request": {
+                  "type": "null"
+                },
+                "response": {
+                  "type": "null"
+                }
+              }
+            },
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "artifact": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "artifact"
+                  ]
+                }
+              ],
+              "properties": {
+                "kind": {
+                  "const": "text"
+                },
+                "request": {
+                  "type": "null"
+                },
+                "response": {
+                  "type": "null"
+                }
+              }
+            }
+          ],
+          "properties": {
+            "artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AssessmentEvidenceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "id": {
+              "minLength": 1,
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "http",
+                "artifact",
+                "text"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "request": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AssessmentEvidenceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "response": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AssessmentEvidenceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "role": {
+              "default": "primary",
+              "enum": [
+                "primary",
+                "supporting"
+              ],
+              "title": "Role",
+              "type": "string"
+            },
+            "source": {
+              "enum": [
+                "capture",
+                "manual",
+                "historical"
+              ],
+              "title": "Source",
+              "type": "string"
+            },
+            "title": {
+              "default": "",
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "source"
+          ],
+          "title": "WorkerEvidenceItem",
+          "type": "object"
         }
       },
       "additionalProperties": false,
@@ -1285,6 +1686,32 @@
         "data": {
           "additionalProperties": false,
           "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "fact": {
+                    "properties": {
+                      "vulnerability": {
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "vulnerability"
+                    ]
+                  }
+                },
+                "required": [
+                  "fact"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "evidence_refs"
+                  ]
+                }
+              }
+            },
             {
               "if": {
                 "required": [
@@ -1761,6 +2188,27 @@
         },
         "FactResult": {
           "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "vulnerability": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "vulnerability"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "evidence_refs"
+                  ]
+                }
+              }
+            }
+          ],
           "properties": {
             "description": {
               "minLength": 1,
@@ -1802,36 +2250,25 @@
               "title": "Confidence",
               "type": "number"
             },
+            "evidence_items": {
+              "items": {
+                "$ref": "#/$defs/WorkerEvidenceItem"
+              },
+              "title": "Evidence Items",
+              "type": "array"
+            },
             "identity": {
               "$ref": "#/$defs/VulnerabilityIdentityInput"
-            },
-            "packet_artifact_handle": {
-              "anyOf": [
-                {
-                  "minLength": 1,
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Packet Artifact Handle"
             },
             "remediation": {
               "default": "",
               "title": "Remediation",
               "type": "string"
             },
-            "repro_request": {
-              "default": "",
-              "title": "Repro Request",
-              "type": "string"
-            },
-            "repro_response": {
-              "default": "",
-              "title": "Repro Response",
-              "type": "string"
+            "schema_version": {
+              "const": 2,
+              "title": "Schema Version",
+              "type": "integer"
             },
             "severity": {
               "enum": [
@@ -1861,9 +2298,11 @@
             }
           },
           "required": [
+            "schema_version",
             "title",
             "severity",
-            "identity"
+            "identity",
+            "evidence_items"
           ],
           "title": "Finding",
           "type": "object"
@@ -2078,6 +2517,181 @@
           },
           "title": "VulnerabilityVectorIdentity",
           "type": "object"
+        },
+        "WorkerEvidenceItem": {
+          "additionalProperties": false,
+          "description": "Worker 只提交已登记原件的引用，不生成或内联复现报文。",
+          "oneOf": [
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "request": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "request"
+                  ]
+                },
+                {
+                  "properties": {
+                    "response": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "response"
+                  ]
+                }
+              ],
+              "properties": {
+                "artifact": {
+                  "type": "null"
+                },
+                "kind": {
+                  "const": "http"
+                }
+              }
+            },
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "artifact": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "artifact"
+                  ]
+                }
+              ],
+              "properties": {
+                "kind": {
+                  "const": "artifact"
+                },
+                "request": {
+                  "type": "null"
+                },
+                "response": {
+                  "type": "null"
+                }
+              }
+            },
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "artifact": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "artifact"
+                  ]
+                }
+              ],
+              "properties": {
+                "kind": {
+                  "const": "text"
+                },
+                "request": {
+                  "type": "null"
+                },
+                "response": {
+                  "type": "null"
+                }
+              }
+            }
+          ],
+          "properties": {
+            "artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AssessmentEvidenceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "id": {
+              "minLength": 1,
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "http",
+                "artifact",
+                "text"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "request": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AssessmentEvidenceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "response": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AssessmentEvidenceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "role": {
+              "default": "primary",
+              "enum": [
+                "primary",
+                "supporting"
+              ],
+              "title": "Role",
+              "type": "string"
+            },
+            "source": {
+              "enum": [
+                "capture",
+                "manual",
+                "historical"
+              ],
+              "title": "Source",
+              "type": "string"
+            },
+            "title": {
+              "default": "",
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "source"
+          ],
+          "title": "WorkerEvidenceItem",
+          "type": "object"
         }
       },
       "additionalProperties": false,
@@ -2113,6 +2727,34 @@
         },
         "data": {
           "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "fact": {
+                    "properties": {
+                      "vulnerability": {
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "vulnerability"
+                    ]
+                  }
+                },
+                "required": [
+                  "fact"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "evidence_refs"
+                  ]
+                }
+              }
+            }
+          ],
           "properties": {
             "assessment_record": {
               "anyOf": [
@@ -2581,6 +3223,27 @@
         },
         "FactResult": {
           "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "vulnerability": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "vulnerability"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "evidence_refs"
+                  ]
+                }
+              }
+            }
+          ],
           "properties": {
             "description": {
               "minLength": 1,
@@ -2622,36 +3285,25 @@
               "title": "Confidence",
               "type": "number"
             },
+            "evidence_items": {
+              "items": {
+                "$ref": "#/$defs/WorkerEvidenceItem"
+              },
+              "title": "Evidence Items",
+              "type": "array"
+            },
             "identity": {
               "$ref": "#/$defs/VulnerabilityIdentityInput"
-            },
-            "packet_artifact_handle": {
-              "anyOf": [
-                {
-                  "minLength": 1,
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Packet Artifact Handle"
             },
             "remediation": {
               "default": "",
               "title": "Remediation",
               "type": "string"
             },
-            "repro_request": {
-              "default": "",
-              "title": "Repro Request",
-              "type": "string"
-            },
-            "repro_response": {
-              "default": "",
-              "title": "Repro Response",
-              "type": "string"
+            "schema_version": {
+              "const": 2,
+              "title": "Schema Version",
+              "type": "integer"
             },
             "severity": {
               "enum": [
@@ -2681,9 +3333,11 @@
             }
           },
           "required": [
+            "schema_version",
             "title",
             "severity",
-            "identity"
+            "identity",
+            "evidence_items"
           ],
           "title": "Finding",
           "type": "object"
@@ -2898,6 +3552,181 @@
           },
           "title": "VulnerabilityVectorIdentity",
           "type": "object"
+        },
+        "WorkerEvidenceItem": {
+          "additionalProperties": false,
+          "description": "Worker 只提交已登记原件的引用，不生成或内联复现报文。",
+          "oneOf": [
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "request": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "request"
+                  ]
+                },
+                {
+                  "properties": {
+                    "response": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "response"
+                  ]
+                }
+              ],
+              "properties": {
+                "artifact": {
+                  "type": "null"
+                },
+                "kind": {
+                  "const": "http"
+                }
+              }
+            },
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "artifact": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "artifact"
+                  ]
+                }
+              ],
+              "properties": {
+                "kind": {
+                  "const": "artifact"
+                },
+                "request": {
+                  "type": "null"
+                },
+                "response": {
+                  "type": "null"
+                }
+              }
+            },
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "artifact": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "artifact"
+                  ]
+                }
+              ],
+              "properties": {
+                "kind": {
+                  "const": "text"
+                },
+                "request": {
+                  "type": "null"
+                },
+                "response": {
+                  "type": "null"
+                }
+              }
+            }
+          ],
+          "properties": {
+            "artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AssessmentEvidenceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "id": {
+              "minLength": 1,
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "http",
+                "artifact",
+                "text"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "request": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AssessmentEvidenceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "response": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AssessmentEvidenceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "role": {
+              "default": "primary",
+              "enum": [
+                "primary",
+                "supporting"
+              ],
+              "title": "Role",
+              "type": "string"
+            },
+            "source": {
+              "enum": [
+                "capture",
+                "manual",
+                "historical"
+              ],
+              "title": "Source",
+              "type": "string"
+            },
+            "title": {
+              "default": "",
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "source"
+          ],
+          "title": "WorkerEvidenceItem",
+          "type": "object"
         }
       },
       "additionalProperties": false,
@@ -2933,6 +3762,34 @@
         },
         "data": {
           "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "fact": {
+                    "properties": {
+                      "vulnerability": {
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "vulnerability"
+                    ]
+                  }
+                },
+                "required": [
+                  "fact"
+                ]
+              },
+              "then": {
+                "not": {
+                  "required": [
+                    "evidence_refs"
+                  ]
+                }
+              }
+            }
+          ],
           "properties": {
             "assessment_record": {
               "anyOf": [
@@ -2978,6 +3835,565 @@
             "fact"
           ],
           "title": "ExploreData",
+          "type": "object"
+        },
+        "reason": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "type": "object"
+    },
+    "external_verify_execute": {
+      "$defs": {
+        "ArtifactDeclaration": {
+          "additionalProperties": false,
+          "properties": {
+            "handle": {
+              "minLength": 1,
+              "title": "Handle",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "log",
+                "file",
+                "report",
+                "screenshot",
+                "patch",
+                "raw_output"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "path": {
+              "pattern": "^/",
+              "title": "Path",
+              "type": "string"
+            },
+            "sha256": {
+              "pattern": "^[a-f0-9]{64}$",
+              "title": "Sha256",
+              "type": "string"
+            },
+            "size_bytes": {
+              "maximum": 33554432,
+              "minimum": 0,
+              "title": "Size Bytes",
+              "type": "integer"
+            },
+            "source_path": {
+              "pattern": "^/",
+              "title": "Source Path",
+              "type": "string"
+            }
+          },
+          "required": [
+            "handle",
+            "kind",
+            "path",
+            "source_path",
+            "sha256",
+            "size_bytes"
+          ],
+          "title": "ArtifactDeclaration",
+          "type": "object"
+        },
+        "AssessmentEvidenceRef": {
+          "additionalProperties": false,
+          "description": "上传前可使用句柄，服务端写入前必须解析为项目内 Artifact ID。",
+          "oneOf": [
+            {
+              "properties": {
+                "artifact_handle": {
+                  "type": "null"
+                },
+                "artifact_id": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "artifact_id"
+              ]
+            },
+            {
+              "properties": {
+                "artifact_handle": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "artifact_id": {
+                  "type": "null"
+                }
+              },
+              "required": [
+                "artifact_handle"
+              ]
+            }
+          ],
+          "properties": {
+            "artifact_handle": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Handle"
+            },
+            "artifact_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Artifact Id"
+            },
+            "pointer": {
+              "default": "",
+              "title": "Pointer",
+              "type": "string"
+            },
+            "verifier_run_id": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Verifier Run Id"
+            }
+          },
+          "title": "AssessmentEvidenceRef",
+          "type": "object"
+        },
+        "VerificationKeyEvidence": {
+          "additionalProperties": false,
+          "properties": {
+            "evidence_item_ids": {
+              "items": {
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              "title": "Evidence Item Ids",
+              "type": "array"
+            },
+            "reason": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason",
+            "evidence_item_ids"
+          ],
+          "title": "VerificationKeyEvidence",
+          "type": "object"
+        },
+        "VerificationTestStep": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Action",
+              "type": "string"
+            },
+            "evidence_item_ids": {
+              "items": {
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              "title": "Evidence Item Ids",
+              "type": "array"
+            },
+            "observation": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Observation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "observation",
+            "evidence_item_ids"
+          ],
+          "title": "VerificationTestStep",
+          "type": "object"
+        },
+        "WorkerEvidenceItem": {
+          "additionalProperties": false,
+          "description": "Worker 只提交已登记原件的引用，不生成或内联复现报文。",
+          "oneOf": [
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "request": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "request"
+                  ]
+                },
+                {
+                  "properties": {
+                    "response": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "response"
+                  ]
+                }
+              ],
+              "properties": {
+                "artifact": {
+                  "type": "null"
+                },
+                "kind": {
+                  "const": "http"
+                }
+              }
+            },
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "artifact": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "artifact"
+                  ]
+                }
+              ],
+              "properties": {
+                "kind": {
+                  "const": "artifact"
+                },
+                "request": {
+                  "type": "null"
+                },
+                "response": {
+                  "type": "null"
+                }
+              }
+            },
+            {
+              "anyOf": [
+                {
+                  "properties": {
+                    "artifact": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "artifact"
+                  ]
+                }
+              ],
+              "properties": {
+                "kind": {
+                  "const": "text"
+                },
+                "request": {
+                  "type": "null"
+                },
+                "response": {
+                  "type": "null"
+                }
+              }
+            }
+          ],
+          "properties": {
+            "artifact": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AssessmentEvidenceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "id": {
+              "minLength": 1,
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "http",
+                "artifact",
+                "text"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "request": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AssessmentEvidenceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "response": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AssessmentEvidenceRef"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "role": {
+              "default": "primary",
+              "enum": [
+                "primary",
+                "supporting"
+              ],
+              "title": "Role",
+              "type": "string"
+            },
+            "source": {
+              "enum": [
+                "capture",
+                "manual",
+                "historical"
+              ],
+              "title": "Source",
+              "type": "string"
+            },
+            "title": {
+              "default": "",
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "source"
+          ],
+          "title": "WorkerEvidenceItem",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "not": {
+              "required": [
+                "data"
+              ]
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "if": {
+            "properties": {
+              "accepted": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "data"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "data": {
+          "additionalProperties": false,
+          "allOf": [
+            {
+              "else": {
+                "properties": {
+                  "evidence_items": {
+                    "contains": {
+                      "anyOf": [
+                        {
+                          "properties": {
+                            "request": {
+                              "type": "object"
+                            }
+                          },
+                          "required": [
+                            "request"
+                          ]
+                        },
+                        {
+                          "properties": {
+                            "response": {
+                              "type": "object"
+                            }
+                          },
+                          "required": [
+                            "response"
+                          ]
+                        },
+                        {
+                          "properties": {
+                            "artifact": {
+                              "type": "object"
+                            }
+                          },
+                          "required": [
+                            "artifact"
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              },
+              "if": {
+                "properties": {
+                  "outcome": {
+                    "const": "insufficient_evidence"
+                  }
+                },
+                "required": [
+                  "outcome"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "limitations": {
+                    "minItems": 1
+                  }
+                }
+              }
+            }
+          ],
+          "description": "新复测只填写一套有序原件关系；底层引用由条目投影。",
+          "properties": {
+            "evidence_items": {
+              "items": {
+                "$ref": "#/$defs/WorkerEvidenceItem"
+              },
+              "title": "Evidence Items",
+              "type": "array"
+            },
+            "key_evidence": {
+              "items": {
+                "$ref": "#/$defs/VerificationKeyEvidence"
+              },
+              "title": "Key Evidence",
+              "type": "array"
+            },
+            "limitations": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "title": "Limitations",
+              "type": "array"
+            },
+            "outcome": {
+              "enum": [
+                "confirmed",
+                "not_reproduced",
+                "environment_changed",
+                "insufficient_evidence"
+              ],
+              "title": "Outcome",
+              "type": "string"
+            },
+            "reason_code": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason Code"
+            },
+            "schema_version": {
+              "const": 3,
+              "title": "Schema Version",
+              "type": "integer"
+            },
+            "summary": {
+              "minLength": 1,
+              "title": "Summary",
+              "type": "string"
+            },
+            "test_steps": {
+              "items": {
+                "$ref": "#/$defs/VerificationTestStep"
+              },
+              "title": "Test Steps",
+              "type": "array"
+            },
+            "tested_scope": {
+              "minLength": 1,
+              "title": "Tested Scope",
+              "type": "string"
+            }
+          },
+          "required": [
+            "schema_version",
+            "outcome",
+            "summary",
+            "tested_scope",
+            "limitations",
+            "key_evidence",
+            "test_steps",
+            "evidence_items"
+          ],
+          "title": "ExternalVerificationData",
           "type": "object"
         },
         "reason": {
@@ -3536,6 +4952,44 @@
         },
         "data": {
           "additionalProperties": false,
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "complete": {
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "complete"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "abandon": {
+                    "maxItems": 0
+                  },
+                  "depth_review": {
+                    "type": "null"
+                  },
+                  "discovered_surfaces": {
+                    "maxItems": 0
+                  },
+                  "intents": {
+                    "anyOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "maxItems": 0,
+                        "type": "array"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ],
           "properties": {
             "abandon": {
               "items": {
@@ -3708,6 +5162,27 @@
           "title": "ArtifactDeclaration",
           "type": "object"
         },
+        "ReportFactReference": {
+          "additionalProperties": false,
+          "properties": {
+            "ref": {
+              "minLength": 1,
+              "title": "Ref",
+              "type": "string"
+            },
+            "type": {
+              "const": "fact",
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "ref"
+          ],
+          "title": "ReportFactReference",
+          "type": "object"
+        },
         "ReportFinding": {
           "additionalProperties": false,
           "properties": {
@@ -3754,6 +5229,28 @@
             "regression_steps"
           ],
           "title": "ReportFinding",
+          "type": "object"
+        },
+        "ReportMarkdownFragment": {
+          "additionalProperties": false,
+          "properties": {
+            "markdown": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Markdown",
+              "type": "string"
+            },
+            "type": {
+              "const": "markdown",
+              "title": "Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "markdown"
+          ],
+          "title": "ReportMarkdownFragment",
           "type": "object"
         }
       },
@@ -3805,15 +5302,37 @@
               "title": "Findings",
               "type": "array"
             },
+            "layout": {
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ReportMarkdownFragment"
+                  },
+                  {
+                    "$ref": "#/$defs/ReportFactReference"
+                  }
+                ]
+              },
+              "minItems": 1,
+              "title": "Layout",
+              "type": "array"
+            },
             "limitations": {
               "default": "",
               "title": "Limitations",
               "type": "string"
+            },
+            "schema_version": {
+              "const": 2,
+              "title": "Schema Version",
+              "type": "integer"
             }
           },
           "required": [
+            "schema_version",
             "executive_summary",
-            "findings"
+            "findings",
+            "layout"
           ],
           "title": "ReportData",
           "type": "object"

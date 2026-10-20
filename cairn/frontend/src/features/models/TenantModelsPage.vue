@@ -1,15 +1,5 @@
 <template>
   <article class="console-page configuration-page tenant-models-page">
-    <div class="section-header section-header--actions">
-      <Button variant="secondary" size="sm" :loading="refreshing" @click="refreshModels">
-        <template #icon><RefreshCw :size="14" /></template>
-        {{ refreshing ? '刷新中...' : '刷新' }}
-      </Button>
-    </div>
-
-    <Alert tone="warning">
-      模型发现和真实请求由 Arena Server 发起；测试可选，失败或未测试均不阻止保存。
-    </Alert>
     <ErrorState
       v-if="loadError"
       title="Model 加载失败"
@@ -25,10 +15,15 @@
         <Card class="console-card configuration-panel configuration-list model-master">
           <div class="list-header">
             <div>
-              <strong>Tenant Models</strong>
-              <p class="text-faint">{{ models.length }} 个配置</p>
+              <strong>模型</strong>
+              <span class="text-faint"> · {{ models.length }} 个配置</span>
             </div>
-            <Button variant="secondary" size="sm" @click="startCreate">新增</Button>
+            <div class="inline-actions">
+              <IconButton label="刷新模型" :loading="refreshing" @click="refreshModels"
+                ><RefreshCw :size="16"
+              /></IconButton>
+              <Button size="sm" @click="startCreate">新增</Button>
+            </div>
           </div>
           <template v-if="modelsPending">
             <Skeleton
@@ -73,7 +68,6 @@
           <div class="editor-title-row">
             <div>
               <h2>{{ creating ? '新增 Model' : '编辑 Model' }}</h2>
-              <p class="text-faint mono">{{ currentModel?.id || '保存后生成 ID' }}</p>
             </div>
             <Button
               v-if="currentModel && !creating"
@@ -87,15 +81,13 @@
             </Button>
           </div>
 
-          <form class="managed-form model-steps" @submit.prevent="saveModel">
-            <section class="model-step">
-              <span class="step-number">1</span>
-              <div class="step-content">
+          <form class="managed-form model-form" @submit.prevent="saveModel">
+            <section class="model-section">
+              <div class="model-section-content">
                 <FormField
                   v-slot="{ controlAttrs }"
                   class="form-group"
                   label="自定义 Model 名称"
-                  hint="用于 Workers 和项目中的显示；当前 Tenant 内不可重复。"
                   required
                 >
                   <Input
@@ -106,12 +98,6 @@
                     @update:model-value="updateDisplayName"
                   />
                 </FormField>
-              </div>
-            </section>
-
-            <section class="model-step">
-              <span class="step-number">2</span>
-              <div class="step-content">
                 <div class="form-grid">
                   <label class="form-group">
                     <span class="form-label">协议格式</span>
@@ -137,16 +123,12 @@
                     required
                     @update:model-value="updateBaseUrl"
                   />
-                  <span class="text-faint"
-                    >支持任意 HTTP(S) URL 前缀；hostname 必须能从 Arena Server 解析。</span
-                  >
                 </label>
               </div>
             </section>
 
-            <section class="model-step">
-              <span class="step-number">3</span>
-              <div class="step-content">
+            <section class="model-section">
+              <div class="model-section-content">
                 <div class="form-grid">
                   <label class="form-group">
                     <span class="form-label">认证字段</span>
@@ -174,7 +156,7 @@
                   </FormField>
                 </div>
                 <div class="credential-status-row">
-                  <span class="text-faint">历史 Key 不会回填；新输入只进入本次请求 body。</span>
+                  <span class="text-faint">已保存的 Key 不回填；留空保留原值。</span>
                   <Button
                     v-if="currentModel && !creating"
                     variant="danger"
@@ -188,12 +170,15 @@
               </div>
             </section>
 
-            <section class="model-step">
-              <span class="step-number">4</span>
-              <div class="step-content">
+            <details class="advanced-config" :open="Boolean(headerError)">
+              <summary>
+                自定义 Headers{{
+                  draft.custom_headers.length ? `（${draft.custom_headers.length}）` : ''
+                }}
+              </summary>
+              <div class="model-section-content advanced-grid">
                 <div class="section-title-row">
                   <div>
-                    <strong>自定义 Headers</strong>
                     <p class="text-faint">
                       名称和值将明文保存并完整回显，请仅在受控内部环境中使用。
                     </p>
@@ -217,9 +202,8 @@
                   <Button variant="danger" size="sm" @click="removeHeader(index)">删除</Button>
                 </div>
                 <p v-if="headerError" class="field-error">{{ headerError }}</p>
-                <p v-if="!draft.custom_headers.length" class="text-faint">未配置自定义 Header。</p>
               </div>
-            </section>
+            </details>
 
             <details class="advanced-config">
               <summary>高级 endpoint 配置</summary>
@@ -249,9 +233,8 @@
               </div>
             </details>
 
-            <section class="model-step">
-              <span class="step-number">5</span>
-              <div class="step-content">
+            <section class="model-section">
+              <div class="model-section-content">
                 <div class="section-title-row">
                   <label class="form-group grow-field">
                     <span class="form-label">Provider Model ID</span>
@@ -289,13 +272,13 @@
                   {{ discoveryResult.endpoint }}
                 </p>
                 <p v-if="discoveryError" class="field-error">获取失败：{{ discoveryError }}</p>
-                <p class="text-faint">获取失败不影响手工填写 Provider Model ID。</p>
+                <p v-if="requestDisabledReason" class="text-faint">{{ requestDisabledReason }}</p>
               </div>
             </section>
 
-            <section class="model-step">
-              <span class="step-number">6</span>
-              <div class="step-content">
+            <details class="advanced-config">
+              <summary>连接测试（可选）</summary>
+              <div class="model-section-content advanced-grid">
                 <label class="form-group">
                   <span class="form-label">真实请求内容</span>
                   <Textarea
@@ -332,24 +315,23 @@
                   <pre>{{ testResult.response_body }}</pre>
                 </Card>
                 <p v-if="testError" class="field-error">测试失败：{{ testError }}</p>
+                <p v-if="!canTest" class="text-faint">
+                  {{
+                    requestDisabledReason ||
+                    (!draft.model_name.trim()
+                      ? '填写 Provider Model ID 后可测试。'
+                      : '填写测试请求内容后可测试。')
+                  }}
+                </p>
               </div>
-            </section>
+            </details>
 
-            <section class="model-step save-step">
-              <span class="step-number">7</span>
-              <div class="step-content">
-                <strong>保存 Model</strong>
-                <p class="text-faint">保存与测试完全独立；未测试或测试失败时仍可保存。</p>
-                <footer class="editor-footer justify-end">
-                  <Button variant="secondary" :disabled="saving" @click="resetDraft">
-                    取消修改
-                  </Button>
-                  <Button type="submit" :loading="saving" :disabled="!canSave">
-                    {{ saving ? '保存中...' : '保存 Model' }}
-                  </Button>
-                </footer>
-              </div>
-            </section>
+            <footer class="editor-footer model-save-actions">
+              <Button variant="secondary" :disabled="saving" @click="resetDraft"> 取消修改 </Button>
+              <Button type="submit" :loading="saving" :disabled="!canSave">
+                {{ saving ? '保存中...' : '保存 Model' }}
+              </Button>
+            </footer>
           </form>
         </Card>
 
@@ -399,6 +381,7 @@ import {
   Checkbox,
   EmptyState,
   FormField,
+  IconButton,
   Input,
   Select,
   Skeleton,
@@ -484,6 +467,13 @@ const hasCredential = computed(() =>
 )
 const canRequest = computed(() =>
   Boolean(draft.base_url.trim() && hasCredential.value && !headerError.value),
+)
+const requestDisabledReason = computed(() =>
+  !draft.base_url.trim()
+    ? '填写 Base URL 后可获取模型和测试。'
+    : !hasCredential.value
+      ? '配置 API Key 后可获取模型和测试。'
+      : headerError.value,
 )
 const canTest = computed(() =>
   Boolean(canRequest.value && draft.model_name.trim() && promptInput.value),

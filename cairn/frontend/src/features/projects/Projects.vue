@@ -22,10 +22,6 @@
         </button>
       </div>
       <div class="header-right">
-        <div class="refresh-indicator" title="实时刷新">
-          <span class="live-dot live-success" :class="{ 'animate-pulse-live': isFetching }"></span>
-          <span class="refresh-label text-faint">{{ isFetching ? '正在刷新' : '实时刷新' }}</span>
-        </div>
         <Button @click="openNewProject($event)">
           <template #icon><Plus :size="14" /></template>
           新建项目
@@ -50,7 +46,6 @@
       @discarded="closeNewProject"
     />
 
-    <!-- 分组已由左侧导航栏（FrontLayout）承载，本页不再重复侧栏，列表区域整宽展示 -->
     <ProjectSchedules v-if="showSchedules" />
     <div v-else class="projects-container">
       <FilterBar class="toolbar" label="项目筛选">
@@ -76,7 +71,7 @@
             id="project-search"
             v-model="searchQuery"
             :placeholder="
-              showTenantAttribution ? '搜索项目、Tenant、分组或场景...' : '搜索项目、分组或场景...'
+              showTenantAttribution ? '搜索项目、Tenant或场景...' : '搜索项目或场景...'
             "
             @keydown.esc="searchQuery = ''"
           />
@@ -100,8 +95,7 @@
         </FormField>
 
         <template #status>
-          <span v-if="isFetching">正在获取最新项目数据…</span>
-          <span v-else>{{ filteredProjects.length }} 个项目</span>
+          <span>{{ filteredProjects.length }} 个项目</span>
         </template>
       </FilterBar>
 
@@ -111,9 +105,9 @@
         tone="warning"
         title="项目刷新失败"
       >
-        当前显示最近一次成功获取的数据。
+        项目列表仍显示最近一次成功获取的数据。
         <template #actions>
-          <Button size="sm" variant="secondary" @click="refetch()">重试刷新</Button>
+          <Button size="sm" variant="secondary" :loading="retryingRefresh" @click="retryRefresh()">重试刷新</Button>
         </template>
       </Alert>
 
@@ -142,7 +136,7 @@
           title="项目数据加载失败"
           description="无法连接至平台后端服务器。请检查服务端状态。"
           retry-label="重新加载"
-          @retry="refetch()"
+          @retry="retryRefresh()"
         />
 
         <EmptyState
@@ -171,7 +165,7 @@
             <button
               type="button"
               class="project-row-main"
-              :aria-label="`进入工作空间 ${p.title}`"
+              :aria-label="`进入工作空间 ${p.title}，${getProjectStatus(p).label}`"
               @focus="focusedIndex = index"
               @click="navigateToWorkspace(p.id)"
               @keydown.down.prevent="moveFocus(1)"
@@ -181,8 +175,8 @@
               <div class="row-left">
                 <span
                   class="status-indicator"
-                  :class="getStatusClass(p.status)"
-                  :title="getProjectRuntime(p).label"
+                  :class="`status-${getProjectStatus(p).tone}`"
+                  aria-hidden="true"
                 ></span>
                 <div class="title-section">
                   <div class="title-row">
@@ -195,9 +189,6 @@
               <!-- Middle Meta Scenario & Stats -->
               <div class="row-middle">
                 <div class="scenario-badge-wrapper">
-                  <Badge tone="info" size="sm" :title="`项目组: ${getGroupName(p)}`">
-                    {{ getGroupName(p) }}
-                  </Badge>
                   <Badge size="sm" :title="`场景方案: ${getScenarioLabel(p)}`">
                     <Wrench :size="10" aria-hidden="true" />
                     {{ getScenarioLabel(p) }}
@@ -242,14 +233,11 @@
               <div
                 class="project-row-status"
                 :class="{ 'project-row-status--scheduled': p.status === 'pending' }"
-                aria-label="项目运行状态"
+                aria-label="项目状态"
               >
-                <Badge :tone="getProjectRuntime(p).tone" size="sm">
-                  {{ getProjectRuntime(p).label }}
+                <Badge :tone="getProjectStatus(p).tone" size="sm">
+                  {{ getProjectStatus(p).label }}
                 </Badge>
-                <span class="project-row-reason" :title="getProjectRuntime(p).detail">
-                  {{ getProjectRuntime(p).detail }}
-                </span>
                 <router-link
                   v-if="p.status === 'pending' && scheduleFor(p)"
                   :to="`/project-schedules/${scheduleFor(p)!.id}`"
@@ -258,13 +246,6 @@
                   {{ scheduleFor(p)!.timezone }} ·
                   {{ scheduleStatusLabels[scheduleFor(p)!.status] }}</router-link
                 >
-                <details
-                  v-if="p.status === 'pending' && scheduleFor(p)?.block_reason"
-                  class="pending-schedule-summary"
-                >
-                  <summary>查看受阻原因</summary>
-                  {{ scheduleFor(p)!.block_reason }}
-                </details>
               </div>
 
               <div class="created-at text-faint" :title="p.created_at">
@@ -287,7 +268,6 @@
                   <Pause v-else-if="item.value === 'stop'" :size="14" />
                   <Play v-else-if="item.value === 'resume'" :size="14" />
                   <ShieldCheck v-else-if="item.value === 'reauthorize'" :size="14" />
-                  <FolderInput v-else-if="item.value === 'move'" :size="14" />
                   <Pencil v-else-if="item.value === 'rename'" :size="14" />
                   <Download v-else-if="item.value === 'export'" :size="14" />
                   <Trash2 v-else-if="item.value === 'delete'" :size="14" />
@@ -321,30 +301,6 @@
           <Button :loading="renameSaving" :disabled="!renameNewTitle.trim()" @click="saveRename">
             保存
           </Button>
-        </template>
-      </Dialog>
-
-      <Dialog
-        :open="Boolean(moveTarget)"
-        title="移动到分组"
-        :description="moveDialogDescription"
-        :dismissible="!moveSaving"
-        @update:open="handleMoveDialogOpenChange"
-      >
-        <label class="project-dialog-label" for="project-move-group">目标分组</label>
-        <Select
-          id="project-move-group"
-          v-model="moveGroupSelection"
-          :options="moveGroupOptions"
-          :disabled="moveSaving"
-          aria-label="目标分组"
-        />
-
-        <template #footer>
-          <Button variant="secondary" :disabled="moveSaving" @click="closeMoveDialog">
-            取消
-          </Button>
-          <Button :loading="moveSaving" @click="saveMove">移动</Button>
         </template>
       </Dialog>
 
@@ -436,7 +392,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, shallowRef, watch } from 'vue'
+import { computed, ref, shallowRef } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery } from '@tanstack/vue-query'
 import {
@@ -447,7 +403,6 @@ import {
 import {
   Download,
   ExternalLink,
-  FolderInput,
   MoreHorizontal,
   Pause,
   Pencil,
@@ -503,18 +458,6 @@ function closeNewProject() {
   newProjectSession.value = false
 }
 
-watch(
-  () => route.query.create,
-  (value) => {
-    if (value !== '1') return
-    openNewProject()
-    const query = { ...route.query }
-    delete query.create
-    void router.replace({ path: '/projects', query })
-  },
-  { immediate: true },
-)
-
 const {
   activeSegment,
   actionError,
@@ -535,33 +478,25 @@ const {
   filteredProjects,
   focusedIndex,
   formatRelativeTime,
-  getGroupName,
-  getProjectRuntime,
+  getProjectStatus,
   runtimeById,
   getScenarioLabel,
   getSegmentCount,
-  getStatusClass,
   hasProjectsSnapshot,
   hasStaleProjectsError,
   isError,
-  isFetching,
   isLoading,
+  retryRefresh,
+  retryingRefresh,
   listElement,
   moveFocus,
-  moveGroups,
-  moveSaving,
-  moveTarget,
-  moveTargetGroupId,
   navigateToWorkspace,
   openDropdownId,
-  openMoveDialog,
   openRenameDialog,
-  refetch,
   renameNewTitle,
   renameSaving,
   renameTarget,
   saveDelete,
-  saveMove,
   saveRename,
   searchQuery,
   segments,
@@ -582,7 +517,6 @@ const scheduleFor = (project: ProjectSummary) =>
     (schedule) => schedule.id === project.schedule_id || schedule.project_id === project.id,
   )
 
-const ungroupedOptionValue = '__ungrouped__'
 const sortOptions: SelectOption[] = [
   { value: 'created_desc', label: '最近创建' },
   { value: 'created_asc', label: '最早创建' },
@@ -596,22 +530,6 @@ const tenantFilterOptions = computed<SelectOption[]>(() => [
     label: `${tenant.name} (${tenant.id})`,
   })),
 ])
-
-const moveGroupOptions = computed<SelectOption[]>(() => [
-  { value: ungroupedOptionValue, label: '未分组' },
-  ...moveGroups.value.map((group) => ({ value: group.id, label: group.name })),
-])
-
-const moveGroupSelection = computed({
-  get: () => moveTargetGroupId.value || ungroupedOptionValue,
-  set: (value: string) => {
-    moveTargetGroupId.value = value === ungroupedOptionValue ? '' : value
-  },
-})
-
-const moveDialogDescription = computed(() =>
-  moveTarget.value ? `将项目「${moveTarget.value.title}」移动到所选分组。` : '选择项目目标分组。',
-)
 
 const deleteProjectDescription = computed(() =>
   deleteTarget.value
@@ -631,14 +549,6 @@ function closeRenameDialog() {
 
 function handleRenameDialogOpenChange(open: boolean) {
   if (!open) closeRenameDialog()
-}
-
-function closeMoveDialog() {
-  if (!moveSaving.value) moveTarget.value = null
-}
-
-function handleMoveDialogOpenChange(open: boolean) {
-  if (!open) closeMoveDialog()
 }
 
 function handleDeleteDialogOpenChange(open: boolean) {
@@ -683,7 +593,6 @@ function getProjectMenuItems(project: ProjectSummary): DropdownMenuOption[] {
   }
 
   items.push(
-    { value: 'move', label: '移动到分组' },
     { value: 'rename', label: '重命名项目' },
     { value: 'export', label: '导出配置 (YAML)' },
     {
@@ -708,7 +617,6 @@ function handleProjectMenuSelect(project: ProjectSummary, value: string) {
   else if (value === 'resume') changeStatus(project.id, 'resume')
   else if (value === 'reauthorize') confirmReauthorization(project)
   else if (value === 'finish') confirmFinish(project)
-  else if (value === 'move') openMoveDialog(project)
   else if (value === 'rename') openRenameDialog(project)
   else if (value === 'export') exportProjectYaml(project.id, project.title)
   else if (value === 'delete') confirmDeleteProject(project)
@@ -735,15 +643,6 @@ void listElement
   color: var(--text-muted);
   font-size: var(--text-xs);
 }
-.pending-schedule-summary summary {
-  cursor: pointer;
-}
-/* 项目组筛选徽章（左侧导航分组选中后仍展示归属信息） */
-.group-badge {
-  background: var(--accent-dim);
-  color: var(--accent);
-}
-
 .authorization-summary {
   display: grid;
   gap: var(--space-2);

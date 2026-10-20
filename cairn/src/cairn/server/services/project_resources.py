@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+import fcntl
 import os
 from pathlib import Path
 import shutil
@@ -28,6 +29,7 @@ from cairn.server.models import (
 
 from .ids import get_project_or_404, next_project_resource_id
 from .time_utils import utcnow
+from .verification_purge import remove_owned_directory
 
 PROJECT_RESOURCE_ROOT_ENV = "CAIRN_PROJECT_RESOURCE_ROOT"
 DEFAULT_PROJECT_RESOURCE_ROOT = "datas/cairn/project-resources"
@@ -609,7 +611,8 @@ def deactivate_project_resource_record(project_id: str, resource_id: str) -> Non
         )
 
 
-def create_project_resource_batch(*, tenant_id: str, user_id: str | None, integration_id: str | None = None) -> ProjectResourceBatch:
+def create_project_resource_batch(*, tenant_id: str, user_id: str | None, integration_id: str | None = None,
+                                  source_request_id: str | None = None) -> ProjectResourceBatch:
     if not tenant_id:
         raise HTTPException(403, "Tenant context required")
     cleanup_expired_project_resource_batches()
@@ -634,10 +637,10 @@ def create_project_resource_batch(*, tenant_id: str, user_id: str | None, integr
         conn.execute(
             """
             INSERT INTO project_resource_batches
-                (id, tenant_id, user_id, integration_id, state, created_at, expires_at)
-            VALUES (?, ?, ?, ?, 'open', ?, ?)
+                (id, tenant_id, user_id, integration_id, state, created_at, expires_at, source_request_id)
+            VALUES (?, ?, ?, ?, 'open', ?, ?, ?)
             """,
-            (batch_id, tenant_id, user_id, integration_id, _format_time(created), _format_time(expires)),
+            (batch_id, tenant_id, user_id, integration_id, _format_time(created), _format_time(expires), source_request_id),
         )
         row = conn.execute("SELECT * FROM project_resource_batches WHERE id = ?", (batch_id,)).fetchone()
         assert row is not None
@@ -649,6 +652,26 @@ def get_project_resource_batch(batch_id: str, *, tenant_id: str, user_id: str | 
     with get_conn() as conn:
         row = _get_owned_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
         return _batch_to_model(conn, row)
+
+
+def _open_batch_upload(batch_id: str, *, prefix: str, tenant_id: str, user_id: str | None,
+                       integration_id: str | None) -> tuple[Path, BinaryIO]:
+    output = None
+    temp_path = None
+    try:
+        with get_conn() as conn:
+            _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
+            temp_path = _batch_directory(batch_id, create=True) / f"{prefix}{uuid4().hex}"
+            output = temp_path.open("xb")
+            # 消费后的暂存清理必须等待在途接收关闭，不能先 unlink 掩盖仍打开的文件。
+            fcntl.flock(output.fileno(), fcntl.LOCK_EX)
+        return temp_path, output
+    except BaseException:
+        if output is not None:
+            output.close()
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise
 
 
 async def upload_project_resource_batch_file(
@@ -667,19 +690,20 @@ async def upload_project_resource_batch_file(
         raise HTTPException(422, "Unsupported project resource kind")
     get_project_resource_batch(batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
     limits = project_resource_limits()
-    temp_path = _batch_directory(batch_id, create=True) / f".upload-{uuid4().hex}"
+    temp_path, output = _open_batch_upload(batch_id, prefix=".upload-", tenant_id=tenant_id,
+                                           user_id=user_id, integration_id=integration_id)
     digest = sha256()
     size_bytes = 0
     try:
-        with temp_path.open("xb") as output:
-            async for chunk in stream:
-                if not chunk:
-                    continue
-                size_bytes += len(chunk)
-                if size_bytes > limits.max_file_bytes:
-                    raise HTTPException(413, f"Project resource exceeds the {limits.max_file_bytes}-byte file limit")
-                output.write(chunk)
-                digest.update(chunk)
+        async for chunk in stream:
+            if not chunk:
+                continue
+            size_bytes += len(chunk)
+            if size_bytes > limits.max_file_bytes:
+                raise HTTPException(413, f"Project resource exceeds the {limits.max_file_bytes}-byte file limit")
+            output.write(chunk)
+            digest.update(chunk)
+        output.flush()
         with get_conn() as conn:
             batch = _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
             _check_batch_additions(conn, batch["id"], [(path, size_bytes)])
@@ -706,6 +730,7 @@ async def upload_project_resource_batch_file(
             assert row is not None
             return _batch_member_to_model(row)
     finally:
+        output.close()
         temp_path.unlink(missing_ok=True)
 
 
@@ -719,18 +744,19 @@ async def import_project_resource_batch_zip(
 ) -> ProjectResourceBatch:
     get_project_resource_batch(batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
     limits = project_resource_limits()
-    directory = _batch_directory(batch_id, create=True)
-    archive_path = directory / f".archive-{uuid4().hex}.zip"
+    archive_path, output = _open_batch_upload(batch_id, prefix=".archive-", tenant_id=tenant_id,
+                                              user_id=user_id, integration_id=integration_id)
+    directory = archive_path.parent
     upload_bytes = 0
     try:
-        with archive_path.open("xb") as output:
-            async for chunk in stream:
-                if not chunk:
-                    continue
-                upload_bytes += len(chunk)
-                if upload_bytes > limits.max_zip_upload_bytes:
-                    raise HTTPException(413, f"ZIP upload exceeds the {limits.max_zip_upload_bytes}-byte limit")
-                output.write(chunk)
+        async for chunk in stream:
+            if not chunk:
+                continue
+            upload_bytes += len(chunk)
+            if upload_bytes > limits.max_zip_upload_bytes:
+                raise HTTPException(413, f"ZIP upload exceeds the {limits.max_zip_upload_bytes}-byte limit")
+            output.write(chunk)
+        output.flush()
         prepared = _preflight_zip(archive_path, limits)
         with get_conn() as conn:
             batch = _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
@@ -789,6 +815,7 @@ async def import_project_resource_batch_zip(
     except (zipfile.BadZipFile, RuntimeError, EOFError) as exc:
         raise HTTPException(400, "Invalid or unsupported ZIP archive") from exc
     finally:
+        output.close()
         archive_path.unlink(missing_ok=True)
 
 
@@ -852,9 +879,21 @@ def delete_project_resource_batch_member(
 
 def delete_project_resource_batch(batch_id: str, *, tenant_id: str, user_id: str | None, integration_id: str | None = None) -> None:
     with get_conn() as conn:
-        row = _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
-        conn.execute("DELETE FROM project_resource_batches WHERE id = ?", (row["id"],))
-        register_after_commit(conn, lambda: delete_project_resource_batch_staging(batch_id))
+        _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id,
+                               integration_id=integration_id, allow_expired=True)
+        # 先持久化现有过期 fence；清理失败时，在途接收也不能重新发布为批次成员。
+        now = utcnow()
+        conn.execute("UPDATE project_resource_batches SET expires_at = ? WHERE id = ? AND expires_at > ?",
+                     (now, batch_id, now))
+    with get_conn() as conn:
+        # TTL 可能已完成同一批次的清理；归属已在上一事务核对，不能误报失败。
+        if conn.execute("SELECT 1 FROM project_resource_batches WHERE id = ?", (batch_id,)).fetchone() is None:
+            return
+        _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id,
+                               integration_id=integration_id, allow_expired=True)
+        if not delete_project_resource_batch_staging(batch_id):
+            raise HTTPException(503, "上传批次清理未完成，请重试删除；在途接收结束前或文件清理失败时，仍保留归属与清理资格。")
+        conn.execute("DELETE FROM project_resource_batches WHERE id = ?", (batch_id,))
 
 
 def commit_project_resource_batch(
@@ -950,30 +989,27 @@ def _mark_resource_batch_consumed(
 
 
 def cleanup_expired_project_resource_batches() -> int:
-    """删除过期批次；数据库先提交，磁盘清理采用 best-effort。"""
+    """过期批次不再接收写入；清理失败仍保留归属，以免丢失在途文件的拥有者。"""
     now = utcnow()
     with get_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT id FROM project_resource_batches
-            WHERE expires_at <= ?
-            """,
-            (now,),
-        ).fetchall()
-        if rows:
-            placeholders = ", ".join("?" for _ in rows)
-            conn.execute(
-                f"DELETE FROM project_resource_batches WHERE id IN ({placeholders})",
-                tuple(row["id"] for row in rows),
-            )
-    for row in rows:
-        shutil.rmtree(_batch_directory(row["id"]), ignore_errors=True)
-    return len(rows)
+        rows = conn.execute("SELECT id FROM project_resource_batches WHERE expires_at <= ?", (now,)).fetchall()
+    cleaned = [row["id"] for row in rows if delete_project_resource_batch_staging(row["id"])]
+    if cleaned:
+        placeholders = ", ".join("?" for _ in cleaned)
+        with get_conn() as conn:
+            conn.execute(f"DELETE FROM project_resource_batches WHERE id IN ({placeholders}) AND expires_at <= ?",
+                         (*cleaned, now))
+    return len(cleaned)
 
 
-def delete_project_resource_batch_staging(batch_id: str) -> None:
-    """批次消费提交后删除暂存副本；元数据保留到 TTL 过期以阻止重放。"""
-    shutil.rmtree(_batch_directory(batch_id), ignore_errors=True)
+def delete_project_resource_batch_staging(batch_id: str) -> bool:
+    """消费后的 best-effort 清理也不能 unlink 尚未关闭的在途上传。"""
+    try:
+        root = project_resource_root()
+        remove_owned_directory(root, root / ".batches" / _safe_storage_segment(batch_id, "batch_id"))
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def delete_project_resource_directory(project_id: str) -> None:
@@ -997,7 +1033,8 @@ def _lock_batch_owner(conn: Any, column: str, owner_id: str) -> None:
     conn.execute(f"UPDATE {table} SET id = id WHERE id = ?", (owner_id,))
 
 
-def _get_owned_batch(conn: Any, batch_id: str, *, tenant_id: str, user_id: str | None, integration_id: str | None = None) -> Any:
+def _get_owned_batch(conn: Any, batch_id: str, *, tenant_id: str, user_id: str | None,
+                     integration_id: str | None = None, allow_expired: bool = False) -> Any:
     column, owner_id = _batch_owner(user_id, integration_id)
     row = conn.execute(
         f"SELECT * FROM project_resource_batches WHERE id = ? AND tenant_id = ? AND {column} = ?",
@@ -1005,12 +1042,13 @@ def _get_owned_batch(conn: Any, batch_id: str, *, tenant_id: str, user_id: str |
     ).fetchone()
     if row is None:
         raise HTTPException(404, "Project resource batch not found")
-    if row["state"] == "open" and row["expires_at"] <= utcnow():
+    if not allow_expired and row["state"] == "open" and row["expires_at"] <= utcnow():
         raise HTTPException(410, "Project resource batch expired")
     return row
 
 
-def _lock_owned_open_batch(conn: Any, batch_id: str, *, tenant_id: str, user_id: str | None, integration_id: str | None = None) -> Any:
+def _lock_owned_open_batch(conn: Any, batch_id: str, *, tenant_id: str, user_id: str | None,
+                           integration_id: str | None = None, allow_expired: bool = False) -> Any:
     # 固定主体→批次锁序；集成仅能消费自己的资料，不能借同租户跳过归属。
     column, owner_id = _batch_owner(user_id, integration_id)
     _lock_batch_owner(conn, column, owner_id)
@@ -1018,7 +1056,8 @@ def _lock_owned_open_batch(conn: Any, batch_id: str, *, tenant_id: str, user_id:
         f"UPDATE project_resource_batches SET id = id WHERE id = ? AND tenant_id = ? AND {column} = ?",
         (batch_id, tenant_id, owner_id),
     )
-    row = _get_owned_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
+    row = _get_owned_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id,
+                           integration_id=integration_id, allow_expired=allow_expired)
     if row["state"] != "open":
         raise HTTPException(409, "Project resource batch has already been consumed")
     return row

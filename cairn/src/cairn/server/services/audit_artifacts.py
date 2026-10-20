@@ -5,6 +5,7 @@ from __future__ import annotations
 from base64 import b64decode
 from dataclasses import dataclass
 from hashlib import sha256
+import fcntl
 import mimetypes
 import os
 from pathlib import Path
@@ -15,7 +16,7 @@ from typing import AsyncIterable
 from .common import *
 from .artifacts import artifact_to_model, fact_evidence_to_model
 from .audit_events import insert_agent_event
-from .ids import get_project_or_404, next_artifact_id
+from .ids import get_project_or_404, lock_verification_project_write, next_artifact_id
 from .payload_values import dump_json
 from .projects import validate_facts_exist, validate_task_run_exists
 from .runtime_context import task_run_runtime_context
@@ -101,25 +102,24 @@ async def create_raw_artifact_record(
     temporary_path: Path | None = None
     final_path: Path | None = None
     replaced = False
+    artifact_file = None
     try:
-        # 先快速校验作用域，不能在接收大型 body 时长期持有数据库事务或 scoped counter 写锁。
+        # 在所有者锁内创建可归属临时文件；接收 body 时只保留文件锁，不长期占用 DB 事务。
         with get_conn() as conn:
+            lock_verification_project_write(conn, project_id)
             get_project_or_404(conn, project_id)
             if body.task_run_id is not None:
                 validate_task_run_exists(conn, project_id, body.task_run_id)
-
-        upload_dir = artifact_root() / ".uploads"
-        upload_dir.mkdir(parents=True, exist_ok=True)
+            is_verification = conn.execute("SELECT 1 FROM verification_requests WHERE project_id = ?", (project_id,)).fetchone()
+            upload_dir = (artifact_root() / "projects" / project_id / ".uploads"
+                          if is_verification else artifact_root() / ".uploads")
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            artifact_file = NamedTemporaryFile(mode="wb", dir=upload_dir, prefix=".raw-artifact-", suffix=".tmp", delete=False)
+            temporary_path = Path(artifact_file.name)
+            fcntl.flock(artifact_file.fileno(), fcntl.LOCK_EX)
         digest = sha256()
         size = 0
-        with NamedTemporaryFile(
-            mode="wb",
-            dir=upload_dir,
-            prefix=".raw-artifact-",
-            suffix=".tmp",
-            delete=False,
-        ) as artifact_file:
-            temporary_path = Path(artifact_file.name)
+        with artifact_file:
             async for chunk in chunks:
                 if not chunk:
                     continue
@@ -130,8 +130,9 @@ async def create_raw_artifact_record(
             os.fsync(artifact_file.fileno())
 
         _validate_registered_content(body.metadata, size, digest.hexdigest())
-        # 完整接收后再分配 ID；counter 更新让并发上传的 ID 分配和最终发布保持串行原子性。
+        # 最终发布必须重取同一 Project 锁和删除 fence，不能凭入口检查重建已删目录。
         with get_conn() as conn:
+            lock_verification_project_write(conn, project_id)
             get_project_or_404(conn, project_id)
             task_row = None
             if body.task_run_id is not None:
@@ -159,12 +160,18 @@ async def create_raw_artifact_record(
                 created_at=utcnow(),
             )
     except BaseException:
+        # 先关闭活动句柄再解除目录中的归属，严格清理才能证明没有仍打开的在途文件。
+        if artifact_file is not None:
+            artifact_file.close()
         # 客户端断连、磁盘错误或数据库失败都不能留下临时文件或孤立的最终文件。
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
         if replaced and final_path is not None:
             final_path.unlink(missing_ok=True)
         raise
+    finally:
+        if artifact_file is not None:
+            artifact_file.close()
 
 
 def _validate_registered_content(metadata: dict, size: int, digest: str) -> None:

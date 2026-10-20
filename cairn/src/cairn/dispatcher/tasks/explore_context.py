@@ -158,7 +158,7 @@ def verifier_prompt_replacements(
         raise ValueError("verifier neutral projection is missing or mismatched")
     allowed = {
         "version", "observation_id", "vulnerability_id", "identity", "preconditions",
-        "baseline", "variants", "controls", "repro_request", "repro_response", "evidence_refs",
+        "baseline", "variants", "controls", "evidence_items", "evidence_refs",
         "discovery_task_run_id", "discovery_session_id",
     }
     neutral = {key: value for key, value in projection.items() if key in allowed}

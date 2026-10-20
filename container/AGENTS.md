@@ -6,8 +6,10 @@
 * 所有生产阶段使用同一 pi SDK Agent；本说明由 runner 显式加载，不依赖旧 CLI 或自动发现配置。
 * 调用当前阶段的 `submit_result` 工具，参数为 `{accepted:true,data:{...}}`，无法提交有效结果时使用 `{accepted:false,reason:"明确原因"}`。以工具提供的 Schema 为准，不用末尾 raw JSON 或 Markdown 信封代替工具调用。
 * runtime 注入 protocol、结果 kind、项目/TaskRun、绑定 Cell、Observation 和 depth review digest；不要手抄这些权威身份。Reason 的来源 Fact、所选 Cell/策略和证据引用仍需明确选择，程序不会猜测。
-* 新证据先保存为当前工作空间已有的本地文件，再调用 `register_artifact`，提供绝对 `path` 和 `kind`，使用返回 handle 引用证据。不要手写 `data.artifacts`、猜 handle 或将远端路径冒充本地文件；登记不等于上传、持久化或任务成功。
-* conclude/结果修正阶段停止目标测试与等待，只读取已有证据、登记已有文件和重新提交。取消或硬截止后不恢复执行；运行失败、预算未执行不能伪造覆盖阴性或验证结果。
+* 普通 execute 的 `capture_http_evidence` 实际采集 HTTP 并自动登记，返回的 `evidence_items` 可直接用于发现/复测；其他新证据先保存为工作空间已有文件，再调用 `register_artifact`，提供绝对 `path` 和 `kind`，使用返回 handle 引用。不要手写 `data.artifacts`、猜 handle 或将远端路径冒充本地文件；登记不等于上传、持久化或任务成功。
+* 新发现按工具 Schema 使用 `schema_version:2`，独立外部复测结果使用 `schema_version:3`；两者使用有序 `evidence_items`，保留 request/response 同条关联及真实缺侧。引用只填 `artifact_handle` 或 `artifact_id` 之一，不写 inline 报文。有漏洞的 Fact 和外部复测不另填 `evidence_refs`。复测的中文判断依据 `key_evidence` 和实际步骤 `test_steps` 通过 `evidence_item_ids` 引用本结果条目的原始 ID，不能用 handle 代替，不再填写 `notes`。
+* 显式 conclude、仅交付恢复和报告只读取已有证据、登记已有文件和提交，不重新测试目标；正常 execute 的格式修正不改变原工具权限。有效候选固定后结束执行，取消或硬截止后不恢复；运行失败、未执行不能伪造覆盖阴性或验证结果。
+* 报告使用 `ReportData.schema_version:2`（Packet 仍为2，输出合同为3），保留逐漏洞解释并提交唯一有序 `layout`；元素只能是 `{type:"markdown",markdown:"..."}` 或 `{type:"fact",ref:"..."}`。按冻结的自由 Markdown 模板保留主要标题和顺序；`{{ report_title }}` 写实际标题，不写另一份整篇 Markdown，不追加旧固定十章。`scope`、`counts`、`work_results`、`execution_status`、`limitations`、`evidence_index` 及每个稳定漏洞 ID 的 `finding:<ID>` 必须恰好引用一次。程序原位展开事实及所属解释，未知／重复／缺失引用或漏漏洞会拒绝；片段的代码块和 HTML 注释须独立闭合，不能遮蔽事实。模板编辑者不需要手写这些内部引用。
 
 # 浏览器自动化（Playwright CLI）
 * 使用 `playwright-cli` 操作无头浏览器，适合登录、JavaScript 页面、截图取证和表单操作；不需要 DISPLAY 环境变量。
@@ -26,7 +28,7 @@
 * 浏览器网络采集应在相关操作前准备，使用 `requests --filter=...` 定位编号，再用 `request N`、`request-body N`、`response-body N` 分别读取详情与正文，并关联触发操作。`request N` 不包含正文，请求列表、资源 URL 和截图不等于完整报文；缺少 headers/body 等字段时如实记录。`response_body_incomplete` 表示请求尚未完成，不是无响应或测试阴性；保留已获得的证据，仅在观察到完成后按预算重试，不循环等待、不修改目标页面强行消费响应。必要的 curl/Python 重放须核对身份、CSRF 与副作用，不能把重放伪称为原浏览器抓包。
 
 # Web 工具与证据
-* HTTP/脚本：`curl`、`openssl`、Python 3（requests、bs4、yaml）、Node、`jq`、`rg`、`fd`。请求、响应和截图保存在工作空间，再登记 Artifact；截图或部分网络日志不等于完整 HTTP 报文。
+* HTTP/脚本：优先按需调用 `capture_http_evidence({url,method?,headers?,body_path?,timeout_seconds?})`，它用 curl 采集实际 HTTP/1.1 应用层/工具字节（不是网络帧），返回已登记证据条目及状态，不把正文复制进工具回复。不自动跟随重定向、不用隐式代理；302 原样保留，授权后另行采集 Location。默认 30 秒且服从原截止，请求体最多 1 MiB、响应最多 4 MiB；超时/失败只保留实际已有内容和缺侧，不等于测试阴性。其他已有工具包括 `curl`、`openssl`、Python 3（requests、bs4、yaml）、Node、`jq`、`rg`、`fd`；专项采集原件保存到工作空间再登记。截图或部分网络日志不等于完整 HTTP 报文。
 * 发现与深测：`dig`/`host`、`nmap`、`ffuf`、`dirsearch`、`katana`、`nuclei`、`sqlmap`、`dalfox`、`jwt_tool`。按当前假设选择工具与有界参数；扫描器告警不是已确认漏洞，正常对照、身份和业务状态验证不能省略。
 * Web 小型字典位于 `/opt/cairn/wordlists/web/`：`common.txt`（目录/文件）、`parameters.txt`（参数）、`xss.txt`、`sqli.txt`。它们不是全面覆盖清单；默认工具字典不适用时显式指定所需文件。
 * nuclei 模板位于 `/home/kali/.local/nuclei-templates`，离线使用已安装模板，不假设执行时能自动更新。根据协议、技术与假设选择模板，避免无边界全扫。

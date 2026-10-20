@@ -4,7 +4,7 @@ import { lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { AgentFailure, CANDIDATE_SPOOL_HARD_LIMITS, object, type JsonObject } from "./protocol.js";
 
-const READONLY_INPUT_ROOT = "/opt/cairn/readonly-inputs";
+const READONLY_INPUT_ROOTS = ["/opt/cairn/readonly-inputs", "/cairn/advisory/project"];
 
 export const ARTIFACT_KINDS = ["log", "file", "report", "screenshot", "patch", "raw_output"] as const;
 export interface Artifact { handle: string; kind: string; path: string; source_path: string; sha256: string; size_bytes: number }
@@ -20,7 +20,7 @@ export async function evidencePath(
   cwd: string,
   path: string,
   sessionRoot: string,
-  readonlyInputRoot = READONLY_INPUT_ROOT,
+  readonlyInputRoots = READONLY_INPUT_ROOTS,
 ): Promise<string> {
   const candidate = resolve(cwd, path);
   if ((await lstat(candidate)).isSymbolicLink()) throw new AgentFailure("artifact_invalid", "Evidence cannot be a symlink");
@@ -30,8 +30,8 @@ export async function evidencePath(
   const sessionRel = relative(sessionRoot, actual);
   const inWorkspace = rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
   const outsideSession = sessionRel === ".." || sessionRel.startsWith(`..${sep}`) || isAbsolute(sessionRel);
-  const inReadonlyInputs = (await readonlyInputsRoots(cwd, readonlyInputRoot)).some((readonlyRoot) => within(readonlyRoot, actual));
-  if ((!inReadonlyInputs && (!inWorkspace || !outsideSession)) || !(await lstat(actual)).isFile()) {
+  const inReadonlyInputs = (await readonlyInputsRoots(cwd, readonlyInputRoots)).some((readonlyRoot) => within(readonlyRoot, actual));
+  if ((!inReadonlyInputs && !inWorkspace) || !outsideSession || !(await lstat(actual)).isFile()) {
     throw new AgentFailure("artifact_invalid", "Evidence must be a regular authorized input file outside session storage");
   }
   return actual;
@@ -40,8 +40,8 @@ function within(root: string, path: string): boolean {
   const rel = relative(root, path);
   return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
-async function readonlyInputsRoots(cwd: string, managedRoot = READONLY_INPUT_ROOT): Promise<string[]> {
-  const candidates = [...new Set([resolve(await realpath(cwd), ".cairn", "readonly-inputs"), managedRoot])];
+async function readonlyInputsRoots(cwd: string, managedRoots = READONLY_INPUT_ROOTS): Promise<string[]> {
+  const candidates = [...new Set([resolve(await realpath(cwd), ".cairn", "readonly-inputs"), ...managedRoots])];
   return Promise.all(candidates.map(async (root) => {
     try { return await realpath(root); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return root; throw error; }
@@ -60,12 +60,12 @@ export class ArtifactRegistry {
   constructor(
     private cwd: string,
     private sessionRoot: string,
-    private readonlyInputRoot = READONLY_INPUT_ROOT,
+    private readonlyInputRoots = READONLY_INPUT_ROOTS,
   ) {}
   async register(sourcePath: string, kind: string, signal?: AbortSignal): Promise<Artifact> {
     if (!ARTIFACT_KINDS.includes(kind as typeof ARTIFACT_KINDS[number])) throw new AgentFailure("artifact_invalid", "Unknown artifact kind");
-    const actual = await evidencePath(this.cwd, sourcePath, this.sessionRoot, this.readonlyInputRoot);
-    if ((await readonlyInputsRoots(this.cwd, this.readonlyInputRoot)).some((root) => within(root, actual))) throw new AgentFailure("artifact_invalid", "Read-only input files cannot be registered as artifacts");
+    const actual = await evidencePath(this.cwd, sourcePath, this.sessionRoot, this.readonlyInputRoots);
+    if ((await readonlyInputsRoots(this.cwd, this.readonlyInputRoots)).some((root) => within(root, actual))) throw new AgentFailure("artifact_invalid", "Read-only input files cannot be registered as artifacts");
     if (this.items.length >= CANDIDATE_SPOOL_HARD_LIMITS.max_artifacts) {
       throw new AgentFailure("artifact_invalid", "Registration capacity reached (32 content versions, including Harness output); existing versions are retained");
     }
@@ -119,7 +119,7 @@ export class ArtifactRegistry {
       }
     }
     for (const artifact of this.items) {
-      const actual = await evidencePath(this.cwd, artifact.path, this.sessionRoot, this.readonlyInputRoot);
+      const actual = await evidencePath(this.cwd, artifact.path, this.sessionRoot, this.readonlyInputRoots);
       const current = await fileDigest(actual, signal);
       if (current.sha256 !== artifact.sha256 || current.size_bytes !== artifact.size_bytes) {
         // 只用 Runner 生成的 handle 和已校验的 kind 定位，不将路径或证据正文带入错误反馈。

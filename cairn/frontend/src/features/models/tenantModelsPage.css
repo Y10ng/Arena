@@ -21,9 +21,9 @@
   text-align: left;
   cursor: pointer;
   transition:
-    background var(--dur-fast),
-    border-color var(--dur-fast),
-    box-shadow var(--dur-fast);
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
 }
 
 .tenant-models-page .model-card:hover {
@@ -49,31 +49,11 @@
   font-size: var(--text-xs);
 }
 
-.tenant-models-page .model-steps {
-  gap: 0;
-}
-
-.tenant-models-page .model-step {
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
+.tenant-models-page .model-form {
   gap: var(--space-3);
-  padding: var(--space-4) 0;
-  border-bottom: 1px solid var(--border);
 }
 
-.tenant-models-page .step-number {
-  width: 24px;
-  height: 24px;
-  display: inline-grid;
-  place-items: center;
-  border: 1px solid var(--border-strong);
-  border-radius: 50%;
-  background: var(--bg-elevated);
-  color: var(--text-muted);
-  font: 600 var(--text-xs)/1 var(--font-mono);
-}
-
-.tenant-models-page .step-content {
+.tenant-models-page .model-section-content {
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -99,17 +79,17 @@
 }
 
 .tenant-models-page .advanced-config {
-  margin: var(--space-3) 0;
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-surface);
+  margin: 0;
+  padding-block: var(--space-2);
+  border-top: 1px solid var(--border);
 }
 
 .tenant-models-page .advanced-config summary {
+  min-height: var(--control-height-sm);
+  align-content: center;
   cursor: pointer;
   color: var(--text-muted);
-  font-weight: 600;
+  font-weight: var(--font-medium);
 }
 
 .tenant-models-page .advanced-grid {
@@ -171,8 +151,11 @@
   font: var(--text-xs)/1.55 var(--font-mono);
 }
 
-.tenant-models-page .save-step {
-  border-bottom: 0;
+.tenant-models-page .model-save-actions {
+  position: sticky;
+  bottom: 0;
+  padding-block: var(--space-3);
+  background: var(--bg-surface);
 }
 
 @media (max-width: 720px) {

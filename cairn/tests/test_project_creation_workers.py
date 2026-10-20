@@ -18,16 +18,13 @@ from cairn.server.auth import RequestPrincipal, create_user_with_personal_tenant
 from cairn.server.models import (
     CreateProjectRequest,
     CreateProjectResourceRequest,
-    MoveProjectToGroupRequest,
     UpdateProjectWorkersRequest,
 )
 from cairn.server.routers.projects import (
     get_project_management_options,
     list_projects,
-    update_project_group,
     update_project_workers,
 )
-from cairn.server.schemas.groups import CreateProjectGroupRequest
 from cairn.server.schemas.models import CreateTenantModelRequest
 from cairn.server.schemas.tenant_workers import CreateTenantWorkerRequest
 from cairn.server.services import model_credentials
@@ -37,7 +34,6 @@ from cairn.server.services.project_records import (
     get_project_detail,
     update_project_workers_record,
 )
-from cairn.server.services.project_groups import create_project_group
 from cairn.server.services.project_resources import (
     create_project_resource_batch,
     upload_project_resource_batch_file,
@@ -88,14 +84,6 @@ def _principal(login: str, role: str = "user") -> RequestPrincipal:
     )
 
 
-def _group(principal: RequestPrincipal, name: str = "Project Group"):
-    return create_project_group(
-        CreateProjectGroupRequest(name=name),
-        tenant_id=principal.tenant_id,
-        actor_id=principal.subject_id,
-    )
-
-
 def _worker(principal: RequestPrincipal, name: str):
     model = create_tenant_model(
         CreateTenantModelRequest(
@@ -113,85 +101,12 @@ def _worker(principal: RequestPrincipal, name: str):
     )
 
 
-@pytest.mark.parametrize(
-    "group_value, include_group",
-    [
-        pytest.param(None, False, id="missing"),
-        pytest.param(None, True, id="null"),
-        pytest.param("   ", True, id="blank"),
-    ],
-)
-def test_create_project_schema_rejects_missing_null_or_blank_group(
-    group_value: object,
-    include_group: bool,
-) -> None:
-    payload = {
-        "title": "Invalid group project",
-        "origin": "https://example.com",
-        "goal": "Audit the target",
-        "scenario": "default",
-        "tenant_worker_ids": ["worker-not-reached"],
-    }
-    if include_group:
-        payload["group_id"] = group_value
-
-    # FastAPI 将请求模型的 ValidationError 映射为 HTTP 422。
-    with pytest.raises(ValidationError):
-        CreateProjectRequest.model_validate(payload)
-    assert "group_id" in CreateProjectRequest.model_json_schema()["required"]
-
-
-def test_project_creation_rejects_missing_and_cross_tenant_groups_before_insert() -> None:
-    tenant_a = _principal("group-tenant-a")
-    tenant_b = _principal("group-tenant-b")
-    worker = _worker(tenant_a, "Tenant A Worker")
-    foreign_group = _group(tenant_b, "Tenant B Group")
-    with db.get_conn() as conn:
-        project_counter = conn.execute(
-            "SELECT value FROM counters WHERE name = 'project'"
-        ).fetchone()["value"]
-
-    for group_id in ("grp_missing", foreign_group.id):
-        with pytest.raises(HTTPException) as hidden:
-            create_project_record(
-                CreateProjectRequest(
-                    title="Protected group project",
-                    origin="https://example.com",
-                    goal="Audit the target",
-                    scenario="default",
-                    tenant_worker_ids=[worker.id],
-                    group_id=group_id,
-                    authorization_expires_at=None,
-                ),
-                tenant_id=tenant_a.tenant_id,
-            )
-        assert hidden.value.status_code == 404
-        with db.get_conn() as conn:
-            assert conn.execute("SELECT COUNT(*) AS count FROM projects").fetchone()["count"] == 0
-            assert (
-                conn.execute("SELECT value FROM counters WHERE name = 'project'").fetchone()[
-                    "value"
-                ]
-                == project_counter
-            )
-
-
 def test_admin_foreign_project_uses_target_tenant_options_and_attribution() -> None:
     admin = _principal("global-admin", role="super_admin")
     owner = _principal("foreign-owner")
     admin_worker = _worker(admin, "Admin Worker")
     owner_worker = _worker(owner, "Owner Worker")
     owner_worker_two = _worker(owner, "Owner Worker Two")
-    admin_group = create_project_group(
-        CreateProjectGroupRequest(name="Admin Group"),
-        tenant_id=admin.tenant_id,
-        actor_id=admin.subject_id,
-    )
-    owner_group = create_project_group(
-        CreateProjectGroupRequest(name="Owner Group"),
-        tenant_id=owner.tenant_id,
-        actor_id=owner.subject_id,
-    )
     detail = create_project_record(
         CreateProjectRequest(
             title="Foreign project",
@@ -199,7 +114,6 @@ def test_admin_foreign_project_uses_target_tenant_options_and_attribution() -> N
             goal="Audit foreign tenant",
             scenario="default",
             tenant_worker_ids=[owner_worker.id],
-            group_id=owner_group.id,
             authorization_expires_at=None,
         ),
         tenant_id=owner.tenant_id,
@@ -212,7 +126,6 @@ def test_admin_foreign_project_uses_target_tenant_options_and_attribution() -> N
             goal="Audit admin tenant",
             scenario="default",
             tenant_worker_ids=[admin_worker.id],
-            group_id=admin_group.id,
             authorization_expires_at=None,
         ),
         tenant_id=admin.tenant_id,
@@ -225,10 +138,7 @@ def test_admin_foreign_project_uses_target_tenant_options_and_attribution() -> N
         detail.project.scenario_snapshot["features"]["assessment_protocol"]
         == "goal-driven-v1"
     )
-    assert (
-        detail.project.scenario_snapshot["features"]["report_prompt_group"]
-        == "goal-driven-v1"
-    )
+    assert not {"report_policy_version", "report_prompt_group"} & detail.project.scenario_snapshot["features"].keys()
     assert detail.project.vulnerability_fingerprint_version == 1
     assert detail.project.assessment_protocol == "goal-driven-v1"
     assert "explore_budget" not in detail.project.model_dump()
@@ -241,23 +151,17 @@ def test_admin_foreign_project_uses_target_tenant_options_and_attribution() -> N
     assert summary.tenant_id == owner.tenant_id
     assert summary.tenant_name == "foreign-owner"
     assert summary.tenant_owner_login == "foreign-owner"
-    assert summary.group_name == "Owner Group"
+    assert "group_id" not in summary.model_dump()
+    assert "group_name" not in summary.model_dump()
 
     options = get_project_management_options(detail.project.id)
-    assert [group.id for group in options.groups] == [owner_group.id]
+    assert set(options.model_dump()) == {"tenant_workers"}
     assert {worker.id for worker in options.tenant_workers} == {
         owner_worker.id,
         owner_worker_two.id,
     }
     assert admin_worker.id not in {worker.id for worker in options.tenant_workers}
 
-    moved = update_project_group(
-        detail.project.id,
-        MoveProjectToGroupRequest(group_id=owner_group.id),
-        admin,
-    )
-    assert moved.group_id == owner_group.id
-    assert moved.group_name == "Owner Group"
     rebound = update_project_workers(
         detail.project.id,
         UpdateProjectWorkersRequest(tenant_worker_ids=[owner_worker_two.id]),
@@ -265,13 +169,6 @@ def test_admin_foreign_project_uses_target_tenant_options_and_attribution() -> N
     )
     assert [worker.id for worker in rebound.tenant_workers] == [owner_worker_two.id]
 
-    with pytest.raises(HTTPException) as wrong_group:
-        update_project_group(
-            detail.project.id,
-            MoveProjectToGroupRequest(group_id=admin_group.id),
-            admin,
-        )
-    assert wrong_group.value.status_code == 404
     with pytest.raises(HTTPException):
         update_project_workers(
             detail.project.id,
@@ -292,7 +189,6 @@ def test_project_creation_requires_durable_worker_binding() -> None:
             goal="Audit the target",
             scenario="default",
             tenant_worker_ids=[first.id, first.id, second.id],
-            group_id=_group(principal).id,
             authorization_expires_at=None,
         ),
         tenant_id=principal.tenant_id,
@@ -345,7 +241,6 @@ def test_project_creation_includes_resources_in_detail_and_deletion_cleans_files
             goal="Audit the target",
             scenario="default-copy-v2",
             tenant_worker_ids=[worker.id],
-            group_id=_group(principal).id,
             authorization_expires_at=None,
             resources=[
                 CreateProjectResourceRequest(
@@ -404,7 +299,6 @@ def test_project_creation_consumes_binary_resource_batch(tmp_path: Path) -> None
             goal="Audit the target",
             scenario="default-copy-v2",
             tenant_worker_ids=[worker.id],
-            group_id=_group(principal).id,
             authorization_expires_at=None,
             resource_batch_id=batch.id,
         ),
@@ -440,7 +334,7 @@ def test_create_project_rejects_removed_budget_fields_with_422(monkeypatch, fiel
     monkeypatch.setitem(app.dependency_overrides, protect_cookie_request, lambda: principal)
     response = TestClient(app).post("/projects", json={
         "title": "Removed budget request", "origin": "授权本地测试", "goal": "验证创建边界",
-        "tenant_worker_ids": ["fixture-worker"], "group_id": "fixture-group",
+        "tenant_worker_ids": ["fixture-worker"],
         "authorization_expires_at": None, field: value,
     })
     assert response.status_code == 422
@@ -460,7 +354,6 @@ def test_project_creation_requires_explicit_authorization_expiry_choice() -> Non
             goal="Audit the target",
             scenario="default-copy-v2",
             tenant_worker_ids=["worker"],
-            group_id="group",
         )
 
     assert exc.value.errors()[0]["loc"] == ("authorization_expires_at",)
@@ -479,7 +372,6 @@ def test_project_creation_rejects_expired_authorization() -> None:
                 goal="Audit the target",
                 scenario="default-copy-v2",
                 tenant_worker_ids=[worker.id],
-                group_id=_group(principal).id,
                 authorization_expires_at="2000-01-01T00:00:00Z",
             ),
             tenant_id=principal.tenant_id,
@@ -508,7 +400,6 @@ def test_goal_driven_project_freezes_scenario_without_budget_and_keeps_optional_
             scenario="goal-driven-v1",
             **({"explore_deadline": deadline} if deadline is not None else {}),
             tenant_worker_ids=[worker.id],
-            group_id=_group(principal).id,
             authorization_expires_at=None,
         ),
         tenant_id=principal.tenant_id,
@@ -519,7 +410,7 @@ def test_goal_driven_project_freezes_scenario_without_budget_and_keeps_optional_
     assert frozen["key"] == "goal-driven-v1"
     assert frozen["prompt_group"] == "goal-driven-v1"
     assert frozen["features"]["assessment_protocol"] == "goal-driven-v1"
-    assert frozen["features"]["report_prompt_group"] == "goal-driven-v1"
+    assert not {"report_policy_version", "report_prompt_group"} & frozen["features"].keys()
     assert frozen["features"]["execution_contract_version"] == 1
     assert frozen["features"]["execution_engine"] == "pi"
     assert frozen["features"]["assessment_contract_version"] == 2
@@ -561,10 +452,7 @@ def test_goal_driven_project_freezes_scenario_without_budget_and_keeps_optional_
     assert reloaded.project.scenario_snapshot == frozen
     assert reloaded.project.scenario_snapshot["key"] == "goal-driven-v1"
     assert reloaded.project.scenario_snapshot["prompt_group"] == "goal-driven-v1"
-    assert (
-        reloaded.project.scenario_snapshot["features"]["report_prompt_group"]
-        == "goal-driven-v1"
-    )
+    assert not {"report_policy_version", "report_prompt_group"} & reloaded.project.scenario_snapshot["features"].keys()
     assert reloaded.project.assessment_protocol == "goal-driven-v1"
     assert "explore_budget" not in reloaded.project.model_dump()
     assert reloaded.project.explore_deadline == deadline
@@ -584,7 +472,6 @@ def test_super_admin_project_uses_only_personal_tenant_workers() -> None:
             goal="Audit the target",
             scenario="default",
             tenant_worker_ids=[owned.id],
-            group_id=_group(admin).id,
             authorization_expires_at=None,
         ),
         tenant_id=admin.tenant_id,
@@ -599,7 +486,6 @@ def test_super_admin_project_uses_only_personal_tenant_workers() -> None:
                 goal="Audit the target",
                 scenario="default",
                 tenant_worker_ids=[foreign.id],
-                group_id=_group(admin).id,
                 authorization_expires_at=None,
             ),
             tenant_id=admin.tenant_id,
@@ -618,7 +504,6 @@ def test_project_worker_rebinding_refreshes_order_and_revision() -> None:
             goal="Audit the target",
             scenario="default",
             tenant_worker_ids=[first.id],
-            group_id=_group(principal).id,
             authorization_expires_at=None,
         ),
         tenant_id=principal.tenant_id,
@@ -646,7 +531,6 @@ def test_project_rebinding_hides_cross_tenant_worker() -> None:
             goal="Audit the target",
             scenario="default",
             tenant_worker_ids=[owned.id],
-            group_id=_group(tenant_a).id,
             authorization_expires_at=None,
         ),
         tenant_id=tenant_a.tenant_id,
@@ -680,7 +564,6 @@ def test_project_creation_hides_cross_tenant_worker() -> None:
                 goal="Audit the target",
                 scenario="default",
                 tenant_worker_ids=[foreign.id],
-                group_id=_group(tenant_a).id,
                 authorization_expires_at=None,
             ),
             tenant_id=tenant_a.tenant_id,
@@ -703,7 +586,6 @@ def test_project_creation_allows_configured_worker_without_dispatcher_heartbeat(
                 goal="Audit the target",
                 scenario="default",
                 tenant_worker_ids=[worker.id],
-                group_id=_group(principal).id,
                 authorization_expires_at=None,
             ),
             tenant_id=principal.tenant_id,
@@ -744,7 +626,6 @@ def test_incomplete_worker_fails_before_project_insert() -> None:
                 goal="Audit the target",
                 scenario="default",
                 tenant_worker_ids=[worker.id],
-                group_id=_group(principal).id,
                 authorization_expires_at=None,
             ),
             tenant_id=principal.tenant_id,

@@ -60,9 +60,11 @@ defineOptions({ name: 'UiInput', inheritAttrs: false })
   min-height: var(--control-height);
   border: calc(var(--space-1) / 4) solid var(--border);
   border-radius: var(--radius-md);
-  background: var(--bg-surface);
+  background: var(--bg-inset);
   color: var(--text);
-  padding: var(--space-2) var(--space-3);
+  padding: calc(var(--space-1) * 1.5) var(--space-3);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
   transition:
     background-color var(--dur-fast) var(--ease),
     border-color var(--dur-fast) var(--ease),
@@ -74,7 +76,7 @@ defineOptions({ name: 'UiInput', inheritAttrs: false })
 }
 
 .ui-input:focus {
-  border-color: var(--border-strong);
+  border-color: var(--accent);
   box-shadow: var(--ring);
 }
 

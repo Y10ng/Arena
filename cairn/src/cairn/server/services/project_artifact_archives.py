@@ -19,6 +19,7 @@ from fastapi import HTTPException
 
 from cairn.server.db import get_conn
 from cairn.server.models import Artifact
+from cairn.evidence_contracts import EvidenceItem, evidence_refs
 
 from .audit_artifacts import ArtifactContentFile, artifact_content_file
 from .ids import get_project_or_404
@@ -193,9 +194,12 @@ def _load_project_vulnerability_evidence(project_id: str) -> list[_Vulnerability
         ).fetchall()
 
         vulnerabilities = [dict(row) for row in vulnerability_rows]
+        for vulnerability in vulnerabilities:
+            vulnerability["evidence_items"] = json.loads(vulnerability["evidence_items_json"])
         observations_by_vulnerability: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in observation_rows:
             observation = dict(row)
+            observation["evidence_items"] = json.loads(observation["evidence_items_json"])
             observations_by_vulnerability[str(observation["vulnerability_id"])].append(observation)
         verifications_by_vulnerability: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in verification_rows:
@@ -227,11 +231,7 @@ def _load_project_vulnerability_evidence(project_id: str) -> list[_Vulnerability
         for vulnerability in vulnerabilities:
             vulnerability_id = str(vulnerability["id"])
             relations: dict[str, list[_EvidenceRelation]] = defaultdict(list)
-            _add_relation(
-                relations,
-                vulnerability.get("packet_artifact_id"),
-                _EvidenceRelation("canonical packet"),
-            )
+            _add_item_relations(relations, vulnerability["evidence_items"], "canonical evidence")
             _add_fact_relations(
                 relations,
                 vulnerability.get("source_fact_id"),
@@ -240,11 +240,7 @@ def _load_project_vulnerability_evidence(project_id: str) -> list[_Vulnerability
             )
             for observation in observations_by_vulnerability.get(vulnerability_id, []):
                 observation_id = str(observation["id"])
-                _add_relation(
-                    relations,
-                    observation.get("packet_artifact_id"),
-                    _EvidenceRelation(f"observation {observation_id} packet"),
-                )
+                _add_item_relations(relations, observation["evidence_items"], f"observation {observation_id} evidence")
                 _add_fact_relations(
                     relations,
                     observation.get("source_fact_id"),
@@ -416,6 +412,17 @@ def _add_relation(
         relations[normalized_artifact_id].append(relation)
 
 
+def _add_item_relations(
+    relations: dict[str, list[_EvidenceRelation]],
+    items: list[dict[str, Any]],
+    source: str,
+) -> None:
+    for ref in evidence_refs(EvidenceItem.model_validate(item) for item in items):
+        _add_relation(relations, ref.artifact_id, _EvidenceRelation(
+            source, pointer=ref.pointer, verifier_run_id=ref.verifier_run_id,
+        ))
+
+
 def _write_vulnerability(
     archive: zipfile.ZipFile,
     project_id: str,
@@ -425,6 +432,22 @@ def _write_vulnerability(
     title = _safe_vulnerability_title(str(vulnerability.get("title") or "漏洞"))
     vulnerability_id = _safe_archive_component(str(vulnerability["id"]), fallback="vulnerability")
     directory = f"vulnerabilities/{title}--{vulnerability_id}"
+    sources = [("canonical", vulnerability["evidence_items"])] + [
+        (f"observations/{_safe_archive_component(str(item['id']), fallback='observation')}", item["evidence_items"])
+        for item in evidence.observations
+    ]
+    _write_text_member(archive, f"{directory}/evidence-items.json", json.dumps(
+        {"canonical": vulnerability["evidence_items"], "observations": [
+            {"observation_id": item["id"], "evidence_items": item["evidence_items"]}
+            for item in evidence.observations
+        ]}, ensure_ascii=False, indent=2,
+    ))
+    # 原文独立导出，不经过 Markdown 展示、换行归一化或首尾空白裁剪。
+    for source, items in sources:
+        for index, item in enumerate(items, start=1):
+            for name in ("request_text", "response_text", "text"):
+                if item.get(name) is not None:
+                    _write_text_member(archive, f"{directory}/originals/{source}/{index:04d}-{name}.txt", item[name])
 
     _write_text_member(
         archive,
@@ -499,7 +522,7 @@ def _write_artifact(
 
 
 def _write_text_member(archive: zipfile.ZipFile, member_path: str, content: str) -> None:
-    archive.writestr(_zip_member(member_path), content.replace("\r\n", "\n").encode("utf-8"))
+    archive.writestr(_zip_member(member_path), content.encode("utf-8"))
 
 
 def _zip_member(member_path: str) -> zipfile.ZipInfo:
@@ -514,7 +537,7 @@ def _archive_readme(project_id: str, vulnerabilities: list[_VulnerabilityEvidenc
         "Arena 漏洞证据归档\n"
         f"项目 ID: {project_id}\n"
         f"漏洞数量: {len(vulnerabilities)}\n\n"
-        "本归档只包含通过漏洞 packet、Observation、Fact Evidence 或 Verification "
+        "本归档只包含通过有序证据条目、Observation、Fact Evidence 或 Verification "
         "明确关联的证据。\n"
         "所有图片、JavaScript 和 HTML 文件均已排除；排除原因记录在每个漏洞的 "
         "evidence-index.md。\n"
@@ -537,7 +560,6 @@ def _vulnerability_markdown(evidence: _VulnerabilityEvidence) -> str:
         f"- Confidence: {_display(vulnerability.get('confidence'))}",
         f"- Fingerprint: {_display(vulnerability.get('fingerprint'))}",
         f"- Source Fact: {_code_or_empty(vulnerability.get('source_fact_id'))}",
-        f"- Packet Artifact: {_code_or_empty(vulnerability.get('packet_artifact_id'))}",
         f"- Discovery Run: {_code_or_empty(vulnerability.get('discovered_by_run_id'))}",
         f"- Discovery Worker: {_display(vulnerability.get('discovered_by_worker'))}",
         f"- Slot: {_display(vulnerability.get('slot_key'))}",
@@ -560,13 +582,11 @@ def _vulnerability_markdown(evidence: _VulnerabilityEvidence) -> str:
         "",
         _display(vulnerability.get("repro_steps")),
         "",
-        "## Raw Request",
+        "## 人工与未配对历史证据",
         "",
-        _fenced_block(vulnerability.get("repro_request")),
+        "条目来源与配对关系以 evidence-items.json 为准；原文位于 originals/canonical/，未配对历史不得拼成 HTTP 交互。",
         "",
-        "## Raw Response",
-        "",
-        _fenced_block(vulnerability.get("repro_response")),
+        _fenced_block(json.dumps(vulnerability["evidence_items"], ensure_ascii=False, indent=2), "json"),
         "",
     ]
     return "\n".join(lines)
@@ -589,7 +609,6 @@ def _observations_markdown(evidence: _VulnerabilityEvidence) -> str:
                 f"- Task Run: {_code_or_empty(observation.get('task_run_id'))}",
                 f"- Slot: {_display(observation.get('slot_key'))}",
                 f"- Source Fact: {_code_or_empty(observation.get('source_fact_id'))}",
-                f"- Packet Artifact: {_code_or_empty(observation.get('packet_artifact_id'))}",
                 "",
                 "### Identity",
                 "",
@@ -599,13 +618,11 @@ def _observations_markdown(evidence: _VulnerabilityEvidence) -> str:
                 "",
                 _display(fact.get("description") if fact else None),
                 "",
-                "### Raw Request",
+                "### Evidence Items",
                 "",
-                _fenced_block(observation.get("repro_request")),
+                "仅为本次发现保存的有序条目；缺失侧不从其他来源补齐。原文位于 originals/observations/ 对应目录。",
                 "",
-                "### Raw Response",
-                "",
-                _fenced_block(observation.get("repro_response")),
+                _fenced_block(json.dumps(observation["evidence_items"], ensure_ascii=False, indent=2), "json"),
                 "",
             ]
         )

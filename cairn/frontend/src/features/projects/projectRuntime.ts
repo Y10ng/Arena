@@ -110,6 +110,7 @@ const actionReasons: Record<string, string> = {
   project_dispatcher_unavailable: '无法确认 Dispatcher 状态。请联系管理员恢复连接后重试。',
   assessment_new_project_required: '此评估已经结束，不能恢复。请新建项目继续评估。',
   project_not_paused: '项目并未处于可恢复的暂停状态。请刷新项目后重试。',
+  project_pending_schedule_required: '项目尚未启动，请通过启动计划管理预约，不能直接恢复执行。',
   project_not_active: '项目当前不是活跃状态。请刷新项目后重试。',
   project_completed: '项目已经完成，不能通过恢复重新执行。',
   project_stopped: '项目已经结束，不能恢复。请新建项目继续评估。',

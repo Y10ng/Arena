@@ -1609,7 +1609,6 @@ def test_v8_database_upgrade_freezes_current_goal_driven_policy(tmp_path: Path) 
             goal="Audit the target",
             scenario="goal-driven-v1",
             tenant_worker_ids=["worker_upgrade"],
-            group_id="group_upgrade",
             authorization_expires_at=None,
         ),
         tenant_id=migrations.LEGACY_TENANT_ID,

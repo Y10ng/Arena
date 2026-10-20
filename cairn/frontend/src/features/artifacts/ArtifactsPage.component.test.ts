@@ -191,7 +191,7 @@ afterEach(() => {
 
 describe('ArtifactsPage', () => {
   it('uses the project-scoped typed query, accessible table, explicit actions, and guarded refresh', async () => {
-    const item = artifact({ id: 'artifact-a', task_run_id: 'run-123456789' })
+    const item = artifact({ id: 'artifact-a', kind: 'file', task_run_id: 'run-123456789' })
     queryState.data.value = [item]
     const wrapper = mountPage()
     const options = mocks.useQuery.mock.calls[0]?.[0] as {
@@ -211,7 +211,12 @@ describe('ArtifactsPage', () => {
     )
     expect(wrapper.find('tbody tr').attributes('role')).toBeUndefined()
 
-    buttonByText('#run-1234').click()
+    expect(document.body.querySelector('.artifact-file-info')).toBeNull()
+    await wrapper.get('[aria-label="预览产物 report-1.md"]').trigger('click')
+    await flushPromises()
+    buttonByText('文件信息').click()
+    await flushPromises()
+    buttonByText('查看运行').click()
     expect(mocks.push).toHaveBeenCalledWith({
       name: 'WorkspaceRuns',
       params: { id: 'project-a' },
@@ -281,11 +286,16 @@ describe('ArtifactsPage', () => {
     })
     route.query = { artifactId: selected.id, keep: 'yes' }
     queryState.data.value = [selected, notes, diagnostic]
-    mocks.fetchArtifactTailPreview.mockResolvedValue(
-      preview(selected, { content: 'selected preview', truncated: false }),
+    mocks.fetchArtifactPreview.mockResolvedValue(
+      preview(selected, { content: '# selected preview', truncated: false }),
     )
     const wrapper = mountPage()
     await flushPromises()
+    expect(wrapper.get('.artifacts-list-card').isVisible()).toBe(false)
+    buttonByText('返回文件').click()
+    await flushPromises()
+    expect(wrapper.get('.artifacts-list-card').isVisible()).toBe(true)
+    expect(wrapper.get('.artifact-report-reader').isVisible()).toBe(false)
 
     const label = wrapper
       .findAll('label')
@@ -387,7 +397,11 @@ describe('ArtifactsPage', () => {
     expect(document.body.querySelectorAll('[role="tab"]')[1]?.getAttribute('aria-selected')).toBe(
       'true',
     )
-    expect(mocks.fetchArtifactTailPreview).toHaveBeenCalledWith('project-a', 'diagnostic-a')
+    expect(mocks.fetchArtifactTailPreview).toHaveBeenCalledWith(
+      'project-a',
+      'diagnostic-a',
+      expect.any(AbortSignal),
+    )
     expect(wrapper.get('tbody tr').attributes('aria-current')).toBe('true')
 
     route.query = { keep: 'yes' }
@@ -422,7 +436,11 @@ describe('ArtifactsPage', () => {
 
     expect(wrapper.text()).toContain('fresh.md')
     expect(wrapper.text()).not.toContain('指定产物不存在或已删除')
-    expect(mocks.fetchArtifactTailPreview).toHaveBeenCalledWith('project-a', 'fresh')
+    expect(mocks.fetchArtifactPreview).toHaveBeenCalledWith(
+      'project-a',
+      'fresh',
+      expect.any(AbortSignal),
+    )
   })
 
   it('renders only report Markdown while preserving raw Markdown and JSON previews', async () => {
@@ -442,67 +460,138 @@ describe('ArtifactsPage', () => {
       uri: 'README.md',
     })
     queryState.data.value = [reportMarkdown, reportSnapshot, genericMarkdown]
+    const reportContent = '# 安全报告\n\n## 证据\n\n<script>alert(1)</script>'
+    mocks.fetchArtifactPreview.mockResolvedValue(
+      preview(reportMarkdown, { content: reportContent, truncated: false }),
+    )
     mocks.fetchArtifactTailPreview.mockImplementation(async (_projectId, artifactId) => {
-      const target = [reportMarkdown, reportSnapshot, genericMarkdown].find(
-        (candidate) => candidate.id === artifactId,
-      )
+      const target = [reportSnapshot, genericMarkdown].find((candidate) => candidate.id === artifactId)
       if (!target) throw new Error('artifact missing')
-      const content =
-        artifactId === reportMarkdown.id
-          ? '# 安全报告\n\n<script>alert(1)</script>'
-          : artifactId === reportSnapshot.id
-            ? '{"packet": true}'
-            : '# README source'
+      const content = artifactId === reportSnapshot.id ? '{"packet": true}' : '# README source'
       return preview(target, { content, truncated: false })
     })
-    route.query = { artifactId: reportMarkdown.id }
+    route.query = { artifactId: reportMarkdown.id, keep: 'yes' }
     const wrapper = mountPage()
     await flushPromises()
 
-    expect(wrapper.get('.artifact-rendered-report h1').text()).toBe('安全报告')
-    expect(wrapper.find('.artifact-rendered-report script').exists()).toBe(false)
-    expect(wrapper.get('.artifact-rendered-report').text()).toContain('<script>alert(1)</script>')
+    expect(mocks.fetchArtifactPreview).toHaveBeenCalledWith(
+      'project-a',
+      reportMarkdown.id,
+      expect.any(AbortSignal),
+    )
+    expect(mocks.fetchArtifactTailPreview).not.toHaveBeenCalled()
+    expect(wrapper.get('.artifact-report-reader .safe-report-markdown h1').text()).toBe('安全报告')
+    expect(wrapper.find('.safe-report-markdown script').exists()).toBe(false)
+    expect(wrapper.get('.safe-report-markdown').text()).toContain('<script>alert(1)</script>')
     expect(wrapper.find('[data-testid="markdown"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="monaco"]').exists()).toBe(false)
+    expect(wrapper.get('.artifacts-list-card').isVisible()).toBe(false)
+    expect(wrapper.get('nav[aria-label="当前报告章节目录"]').findAll('button').map((entry) => entry.text())).toEqual(['安全报告', '证据'])
+
+    buttonByText('原文').click()
+    await flushPromises()
+    expect(wrapper.get('[aria-label="报告原文"] pre').text()).toBe(reportContent)
+    expect(wrapper.find('nav[aria-label="当前报告章节目录"]').exists()).toBe(false)
+    const pane = wrapper.get<HTMLElement>('[aria-label="报告原文"]')
+    pane.element.scrollTop = 95
+    await pane.trigger('scroll')
+    buttonByText('返回文件').click()
+    await flushPromises()
+    expect(wrapper.get('.artifacts-list-card').isVisible()).toBe(true)
+    expect(wrapper.get('.artifact-report-reader').isVisible()).toBe(false)
+    expect(route.query).toEqual({ artifactId: reportMarkdown.id, keep: 'yes' })
+    expect(mocks.replace).not.toHaveBeenCalled()
+    await wrapper.get(`[aria-label="预览产物 ${reportMarkdown.uri.split('/').pop()}"]`).trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.artifact-report-reader').isVisible()).toBe(true)
+    expect(wrapper.get('.artifacts-list-card').isVisible()).toBe(false)
+    expect(wrapper.get('.report-reader-raw').text()).toBe(reportContent)
+    expect(wrapper.get<HTMLElement>('[aria-label="报告原文"]').element.scrollTop).toBe(95)
+    expect(mocks.fetchArtifactPreview).toHaveBeenCalledOnce()
 
     route.query = { artifactId: reportSnapshot.id }
     await flushPromises()
     expect(wrapper.get('[data-testid="monaco"]').text()).toBe('{"packet": true}')
-    expect(wrapper.find('.artifact-rendered-report').exists()).toBe(false)
+    expect(wrapper.find('.artifact-report-reader').exists()).toBe(false)
 
     route.query = { artifactId: genericMarkdown.id }
     await flushPromises()
     expect(wrapper.get('[data-testid="markdown"]').text()).toBe('# README source')
-    expect(wrapper.find('.artifact-rendered-report').exists()).toBe(false)
+    expect(wrapper.find('.artifact-report-reader').exists()).toBe(false)
   })
 
-  it('uses tail then head windows with accurate truncation wording and encoded downloads', async () => {
+  it.each(['report', 'file'] as const)('uses the appropriate initial %s window, cancellation, truncation wording, and encoded downloads', async (kind) => {
     const item = artifact({
       id: 'artifact / one',
       project_id: 'project / one',
+      kind,
       uri: '报告 final.md',
     })
     workspaceStore.currentProjectId = 'project / one'
     route.params.id = 'project / one'
     route.query = { artifactId: item.id }
     queryState.data.value = [item]
-    mocks.fetchArtifactTailPreview.mockResolvedValue(preview(item))
-    mocks.fetchArtifactPreview.mockResolvedValue(preview(item, { content: 'head' }))
+    mocks.fetchArtifactTailPreview.mockResolvedValue(preview(item, { content: '# tail' }))
+    mocks.fetchArtifactPreview.mockResolvedValue(preview(item, { content: '# head' }))
     const wrapper = mountPage()
     await flushPromises()
 
-    expect(wrapper.text()).toContain('当前显示文件尾部窗口')
-    expect(wrapper.text()).toContain('下载原文件可获取完整服务器产物')
+    const initialRequest = kind === 'report' ? mocks.fetchArtifactPreview : mocks.fetchArtifactTailPreview
+    const nextRequest = kind === 'report' ? mocks.fetchArtifactTailPreview : mocks.fetchArtifactPreview
+    expect(initialRequest).toHaveBeenCalledWith(
+      'project / one',
+      'artifact / one',
+      expect.any(AbortSignal),
+    )
+    expect(nextRequest).not.toHaveBeenCalled()
+    const initialSignal = initialRequest.mock.calls[0]?.[2] as AbortSignal
+    expect(initialSignal.aborted).toBe(false)
+    expect(wrapper.text()).toContain(kind === 'report' ? '当前仅显示报告开头' : '当前显示文件尾部窗口')
+    expect(wrapper.text()).toContain(kind === 'report' ? '目录仅覆盖已载入部分' : '下载原文件可获取完整服务器产物')
     expect(wrapper.text()).not.toContain('加载完整内容')
     expect(wrapper.get<HTMLAnchorElement>('a[download]').attributes('href')).toBe(
       '/projects/project%20%2F%20one/artifacts/artifact%20%2F%20one/content',
     )
 
-    buttonByText('查看文件开头').click()
+    buttonByText(kind === 'report' ? '查看文件尾部' : '查看文件开头').click()
     await flushPromises()
-    expect(mocks.fetchArtifactPreview).toHaveBeenCalledWith('project / one', 'artifact / one')
-    expect(wrapper.text()).toContain('这不是完整文件')
-    expect(wrapper.text()).toContain('查看文件尾部')
+    expect(initialSignal.aborted).toBe(true)
+    expect(nextRequest).toHaveBeenCalledWith(
+      'project / one',
+      'artifact / one',
+      expect.any(AbortSignal),
+    )
+    expect(wrapper.text()).toContain(kind === 'report' ? '当前仅显示报告尾部' : '这不是完整文件')
+    expect(wrapper.text()).toContain(kind === 'report' ? '查看文件开头' : '查看文件尾部')
+    expect(wrapper.text()).toContain(kind === 'report' ? 'tail' : 'head')
+  })
+
+  it.each([
+    ['report', 'project_id'],
+    ['report', 'artifact_id'],
+    ['file', 'project_id'],
+    ['file', 'artifact_id'],
+  ] as const)('rejects a %s response with mismatched %s and permits an explicit retry', async (kind, field) => {
+    const item = artifact({ id: 'selected', kind, uri: 'selected.md' })
+    queryState.data.value = [item]
+    route.query = { artifactId: item.id }
+    const request = kind === 'report' ? mocks.fetchArtifactPreview : mocks.fetchArtifactTailPreview
+    request.mockResolvedValueOnce(
+      preview(item, { [field]: 'other-identity', content: '# 不应显示', truncated: false }),
+    )
+    const wrapper = mountPage()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('服务端返回的项目或 Artifact 身份与所选文件不一致，已阻止渲染。')
+    expect(wrapper.text()).not.toContain('不应显示')
+    expect(wrapper.find('.safe-report-markdown').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="markdown"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="monaco"]').exists()).toBe(false)
+    request.mockResolvedValueOnce(preview(item, { content: '# 正确报告', truncated: false }))
+    buttonByText(kind === 'report' ? '重试' : '重试预览').click()
+    await flushPromises()
+    expect(wrapper.text()).toContain('正确报告')
+    expect(wrapper.text()).not.toContain('身份与所选文件不一致')
   })
 
   it('keeps the loaded preview when the selected artifact action is clicked again', async () => {
@@ -526,7 +615,7 @@ describe('ArtifactsPage', () => {
     expect(mocks.replace).not.toHaveBeenCalled()
   })
 
-  it('ignores stale preview completion and failure across artifact and project visits', async () => {
+  it.each(['completion', 'failure'])('aborts switched artifact reads and ignores their stale %s', async (outcome) => {
     const first = artifact({ id: 'shared', uri: 'first.txt', kind: 'file' })
     const second = artifact({ id: 'second', uri: 'second.txt', kind: 'file' })
     const firstRequest = deferred<ArtifactPreview>()
@@ -541,12 +630,21 @@ describe('ArtifactsPage', () => {
     await flushPromises()
     document.body.querySelector<HTMLButtonElement>('[aria-label="预览产物 second.txt"]')?.click()
     await flushPromises()
+    const firstSignal = mocks.fetchArtifactTailPreview.mock.calls[0]?.[2] as AbortSignal
+    const secondSignal = mocks.fetchArtifactTailPreview.mock.calls[1]?.[2] as AbortSignal
+    expect(firstSignal.aborted).toBe(true)
+    expect(secondSignal.aborted).toBe(false)
     secondRequest.resolve(preview(second, { content: 'second content', truncated: false }))
     await flushPromises()
-    firstRequest.reject(new Error('旧请求失败'))
+    if (outcome === 'completion') {
+      firstRequest.resolve(preview(first, { content: 'stale content', truncated: false }))
+    } else {
+      firstRequest.reject(new Error('旧请求失败'))
+    }
     await flushPromises()
 
     expect(wrapper.text()).toContain('second content')
+    expect(wrapper.text()).not.toContain('stale content')
     expect(wrapper.text()).not.toContain('旧请求失败')
     expect(mocks.showToast).not.toHaveBeenCalled()
 
@@ -559,6 +657,57 @@ describe('ArtifactsPage', () => {
     queryState.data.value = [first]
     await flushPromises()
     expect(wrapper.text()).toContain('选择一个文件开始审阅')
+  })
+
+  it('isolates late responses across project revisits and aborts an in-flight read on unmount', async () => {
+    const first = artifact({ id: 'shared', kind: 'file', uri: 'first.txt' })
+    const other = artifact({ id: 'shared', project_id: 'project-b', kind: 'file', uri: 'other.txt' })
+    const firstVisit = deferred<ArtifactPreview>()
+    const otherVisit = deferred<ArtifactPreview>()
+    const currentVisit = deferred<ArtifactPreview>()
+    mocks.fetchArtifactTailPreview
+      .mockReturnValueOnce(firstVisit.promise)
+      .mockReturnValueOnce(otherVisit.promise)
+      .mockReturnValueOnce(currentVisit.promise)
+    queryState.data.value = [first]
+    route.query = { artifactId: 'shared' }
+    const wrapper = mountPage()
+    await flushPromises()
+
+    workspaceStore.currentProjectId = 'project-b'
+    route.params.id = 'project-b'
+    queryState.data.value = [other]
+    await flushPromises()
+    workspaceStore.currentProjectId = 'project-a'
+    route.params.id = 'project-a'
+    queryState.data.value = [first]
+    await flushPromises()
+    const signals = mocks.fetchArtifactTailPreview.mock.calls.map((call) => call[2] as AbortSignal)
+    expect(signals).toHaveLength(3)
+    expect(signals.map((signal) => signal.aborted)).toEqual([true, true, false])
+
+    firstVisit.resolve(preview(first, { content: 'old visit content', truncated: false }))
+    otherVisit.reject(new Error('旧项目读取失败'))
+    await flushPromises()
+    expect(wrapper.text()).toContain('正在载入预览内容')
+    expect(wrapper.text()).not.toContain('old visit content')
+    expect(wrapper.text()).not.toContain('旧项目读取失败')
+    expect(mocks.showToast).not.toHaveBeenCalled()
+
+    currentVisit.resolve(preview(first, { content: 'current visit content' }))
+    await flushPromises()
+    expect(wrapper.text()).toContain('current visit content')
+    const headRequest = deferred<ArtifactPreview>()
+    mocks.fetchArtifactPreview.mockReturnValueOnce(headRequest.promise)
+    buttonByText('查看文件开头').click()
+    await flushPromises()
+    const headSignal = mocks.fetchArtifactPreview.mock.calls[0]?.[2] as AbortSignal
+    wrapper.unmount()
+    wrappers.splice(wrappers.indexOf(wrapper), 1)
+    expect(headSignal.aborted).toBe(true)
+    headRequest.reject(new Error('卸载后的读取失败'))
+    await flushPromises()
+    expect(mocks.showToast).not.toHaveBeenCalled()
   })
 
   it('renders screenshot fallback and download-only binary without requesting text previews', async () => {
@@ -585,15 +734,22 @@ describe('ArtifactsPage', () => {
     const item = artifact({ id: 'copy', uri: 'copy.md' })
     queryState.data.value = [item]
     route.query = { artifactId: item.id }
+    const copyRequest = deferred<void>()
     const writeText = vi
       .fn()
-      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(copyRequest.promise)
       .mockRejectedValueOnce(new Error('denied'))
     vi.stubGlobal('navigator', { clipboard: { writeText } })
     mountPage()
     await flushPromises()
+    buttonByText('文件信息').click()
+    await flushPromises()
 
     buttonByText('复制 HASH').click()
+    await flushPromises()
+    expect(writeText).toHaveBeenCalledWith(item.sha256)
+    expect(mocks.showToast).not.toHaveBeenCalled()
+    copyRequest.resolve(undefined)
     await flushPromises()
     expect(mocks.showToast).toHaveBeenLastCalledWith('SHA256 HASH 值已复制到剪切板', 'success')
 

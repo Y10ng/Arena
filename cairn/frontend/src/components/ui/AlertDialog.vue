@@ -87,16 +87,14 @@ defineOptions({ name: 'UiAlertDialog' })
 <style scoped>
 .ui-alert-dialog__overlay {
   position: fixed;
-  z-index: var(--z-modal);
+  z-index: var(--z-overlay-child);
   inset: 0;
   background: var(--color-overlay);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
 }
 
 .ui-alert-dialog__content {
   position: fixed;
-  z-index: var(--z-modal);
+  z-index: var(--z-overlay-child);
   top: 50%;
   left: 50%;
   width: calc(100vw - var(--space-6));
@@ -110,6 +108,9 @@ defineOptions({ name: 'UiAlertDialog' })
   background: var(--bg-elevated);
   box-shadow: var(--shadow-modal);
   color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
   transform: translate(-50%, -50%);
 }
 
@@ -122,7 +123,10 @@ defineOptions({ name: 'UiAlertDialog' })
 }
 
 .ui-alert-dialog__header {
-  padding: var(--space-5) var(--space-5) var(--space-3);
+  min-height: 0;
+  padding: var(--space-5);
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .ui-alert-dialog__title {
@@ -155,8 +159,11 @@ defineOptions({ name: 'UiAlertDialog' })
 }
 
 .ui-alert-dialog__footer {
-  padding: var(--space-3) var(--space-5) var(--space-5);
+  padding: var(--space-4) var(--space-5);
+  border-top: 1px solid var(--border-subtle);
+  flex-shrink: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);

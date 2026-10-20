@@ -8,7 +8,10 @@ export interface ReportInventoryItem {
   artifact_size: number
   created_at: string
   template_key: string
-  template_version: number
+  template_version: number | null
+  packet_version?: number | null
+  output_contract_version?: number | null
+  report_data_schema_version?: number | null
   template_digest_sha256: string
   report_policy_version: number
   report_execution_plan_sha256: string

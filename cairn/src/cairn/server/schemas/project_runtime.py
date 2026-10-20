@@ -3,6 +3,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
+from .common import ProjectStatus
+
 
 class RuntimeAction(BaseModel):
     allowed: bool
@@ -69,7 +71,7 @@ class _ProjectRuntimeBase(BaseModel):
     project_id: str
     observed_at: str
     execution_generation: int
-    project_status: Literal["active", "paused", "stopped", "completed"]
+    project_status: ProjectStatus
     state: str
     code: str
     message: str

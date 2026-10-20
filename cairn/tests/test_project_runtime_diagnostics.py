@@ -14,7 +14,7 @@ from cairn.server.schemas.monitoring_dispatcher import DispatcherHeartbeatReques
 from cairn.server.services.monitoring.dispatcher import record_dispatcher_heartbeat
 from cairn.server.services.project_records import create_project_record
 from cairn.server.services.time_utils import utcnow
-from test_project_creation_workers import configured_database, _group, _principal, _worker
+from test_project_creation_workers import configured_database, _principal, _worker
 
 
 @pytest.fixture
@@ -23,7 +23,7 @@ def runtime_client():
     worker = _worker(principal, "Runtime Worker")
     project = create_project_record(CreateProjectRequest(
         title="Synthetic runtime", origin="https://example.test", goal="Synthetic fixture",
-        scenario="default", tenant_worker_ids=[worker.id], group_id=_group(principal).id,
+        scenario="goal-driven-v1", tenant_worker_ids=[worker.id],
         authorization_expires_at=None,
     ), tenant_id=principal.tenant_id)
     previous = dict(app.dependency_overrides)
@@ -414,6 +414,54 @@ def test_empty_runs_without_dispatcher_are_unknown_not_waiting(runtime_client):
     assert payload["code"] == "dispatcher_unobserved"
     assert payload["active_runs"] == []
     assert payload["last_activity"] is None
+
+
+@pytest.mark.parametrize("schema_version", [1, 2])
+def test_pending_runtime_single_and_mixed_batch_preserve_schedule_gate(
+    runtime_client, schema_version,
+):
+    client, principal, active_id = runtime_client
+    pending = create_project_record(
+        CreateProjectRequest(
+            title="Synthetic pending runtime", origin="https://example.test",
+            goal="Synthetic fixture", scenario="goal-driven-v1",
+            tenant_worker_ids=[_worker(principal, "Pending Runtime Worker").id],
+            authorization_expires_at=None,
+        ),
+        tenant_id=principal.tenant_id,
+        initial_status="pending",
+    )
+    pending_id = pending.project.id
+    single = client.get(
+        f"/projects/{pending_id}/runtime", params={"schema_version": schema_version},
+    )
+    batch = client.get(
+        "/projects/runtime",
+        params={"project_ids": f"{pending_id},{active_id}", "schema_version": schema_version},
+    )
+    assert single.status_code == 200, single.text
+    assert batch.status_code == 200, batch.text
+    by_id = {item["project_id"]: item for item in batch.json()["items"]}
+    for payload in (single.json(), by_id[pending_id]):
+        assert payload["schema_version"] == schema_version
+        assert payload["project_status"] == payload["state"] == "pending"
+        assert payload["code"] == "project_pending_schedule_required"
+        assert "启动计划" in payload["message"]
+        assert payload["scheduling"] is None
+        assert payload["active_runs"] == []
+        assert payload["actions"]["resume"] == {
+            "allowed": False, "reason": "project_pending_schedule_required",
+        }
+        if schema_version == 2:
+            assert payload["axes"]["execution"]["state"] == "pending"
+            assert payload["recovery"]["route"] == "none"
+    assert by_id[active_id]["code"] == "dispatcher_unobserved"
+    denied = client.post(f"/projects/{pending_id}/resume")
+    assert denied.status_code == 409
+    assert denied.json()["detail"] == "project_pending_schedule_required"
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT status FROM projects WHERE id = ?", (pending_id,)).fetchone()["status"] == "pending"
+        assert conn.execute("SELECT COUNT(*) AS n FROM task_runs WHERE project_id = ?", (pending_id,)).fetchone()["n"] == 0
 
 
 def test_runtime_schema_negotiation_preserves_v1_and_rejects_unknown_version(

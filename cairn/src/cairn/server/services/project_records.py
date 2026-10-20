@@ -7,7 +7,7 @@ import json
 import shutil
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field
 
 from cairn.assessment_contracts import GOAL_DRIVEN_PROTOCOL
 from cairn.server.db import PostgresConnection, artifact_root, get_conn, schedule_transaction
@@ -15,7 +15,6 @@ from cairn.server.models import (
     CreateProjectRequest,
     Fact,
     Hint,
-    MoveProjectToGroupRequest,
     ProjectDetail,
     ProjectLibraryBinding,
     ProjectMeta,
@@ -55,7 +54,6 @@ from .projects import (
     project_reason_from_row,
 )
 from .projects import _parse_preferred_workers
-from .project_groups import get_project_group_or_404
 from .project_resources import (
     consume_project_resource_batch,
     create_initial_project_resource_records,
@@ -109,6 +107,7 @@ def list_project_summaries(tenant_id: str | None = None, *, include_verification
         from .verification_requests import expire_pending_verification_requests
         expire_pending_verification_requests(conn)
         clauses = [] if tenant_id is None else ["p.tenant_id = ?"]
+        clauses.append("NOT EXISTS (SELECT 1 FROM verification_requests vr WHERE vr.project_id = p.id AND vr.purge_state IS NOT NULL)")
         if not include_verification:
             clauses.append("NOT EXISTS (SELECT 1 FROM verification_requests vr WHERE vr.project_id = p.id)")
         tenant_clause = "WHERE " + " AND ".join(clauses) if clauses else ""
@@ -122,10 +121,6 @@ def list_project_summaries(tenant_id: str | None = None, *, include_verification
                  WHERE tm.tenant_id = p.tenant_id AND tm.role = 'owner'
                  ORDER BY tm.created_at, u.id
                  LIMIT 1) AS tenant_owner_login,
-                (SELECT pg.name
-                 FROM project_groups pg
-                 WHERE pg.id = p.group_id AND pg.tenant_id = p.tenant_id
-                 LIMIT 1) AS group_name,
                 (SELECT COUNT(*) FROM facts WHERE project_id = p.id) AS fact_count,
                 (SELECT COUNT(*) FROM intents WHERE project_id = p.id) AS intent_count,
                 (SELECT COUNT(*) FROM intents WHERE project_id = p.id AND concluded_at IS NULL AND worker IS NOT NULL) AS working_intent_count,
@@ -182,8 +177,6 @@ def list_project_summaries(tenant_id: str | None = None, *, include_verification
                 tenant_id=row["tenant_id"],
                 tenant_name=row["tenant_name"],
                 tenant_owner_login=row["tenant_owner_login"],
-                group_id=row["group_id"],
-                group_name=row["group_name"],
                 reason=project_reason_from_row(row),
                 fact_count=row["fact_count"],
                 intent_count=row["intent_count"],
@@ -196,18 +189,11 @@ def list_project_summaries(tenant_id: str | None = None, *, include_verification
 
 
 class _VerificationProjectRequest(CreateProjectRequest):
-    """仅供内部复测服务创建；不改变公开项目必须选组的合同。"""
+    """内部复测固定场景与专用 Worker，独立于普通项目创建入口。"""
 
-    group_id: None = None
     scenario: Literal["goal-driven-v1"] = "goal-driven-v1"
     tenant_worker_ids: list[str] = Field(min_length=1, max_length=1)
-    goal: str = "在本次授权范围内验证所提交报告的漏洞主张，保留实际观察、证据与限制，不开展无关探索。"
-
-    @field_validator("group_id")
-    @classmethod
-    def validate_group_id(cls, value: None) -> None:
-        return value
-
+    goal: str = "根据来源背景与所提供资料验证漏洞主张，保留实际观察、证据与限制，遵守来源已明确的范围和排除项，不开展无关探索。"
 
 def create_verification_project_record(
     conn,
@@ -244,7 +230,7 @@ def create_project_record(
     require_all_roles: bool = True,
     actor_type: str = "user",
 ) -> ProjectDetail:
-    """普通项目与计划必须选择同租户项目组和普通用途 Worker。"""
+    """普通项目与计划使用同租户的普通用途 Worker。"""
     if not tenant_id:
         raise ValueError("tenant_id is required")
     if initial_status not in {"active", "pending"}:
@@ -268,12 +254,6 @@ def _create_project_record(
     worker_purpose: str = "general",
 ) -> ProjectDetail:
     now = utcnow()
-    group_id = body.group_id
-    # 只有受控复测入口使用空组，普通项目仍先校验同租户的必选组。
-    if worker_purpose == "general":
-        get_project_group_or_404(conn, group_id, tenant_id=tenant_id)
-    elif group_id is not None:
-        raise ValueError("verification project must not have a group")
     scenario_key = resolve_scenario_key(conn, body.scenario)
     scenario = get_scenario_or_404(conn, scenario_key)
     snapshot = scenario_snapshot(scenario)
@@ -309,8 +289,8 @@ def _create_project_record(
             id, title, status, created_at, scenario_key,
             scenario_snapshot_json, assessment_protocol,
             vulnerability_fingerprint_version, explore_deadline,
-            authorization_expires_at, preferred_workers_json, group_id, tenant_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            authorization_expires_at, preferred_workers_json, tenant_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             pid,
@@ -324,7 +304,6 @@ def _create_project_record(
             policy.explore_deadline,
             body.authorization_expires_at,
             "[]",
-            group_id,
             tenant_id,
         ),
     )
@@ -504,27 +483,6 @@ def update_project_title_record(project_id: str, body: UpdateProjectTitleRequest
         conn.execute(
             "UPDATE projects SET title = ? WHERE id = ?",
             (body.title, project_id),
-        )
-        updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-        return project_meta_from_row(conn, updated)
-
-
-def update_project_group_record(
-    project_id: str,
-    body: MoveProjectToGroupRequest,
-    *,
-    tenant_id: str,
-) -> ProjectMeta:
-    with get_conn() as conn:
-        get_project_or_404(conn, project_id, tenant_id=tenant_id)
-        require_unmanaged_project(conn, project_id)
-        group_id = body.group_id
-        # 指定 group_id 时必须属于同一 Tenant；跨 Tenant 的具体组按不存在处理。
-        if group_id:
-            get_project_group_or_404(conn, group_id, tenant_id=tenant_id)
-        conn.execute(
-            "UPDATE projects SET group_id = ? WHERE id = ?",
-            (group_id, project_id),
         )
         updated = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         return project_meta_from_row(conn, updated)

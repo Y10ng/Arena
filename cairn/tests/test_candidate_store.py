@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 import json
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from fastapi import Response
@@ -21,18 +22,28 @@ from cairn.server.schemas.candidates import (
     canonical_value_sha256,
 )
 from cairn.server.services import candidate_store as candidate_store_service
+from test_assessment_migration_v34 import database, private_postgres
 
 _SESSION = "pi:11111111-1111-4111-8111-111111111111"
 _CAPTURE = "22222222-2222-4222-8222-222222222222"
 
 
 @pytest.fixture(autouse=True)
-def configured_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def configured_database(request, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     db._reset_for_tests()
-    database_path = tmp_path / "candidates.db"
-    monkeypatch.setenv("CAIRN_DATABASE_URL", f"sqlite:///{database_path}")
     monkeypatch.setenv("CAIRN_TRUSTED_ORIGINS", "http://testserver")
-    db.configure(database_path)
+    if getattr(request, "param", None) == "postgres":
+        _, connect = request.getfixturevalue("database")
+        connection = connect()
+        info = connection._connection.info
+        url = f"postgresql://{quote(info.user)}@/{quote(info.dbname)}?host={quote(info.host, safe='')}"
+        connection.close()
+        monkeypatch.setenv("CAIRN_DATABASE_URL", url)
+        db.configure(database_url=url, artifact_path=tmp_path / "artifacts")
+    else:
+        database_path = tmp_path / "candidates.db"
+        monkeypatch.setenv("CAIRN_DATABASE_URL", f"sqlite:///{database_path}")
+        db.configure(database_path)
     yield
     db._reset_for_tests()
 
@@ -296,7 +307,9 @@ def test_frozen_delivery_uses_type_sensitive_identity() -> None:
     ]
 
 
-def test_capabilities_are_machine_only_and_always_required() -> None:
+@pytest.mark.parametrize("database", ["postgres"], indirect=True)
+@pytest.mark.parametrize("configured_database", ["postgres"], indirect=True)
+def test_capabilities_are_machine_only_and_always_required(database) -> None:
     # 与 Pi JSON.stringify 规范化向量共享，防止跨语言 digest 悄然漂移。
     assert canonical_value_sha256(None) == (
         "74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b"
@@ -307,9 +320,16 @@ def test_capabilities_are_machine_only_and_always_required() -> None:
         '{"numbers":[0,0.000001,1e-7,1e+21],"中文":"值",'
         '"𐀀":1,"":2}'
     ).encode("utf-8")
-    assert canonical_value_sha256(
-        build_submit_result_schema("explore_execute", binding=None)
-    ) == "6ca9651baef3d1a93b1a70d1863dc7df531d6b5dcd6cff44619b74c9fe869b4f"
+    schema = build_submit_result_schema("explore_execute", binding=None)
+    exported = json.loads(
+        (Path(__file__).resolve().parents[2] / "container/pi-agent/contracts/submission-v1.json").read_text()
+    )["submit_result_schemas"]["explore_execute"]
+    # 发现已改为有序原件引用；先对照执行端导出合同，再固定跨语言摘要。
+    assert schema == exported
+    finding = schema["$defs"]["Finding"]
+    assert {"schema_version", "evidence_items"} <= set(finding["required"])
+    assert not {"repro_request", "repro_response", "packet_artifact_handle"} & finding["properties"].keys()
+    assert canonical_value_sha256(schema) == "3862641fc50f862c0c7e6e670976ca9127bbeb8c6683cc32254bb1e84bfd4aae"
     identity = _seed_identity()
     path = "/candidates/capabilities"
 

@@ -394,7 +394,6 @@ def test_create_project_requires_explicit_null_or_nonblank_authorization_expiry(
         "origin": "https://example.test/",
         "goal": "verify boundaries",
         "tenant_worker_ids": ["worker-1"],
-        "group_id": "group-1",
     }
     unlimited = CreateProjectRequest(
         **base,

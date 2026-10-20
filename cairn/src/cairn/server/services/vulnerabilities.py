@@ -10,6 +10,8 @@ import json
 import sqlite3
 from uuid import uuid4
 
+from cairn.evidence_contracts import EvidenceItem, evidence_refs
+from cairn.server.auth import RequestPrincipal, verification_project_access_clause
 from cairn.server.models import (
     CreateVulnerabilityRequest,
     UpdateVulnerabilityRequest,
@@ -27,7 +29,7 @@ from cairn.server.models import (
 
 from .artifacts import artifact_to_model, fact_evidence_to_model
 from .common import *
-from .ids import next_vulnerability_id
+from .ids import lock_verification_project_write, next_vulnerability_id
 from .projects import intent_to_model, task_run_to_model
 from .time_utils import utcnow
 from .vulnerability_identity import (
@@ -38,6 +40,45 @@ from .vulnerability_verifications import (
     list_vulnerability_verifications,
     schedule_observation_verifier,
 )
+
+
+def _evidence_items_from_row(row: sqlite3.Row) -> list[EvidenceItem]:
+    return [EvidenceItem.model_validate(item) for item in json.loads(row["evidence_items_json"])]
+
+
+def read_vulnerability_evidence(
+    conn: sqlite3.Connection,
+    project_id: str,
+    vuln_id: str,
+    observation_id: str | None = None,
+) -> dict[str, Any]:
+    """一次只选择一个来源；缺失报文不从其他发现或 canonical 回填。"""
+    vulnerability = get_vulnerability_or_404(conn, project_id, vuln_id)
+    params = [project_id, vuln_id]
+    selected = ""
+    if observation_id is not None:
+        selected = " AND id = ?"
+        params.append(observation_id)
+    observation = conn.execute(
+        "SELECT * FROM vulnerability_observations "
+        "WHERE project_id = ? AND vulnerability_id = ?" + selected
+        + " ORDER BY observed_at DESC, id DESC LIMIT 1",
+        params,
+    ).fetchone()
+    if observation_id is not None and observation is None:
+        raise HTTPException(404, "vulnerability_observation_not_found")
+    row = observation if observation is not None else vulnerability
+    items = _evidence_items_from_row(row)
+    source = items[0].source if items else (
+        "capture" if observation is not None else (
+            "historical" if vulnerability["source_fact_id"] or vulnerability["discovered_by_run_id"] else "manual"
+        )
+    )
+    return {
+        "observation_id": observation["id"] if observation is not None else None,
+        "source": source,
+        "evidence_items": [item.model_dump(exclude_none=True) for item in items],
+    }
 
 
 def vulnerability_from_row(row: sqlite3.Row) -> Vulnerability:
@@ -59,10 +100,8 @@ def vulnerability_from_row(row: sqlite3.Row) -> Vulnerability:
         confidence=row["confidence"],
         status=row["status"],
         source_fact_id=row["source_fact_id"],
-        packet_artifact_id=row["packet_artifact_id"],
+        evidence_items=_evidence_items_from_row(row),
         remediation=row["remediation"] or "",
-        repro_request=row["repro_request"] if "repro_request" in row.keys() else "",
-        repro_response=row["repro_response"] if "repro_response" in row.keys() else "",
         # repro_steps 为加性列，旧库迁移前查询兜底空串。
         repro_steps=row["repro_steps"] if "repro_steps" in row.keys() else "",
         discovered_by_run_id=row["discovered_by_run_id"],
@@ -101,12 +140,10 @@ def _observation_from_row(row: sqlite3.Row) -> VulnerabilityObservation:
         task_run_id=row["task_run_id"],
         worker=row["worker"],
         slot_key=row["slot_key"],
-        packet_artifact_id=row["packet_artifact_id"],
+        evidence_items=_evidence_items_from_row(row),
         identity=identity,
         severity=row["severity"],
         confidence=row["confidence"],
-        repro_request=row["repro_request"] or "",
-        repro_response=row["repro_response"] or "",
         observed_at=row["observed_at"],
     )
 
@@ -132,16 +169,25 @@ def get_vulnerability_detail(
     conn: sqlite3.Connection,
     project_id: str,
     vuln_id: str,
+    observation_id: str | None = None,
 ) -> VulnerabilityDetail:
-    """聚合漏洞来源 fact（含 evidence）与产出 run 的日志 artifact，供详情页展示复现信息。
-
-    即便 packet_artifact_id 为空（worker 未声明 packet_path 或文件在目标侧未收集），
-    source_fact.description 与 run stdout 日志通常已含完整复现分析，避免详情页空白。
-    """
+    """默认主证据来自最新真实 Observation；其他历史材料保留独立入口。"""
     row = get_vulnerability_or_404(conn, project_id, vuln_id)
     detail = VulnerabilityDetail(**vulnerability_from_row(row).model_dump())
+    detail.record_evidence_items = detail.evidence_items
+    selected = read_vulnerability_evidence(conn, project_id, vuln_id, observation_id)
+    detail.observation_id = selected["observation_id"]
+    detail.source = selected["source"]
+    detail.evidence_items = [EvidenceItem.model_validate(item) for item in selected["evidence_items"]]
 
-    source_fact_id = row["source_fact_id"]
+    selected_observation = (
+        conn.execute(
+            "SELECT * FROM vulnerability_observations WHERE project_id = ? AND id = ?",
+            (project_id, detail.observation_id),
+        ).fetchone()
+        if detail.observation_id is not None else None
+    )
+    source_fact_id = (selected_observation if selected_observation is not None else row)["source_fact_id"]
     if source_fact_id:
         fact_row = conn.execute(
             "SELECT id, description, task_run_id FROM facts WHERE id = ? AND project_id = ?",
@@ -186,7 +232,10 @@ def get_vulnerability_detail(
         vuln_id,
     )
 
-    run_id = row["discovered_by_run_id"] or (detail.source_fact.task_run_id if detail.source_fact else None)
+    run_id = (
+        selected_observation["task_run_id"] if selected_observation is not None
+        else row["discovered_by_run_id"]
+    )
     if run_id:
         # 产出 run 的 stdout/diagnostic 日志：完整 worker 交互，含复现命令与响应
         run_artifact_rows = conn.execute(
@@ -252,15 +301,15 @@ def get_vulnerability_provenance(
     }
     intent_ids = {item.intent_id for item in verifications}
     observation_ids = {item.id for item in observations}
+    discovery_refs = evidence_refs([
+        *vulnerability.evidence_items,
+        *(item for observation in observations for item in observation.evidence_items),
+    ])
     artifact_ids = {
-        value
-        for value in (
-            vulnerability.packet_artifact_id,
-            *(item.packet_artifact_id for item in observations),
-            *(ref.artifact_id for item in verifications for ref in item.evidence),
-        )
-        if value
+        ref.artifact_id
+        for ref in [*discovery_refs, *(ref for item in verifications for ref in item.evidence)]
     }
+    run_ids.update(ref.verifier_run_id for ref in discovery_refs if ref.verifier_run_id)
 
     fact_rows: list[sqlite3.Row] = []
     run_rows: list[sqlite3.Row] = []
@@ -443,12 +492,8 @@ def get_vulnerability_provenance(
         "discovered_by_run",
         "vulnerabilities.discovered_by_run_id",
     )
-    add_relation(
-        vuln_id,
-        vulnerability.packet_artifact_id,
-        "has_packet_artifact",
-        "vulnerabilities.packet_artifact_id",
-    )
+    for ref in evidence_refs(vulnerability.evidence_items):
+        add_relation(vuln_id, ref.artifact_id, "supported_by_artifact", "vulnerabilities.evidence_items_json")
     for observation in observations:
         add_relation(
             vuln_id,
@@ -468,12 +513,8 @@ def get_vulnerability_provenance(
             "discovered_by_run",
             "vulnerability_observations.task_run_id",
         )
-        add_relation(
-            observation.id,
-            observation.packet_artifact_id,
-            "has_packet_artifact",
-            "vulnerability_observations.packet_artifact_id",
-        )
+        for ref in evidence_refs(observation.evidence_items):
+            add_relation(observation.id, ref.artifact_id, "supported_by_artifact", "vulnerability_observations.evidence_items_json")
     for verification in verifications:
         add_relation(
             verification.id,
@@ -584,12 +625,14 @@ def get_vulnerability_provenance(
         warnings.append(f"Vulnerability {vuln_id} has no discovery observations.")
     warn_missing("fact", f"Vulnerability {vuln_id}", vulnerability.source_fact_id, loaded_fact_ids)
     warn_missing("task run", f"Vulnerability {vuln_id}", vulnerability.discovered_by_run_id, loaded_run_ids)
-    warn_missing("artifact", f"Vulnerability {vuln_id}", vulnerability.packet_artifact_id, loaded_artifact_ids)
+    for ref in evidence_refs(vulnerability.evidence_items):
+        warn_missing("artifact", f"Vulnerability {vuln_id}", ref.artifact_id, loaded_artifact_ids)
     for observation in observations:
         owner = f"Observation {observation.id}"
         warn_missing("fact", owner, observation.source_fact_id, loaded_fact_ids)
         warn_missing("task run", owner, observation.task_run_id, loaded_run_ids)
-        warn_missing("artifact", owner, observation.packet_artifact_id, loaded_artifact_ids)
+        for ref in evidence_refs(observation.evidence_items):
+            warn_missing("artifact", owner, ref.artifact_id, loaded_artifact_ids)
     for verification in verifications:
         owner = f"Verification {verification.id}"
         warn_missing("observation", owner, verification.observation_id, observation_ids)
@@ -630,10 +673,15 @@ def list_all_vulnerabilities(
     tenant_id: str | None = None,
     severity: str | None = None,
     status: str | None = None,
+    principal: RequestPrincipal | None = None,
 ) -> list[VulnerabilityListItem]:
     """跨项目成果列表：聚合所有项目的漏洞并附带项目标题，供主菜单"成果列表"展示。"""
     clauses: list[str] = []
     params: list = []
+    if principal is not None:
+        access_clause, access_params = verification_project_access_clause(principal)
+        clauses.append(access_clause)
+        params.extend(access_params)
     if tenant_id is not None:
         clauses.append("p.tenant_id = ?")
         params.append(tenant_id)
@@ -685,6 +733,68 @@ def list_vulnerabilities(
     return [vulnerability_from_row(row) for row in rows]
 
 
+def _validate_evidence_items(
+    conn: sqlite3.Connection,
+    project_id: str,
+    items: list[EvidenceItem],
+    *,
+    discovery: bool = False,
+    task_run_id: str | None = None,
+    preserved_items: list[EvidenceItem] | None = None,
+) -> None:
+    ids = [item.id for item in items]
+    if len(ids) != len(set(ids)):
+        raise HTTPException(422, "evidence_item_id_must_be_unique")
+    if discovery and any(
+        item.source == "historical"
+        or any(value is not None for value in (item.request_text, item.response_text, item.text))
+        for item in items
+    ):
+        raise HTTPException(422, "new_discovery_requires_artifact_evidence")
+    # 原样保留的既有条目不是新输入；原件已缺失时仍须保留其真实历史引用。
+    refs = evidence_refs(item for item in items if item not in (preserved_items or []))
+    for ref in refs:
+        row = conn.execute(
+            "SELECT task_run_id FROM artifacts WHERE project_id = ? AND id = ?",
+            (project_id, ref.artifact_id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(422, f"Artifact {ref.artifact_id} not found in project")
+        if discovery and (task_run_id is None or row["task_run_id"] != task_run_id):
+            raise HTTPException(422, "discovery_evidence_current_run_required")
+
+
+def _insert_discovery_observation(
+    conn: sqlite3.Connection,
+    project_id: str,
+    vulnerability_id: str,
+    body: CreateVulnerabilityRequest,
+    *,
+    identity_json: str,
+    task_run_id: str | None,
+    worker: str | None,
+    observed_at: str,
+) -> str:
+    observation_id = f"vo_{uuid4().hex}"
+    conn.execute(
+        """
+        INSERT INTO vulnerability_observations (
+            id, project_id, vulnerability_id, source_fact_id,
+            task_run_id, worker, slot_key, identity_json,
+            severity, confidence, evidence_items_json, observed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            observation_id, project_id, vulnerability_id, body.source_fact_id,
+            task_run_id, worker, body.slot_key, identity_json,
+            body.severity, body.confidence,
+            dump_json([item.model_dump(exclude_none=True) for item in body.evidence_items]),
+            observed_at,
+        ),
+    )
+    return observation_id
+
+
 def create_vulnerability(
     conn: sqlite3.Connection,
     project_id: str,
@@ -702,13 +812,13 @@ def create_vulnerability(
         ).fetchone()
         if fact_row is None:
             raise HTTPException(422, f"Fact {body.source_fact_id} not found in project")
-    if body.packet_artifact_id is not None:
-        art_row = conn.execute(
-            "SELECT 1 FROM artifacts WHERE id = ? AND project_id = ?",
-            (body.packet_artifact_id, project_id),
-        ).fetchone()
-        if art_row is None:
-            raise HTTPException(422, f"Artifact {body.packet_artifact_id} not found in project")
+    discovery = body.source_fact_id is not None
+    _validate_evidence_items(
+        conn, project_id, body.evidence_items,
+        discovery=discovery, task_run_id=discovered_by_run_id,
+    )
+    if not discovery and any(item.source != "manual" for item in body.evidence_items):
+        raise HTTPException(422, "manual_vulnerability_requires_manual_evidence")
     vid = next_vulnerability_id(conn, project_id)
     now = utcnow()
     # 自动确认（有 source_fact_id）默认 status=new，由 pentest verified 路径升级 confirmed；
@@ -717,17 +827,22 @@ def create_vulnerability(
         """
         INSERT INTO vulnerabilities
             (id, project_id, title, severity, vuln_type, target, confidence, status,
-             source_fact_id, packet_artifact_id, remediation, repro_request, repro_response,
+             source_fact_id, remediation, evidence_items_json,
              discovered_by_run_id, discovered_by_worker, slot_key, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             vid, project_id, body.title, body.severity, body.vuln_type, body.target,
-            body.confidence, body.source_fact_id, body.packet_artifact_id, body.remediation,
-            body.repro_request, body.repro_response,
+            body.confidence, body.source_fact_id, body.remediation,
+            dump_json([] if discovery else [item.model_dump(exclude_none=True) for item in body.evidence_items]),
             discovered_by_run_id, discovered_by_worker, body.slot_key, now, now,
         ),
     )
+    if discovery:
+        _insert_discovery_observation(
+            conn, project_id, vid, body, identity_json="{}",
+            task_run_id=discovered_by_run_id, worker=discovered_by_worker, observed_at=now,
+        )
     row = get_vulnerability_or_404(conn, project_id, vid)
     return vulnerability_from_row(row)
 
@@ -778,16 +893,10 @@ def register_discovered_vulnerability(
             422,
             f"Fact {body.source_fact_id} not found in project",
         )
-    if body.packet_artifact_id is not None:
-        artifact = conn.execute(
-            "SELECT 1 FROM artifacts WHERE id = ? AND project_id = ?",
-            (body.packet_artifact_id, project_id),
-        ).fetchone()
-        if artifact is None:
-            raise HTTPException(
-                422,
-                f"Artifact {body.packet_artifact_id} not found in project",
-            )
+    _validate_evidence_items(
+        conn, project_id, body.evidence_items,
+        discovery=True, task_run_id=discovered_by_run_id,
+    )
 
     canonical_identity = canonicalize_vulnerability_identity(
         identity,
@@ -801,13 +910,11 @@ def register_discovered_vulnerability(
         """
         INSERT INTO vulnerabilities (
             id, project_id, title, severity, vuln_type, target,
-            confidence, status, source_fact_id, packet_artifact_id,
-            remediation, repro_request, repro_response,
+            confidence, status, source_fact_id, remediation,
             discovered_by_run_id, discovered_by_worker, slot_key,
             fingerprint, identity_json, created_at, updated_at
         ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
         ON CONFLICT (project_id, fingerprint)
             WHERE fingerprint IS NOT NULL
@@ -823,10 +930,7 @@ def register_discovered_vulnerability(
             body.target,
             body.confidence,
             body.source_fact_id,
-            body.packet_artifact_id,
             body.remediation,
-            body.repro_request,
-            body.repro_response,
             discovered_by_run_id,
             discovered_by_worker,
             body.slot_key,
@@ -866,11 +970,6 @@ def register_discovered_vulnerability(
             target = CASE WHEN target = '' THEN ? ELSE target END,
             remediation = CASE
                 WHEN remediation = '' THEN ? ELSE remediation END,
-            packet_artifact_id = COALESCE(packet_artifact_id, ?),
-            repro_request = CASE
-                WHEN repro_request = '' THEN ? ELSE repro_request END,
-            repro_response = CASE
-                WHEN repro_response = '' THEN ? ELSE repro_response END,
             updated_at = ?
         WHERE id = ? AND project_id = ?
         """,
@@ -880,40 +979,15 @@ def register_discovered_vulnerability(
             body.vuln_type,
             body.target,
             body.remediation,
-            body.packet_artifact_id,
-            body.repro_request,
-            body.repro_response,
             now,
             vulnerability_id,
             project_id,
         ),
     )
-    observation_id = f"vo_{uuid4().hex}"
-    conn.execute(
-        """
-        INSERT INTO vulnerability_observations (
-            id, project_id, vulnerability_id, source_fact_id,
-            task_run_id, worker, slot_key, packet_artifact_id,
-            identity_json, severity, confidence, repro_request,
-            repro_response, observed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            observation_id,
-            project_id,
-            vulnerability_id,
-            body.source_fact_id,
-            discovered_by_run_id,
-            discovered_by_worker,
-            body.slot_key,
-            body.packet_artifact_id,
-            identity_json,
-            body.severity,
-            body.confidence,
-            body.repro_request,
-            body.repro_response,
-            now,
-        ),
+    observation_id = _insert_discovery_observation(
+        conn, project_id, vulnerability_id, body,
+        identity_json=identity_json,
+        task_run_id=discovered_by_run_id, worker=discovered_by_worker, observed_at=now,
     )
     # verifier Intent 与 observation 同事务创建，避免发现已提交但验证工作丢失。
     schedule_observation_verifier(conn, project_id, observation_id)
@@ -928,7 +1002,8 @@ def update_vulnerability(
     vuln_id: str,
     body: UpdateVulnerabilityRequest,
 ) -> Vulnerability:
-    get_vulnerability_or_404(conn, project_id, vuln_id)
+    lock_verification_project_write(conn, project_id)
+    current = get_vulnerability_or_404(conn, project_id, vuln_id)
     sets: list[str] = []
     params: list = []
     for field in ("status", "severity", "remediation"):
@@ -939,13 +1014,18 @@ def update_vulnerability(
     if body.confidence is not None:
         sets.append("confidence = ?")
         params.append(body.confidence)
-    # 人工补录复现数据包：repro_request/repro_response 可独立更新（None=不改动）
-    if body.repro_request is not None:
-        sets.append("repro_request = ?")
-        params.append(body.repro_request)
-    if body.repro_response is not None:
-        sets.append("repro_response = ?")
-        params.append(body.repro_response)
+    if body.evidence_items is not None:
+        current_items = _evidence_items_from_row(current)
+        historical = [item for item in current_items if item.source == "historical"]
+        submitted_history = [item for item in body.evidence_items if item.source == "historical"]
+        # 人工替换不能改写或删除迁移原文，也不能将人工材料标成自动采集。
+        if historical != submitted_history:
+            raise HTTPException(422, "historical_evidence_is_immutable")
+        if any(item.source == "capture" for item in body.evidence_items):
+            raise HTTPException(422, "manual_vulnerability_requires_manual_evidence")
+        _validate_evidence_items(conn, project_id, body.evidence_items, preserved_items=current_items)
+        sets.append("evidence_items_json = ?")
+        params.append(dump_json([item.model_dump(exclude_none=True) for item in body.evidence_items]))
     # 报告阶段回写的复现步骤（markdown 编号步骤）；None=不改动。
     if body.repro_steps is not None:
         sets.append("repro_steps = ?")
@@ -969,10 +1049,13 @@ def get_vulnerability_for_fact(
     project_id: str,
     fact_id: str,
 ) -> Vulnerability | None:
-    # vulnerability:fact = 1:1，一个 fact 最多一个漏洞。
+    # 合并后的后续发现也通过实际 Observation 映射回同一个漏洞身份。
     row = conn.execute(
-        "SELECT * FROM vulnerabilities WHERE project_id = ? AND source_fact_id = ? LIMIT 1",
-        (project_id, fact_id),
+        "SELECT v.* FROM vulnerabilities v WHERE v.project_id = ? AND "
+        "(v.source_fact_id = ? OR EXISTS (SELECT 1 FROM vulnerability_observations o "
+        "WHERE o.project_id = v.project_id AND o.vulnerability_id = v.id AND o.source_fact_id = ?)) "
+        "ORDER BY v.created_at, v.id LIMIT 1",
+        (project_id, fact_id, fact_id),
     ).fetchone()
     return vulnerability_from_row(row) if row is not None else None
 
@@ -999,11 +1082,17 @@ def vulnerabilities_summary(
     conn: sqlite3.Connection,
     *,
     tenant_id: str | None = None,
+    principal: RequestPrincipal | None = None,
 ) -> dict[str, object]:
     """按显式 Tenant 聚合漏洞；省略 Tenant 仅供超级管理员全局视图。"""
-    tenant_join = "JOIN projects p ON p.id = v.project_id" if tenant_id is not None else ""
-    tenant_where = "WHERE p.tenant_id = ?" if tenant_id is not None else ""
+    tenant_join = "JOIN projects p ON p.id = v.project_id" if tenant_id is not None or principal is not None else ""
+    clauses = ["p.tenant_id = ?"] if tenant_id is not None else []
     params = (tenant_id,) if tenant_id is not None else ()
+    if principal is not None:
+        access_clause, access_params = verification_project_access_clause(principal)
+        clauses.append(access_clause)
+        params += access_params
+    tenant_where = "WHERE " + " AND ".join(clauses) if clauses else ""
     total = conn.execute(
         f"SELECT COUNT(*) AS c FROM vulnerabilities v {tenant_join} {tenant_where}",
         params,
@@ -1028,8 +1117,8 @@ def vulnerabilities_summary(
         params,
     ).fetchall():
         by_status[row["status"]] = int(row["c"])
-    # 项目列表本身通过 projects.tenant_id 过滤，避免跨 Tenant 暴露标题和 ID。
-    project_where = "WHERE p.tenant_id = ?" if tenant_id is not None else ""
+    # 项目标题、ID 与计数必须使用相同的 Tenant／复测 caller 过滤。
+    project_where = tenant_where
     per_project: list[dict[str, object]] = []
     for row in conn.execute(
         f"""

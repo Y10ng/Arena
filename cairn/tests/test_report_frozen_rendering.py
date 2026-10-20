@@ -25,8 +25,31 @@ def _finding(vulnerability_id: str) -> dict[str, str]:
     }
 
 
+V3_TEMPLATE = "# {{ report_title }}\n\n## 漏洞成果汇总\n\n## 漏洞详情\n\n## 整体修复建议\n\n## 附录：证据索引\n"
+
+
+def _layout(*ids: str) -> list[dict[str, str]]:
+    return [
+        {"type": "markdown", "markdown": "# 安全评估部分报告\n\n## 漏洞成果汇总"},
+        *({"type": "fact", "ref": ref} for ref in ("scope", "counts", "work_results", "execution_status")),
+        {"type": "markdown", "markdown": "## 漏洞详情"},
+        *({"type": "fact", "ref": f"finding:{value}"} for value in ids),
+        {"type": "markdown", "markdown": "## 整体修复建议\n\n建议优先恢复服务端权限边界，修复后按正常对照回归。"},
+        {"type": "fact", "ref": "limitations"},
+        {"type": "markdown", "markdown": "## 附录：证据索引"},
+        {"type": "fact", "ref": "evidence_index"},
+    ]
+
+
 def _data(*ids: str) -> dict[str, object]:
-    return {"executive_summary": "建议优先处理权限边界。", "findings": [_finding(value) for value in ids], "limitations": "未执行修复后回归。", "artifacts": []}
+    return {
+        "schema_version": 2,
+        "executive_summary": "建议优先处理权限边界。",
+        "findings": [_finding(value) for value in ids],
+        "layout": _layout(*ids),
+        "limitations": "未执行修复后回归。",
+        "artifacts": [],
+    }
 
 
 def _packet(*, empty: bool = False) -> dict[str, object]:
@@ -189,6 +212,7 @@ def test_findings_require_exact_snapshot_id_set(ids, error) -> None:
         "report-run",
         data=_data(*ids),
         report_packet_json=json.dumps(_packet()),
+        report_template_markdown=V3_TEMPLATE,
     ) == "request_contract"
     assert client.artifacts == []
 
@@ -205,6 +229,7 @@ def test_model_cannot_submit_fact_or_canonical_update_fields(field: str) -> None
         "report-run",
         data=data,
         report_packet_json=json.dumps(_packet()),
+        report_template_markdown=V3_TEMPLATE,
     ) == "request_contract"
     assert not client.artifacts
 
@@ -237,22 +262,22 @@ def test_render_preserves_counts_verifications_coverage_budget_and_evidence() ->
     packet = _packet()
     before = deepcopy(packet)
     data = _data("v2", "v1")
-    markdown = report._render_report_markdown(data, report_packet_json=json.dumps(packet))
+    markdown = report._render_report_markdown(data, report_packet_json=json.dumps(packet), report_template_markdown=V3_TEMPLATE)
     assert packet == before
     assert markdown.startswith("# 安全评估部分报告")
     assert "Canonical 漏洞记录数：2；Observation 数：3" in markdown
     assert "| high | 1 |" in markdown
     assert "| medium | 1 |" in markdown
-    assert "| o1 | v1 | conflicting | f1 | discovery-1 | a1 |" in markdown
+    assert "| o1 | v1 | conflicting | f1 | discovery-1 | 历史冻结 packet Artifact: a1 |" in markdown
     assert "| o1 | verify-yes | confirmed | vr1 |" in markdown
     assert "| o1 | verify-no | not_reproduced | vr2 |" in markdown
     assert "| o2 | v1 | run_failed |" in markdown
     assert "| o3 | v2 | not_run |" in markdown
     assert "| vi-no-budget | abandoned | explore_budget_exhausted |" in markdown
     assert "| vi-failed | failed | worker_timeout |" in markdown
-    assert "### 已测（1）" in markdown
-    assert "### 阻塞（1）" in markdown
-    assert "### 未测/未完成（1）" in markdown
+    assert "#### 已测（1）" in markdown
+    assert "#### 阻塞（1）" in markdown
+    assert "#### 未测/未完成（1）" in markdown
     assert "缺少第二身份" in markdown
     assert "c-open" in markdown and "deep-1" in markdown
     assert "| budget | 5 |" in markdown
@@ -264,7 +289,7 @@ def test_render_preserves_counts_verifications_coverage_budget_and_evidence() ->
     assert "候选关联不等于已复现的利用链" in markdown
     assert "修复建议（未实施）" in markdown
     assert "修复后回归方法（未执行）" in markdown
-    assert markdown.index("### 漏洞 v1") < markdown.index("### 漏洞 v2")
+    assert markdown.index("### 漏洞 v2") < markdown.index("### 漏洞 v1")
 
 
 def test_goal_driven_render_uses_business_work_without_cell_or_depth_review() -> None:
@@ -272,6 +297,7 @@ def test_goal_driven_render_uses_business_work_without_cell_or_depth_review() ->
     markdown = report._render_report_markdown(
         _data(),
         report_packet_json=json.dumps(packet),
+        report_template_markdown=V3_TEMPLATE,
     )
 
     assert "目标驱动工作按已接受的 ExperimentRecord 和 Intent 结论汇总" in markdown
@@ -305,7 +331,7 @@ def test_historical_goal_driven_packet_keeps_frozen_limits_without_reinterpretin
         budget=8, verification_reserve=2, remaining_total=5, remaining_discovery=3,
     )
     before = deepcopy(packet)
-    markdown = report._render_report_markdown(_data(), report_packet_json=json.dumps(packet))
+    markdown = report._render_report_markdown(_data(), report_packet_json=json.dumps(packet), report_template_markdown=V3_TEMPLATE)
     assert packet == before
     assert "历史额度与执行计量（冻结原件）" in markdown
     assert "| budget | 8 |" in markdown
@@ -318,7 +344,7 @@ def test_historical_goal_driven_packet_keeps_frozen_limits_without_reinterpretin
 def test_every_observation_status_is_preserved_verbatim(status: str) -> None:
     packet = _packet()
     packet["observation_statuses"][0]["verification_status"] = status
-    markdown = report._render_report_markdown(_data("v1", "v2"), report_packet_json=json.dumps(packet))
+    markdown = report._render_report_markdown(_data("v1", "v2"), report_packet_json=json.dumps(packet), report_template_markdown=V3_TEMPLATE)
     assert f"| o1 | v1 | {status} |" in markdown
 
 
@@ -330,6 +356,7 @@ def test_stopped_zero_findings_produces_partial_report_without_model_no_finding_
         "report-run",
         data=_data(),
         report_packet_json=json.dumps(_packet(empty=True)),
+        report_template_markdown=V3_TEMPLATE,
     )
     assert isinstance(identity, report.ReportArtifactIdentity)
     assert identity.artifact_id == "report-artifact"
@@ -345,7 +372,7 @@ def test_unstructured_missing_coverage_is_not_claimed_as_complete() -> None:
     packet = _packet(empty=True)
     packet["assessment_summary"]["execution"]["minimum_coverage_enabled"] = False
     packet["assessment_summary"]["coverage"] = {"tested": [], "blocked": [], "untested": []}
-    markdown = report._render_report_markdown(_data(), report_packet_json=json.dumps(packet))
+    markdown = report._render_report_markdown(_data(), report_packet_json=json.dumps(packet), report_template_markdown=V3_TEMPLATE)
     assert "缺失数据不能解释为零工作或完整覆盖" in markdown
 
 
@@ -354,7 +381,7 @@ def test_report_artifact_keeps_generation_and_snapshot_metadata_without_canonica
     packet_json = json.dumps(_packet())
     snapshot_digest = sha256(packet_json.encode()).hexdigest()
     metadata = {
-        "report_generation_token": "generation-2", "report_template_key": "default", "report_template_version": 3,
+        "report_generation_token": "generation-2", "report_template_key": "default",
         "report_template_digest_sha256": "template-digest", "report_policy_version": 1,
         "report_execution_plan_sha256": "plan-digest", "report_prompt_digest_sha256": "prompt-digest",
         "completeness_rule_version": 1, "input_snapshot_artifact_id": "snapshot-1", "input_snapshot_sha256": snapshot_digest,
@@ -365,6 +392,7 @@ def test_report_artifact_keeps_generation_and_snapshot_metadata_without_canonica
         "report-run",
         data=_data("v1", "v2"),
         report_packet_json=packet_json,
+        report_template_markdown=V3_TEMPLATE,
         **metadata,
     )
     assert isinstance(identity, report.ReportArtifactIdentity)
@@ -374,7 +402,11 @@ def test_report_artifact_keeps_generation_and_snapshot_metadata_without_canonica
     assert artifact["filename"] == report.REPORT_ARTIFACT_FILENAME
     assert artifact["kind"] == "report"
     assert artifact["task_run_id"] == "report-run"
-    assert artifact["metadata"] == {"source": "report_task", "format": "markdown", **metadata}
+    assert artifact["metadata"] == {
+        "source": "report_task", "format": "markdown", "packet_version": 2,
+        "output_contract_version": 3, "report_data_schema_version": 2, **metadata,
+    }
+    assert "report_template_version" not in artifact["metadata"]
     assert "original request" not in artifact["content"]
     assert "original response" not in artifact["content"]
     assert json.loads(packet_json)["vulnerabilities"][0]["repro_steps"] == "original steps"
@@ -388,6 +420,7 @@ def test_failed_artifact_write_is_not_a_success() -> None:
         "report-run",
         data=_data(),
         report_packet_json=json.dumps(_packet(empty=True)),
+        report_template_markdown=V3_TEMPLATE,
     ) == "server_write_failed"
 
 
@@ -419,23 +452,24 @@ def test_corrupt_or_cross_project_packet_cannot_become_zero_finding_report(mutat
         "report-run",
         data=_data("v1", "v2"),
         report_packet_json=json.dumps(packet),
+        report_template_markdown=V3_TEMPLATE,
     ) == "request_contract"
     assert not client.artifacts
 
 
-@pytest.mark.parametrize("group", ["default-report", "default-durable-report-v1", "default-copy-v2", "goal-driven-v1"])
-def test_report_prompt_only_requests_narrow_explanatory_result(group: str) -> None:
-    prompt = (Path(report.__file__).parents[1] / "prompts" / group / "report.md").read_text()
+def test_report_prompt_requests_explanations_and_single_layout() -> None:
+    prompt = (Path(report.__file__).parents[1] / "prompts" / "goal-driven-v1" / "report.md").read_text()
     assert "submit_result" in prompt
     assert "executive_summary" in prompt and "regression_steps" in prompt
     assert "vulnerability_updates" not in prompt
     assert "report_markdown" not in prompt
     assert "Return one raw JSON" not in prompt
     assert "{report_packet_json}" in prompt
-    if group == "goal-driven-v1":
-        assert "Coverage 的 required/optional" not in prompt
-        assert "不把选中的 deep 工作略去" not in prompt
-        assert "ExperimentRecord" in prompt
+    assert "Coverage 的 required/optional" not in prompt
+    assert "不把选中的 deep 工作略去" not in prompt
+    assert "ExperimentRecord" in prompt
+    assert "schema_version: 2" in prompt
+    assert "layout" in prompt and "finding:<" in prompt
 
 
 def test_frozen_plan_rejects_old_execution_without_translation() -> None:
@@ -443,7 +477,7 @@ def test_frozen_plan_rejects_old_execution_without_translation() -> None:
     prompt_digest = sha256(prompt.encode()).hexdigest()
     plan = {
         "version": 2, "execution_contract_version": 1, "execution_engine": "pi",
-        "report_policy_version": 1, "packet_version": 2, "output_contract_version": 2,
+        "report_policy_version": 1, "packet_version": 2, "output_contract_version": 3,
         "completeness_rule_version": 1, "report_prompt_name": "report.md",
         "report_prompt_group": "default-durable-report-v1", "report_prompt_digest_sha256": prompt_digest,
     }
@@ -453,8 +487,168 @@ def test_frozen_plan_rejects_old_execution_without_translation() -> None:
         return report._frozen_execution_error(canonical, plan, sha256(canonical.encode()).hexdigest(), prompt, prompt_digest)
 
     assert check() is None
+    plan["output_contract_version"] = 2
+    assert check() == "report_execution_plan_unsupported:output_contract_version"
+    plan["output_contract_version"] = 3
     plan["version"] = 1
     assert check() == "report_execution_plan_unsupported:version"
     plan["version"] = 2
     plan["execution_engine"] = "claudecode"
     assert check() == "report_execution_plan_unsupported:execution_engine"
+
+
+def test_same_packet_two_templates_change_real_artifact_structure_not_facts() -> None:
+    packet = _goal_packet()
+    original = _packet()
+    for key in ("vulnerabilities", "observations", "observation_statuses", "verifications", "chain_candidates"):
+        packet[key] = original[key]
+    before = deepcopy(packet)
+    first = _data("v1", "v2")
+    second = deepcopy(first)
+    second["layout"] = [
+        {"type": "markdown", "markdown": "# 冻结材料交付\n\n## 事实及发现"},
+        *({"type": "fact", "ref": item["ref"]} for item in first["layout"] if item["type"] == "fact" and item["ref"] not in {"limitations", "evidence_index"}),
+        {"type": "markdown", "markdown": "## 修复路线与附件\n\n先修复边界，再记录回归证据。"},
+        {"type": "fact", "ref": "limitations"},
+        {"type": "fact", "ref": "evidence_index"},
+    ]
+    alternative = "# 冻结材料交付\n\n## 事实及发现\n\n## 修复路线与附件\n"
+    outputs = []
+    for data, template in ((first, V3_TEMPLATE), (second, alternative)):
+        client = _ArtifactOnlyClient()
+        identity = report._write_report_results(
+            client, "p1", "report-run", data=data,
+            report_packet_json=json.dumps(packet), report_template_markdown=template,
+        )
+        assert isinstance(identity, report.ReportArtifactIdentity)
+        markdown = client.artifacts[0]["content"]
+        assert report._report_main_headings(markdown) == report._report_main_headings(template.replace("{{ report_title }}", "安全评估部分报告"))
+        for text in (
+            "Canonical 漏洞记录数：2；Observation 数：3", "conflicting", "run_failed", "not_run",
+            "非所有者请求返回 403", "仅验证了一个对象", "缺少第二身份; 未执行身份对照",
+            "a1", "/evidence/request", "漏洞 v1", "漏洞 v2", "未执行修复后回归。",
+        ):
+            assert text in markdown
+        assert "## 1." not in markdown and "## 10." not in markdown
+        facts = markdown
+        for item in data["layout"]:
+            if item["type"] == "markdown":
+                facts = facts.replace(item["markdown"], "")
+        outputs.append((markdown, facts.strip()))
+    assert packet == before
+    assert outputs[0][0] != outputs[1][0]
+    assert outputs[0][1].replace("\n", "") == outputs[1][1].replace("\n", "")
+    assert [title for level, title in report._report_main_headings(outputs[0][0]) if level == 2] == [
+        "漏洞成果汇总", "漏洞详情", "整体修复建议", "附录：证据索引",
+    ]
+
+
+@pytest.mark.parametrize(("mutation", "error"), [
+    ("unknown", "report_layout_ref_unknown:unknown"),
+    ("unknown_finding", "report_layout_ref_unknown:finding:unknown"),
+    ("duplicate", "report_layout_ref_duplicate:scope"),
+    ("duplicate_finding", "report_layout_ref_duplicate:finding:v1"),
+    ("missing", "report_layout_ref_missing:counts"),
+    ("missing_finding", "report_layout_ref_missing:finding:v2"),
+])
+def test_invalid_layout_references_fail_without_old_report_fallback(mutation, error) -> None:
+    data = _data("v1", "v2")
+    if mutation in {"unknown", "unknown_finding", "duplicate", "duplicate_finding"}:
+        ref = {"unknown": "unknown", "unknown_finding": "finding:unknown", "duplicate": "scope", "duplicate_finding": "finding:v1"}[mutation]
+        data["layout"].append({"type": "fact", "ref": ref})
+    else:
+        ref = "counts" if mutation == "missing" else "finding:v2"
+        data["layout"] = [item for item in data["layout"] if item.get("ref") != ref]
+    assert report._report_completeness_error(data, id_to_title={"v1": "", "v2": ""}) == error
+    with pytest.raises(ValueError, match=error):
+        report._render_report_markdown(data, report_packet_json=json.dumps(_packet()), report_template_markdown=V3_TEMPLATE)
+    client = _ArtifactOnlyClient()
+    assert report._write_report_results(
+        client, "p1", "report-run", data=data, report_packet_json=json.dumps(_packet()), report_template_markdown=V3_TEMPLATE,
+    ) == "request_contract"
+    assert not client.artifacts
+
+
+@pytest.mark.parametrize("replacement", ["## 改名", "## 漏洞详情\n\n## 漏洞成果汇总", "## 漏洞成果汇总\n\n## 额外章节"])
+def test_fixed_template_heading_name_count_and_order_are_required(replacement) -> None:
+    data = _data("v1", "v2")
+    data["layout"][0]["markdown"] = "# 安全评估部分报告\n\n" + replacement
+    with pytest.raises(ValueError, match="report_template_heading_mismatch"):
+        report._render_report_markdown(data, report_packet_json=json.dumps(_packet()), report_template_markdown=V3_TEMPLATE)
+
+
+@pytest.mark.parametrize("title", ["{{ report_title }}", "{{report_title}}", "安全评估 {{ report_title }}"])
+def test_template_title_placeholder_must_be_expanded(title: str) -> None:
+    data = _data("v1", "v2")
+    data["layout"][0]["markdown"] = f"# {title}\n\n## 漏洞成果汇总"
+    with pytest.raises(ValueError, match="report_template_heading_mismatch"):
+        report._render_report_markdown(data, report_packet_json=json.dumps(_packet()), report_template_markdown=V3_TEMPLATE)
+
+
+@pytest.mark.parametrize("placement", ["layout", "repro_steps"])
+@pytest.mark.parametrize("fragment", [
+    "1. ```http\n   GET / HTTP/1.1\n   ```",
+    "10. ```http\n    GET / HTTP/1.1\n    ```",
+    "1.     ```http\n       GET / HTTP/1.1",
+    "<!-- 已闭合 --> <!-- 也已闭合 --> ## 同行文本不是主章节",
+])
+def test_closed_markdown_fragments_are_preserved(placement: str, fragment: str) -> None:
+    data = _data("v1", "v2")
+    if placement == "layout":
+        data["layout"].insert(-1, {"type": "markdown", "markdown": fragment})
+    else:
+        data["findings"][0]["repro_steps"] = fragment
+    markdown = report._render_report_markdown(
+        data, report_packet_json=json.dumps(_packet()), report_template_markdown=V3_TEMPLATE,
+    )
+    assert fragment in markdown
+    assert markdown.index(fragment) < markdown.index("### 证据索引（冻结快照）")
+
+
+def test_heading_extractor_ignores_code_and_html_but_supports_setext() -> None:
+    markdown = """标题
+===
+
+章节
+---
+
+```markdown
+# 示例不是标题
+## 代码内章节
+```
+
+~~~~
+## 另一个代码示例
+~~~~
+
+    ## 缩进代码
+
+<!--
+## 注释不是标题
+-->
+
+<pre>
+## HTML 内不是标题
+</pre>
+
+## 真实章节 ##
+"""
+    assert report._report_main_headings(markdown, require_closed=True) == [(1, "标题"), (2, "章节"), (2, "真实章节")]
+    data = _data("v1", "v2")
+    data["layout"].append({"type": "markdown", "markdown": "```markdown\n## 不是额外主章节\n```\n\n    # 也不是标题\n\n行内代码 `<!--` 只表示语法示例。"})
+    assert report._render_report_markdown(data, report_packet_json=json.dumps(_packet()), report_template_markdown=V3_TEMPLATE)
+
+
+@pytest.mark.parametrize("placement", ["layout", "repro_steps"])
+@pytest.mark.parametrize("fragment", [
+    "```markdown", "~~~", "<!-- 未闭合", "说明 <!-- 未闭合", "<pre>未闭合",
+    "1. ```http\n   GET / HTTP/1.1", "<!-- 已闭合 --> <!--",
+])
+def test_fragment_cannot_hide_following_facts_in_unclosed_block(placement: str, fragment: str) -> None:
+    data = _data("v1", "v2")
+    if placement == "layout":
+        data["layout"].insert(-1, {"type": "markdown", "markdown": fragment})
+    else:
+        data["findings"][0]["repro_steps"] = fragment
+    with pytest.raises(ValueError, match="report_layout_unclosed_block"):
+        report._render_report_markdown(data, report_packet_json=json.dumps(_packet()), report_template_markdown=V3_TEMPLATE)

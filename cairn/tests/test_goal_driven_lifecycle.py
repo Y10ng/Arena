@@ -937,7 +937,6 @@ def test_user_finish_drains_historical_result_candidate_and_cleanup(lifecycle_db
             conn,
             "p",
             template_key="standard-pentest",
-            template_version=1,
             requested_by="operator",
         )
     assert report_while_draining.value.detail == "project_pause_draining"
@@ -1060,7 +1059,6 @@ def test_user_finish_drains_historical_result_candidate_and_cleanup(lifecycle_db
         conn,
         "p",
         template_key="standard-pentest",
-        template_version=1,
         requested_by="operator",
     )
     assert report.status == "pending"

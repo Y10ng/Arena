@@ -84,7 +84,7 @@ def client(conn, monkeypatch):
             raise
 
     monkeypatch.setattr(project_records, "get_conn", get_conn)
-    monkeypatch.setattr(project_authorization, "get_conn", get_conn)
+    monkeypatch.setattr(project_authorization, "schedule_transaction", get_conn)
     monkeypatch.setattr(assessment_reports, "get_conn", get_conn)
     monkeypatch.setattr(project_completion, "get_conn", get_conn)
     monkeypatch.setattr(projects_router, "get_conn", get_conn)
@@ -231,7 +231,7 @@ def test_active_finalizing_cannot_request_report(conn, client):
     before = _snapshot(conn)
     response = client.post(
         "/projects/p/assessment-report-finalization/request",
-        json={"template_key": "standard-pentest", "template_version": 1},
+        json={"template_key": "standard-pentest"},
     )
     assert response.status_code == 409
     assert response.json()["detail"] == "assessment_report_project_active"
@@ -273,7 +273,7 @@ def test_explicit_pause_resume_preserves_phase_obligations_and_budget(conn, clie
     assert paused["explore_deadline"] == "2099-01-01T00:00:00Z"
     assert paused["coverage_stop_reason"] is None
     assert client.post("/projects/p/pause").json()["execution_generation"] == 1
-    report = client.post("/projects/p/assessment-report-finalization/request", json={"template_key": "standard-pentest", "template_version": 1})
+    report = client.post("/projects/p/assessment-report-finalization/request", json={"template_key": "standard-pentest"})
     assert report.status_code == 409
     assert report.json()["detail"] == "assessment_report_project_paused"
     # 本例只回归业务状态保留；真实认证就绪门禁由 monitoring HTTP 测试覆盖。
@@ -736,7 +736,7 @@ def test_finish_after_pause_cannot_freeze_report_until_cleanup_confirmed(conn, c
     assert finished.json()["status"] == "stopped"
     assert finished.json()["assessment_progress"]["phase"] == "finalizing"
     before = _snapshot(conn)
-    response = client.post("/projects/p/assessment-report-finalization/request", json={"template_key": "standard-pentest", "template_version": 1})
+    response = client.post("/projects/p/assessment-report-finalization/request", json={"template_key": "standard-pentest"})
     assert response.status_code == 409
     assert response.json()["detail"] == "project_pause_draining"
     assert _snapshot(conn) == before
@@ -745,7 +745,7 @@ def test_finish_after_pause_cannot_freeze_report_until_cleanup_confirmed(conn, c
 
 
 def _request_report(client):
-    response = client.post("/projects/p/assessment-report-finalization/request", json={"template_key": "full-technical", "template_version": 1})
+    response = client.post("/projects/p/assessment-report-finalization/request", json={"template_key": "full-technical"})
     assert response.status_code == 202, response.text
     return response.json()
 

@@ -284,6 +284,16 @@ def _goal_reason_delivery(conn, monkeypatch, *, open_work=False):
                     "p", run.id, UpdateTaskRunRequest.model_validate_json(wire), principal=TEST_DISPATCHER,
                 )
                 return ApiResult(status_code=200, data=value.model_dump(mode="json", by_alias=True))
+            if (method, path) == ("POST", "/projects/p/complete"):
+                sent.append(json.loads(wire))
+                try:
+                    value = complete_project_record_with_conn(conn, "p", CompleteRequest.model_validate_json(wire))
+                except HTTPException as exc:
+                    conn.commit()
+                    return ApiResult(status_code=exc.status_code, data={"detail": exc.detail})
+                conn.commit()
+                accepted.append(value.model_dump(mode="json", by_alias=True))
+                return ApiResult(status_code=200, data=accepted[-1])
             assert (method, path) == ("POST", "/projects/p/intents")
             sent.append(json.loads(wire))
             value = intents_router.create_intent("p", CreateIntentRequest.model_validate_json(wire), principal=TEST_DISPATCHER)
@@ -470,7 +480,8 @@ def test_goal_reason_structure_repairs_in_session_and_server_accepts_intent_rece
     assert [item["code"] for item in captured["outcomes"]] == ["submission_invalid", "locally_validated"]
     assert captured["candidates"][1]["parent_producer_candidate_key"] == captured["candidates"][0]["producer_candidate_key"]
     assert [event["code"] for event in captured["audit"] if event["event"] == "result_repair"] == ["submission_invalid"]
-    assert captured["tool_scopes"][1] == ["read_evidence", "register_artifact", "submit_result"]
+    assert captured["tool_scopes"][1] == captured["tool_scopes"][0]
+    assert {"bash", "read", "write", "edit"} <= set(captured["tool_scopes"][1])
     assert conn.execute("SELECT count(*) FROM intents").fetchone()[0] == int(open_work)
     decoded = _decode_reason_submission(state, captured["raw"])
     assert decoded.succeeded and decoded.kind == "intents", decoded.failure
@@ -494,6 +505,57 @@ def test_goal_reason_structure_repairs_in_session_and_server_accepts_intent_rece
     assert state.accepted[3:] == state.accepted[:3]
     assert conn.execute("SELECT count(*) FROM intents").fetchone()[0] == 3 + int(open_work)
     assert conn.execute("SELECT count(*) FROM intent_sources").fetchone()[0] == 6 + int(open_work)
+    state.client.close()
+
+
+@pytest.mark.parametrize("empty_intents,open_work", [({}, False), ({"intents": None}, False),
+                                                    ({"intents": []}, False), ({"intents": []}, True)],
+                         ids=["missing", "null", "empty", "empty-with-open-work"])
+def test_goal_reason_completion_empty_intents_reaches_real_completion_gate(conn, monkeypatch, empty_intents, open_work):
+    state = _goal_reason_delivery(conn, monkeypatch, open_work=open_work)
+    submitted = {"accepted": True, "data": {
+        "complete": {"from": ["baseline"], "description": "合成材料支持本次收尾建议。"},
+        **empty_intents,
+    }}
+    captured = _run_reason_submission_fixture(state, [submitted])
+    assert json.loads(captured["raw"])["status"] == "succeeded", captured["raw"]
+    assert captured["rejections"] == []
+    assert json.loads(captured["raw"])["result"]["data"] == submitted["data"]
+    raw_before = [bytes(row[0]) for row in conn.execute("SELECT raw_bytes FROM task_run_candidates")]
+    decoded = _decode_reason_submission(state, captured["raw"])
+    assert decoded.succeeded and decoded.kind == "complete", decoded.failure
+    assert _write_decoded_reason(state, decoded) == ("business_acceptance" if open_work else "success")
+    assert len(state.sent) == 1
+    project = conn.execute("SELECT status FROM projects WHERE id='p'").fetchone()
+    assert project[0] == ("active" if open_work else "completed")
+    context = json.loads(conn.execute("SELECT runtime_context_json FROM task_runs WHERE id=?", (state.run.id,)).fetchone()[0])
+    if open_work:
+        assert context["completion_rejection"]["code"] == "goal_driven_completion_open_intents"
+        assert "accepted_completion_intent_id" not in context
+    else:
+        assert context["accepted_completion_intent_id"] == state.accepted[0]["id"]
+    assert [bytes(row[0]) for row in conn.execute("SELECT raw_bytes FROM task_run_candidates")] == raw_before
+    state.client.close()
+
+
+@pytest.mark.parametrize("action", ["intents", "abandon"], ids=["nonempty-intents", "nonempty-abandon"])
+def test_goal_reason_conflicting_completion_repairs_locally(conn, monkeypatch, action):
+    state = _goal_reason_delivery(conn, monkeypatch)
+    valid = {"accepted": True, "data": {
+        "complete": {"from": ["baseline"], "description": "无新增安排的合成完成建议。"}, "intents": [],
+    }}
+    invalid = json.loads(json.dumps(valid))
+    invalid["data"][action] = ([{"from": ["baseline"], "description": "不能与完成同时安排。"}]
+                                if action == "intents" else ["old-obligation"])
+    captured = _run_reason_submission_fixture(state, [invalid, valid])
+    assert json.loads(captured["raw"])["status"] == "succeeded", captured["raw"]
+    assert [item["code"] for item in captured["rejections"]] == ["submission_invalid"]
+    assert [item["code"] for item in captured["outcomes"]] == ["submission_invalid", "locally_validated"]
+    decoded = _decode_reason_submission(state, captured["raw"])
+    assert decoded.succeeded and decoded.kind == "complete", decoded.failure
+    assert _write_decoded_reason(state, decoded) == "success"
+    assert len(state.sent) == 1
+    assert conn.execute("SELECT status FROM projects WHERE id='p'").fetchone()[0] == "completed"
     state.client.close()
 
 

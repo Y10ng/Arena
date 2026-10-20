@@ -174,7 +174,7 @@
       </header>
 
       <!-- Viewport -->
-      <main class="content-viewport">
+      <main class="content-viewport" :class="{ 'content-viewport--workspace': usesWorkspaceViewport }">
         <router-view></router-view>
       </main>
     </div>
@@ -290,13 +290,13 @@ const handleLogout = async () => {
   }
 }
 
-// Refresh Page Data
+// 非 Query 页面继续通过刷新事件更新；Query 请求失败必须如实反馈。
 const refreshData = async () => {
+  if (isRefreshing.value) return
   isRefreshing.value = true
   uiStore.triggerGlobalRefresh()
   try {
-    await queryClient.invalidateQueries()
-    uiStore.showToast('数据已刷新', 'success')
+    await queryClient.invalidateQueries({}, { throwOnError: true })
   } catch {
     uiStore.showToast('刷新失败', 'danger')
   } finally {
@@ -309,6 +309,12 @@ const workspaceProjectId = computed(() =>
   route.matched.some((record) => record.path === '/projects/:id') && typeof route.params.id === 'string'
     ? route.params.id
     : undefined,
+)
+
+// 阅读与编辑工作区继承 Shell 的剩余高度，普通表单页继续使用外层滚动。
+const usesWorkspaceViewport = computed(() =>
+  Boolean(workspaceProjectId.value) ||
+  ['Reports', 'ConsoleKnowledge', 'ConsoleReportTemplates'].includes(String(route.name)),
 )
 
 // Navigation / Breadcrumbs
@@ -474,8 +480,6 @@ const handleGlobalKeydown = (e: KeyboardEvent) => {
       router.push('/')
     } else if (key === 'p') {
       router.push('/projects')
-    } else if (key === 'n') {
-      router.push('/projects/new')
     } else if (key === 'm') {
       router.push('/monitoring')
     } else if (key === 's') {

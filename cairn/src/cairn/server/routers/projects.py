@@ -29,7 +29,6 @@ from cairn.server.models import (
     HeartbeatRequest,
     Intent,
     Library,
-    MoveProjectToGroupRequest,
     ProjectDetail,
     ProjectManagementOptions,
     ProjectMeta,
@@ -56,7 +55,6 @@ from cairn.server.services import (
     get_assessment_report_finalization,
     get_project_detail,
     heartbeat_project_reason_record,
-    list_project_groups,
     list_project_summaries,
     list_selectable_current_libraries,
     list_target_records,
@@ -65,7 +63,6 @@ from cairn.server.services import (
     replay_assessment_report_finalization,
     reopen_project_record,
     request_assessment_report_generation,
-    update_project_group_record,
     update_project_status_record,
     project_lifecycle_action,
     reauthorize_project_record,
@@ -128,7 +125,6 @@ def _project_tenant_id(project_id: str) -> str:
 def get_project_management_options(project_id: str):
     tenant_id = _project_tenant_id(project_id)
     return ProjectManagementOptions(
-        groups=list_project_groups(tenant_id=tenant_id),
         tenant_workers=list_tenant_workers(tenant_id=tenant_id),
     )
 
@@ -156,19 +152,6 @@ def delete_project(project_id: str):
 @router.put("/projects/{project_id}/title", response_model=ProjectMeta, dependencies=[Depends(require_user_tenant_project)])
 def update_project_title(project_id: str, body: UpdateProjectTitleRequest):
     return update_project_title_record(project_id, body)
-
-
-@router.put("/projects/{project_id}/group", response_model=ProjectMeta)
-def update_project_group(
-    project_id: str,
-    body: MoveProjectToGroupRequest,
-    _principal: RequestPrincipal = Depends(require_user_tenant_project),
-):
-    return update_project_group_record(
-        project_id,
-        body,
-        tenant_id=_project_tenant_id(project_id),
-    )
 
 
 @router.post("/projects/{project_id}/pause", response_model=ProjectMeta, dependencies=[Depends(require_user_tenant_project)])
@@ -275,7 +258,6 @@ def request_assessment_report_generation_route(
             conn,
             project_id,
             template_key=body.template_key,
-            template_version=body.template_version,
             requested_by=principal.subject_id,
         )
 

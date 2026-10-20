@@ -1,19 +1,19 @@
-"""不可变、版本化报告模板服务。"""
+"""报告模板当前内容的读取、保存与真实删除。"""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from hashlib import sha256
 from re import fullmatch
-import sqlite3
+from uuid import uuid4
 
 from fastapi import HTTPException
 
+from cairn.server.db import PostgresConnection
 from cairn.server.schemas.report_templates import (
     ReportTemplate,
     ReportTemplateCatalogEntry,
-    ReportTemplateVersion,
-    ReportTemplateVersionDetail,
+    ReportTemplateUpdate,
 )
 
 
@@ -32,231 +32,134 @@ def report_template_digest(markdown_content: str) -> str:
     return sha256(markdown_content.encode("utf-8")).hexdigest()
 
 
-def _template_model(row: sqlite3.Row) -> ReportTemplate:
-    return ReportTemplate(**dict(row))
-
-
-def _version_profiles(
-    conn: sqlite3.Connection,
-    template_key: str,
-    version: int,
-) -> list[str]:
-    rows = conn.execute(
-        """SELECT profile_id FROM report_template_version_profiles
-           WHERE template_key = ? AND template_version = ? ORDER BY profile_id""",
-        (template_key, version),
+def _template_model(conn: PostgresConnection, row) -> ReportTemplate:
+    profiles = conn.execute(
+        "SELECT profile_id FROM report_template_profiles WHERE template_key = ? ORDER BY profile_id",
+        (row["key"],),
     ).fetchall()
-    return [str(row["profile_id"]) for row in rows]
-
-
-def _version_model(
-    conn: sqlite3.Connection,
-    row: sqlite3.Row,
-) -> ReportTemplateVersion:
-    values = dict(row)
-    values["compatibility_profiles"] = _version_profiles(
-        conn,
-        str(row["template_key"]),
-        int(row["version"]),
+    item = ReportTemplate(
+        **dict(row),
+        compatibility_profiles=[str(profile["profile_id"]) for profile in profiles],
     )
-    return ReportTemplateVersion(**values)
-
-
-def list_report_templates(
-    conn: sqlite3.Connection,
-    *,
-    include_archived: bool = False,
-) -> list[ReportTemplate]:
-    where = "" if include_archived else "WHERE template.archived_at IS NULL"
-    rows = conn.execute(
-        f"""
-        SELECT template.key, template.name, template.description,
-               template.created_at, template.archived_at,
-               (SELECT MAX(version.version)
-                FROM report_template_versions AS version
-                WHERE version.template_key = template.key) AS latest_version
-        FROM report_templates AS template
-        {where}
-        ORDER BY template.key
-        """
-    ).fetchall()
-    return [_template_model(row) for row in rows]
-
-
-def get_report_template(
-    conn: sqlite3.Connection,
-    key: str,
-    *,
-    include_archived: bool = False,
-) -> ReportTemplate:
-    normalized = validate_report_template_key(key)
-    for item in list_report_templates(conn, include_archived=include_archived):
-        if item.key == normalized:
-            return item
-    raise HTTPException(404, f"Report template {normalized} not found")
-
-
-def create_report_template(
-    conn: sqlite3.Connection,
-    key: str,
-    name: str,
-    description: str = "",
-) -> ReportTemplate:
-    normalized = validate_report_template_key(key)
-    if conn.execute(
-        "SELECT 1 FROM report_templates WHERE key = ?", (normalized,)
-    ).fetchone() is not None:
-        raise HTTPException(409, f"Report template {normalized} already exists")
-    conn.execute(
-        """INSERT INTO report_templates (key, name, description, created_at)
-           VALUES (?, ?, ?, ?)""",
-        (normalized, name.strip(), description.strip(), _utcnow()),
-    )
-    return get_report_template(conn, normalized)
-
-
-def archive_report_template(conn: sqlite3.Connection, key: str) -> None:
-    template = get_report_template(conn, key, include_archived=True)
-    if template.archived_at is None:
-        conn.execute(
-            "UPDATE report_templates SET archived_at = ? WHERE key = ?",
-            (_utcnow(), template.key),
-        )
-
-
-def list_report_template_versions(
-    conn: sqlite3.Connection,
-    key: str,
-) -> list[ReportTemplateVersion]:
-    normalized = get_report_template(conn, key, include_archived=True).key
-    rows = conn.execute(
-        """SELECT template_key, version, digest_sha256, message, created_by, created_at
-           FROM report_template_versions
-           WHERE template_key = ? ORDER BY version DESC""",
-        (normalized,),
-    ).fetchall()
-    return [_version_model(conn, row) for row in rows]
-
-
-def get_report_template_version(
-    conn: sqlite3.Connection,
-    key: str,
-    version: int,
-    *,
-    allow_archived: bool = True,
-) -> ReportTemplateVersionDetail:
-    normalized = get_report_template(
-        conn, key, include_archived=allow_archived
-    ).key
-    row = conn.execute(
-        """SELECT template_key, version, digest_sha256, markdown_content,
-                  message, created_by, created_at
-           FROM report_template_versions
-           WHERE template_key = ? AND version = ?""",
-        (normalized, version),
-    ).fetchone()
-    if row is None:
-        raise HTTPException(404, f"Report template {normalized} version {version} not found")
-    values = dict(row)
-    values["compatibility_profiles"] = _version_profiles(
-        conn,
-        normalized,
-        version,
-    )
-    item = ReportTemplateVersionDetail(**values)
-    if report_template_digest(item.markdown_content) != item.digest_sha256:
-        raise RuntimeError(
-            f"Report template digest mismatch: {normalized}@{version}"
-        )
+    if item.markdown_content is not None and report_template_digest(item.markdown_content) != item.digest_sha256:
+        raise RuntimeError(f"Report template digest mismatch: {item.key}")
     return item
 
 
-def create_report_template_version(
-    conn: sqlite3.Connection,
-    key: str,
-    markdown_content: str,
-    *,
-    message: str | None = None,
-    created_by: str | None = None,
-    compatibility_profiles: list[str] | None = None,
-) -> ReportTemplateVersionDetail:
-    template = get_report_template(conn, key)
-    content = markdown_content.strip()
-    digest = report_template_digest(content)
+def list_report_templates(conn: PostgresConnection) -> list[ReportTemplate]:
+    rows = conn.execute("SELECT * FROM report_templates ORDER BY key").fetchall()
+    return [_template_model(conn, row) for row in rows]
+
+
+def _template_row(conn: PostgresConnection, key: str, *, lock: str = ""):
+    normalized = validate_report_template_key(key)
     row = conn.execute(
-        "SELECT COALESCE(MAX(version), 0) + 1 AS next_version "
-        "FROM report_template_versions WHERE template_key = ?",
-        (template.key,),
+        f"SELECT * FROM report_templates WHERE key = ? {lock}", (normalized,)
     ).fetchone()
-    version = int(row["next_version"])
-    created_at = _utcnow()
-    conn.execute(
-        """INSERT INTO report_template_versions
-           (template_key, version, digest_sha256, markdown_content,
-            message, created_by, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (
-            template.key,
-            version,
-            digest,
-            content,
-            message,
-            created_by,
-            created_at,
-        ),
-    )
-    profiles = compatibility_profiles or ["assessment-report-packet-v1"]
+    if row is None:
+        raise HTTPException(404, f"Report template {normalized} not found")
+    return row
+
+
+def get_report_template(conn: PostgresConnection, key: str) -> ReportTemplate:
+    return _template_model(conn, _template_row(conn, key))
+
+
+def _replace_profiles(conn: PostgresConnection, key: str, profiles: list[str]) -> None:
+    # 修改关系之前持有模板行锁，受理方可一次冻结同一份正文与 profile。
+    conn.execute("DELETE FROM report_template_profiles WHERE template_key = ?", (key,))
     for profile in profiles:
         conn.execute(
-            """INSERT INTO report_template_version_profiles
-               (template_key, template_version, profile_id, created_at)
-               VALUES (?, ?, ?, ?)""",
-            (template.key, version, profile, created_at),
+            "INSERT INTO report_template_profiles (template_key, profile_id) VALUES (?, ?)",
+            (key, profile),
         )
-    return get_report_template_version(conn, template.key, version)
 
 
-def list_report_template_catalog(
-    conn: sqlite3.Connection,
-) -> list[ReportTemplateCatalogEntry]:
-    rows = conn.execute(
-        """SELECT template.key, template.name, template.description,
-                  version.version, version.digest_sha256
-           FROM report_templates AS template
-           JOIN report_template_versions AS version
-             ON version.template_key = template.key
-            AND version.version = (
-                SELECT MAX(candidate.version)
-                FROM report_template_versions AS candidate
-                WHERE candidate.template_key = template.key
-            )
-           WHERE template.archived_at IS NULL
-           ORDER BY template.key"""
-    ).fetchall()
-    catalog: list[ReportTemplateCatalogEntry] = []
-    for row in rows:
-        values = dict(row)
-        values["compatibility_profiles"] = _version_profiles(
-            conn,
-            str(row["key"]),
-            int(row["version"]),
+def create_report_template(
+    conn: PostgresConnection,
+    key: str | None,
+    name: str,
+    description: str,
+    markdown_content: str,
+    *,
+    compatibility_profiles: list[str] | None = None,
+) -> ReportTemplate:
+    body = ReportTemplateUpdate(
+        name=name,
+        description=description,
+        markdown_content=markdown_content,
+        **({"compatibility_profiles": compatibility_profiles} if compatibility_profiles is not None else {}),
+    )
+    normalized = validate_report_template_key(key) if key is not None else f"report-{uuid4().hex}"
+    now = _utcnow()
+    inserted = conn.execute(
+        """INSERT INTO report_templates
+           (key, name, description, markdown_content, digest_sha256, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (key) DO NOTHING""",
+        (normalized, body.name, body.description, body.markdown_content,
+         report_template_digest(body.markdown_content), now, now),
+    )
+    if inserted.rowcount != 1:
+        raise HTTPException(409, f"Report template {normalized} already exists")
+    _replace_profiles(conn, normalized, body.compatibility_profiles)
+    return get_report_template(conn, normalized)
+
+
+def update_report_template(
+    conn: PostgresConnection,
+    key: str,
+    name: str,
+    description: str,
+    markdown_content: str,
+    *,
+    compatibility_profiles: list[str] | None = None,
+) -> ReportTemplate:
+    body = ReportTemplateUpdate(
+        name=name,
+        description=description,
+        markdown_content=markdown_content,
+        **({"compatibility_profiles": compatibility_profiles} if compatibility_profiles is not None else {}),
+    )
+    row = _template_row(conn, key, lock="FOR UPDATE")
+    conn.execute(
+        """UPDATE report_templates SET name = ?, description = ?, markdown_content = ?,
+           digest_sha256 = ?, updated_at = ? WHERE key = ?""",
+        (body.name, body.description, body.markdown_content,
+         report_template_digest(body.markdown_content), _utcnow(), row["key"]),
+    )
+    _replace_profiles(conn, row["key"], body.compatibility_profiles)
+    return get_report_template(conn, row["key"])
+
+
+def delete_report_template(conn: PostgresConnection, key: str) -> None:
+    row = _template_row(conn, key, lock="FOR UPDATE")
+    # finalization 自持冻结输入，不以外键绑定当前模板，也不随删除撤销任务。
+    conn.execute("DELETE FROM report_templates WHERE key = ?", (row["key"],))
+
+
+def list_report_template_catalog(conn: PostgresConnection) -> list[ReportTemplateCatalogEntry]:
+    return [
+        ReportTemplateCatalogEntry(
+            key=item.key,
+            name=item.name,
+            description=item.description,
+            digest_sha256=item.digest_sha256,
+            compatibility_profiles=item.compatibility_profiles,
         )
-        catalog.append(ReportTemplateCatalogEntry(**values))
-    return catalog
+        for item in list_report_templates(conn)
+        if item.markdown_content is not None and item.markdown_content.strip()
+    ]
 
 
 def require_report_template_profile(
-    conn: sqlite3.Connection,
+    conn: PostgresConnection,
     template_key: str,
-    version: int,
     profile_id: str,
-) -> ReportTemplateVersionDetail:
-    template = get_report_template_version(
-        conn,
-        template_key,
-        version,
-        allow_archived=False,
-    )
+) -> ReportTemplate:
+    # 行锁保持到受理事务结束，禁止编辑或删除穿过正文／profile 冻结的边界。
+    template = _template_model(conn, _template_row(conn, template_key, lock="FOR SHARE"))
+    if template.markdown_content is None or not template.markdown_content.strip():
+        raise HTTPException(409, "assessment_report_template_content_missing")
     if profile_id not in template.compatibility_profiles:
         raise HTTPException(409, "assessment_report_template_incompatible")
     return template

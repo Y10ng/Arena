@@ -206,11 +206,6 @@ SCENARIO_FEATURE_SCHEMA_DEFS: tuple[dict[str, Any], ...] = (
         "default": "container", "options": ["container"], "runtime_driver": False,
         "description": "执行隔离策略的元数据标记。",
     },
-    {
-        "key": "report_prompt_group", "label": "报告 Prompt 组", "value_type": "string",
-        "default": DEFAULT_PROMPT_GROUP, "runtime_driver": False,
-        "description": "报告使用的 Prompt 组；留空时使用目标驱动内置模板。",
-    },
 )
 KNOWLEDGE_KEY_RE = re.compile(r"^[a-z0-9_-]+$")
 KNOWLEDGE_FILE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")

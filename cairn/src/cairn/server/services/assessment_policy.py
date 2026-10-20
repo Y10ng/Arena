@@ -89,6 +89,8 @@ def frozen_execution_features(scenario: Scenario) -> dict[str, Any]:
         "explore_budget",
         "exploration_limit",
         "verification_reserve",
+        "report_policy_version",
+        "report_prompt_group",
     ):
         features.pop(key, None)
     features.update(
@@ -99,8 +101,6 @@ def frozen_execution_features(scenario: Scenario) -> dict[str, Any]:
         vulnerability_fingerprint_version=1,
         outcome_contract_version=2,
         verifier_contract_version=1,
-        report_policy_version="1",
-        report_prompt_group=features.get("report_prompt_group") or GOAL_DRIVEN_PROTOCOL,
     )
     return features
 

@@ -3,11 +3,19 @@ import type { KnowledgeFile } from '@/api/types'
 export const ROOT_KNOWLEDGE_DIRECTORY = ''
 
 export interface KnowledgeDirectoryGroup {
-  directory: string;
-  label: string;
-  depth: number;
-  files: KnowledgeFile[];
-  totalSize: number;
+  directory: string
+  label: string
+  depth: number
+  files: KnowledgeFile[]
+  totalSize: number
+}
+
+export interface KnowledgeNavigationEntry {
+  kind: 'directory' | 'file'
+  path: string
+  name: string
+  depth: number
+  expanded?: boolean
 }
 
 const cleanPath = (path: string) => path.trim().replace(/^\/+|\/+$/g, '')
@@ -52,6 +60,10 @@ export const buildKnowledgeDirectoryGroups = (files: KnowledgeFile[] = []) => {
   ensureGroup(ROOT_KNOWLEDGE_DIRECTORY)
   for (const file of files) {
     const directory = knowledgeFileDirectory(file.path)
+    const segments = directory.split('/').filter(Boolean)
+    for (let index = 1; index <= segments.length; index++) {
+      ensureGroup(segments.slice(0, index).join('/'))
+    }
     const group = ensureGroup(directory)
     group.files.push(file)
     group.totalSize += file.size
@@ -64,8 +76,48 @@ export const buildKnowledgeDirectoryGroups = (files: KnowledgeFile[] = []) => {
   })
 }
 
+export const buildKnowledgeNavigation = (
+  files: KnowledgeFile[],
+  expandedDirectories: ReadonlySet<string>,
+  search = '',
+): KnowledgeNavigationEntry[] => {
+  const query = search.trim().toLocaleLowerCase()
+  const visibleFiles = query
+    ? files.filter((file) => file.path.toLocaleLowerCase().includes(query))
+    : files
+  const groups = buildKnowledgeDirectoryGroups(visibleFiles)
+  const children = new Map<string, KnowledgeDirectoryGroup[]>()
+  for (const group of groups) {
+    if (!group.directory) continue
+    const parent = knowledgeFileDirectory(group.directory)
+    const siblings = children.get(parent) || []
+    siblings.push(group)
+    children.set(parent, siblings)
+  }
+
+  const entries: KnowledgeNavigationEntry[] = []
+  const visit = (directory: string, depth: number) => {
+    for (const child of children.get(directory) || []) {
+      const expanded = Boolean(query) || expandedDirectories.has(child.directory)
+      entries.push({
+        kind: 'directory',
+        path: child.directory,
+        name: knowledgeFileName(child.directory),
+        depth,
+        expanded,
+      })
+      if (expanded) visit(child.directory, depth + 1)
+    }
+    for (const file of groups.find((group) => group.directory === directory)?.files || []) {
+      entries.push({ kind: 'file', path: file.path, name: knowledgeFileName(file.path), depth })
+    }
+  }
+  visit(ROOT_KNOWLEDGE_DIRECTORY, 0)
+  return entries
+}
+
 export const nextKnowledgeFilePath = (directory: string, files: KnowledgeFile[] = []) => {
-  const existingPaths = new Set(files.map(file => file.path))
+  const existingPaths = new Set(files.map((file) => file.path))
   const candidate = knowledgeFilePathInDirectory(directory, 'README.md')
   if (!existingPaths.has(candidate)) return candidate
 

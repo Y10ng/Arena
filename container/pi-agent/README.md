@@ -33,10 +33,11 @@ cairn-agent --request FILE
 - `result_schema`：Python 生成的完整 `submit_result` 参数 JSON Schema，包含 accepted/data 或 accepted/reason，但不包含外层 protocol/kind。唯一来源及导出快照是 `cairn.dispatcher.worker_protocol.submission` 与 `contracts/submission-v1.json`。
 - `binding`：可为 null。`slot_key/surface_key/test_family` 仅注入已经存在的 `data.coverage_result`；`verification_observation_id` 仅注入已经存在的 `data.verification_result.observation_id`；`review_input_digest` 仅注入已经存在的 `data.depth_review.input_digest`。`max_intents/allowed_fact_ids` 供 Python 生成 Schema，不注入结果，不凭空创建语义对象。
 - `timeout_seconds`：本次总截止，覆盖执行、provider 重试、结果修正和终态整理。
-- `max_result_repairs`：0–2，默认 2。`conclude_only`：布尔值。
+- `max_result_repairs`：0–2，默认 2。`conclude_only`：布尔值，仅显式交付模式限制为材料读取与提交。
+- `conclude_timeout_seconds`：可选剩余时间提示窗口；到时只提示一次，不撤销正常执行的工具权限、不打断在途调用或延长 `timeout_seconds`。
 - 可选 `cwd`，默认 `/home/kali/workspace`；可选 `session_root`，默认 `<cwd>/.cairn/pi`。本地测试显式指定临时目录。
 
-允许的 phase 为 `bootstrap_execute`、`bootstrap_conclude`、`explore_execute`、`explore_conclude`、`verifier_execute`、`verifier_conclude`、`reason_execute`、`report_execute`；`healthcheck`、其他未知 phase、旧 session、旧协议直接拒绝。
+允许的 phase 为 `bootstrap_execute`、`bootstrap_conclude`、`explore_execute`、`explore_conclude`、`verifier_execute`、`verifier_conclude`、`reason_execute`、`report_execute`、`external_verify_execute`；`healthcheck`、其他未知 phase、旧 session、旧协议直接拒绝。
 
 ## 模型协议与 endpoint
 
@@ -56,11 +57,14 @@ cairn-agent --request FILE
 
 - 模型仅调用 `submit_result` 提交业务参数。原始工具参数先严格校验，禁止 SDK 类型转换与 partial JSON parser 把错误输入变成成功。
 - runner 注入 `cairn-assessment-v2`、phase 对应 kind、权威绑定和已登记 Artifact。`submission_id` 是递归键排序 JSON 的 SHA256，固定 64 位小写 hex；Python 可将其作为 opaque 标识，不能假定不同语言数值序列化天然相同。
-- `register_artifact({path,kind})` 只读取工作区已有普通文件；kind 为 log/file/report/screenshot/patch/raw_output。返回 `{handle,kind,path,sha256,size_bytes}`；最终 `data.artifacts` 仅包含 `{handle,kind,path}`。摘要和大小进入审计元数据，文件未上传前不视为 Server Artifact。
-- SDK bash 的溢出输出复制到 `<cwd>/.cairn/artifacts/<session UUID>/` 并登记；大正文不进入 stderr 审计。其他证据由模型显式登记，提交前再次验证内容未变化。
+- `register_artifact({path,kind})` 只读取工作区已有普通文件；kind 为 log/file/report/screenshot/patch/raw_output。返回及最终注入的 `data.artifacts` 均包含 `{handle,kind,path,source_path,sha256,size_bytes}`：`path` 为登记时固定的原件版本，`source_path` 为来源。提交前复验摘要与大小，文件未上传前不视为 Server Artifact。
+- 普通 execute 可用 `capture_http_evidence({url,method?,headers?,body_path?,timeout_seconds?,title?,role?})`：使用现有 curl 实际发送一次 HTTP/1.1 请求，自动登记 request/response、原始 trace 和状态文件，直接返回可放入发现或复测的 `evidence_items`，不用再次登记。采集的是 curl 应用层/工具字节表示（含原始 chunk framing），不是网络帧或原浏览器抓包；响应正文不复制进工具回复。URL 禁止内嵌凭据，认证头只通过授权取证途径使用。
+- HTTP 采集不跟随重定向、不使用隐式代理；实际 302/Location 原样保留，授权后另行调用采集后续地址。超时或失败保留真实 trace、已采集字节及缺失的一侧，不补造响应；检查 `complete`、`exit_code` 和限制后解释结果。默认 30 秒、最多 120 秒且不超过本轮剩余时间；请求正文最多 1 MiB、响应最多 4 MiB，更大或专项采集使用其他已有工具。登记仍受每轮 32 个版本/32 MiB 总量限制，容量不足不裁剪原件，采集源文件保留但工具明确失败。
+- 新发现和外部复测使用 `schema_version:2`、必填有序 `evidence_items`，引用为 `artifact_handle` 或 `artifact_id`（二选一）；Worker 不写 inline 报文。`http` 只放 `request/response`，允许真实单侧缺失；`artifact/text` 使用 `artifact` 原件引用，不放请求／响应槽位，每条至少引用一份原件。Python 共享合同与生成 Schema 同时拒绝错槽，不猜测类型或补包。底层 `evidence_refs` 从同一条目投影，有漏洞的 Fact 及外部复测不再双填。Worker 升级只在无 queued/running TaskRun、候选 outbox 已排空的维护窗口执行；不恢复旧 Worker 业务合同，不按缺字段回退 v1。已接收候选的原文和 exact receipt replay 保留，不用新 Schema 重新解码历史候选。
+- SDK bash 的溢出输出复制到 `<cwd>/.cairn/artifacts/<session UUID>/` 并登记；大正文不进入 stderr 审计。除采集工具自动登记的材料外，其他证据由模型显式登记，提交前再次验证固定版本未变化。
 - 已有 Server Artifact ID 仅保留引用；实际存在性、项目归属和业务条件继续由 Python Gateway/Server 校验。
-- 收尾、report、修正只开放 `read_evidence`、`register_artifact`、`submit_result`。`read_evidence` 是有界本地文件读取，不运行 shell、网络或可执行文件。第一次尝试 submit 即进入收尾门禁，同一 SDK tool batch 后续的 bash 等动作也被拒绝。
-- 没有提交、Schema 或证据引用错误最多两轮同 session 修正；不会抽取自然语言中的 JSON，不重新探索目标。重复同内容提交幂等，不同内容冲突失败。
+- 显式 `conclude_only`、`*_conclude` 和 report 只开放 `read_evidence`、`register_artifact`、`submit_result`，不能重新研究。`read_evidence` 只读取工作区及 Dispatcher 受管只读输入（含 `/cairn/advisory/project`），不运行 shell、网络或可执行文件；只读输入不能登记成本轮新 Artifact。
+- 正常 execute 不因剩余时间提示、提交尝试或格式修正自动收权。没有提交、Schema 或证据引用错误最多两轮同 session 修正，仍服从原授权和硬截止；不抽取自然语言 JSON，不自动重放已完成动作。有效候选固定后结束执行，同批尾随非提交工具只跳过、不把候选改成权限失败。重复同内容提交幂等，不同内容冲突失败。
 - 候选结果以 `0600` 保存在 session 目录的 `candidate-*.json`，明确 `server_accepted:false`。失败不删除已生成证据；本地工具成功不等于 Server 已接受。
 
 ## 会话、取消与输出
@@ -71,7 +75,7 @@ cairn-agent --request FILE
 
 stdout 恰好一个程序生成信封：`protocol=cairn-agent-result-v1`、`engine=pi`、项目/TaskRun/phase/session、`status`、规范 result 或 null、submission_id、usage 或 null、error 或 null。退出码分别为成功 0、失败 1、取消 130。未知 token 计量返回 null，不使用 SDK 默认零值冒充已计量费用。
 
-stderr 为 NDJSON：`protocol=cairn-agent-audit-v1`、timestamp、项目/TaskRun/phase/session、event。真实 SDK `tool_execution_start/end` 含 tool_name/tool_call_id、input_bytes/output_bytes、is_error 等有界元数据；不记录参数、正文、请求配置或密钥。调用者应流式保存 stderr，不将全部日志复制入内存。
+stderr 为 NDJSON：`protocol=cairn-agent-audit-v1`、timestamp、项目/TaskRun/phase/session、event。真实 SDK `tool_execution_start/end` 含 tool_name/tool_call_id、input_bytes/output_bytes、is_error 等有界元数据；不记录参数、正文、请求配置或密钥。实际加载 `/opt/cairn/AGENTS.md` 后，`instructions_loaded` 仅记录 `prompt_name=AGENTS.md`、`prompt_hash`、`prompt_bytes`；Dispatcher 校验本次执行绑定并投影为已有 `prompt_rendered`，供输出边界识别原样指引副本，不复制指引正文。调用者应流式保存 stderr，不将全部日志复制入内存。
 
 ## 边界
 

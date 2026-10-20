@@ -41,6 +41,27 @@ def require_configuration_admin(conn, principal: RequestPrincipal, tenant_id: st
         raise HTTPException(404, "目标租户不存在")
 
 
+def _configuration_tenant(conn, principal: RequestPrincipal, tenant_id: str | None) -> str:
+    if principal.is_super_admin:
+        target_tenant_id = tenant_id or ""
+        require_configuration_admin(conn, principal, target_tenant_id)
+        return target_tenant_id
+    if principal.kind != "user" or not principal.tenant_id:
+        raise HTTPException(403, "复测执行配置仅允许浏览器用户管理")
+    if tenant_id is not None and tenant_id != principal.tenant_id:
+        raise HTTPException(403, "只能管理本人的个人租户复测配置")
+    personal = conn.execute(
+        "SELECT t.id FROM tenants t JOIN tenant_memberships tm ON tm.tenant_id = t.id "
+        "WHERE t.id = ? AND t.kind = 'personal' AND tm.user_id = ? AND tm.role = 'owner' "
+        "AND NOT EXISTS (SELECT 1 FROM tenant_memberships other "
+        "WHERE other.tenant_id = t.id AND other.role = 'owner' AND other.user_id <> tm.user_id)",
+        (principal.tenant_id, principal.subject_id),
+    ).fetchone()
+    if personal is None:
+        raise HTTPException(403, "只能管理本人唯一拥有的个人租户复测配置")
+    return personal["id"]
+
+
 def _execution_capacity_reason(conn) -> tuple[str | None, str]:
     available = []
     for row in conn.execute("SELECT status, updated_at, runtime_json FROM dispatcher_status"):
@@ -66,7 +87,7 @@ def _configuration_view(conn, tenant_id: str) -> dict:
         "display_name": None, "engine": None, "model_id": None, "model_name": None,
         "model_display_name": None, "max_running": None, "priority": None,
         "enabled": None, "revision": None, "ready": False, "updated_at": None,
-        "reason": "verification_not_configured", "message": "尚未配置漏洞复测专用 Worker 与模型，请联系管理员保存配置。",
+        "reason": "verification_not_configured", "message": "尚未配置漏洞复测专用 Worker 与模型，请前往漏洞复测配置保存。",
     }
     if row is None:
         return view
@@ -108,16 +129,16 @@ def verification_readiness(principal: RequestPrincipal) -> dict:
         }
 
 
-def get_verification_configuration(principal: RequestPrincipal, *, tenant_id: str) -> dict:
+def get_verification_configuration(principal: RequestPrincipal, *, tenant_id: str | None = None) -> dict:
     with get_conn() as conn:
-        require_configuration_admin(conn, principal, tenant_id)
+        tenant_id = _configuration_tenant(conn, principal, tenant_id)
         return _configuration_view(conn, tenant_id)
 
 
 def update_verification_configuration(body: UpdateVerificationConfiguration, principal: RequestPrincipal,
-                                      *, tenant_id: str) -> dict:
+                                      *, tenant_id: str | None = None) -> dict:
     with schedule_transaction() as conn:
-        require_configuration_admin(conn, principal, tenant_id)
+        tenant_id = _configuration_tenant(conn, principal, tenant_id)
         # 与首次 claim 共用租户锁；只修改稳定身份的配置，不热改已开始的执行。
         conn.execute("UPDATE tenants SET id = id WHERE id = ?", (tenant_id,))
         _validate_model_binding(conn, body.model_id, tenant_id=tenant_id)
@@ -157,9 +178,9 @@ def update_verification_configuration(body: UpdateVerificationConfiguration, pri
         return _configuration_view(conn, tenant_id)
 
 
-def verification_configuration_options(principal: RequestPrincipal, *, tenant_id: str) -> dict:
+def verification_configuration_options(principal: RequestPrincipal, *, tenant_id: str | None = None) -> dict:
     with get_conn() as conn:
-        require_configuration_admin(conn, principal, tenant_id)
+        tenant_id = _configuration_tenant(conn, principal, tenant_id)
         models = [
             {**{key: row[key] for key in ("id", "display_name", "model_name", "protocol")},
              "enabled": bool(row["enabled"]),

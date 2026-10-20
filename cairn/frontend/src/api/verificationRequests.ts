@@ -1,30 +1,33 @@
-import { api, apiRaw } from './client'
-import type { EvidenceRef, ProjectResourceBatch, ProjectResourceBatchMember, ProjectResourceKind } from './types'
+import { api, apiRaw, type ArtifactPreview } from './client'
+import type { EvidenceItem, EvidenceSource, EvidenceRef, ProjectResourceBatch, ProjectResourceBatchMember, ProjectResourceKind } from './types'
 import type { Vulnerability } from './client'
 
 export type VerificationMode = 'reproduce' | 'retest'
-export type VerificationStatus = 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled'
+export type VerificationStatus = 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled' | 'cleanup_pending'
 export type VerificationOutcome = 'confirmed' | 'not_reproduced' | 'environment_changed' | 'insufficient_evidence'
 export type VerificationReportInput =
   | { type: 'markdown' | 'text'; content: string }
   | { type: 'file'; batch_member_id: string }
-  | { type: 'platform_vulnerability'; project_id: string; vulnerability_id: string }
+  | { type: 'platform_vulnerability'; project_id: string; vulnerability_id: string; observation_id?: string }
 export interface VerificationInputSource {
   type: 'platform_vulnerability'
   project_id: string
   vulnerability_id: string
+  observation_id?: string | null
   input_mode: 'current_vulnerability' | 'copied_snapshot'
 }
 export interface VerificationSourcePreview {
   project_id: string
   vulnerability_id: string
   project_title: string
-  vulnerability: Pick<Vulnerability, 'id' | 'title' | 'severity' | 'status' | 'target' | 'remediation' | 'repro_request' | 'repro_response' | 'repro_steps'> & Record<string, unknown>
+  vulnerability: Pick<Vulnerability, 'id' | 'title' | 'severity' | 'status' | 'target' | 'remediation' | 'repro_steps'> & Record<string, unknown>
+  evidence: { observation_id: string | null; source: EvidenceSource; evidence_items: EvidenceItem[] }
+  project_context: Record<string, unknown>
   facts: { id: string; description: string; [key: string]: unknown }[]
   observations: { id: string; [key: string]: unknown }[]
   verifications: { id: string; outcome: VerificationOutcome; notes: string; [key: string]: unknown }[]
   fact_evidence: { fact_id: string; artifact_id: string; pointer: string; [key: string]: unknown }[]
-  artifacts: { artifact_id: string; filename?: string; kind?: string; size_bytes?: number; sha256?: string; available: boolean; [key: string]: unknown }[]
+  artifacts: { artifact_id: string; filename?: string; kind?: string; size_bytes?: number; sha256?: string; available: boolean; input_path?: string; [key: string]: unknown }[]
   missing_materials: { code: string; source_type: string; source_id: string; artifact_id?: string; message: string }[]
 }
 export interface CreateVerificationRequest {
@@ -33,22 +36,28 @@ export interface CreateVerificationRequest {
   external_id: string | null
   mode: VerificationMode
   title: string
-  origin: string
+  origin?: string
   report: VerificationReportInput
   resource_batch_id?: string
   previous_request_id?: string
-  authorization_expires_at: string | null
+  authorization_expires_at?: string | null
   execution_deadline?: string | null
 }
-export interface VerificationResult {
+interface VerificationResultBase {
   outcome: VerificationOutcome
   summary: string
   tested_scope: string
-  notes: string
   limitations: string[]
   reason_code: string | null
   evidence_refs: EvidenceRef[]
 }
+export interface VerificationEvidenceReason { reason: string; evidence_item_ids: string[] }
+export interface VerificationTestStep { action: string; observation: string; evidence_item_ids: string[] }
+export type VerificationResult = VerificationResultBase & (
+  | { schema_version?: 1; notes: string; evidence_items?: never }
+  | { schema_version: 2; notes: string; evidence_items: EvidenceItem[] }
+  | { schema_version: 3; key_evidence: VerificationEvidenceReason[]; test_steps: VerificationTestStep[]; evidence_items: EvidenceItem[] }
+)
 export interface VerificationError { code: string; message: string }
 export interface VerificationSummary {
   schema_version: 1
@@ -60,6 +69,10 @@ export interface VerificationSummary {
   source: { type: 'user' | 'integration'; id: string; name: string }
   input_source: VerificationInputSource | null
   execution_status: VerificationStatus
+  can_delete: boolean
+  delete_block_reason: string | null
+  purge_state: 'pending' | 'completed' | null
+  purge_error: string | null
   result: VerificationResult | null
   error: VerificationError | null
   created_at: string
@@ -91,12 +104,11 @@ export interface VerificationRun {
 }
 export interface VerificationDetail extends VerificationSummary {
   project_id: string
-  accepted_at: string
+  accepted_at: string | null
   terminal_at: string | null
   origin: string
-  report: { type: 'markdown' | 'text' | 'file' | 'platform_vulnerability'; resource_id: string; manifest_resource_id: string | null }
+  report: { type: 'markdown' | 'text' | 'file' | 'platform_vulnerability'; resource_id: string; manifest_resource_id: string | null } | null
   previous_request_id: string | null
-  group_id: string | null
   worker_template_id: string | null
   tenant_workers: { id: string; display_name: string; revision: number | null }[]
   execution_binding: { worker_id: string; display_name: string; worker_revision: number; model_id: string; model_name: string; model_revision: number } | null
@@ -140,10 +152,24 @@ export const createVerificationRequest = (body: CreateVerificationRequest) =>
   api<VerificationDetail>('POST', requestsPath, body)
 export const cancelVerificationRequest = (id: string) =>
   api<VerificationDetail>('POST', `${requestPath(id)}/cancel`, {})
+export const deleteVerificationRequest = (id: string) =>
+  api<void>('DELETE', requestPath(id))
+export async function downloadVerificationReport(id: string) {
+  const content = await api<unknown>('GET', verificationReportUrl(id))
+  if (typeof content !== 'string') throw new Error('报告响应不是 Markdown，未开始下载。')
+  const url = URL.createObjectURL(new Blob([content], { type: 'text/markdown;charset=utf-8' }))
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `复测报告-${id}.md`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
 const verificationSourcePath = (projectId: string, vulnerabilityId: string) =>
   `/api/v1/verification-sources/projects/${encodeURIComponent(projectId)}/vulnerabilities/${encodeURIComponent(vulnerabilityId)}`
-export const getVerificationSourcePreview = (projectId: string, vulnerabilityId: string, signal?: AbortSignal) =>
-  api<VerificationSourcePreview>('GET', `${verificationSourcePath(projectId, vulnerabilityId)}/preview`, undefined, signal)
+export const getVerificationSourcePreview = (projectId: string, vulnerabilityId: string, signal?: AbortSignal, observationId?: string) =>
+  api<VerificationSourcePreview>('GET', `${verificationSourcePath(projectId, vulnerabilityId)}/preview${observationId ? `?${new URLSearchParams({ observation_id: observationId })}` : ''}`, undefined, signal)
 export const getVerificationSourceHistory = (projectId: string, vulnerabilityId: string, limit: number, offset: number, signal?: AbortSignal) =>
   api<{ items: VerificationSummary[]; total: number }>('GET', `${verificationSourcePath(projectId, vulnerabilityId)}/history?${new URLSearchParams({ limit: String(limit), offset: String(offset) })}`, undefined, signal)
 export const verificationReportUrl = (id: string) => `${requestPath(id)}/report`
@@ -151,6 +177,10 @@ export const verificationMaterialUrl = (id: string, resourceId: string) =>
   `${requestPath(id)}/materials/${encodeURIComponent(resourceId)}`
 export const verificationArtifactUrl = (id: string, artifactId: string) =>
   `${requestPath(id)}/artifacts/${encodeURIComponent(artifactId)}`
+export const getVerificationArtifactPreview = (id: string, artifactId: string, signal?: AbortSignal) =>
+  api<ArtifactPreview>('GET', `${verificationArtifactUrl(id, artifactId)}/preview`, undefined, signal)
+export const getVerificationMaterialPreview = (id: string, resourceId: string, signal?: AbortSignal) =>
+  api<ArtifactPreview>('GET', `${verificationMaterialUrl(id, resourceId)}/preview`, undefined, signal)
 export const createVerificationBatch = (sourceRequestId?: string) =>
   api<VerificationBatch>('POST', batchesPath, sourceRequestId ? { source_request_id: sourceRequestId } : {})
 export const getVerificationBatch = (id: string) => api<VerificationBatch>('GET', batchPath(id))
@@ -202,14 +232,14 @@ export interface VerificationConfigurationOptions {
   defaults: Omit<VerificationConfigurationInput, 'model_id'>
 }
 export interface VerificationTenant { id: string; name: string; kind: string }
-const tenantQuery = (tenantId: string) => `?${new URLSearchParams({ tenant_id: tenantId })}`
+const tenantQuery = (tenantId?: string) => tenantId === undefined ? '' : `?${new URLSearchParams({ tenant_id: tenantId })}`
 export const getVerificationReadiness = () => api<VerificationReadiness>('GET', '/api/v1/verification-readiness')
 export const listVerificationTenants = () => api<VerificationTenant[]>('GET', '/admin/tenants')
-export const getVerificationConfiguration = (tenantId: string) =>
+export const getVerificationConfiguration = (tenantId?: string) =>
   api<VerificationConfiguration>('GET', `/api/v1/verification-configuration${tenantQuery(tenantId)}`)
-export const getVerificationConfigurationOptions = (tenantId: string) =>
+export const getVerificationConfigurationOptions = (tenantId?: string) =>
   api<VerificationConfigurationOptions>('GET', `/api/v1/verification-configuration/options${tenantQuery(tenantId)}`)
-export const saveVerificationConfiguration = (tenantId: string, body: VerificationConfigurationInput) =>
+export const saveVerificationConfiguration = (tenantId: string | undefined, body: VerificationConfigurationInput) =>
   api<VerificationConfiguration>('PUT', `/api/v1/verification-configuration${tenantQuery(tenantId)}`, body)
 
 export interface VerificationIntegration {

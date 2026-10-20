@@ -17,7 +17,10 @@ function goalSchemas() {
   const source = fileURLToPath(new URL('../../../cairn/src/', import.meta.url));
   const code = `import json
 from cairn.dispatcher.worker_protocol.submission import build_submit_result_schema
+from cairn.evidence_contracts import EvidenceItem
 print(json.dumps({
+  'evidence_item': EvidenceItem.model_json_schema(),
+  'external': build_submit_result_schema('external_verify_execute'),
   'explore': build_submit_result_schema('explore_execute', {'assessment_protocol': 'goal-driven-v1'}),
   'explore_conclude': build_submit_result_schema('explore_conclude', {'assessment_protocol': 'goal-driven-v1'}),
   'reason': build_submit_result_schema('reason_execute', {'allowed_fact_ids': ['f1'], 'allowed_intent_ids': ['i-closed'], 'max_intents': 3, 'decision_input_digest': 'a' * 64}, inputs={'open_intent_ids': []}),
@@ -33,7 +36,9 @@ const findingResult = {
     fact: {
       description: 'Synthetic finding',
       vulnerability: {
+        schema_version: 2,
         title: 'Synthetic access control finding', severity: 'high',
+        evidence_items: [{ id: 'request-1', kind: 'http', source: 'capture', request: { artifact_id: 'a1' } }],
         identity: {
           vulnerability_class: 'broken_access_control',
           asset: { host: 'synthetic.example', port: 443 },
@@ -48,6 +53,119 @@ const findingResult = {
   },
 };
 
+test('report schema v2 requires a single ordered markdown or fact layout', () => {
+  const validator = Compile(contracts.submit_result_schemas.report_execute);
+  const result = { accepted: true, data: {
+    schema_version: 2, executive_summary: '仅解释冻结材料', findings: [],
+    layout: [{ type: 'markdown', markdown: '# 合成报告' }, { type: 'fact', ref: 'scope' }],
+  } };
+  assert.equal(validator.Check(result), true);
+  for (const change of [
+    (value) => { delete value.data.schema_version; },
+    (value) => { value.data.schema_version = 1; },
+    (value) => { delete value.data.layout; },
+    (value) => { value.data.layout = []; },
+    (value) => { value.data.report_markdown = '# 另一份整篇报告'; },
+    (value) => { value.data.layout[0] = { type: 'markdown', markdown: ' ' }; },
+    (value) => { value.data.layout[0] = { type: 'markdown', markdown: '# 报告', ref: 'scope' }; },
+    (value) => { value.data.layout[1] = { type: 'fact', ref: 'scope', markdown: '伪装事实' }; },
+    (value) => { value.data.layout[1] = { type: 'fact' }; },
+    (value) => { value.data.layout[1] = { type: 'template', ref: 'scope' }; },
+  ]) {
+    const invalid = structuredClone(result);
+    change(invalid);
+    assert.equal(validator.Check(invalid), false, change.toString());
+  }
+});
+
+test('evidence v2 schemas require ordered items and reject inline or double-filled references', () => {
+  for (const schema of Object.values(contracts.submit_result_schemas)) Compile(schema);
+  const findingSchema = contracts.submit_result_schemas.explore_execute;
+  const findingValidator = Compile(findingSchema);
+  const finding = structuredClone(findingResult);
+  delete finding.data.assessment_record;
+  assert.equal(findingValidator.Check(finding), true);
+  for (const change of [
+    (value) => { delete value.data.fact.vulnerability.schema_version; },
+    (value) => { value.data.fact.vulnerability.schema_version = 1; },
+    (value) => { value.data.fact.evidence_refs = []; },
+    (value) => { value.data.evidence_refs = []; },
+    (value) => { value.data.fact.vulnerability.repro_request = 'GET /invented'; },
+    (value) => { value.data.fact.vulnerability.evidence_items[0].request_text = 'GET /invented'; },
+    (value) => { value.data.fact.vulnerability.evidence_items[0].request.artifact_handle = 'local-double'; },
+  ]) {
+    const invalid = structuredClone(finding);
+    change(invalid);
+    assert.equal(findingValidator.Check(invalid), false, change.toString());
+  }
+  const validator = Compile(contracts.submit_result_schemas.external_verify_execute);
+  const external = { accepted: true, data: {
+    schema_version: 3, outcome: 'confirmed', summary: '合成观察', tested_scope: '本地合成材料',
+    key_evidence: [{ reason: '原件记录观察结果', evidence_item_ids: ['request-1'] }],
+    test_steps: [{ action: '登记本地合成原件', observation: '登记成功', evidence_item_ids: ['request-1'] }], limitations: [],
+    evidence_items: structuredClone(finding.data.fact.vulnerability.evidence_items),
+  } };
+  assert.equal(validator.Check(external), true);
+  for (const change of [
+    (value) => { delete value.data.schema_version; },
+    (value) => { value.data.schema_version = 2; },
+    (value) => { value.data.notes = 'retired'; },
+    (value) => { delete value.data.key_evidence; },
+    (value) => { value.data.test_steps[0].observation = '  '; },
+    (value) => { value.data.evidence_refs = [{ artifact_id: 'a1' }]; },
+    (value) => { value.data.evidence_items = []; },
+    (value) => { value.data.evidence_items[0].request = null; },
+  ]) {
+    const invalid = structuredClone(external);
+    change(invalid);
+    assert.equal(validator.Check(invalid), false, change.toString());
+  }
+  external.data.outcome = 'insufficient_evidence';
+  external.data.evidence_items = [];
+  assert.equal(validator.Check(external), false);
+  external.data.limitations = ['No response was received'];
+  assert.equal(validator.Check(external), true);
+});
+
+test('evidence kinds expose only readable slots in exported and dynamic schemas', () => {
+  const schemas = goalSchemas();
+  const stored = Compile(schemas.evidence_item);
+  const findings = [schemas.explore, schemas.explore_conclude,
+    contracts.submit_result_schemas.explore_execute, contracts.submit_result_schemas.explore_conclude].map((schema) => Compile(schema));
+  assert.deepEqual(schemas.external, contracts.submit_result_schemas.external_verify_execute);
+  const external = Compile(schemas.external);
+  for (const [kind, source, content, valid] of [
+    ['http', 'capture', { request: { artifact_id: 'a1' }, response: { artifact_id: 'a2' } }, true],
+    ['http', 'capture', { request: { artifact_id: 'a1' } }, true],
+    ['http', 'capture', { response: { artifact_id: 'a2' } }, true],
+    ['artifact', 'capture', { artifact: { artifact_id: 'a1' } }, true],
+    ['text', 'capture', { artifact: { artifact_id: 'a1' } }, true],
+    ['http', 'historical', { request_text: 'GET / HTTP/1.1\r\n\r\n  ' }, true],
+    ['text', 'historical', { text: '历史原文\n  ' }, true],
+    ['http', 'capture', { artifact: { artifact_id: 'a1' } }, false],
+    ['http', 'capture', { request: { artifact_id: 'a1' }, artifact: { artifact_id: 'a2' } }, false],
+    ['http', 'historical', { text: '不可隐藏的正文' }, false],
+    ['artifact', 'capture', { request: { artifact_id: 'a1' } }, false],
+    ['text', 'capture', { response: { artifact_id: 'a1' } }, false],
+    ['artifact', 'historical', { artifact: { artifact_id: 'a1' }, response_text: 'HTTP/1.1 200 OK' }, false],
+    ['artifact', 'historical', { text: '附件应使用原件引用' }, false],
+    ['http', 'capture', { request_text: 'GET / HTTP/1.1' }, false],
+    ['http', 'capture', {}, false],
+  ]) {
+    const item = { id: 'synthetic', kind, source, ...content };
+    const label = JSON.stringify(item);
+    assert.equal(stored.Check(item), valid, label);
+    const workerValid = valid && !['request_text', 'response_text', 'text'].some((slot) => slot in content);
+    const result = structuredClone(findingResult);
+    result.data.fact.vulnerability.evidence_items = [item];
+    for (const validator of findings) assert.equal(validator.Check(result), workerValid, label);
+    assert.equal(external.Check({ accepted: true, data: {
+      schema_version: 3, outcome: 'confirmed', summary: '合成结果', tested_scope: '仅隔离合同',
+      key_evidence: [], test_steps: [], limitations: [], evidence_items: [item],
+    } }), workerValid, label);
+  }
+});
+
 test('goal-driven Explore production Schema requires finding identity and matching outcome', () => {
   const schemas = goalSchemas();
   for (const schema of [schemas.explore, schemas.explore_conclude]) {
@@ -58,6 +176,7 @@ test('goal-driven Explore production Schema requires finding identity and matchi
       (data) => { data.fact.vulnerability = null; },
       (data) => { delete data.fact.vulnerability.identity; },
       (data) => { data.fact.vulnerability.identity = null; },
+      (data) => { data.fact.vulnerability.packet_artifact_handle = 'retired-packet'; },
       (data) => { data.fact.vulnerability.identity.vulnerability_class = ' \t'; },
       (data) => { data.fact.vulnerability.identity.asset.host = ' \t'; },
       (data) => { data.fact.vulnerability.identity.asset.port = 0; },
@@ -116,7 +235,7 @@ test('goal-driven production Schema accepts missing comparisons and repairs miss
   const issue = audit.find((event) => event.event === 'result_repair').issue;
   assert.equal(issue.path, '/data/assessment_record');
   assert.ok(issue.rules.some((rule) => rule.required?.includes('observations')));
-  assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+  assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name), calls[0].body.tools.map((tool) => tool.function.name));
 });
 
 test('goal-driven Reason production Schema preserves Intent structure and repairs invalid dependencies', async (t) => {
@@ -217,7 +336,7 @@ test('production Bootstrap submission hides complete.from while Reason retains i
   assert.ok(contracts.submit_result_schemas.reason_execute.$defs.CompleteResult.properties.from);
 });
 
-test('production Schema SDK pre-execute rejection has bounded safe diagnostics and readonly repairs', async (t) => {
+test('production Schema SDK pre-execute rejection has bounded safe diagnostics and normal repair tools', async (t) => {
   const canary = 'SECRET_DYNAMIC_VALUE_7fa9';
   const args = structuredClone(bootstrap);
   args.data.fact.description = { [canary]: canary };
@@ -237,7 +356,7 @@ test('production Schema SDK pre-execute rejection has bounded safe diagnostics a
   assert.equal(result.result, null);
   assert.ok(!JSON.stringify({ result, audit }).includes(canary));
   for (const call of calls.slice(1)) {
-    assert.deepEqual(call.body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+    assert.deepEqual(call.body.tools.map((tool) => tool.function.name), calls[0].body.tools.map((tool) => tool.function.name));
     assert.ok(!call.body.messages.filter((message) => message.role === 'user').at(-1).content.includes(canary));
   }
 });
@@ -278,7 +397,7 @@ test('bootstrap scope conflict is captured then repaired without repeating explo
   assert.equal(result.status, 'succeeded', JSON.stringify(result));
   assert.deepEqual(result.result.data, bootstrap.data);
   assert.equal(calls.length, 2);
-  assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+  assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name), calls[0].body.tools.map((tool) => tool.function.name));
   const spool = await readFile(candidateSpoolPath);
   assert.equal(spool.includes(Buffer.from(conflictingRaw)), true);
   assert.equal(spool.includes(Buffer.from(repairedRaw)), true);
@@ -402,7 +521,7 @@ for (const tool of ['read_evidence', 'register_artifact']) {
     assert.equal(end.repair_rounds, 2);
     assert.equal(end.issue.keyword, 'required');
     assert.ok(audit.some((event) => event.event === 'tool_execution_end' && event.tool_name === tool && event.is_error));
-    for (const call of calls.slice(1)) assert.deepEqual(call.body.tools.map((entry) => entry.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+    for (const call of calls.slice(1)) assert.deepEqual(call.body.tools.map((entry) => entry.function.name), calls[0].body.tools.map((entry) => entry.function.name));
     if (!sameTurn) assert.match(JSON.stringify(calls[3].body.messages.filter((message) => message.role === 'tool')), /regular authorized input file outside session storage/);
     assert.ok((await readFile(candidateSpoolPath)).includes(Buffer.from(JSON.stringify(bad.tools[0].args))));
   });
@@ -425,7 +544,7 @@ for (const submitted of [true, false]) test(`auxiliary failure alone preserves $
   assert.equal(audit.filter((event) => event.event === 'tool_execution_end' && event.is_error && ['read_evidence', 'register_artifact'].includes(event.tool_name)).length, 2);
 });
 
-for (const round of [1, 2]) test(`production Schema repairs successfully in round ${round} without target tools`, async (t) => {
+for (const round of [1, 2]) test(`production Schema repairs successfully in round ${round} with authorized tools retained`, async (t) => {
   const bad = { tools: [{ name: 'submit_result', args: { accepted: true, data: {} } }] };
   const good = { tools: [{ name: 'submit_result', args: bootstrap }] };
   const { request, calls } = await fixture(t, 'openai-chat-completions', [...Array(round).fill(bad), good]);
@@ -434,7 +553,7 @@ for (const round of [1, 2]) test(`production Schema repairs successfully in roun
   assert.equal(result.status, 'succeeded', JSON.stringify(result));
   assert.deepEqual(result.result.data, bootstrap.data);
   assert.equal(calls.length, round + 1);
-  for (const call of calls.slice(1)) assert.deepEqual(call.body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+  for (const call of calls.slice(1)) assert.deepEqual(call.body.tools.map((tool) => tool.function.name), calls[0].body.tools.map((tool) => tool.function.name));
 });
 
 for (const [label, action, code, keyword, attempts] of [
@@ -526,7 +645,7 @@ test('second repair still expires at the original deadline', async (t) => {
   assert.equal(result.error.submission_attempts, 0);
   assert.equal(calls.length, 3);
   assert.ok(performance.now() - started < 1000);
-  for (const call of calls.slice(1)) assert.deepEqual(call.body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+  for (const call of calls.slice(1)) assert.deepEqual(call.body.tools.map((tool) => tool.function.name), calls[0].body.tools.map((tool) => tool.function.name));
 });
 
 for (const tool of [
@@ -559,7 +678,10 @@ function sample(schema, root, field = '') {
   if (schema.enum) return schema.enum[0];
   if (schema.anyOf) return sample(schema.anyOf.find((variant) => variant.type !== 'null') ?? schema.anyOf[0], root, field);
   if (schema.type === 'object') return Object.fromEntries([...new Set([...(schema.required ?? []), ...(schema.oneOf?.[0]?.required ?? [])])].map((key) => [key, sample(schema.properties[key], root, key)]));
-  if (schema.type === 'array') return Array.from({ length: schema.minItems ?? 0 }, () => sample(schema.items, root, field));
+  if (schema.type === 'array') {
+    if (field === 'evidence_items') return [{ id: 'fixture', kind: 'artifact', source: 'capture', artifact: { artifact_id: 'a1' } }];
+    return Array.from({ length: schema.minItems ?? 0 }, () => sample(schema.items, root, field));
+  }
   if (schema.type === 'string') return field === 'artifact_id' ? 'a1' : 'fixture';
   if (schema.type === 'integer' || schema.type === 'number') return schema.minimum ?? 1;
   if (schema.type === 'boolean') return true;
@@ -569,7 +691,7 @@ function sample(schema, root, field = '') {
 
 test('runner phase kind map equals the Python generated source contract', () => {
   assert.deepEqual(PHASE_RESULT_KINDS, contracts.phase_result_kinds);
-  assert.equal(Object.keys(PHASE_RESULT_KINDS).length, 8);
+  assert.equal(Object.keys(PHASE_RESULT_KINDS).length, 9);
   assert.equal(Object.hasOwn(PHASE_RESULT_KINDS, 'healthcheck'), false);
   assert.equal(Object.hasOwn(contracts.submit_result_schemas, 'healthcheck'), false);
   assert.equal(contracts.request_protocol, 'cairn-agent-request-v1');

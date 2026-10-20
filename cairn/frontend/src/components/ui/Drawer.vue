@@ -136,8 +136,6 @@ defineOptions({ name: 'UiDrawer' })
   z-index: var(--z-modal);
   inset: 0;
   background: var(--color-overlay);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
 }
 
 .ui-drawer__content {
@@ -150,6 +148,9 @@ defineOptions({ name: 'UiDrawer' })
   background: var(--bg-elevated);
   box-shadow: var(--shadow-modal);
   color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
 }
 
 .ui-drawer__content--left,
@@ -259,6 +260,7 @@ defineOptions({ name: 'UiDrawer' })
 .ui-drawer__footer {
   padding: var(--space-3) var(--space-5) var(--space-5);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);

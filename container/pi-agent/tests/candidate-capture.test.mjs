@@ -86,7 +86,7 @@ test('production explore schema and null binding have cross-language canonical d
   await new CandidateSpool(request).appendCandidate(1, 0, Buffer.from('{}'));
   const manifest = decodeFrames(await readFile(path))[0].manifest;
   assert.equal(manifest.binding_sha256, '74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b');
-  assert.equal(manifest.result_schema_sha256, '6ca9651baef3d1a93b1a70d1863dc7df531d6b5dcd6cff44619b74c9fe869b4f');
+  assert.equal(manifest.result_schema_sha256, '13aef69875fb7aa0ace390329a0af4fd262fc420a6b39cbb50dfa86c282ee6dd');
 });
 
 test('candidate spool preserves malformed Unicode and CRLF bytes in a checksummed binary frame', async (t) => {
@@ -403,7 +403,7 @@ test('artifact injection failure preserves pre-injection candidate and registere
   assert.equal(result.error.repair_rounds, request.max_result_repairs);
   assert.equal(result.error.submission_attempts, 1 + request.max_result_repairs);
   assert.equal(calls.length, 2 + request.max_result_repairs);
-  for (const call of calls.slice(2)) assert.deepEqual(call.body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+  for (const call of calls.slice(2)) assert.deepEqual(call.body.tools.map((tool) => tool.function.name), calls[0].body.tools.map((tool) => tool.function.name));
   const frames = decodeFrames(await readFile(candidateSpoolPath));
   const candidates = frames.filter((entry) => entry.manifest.record_kind === 'candidate');
   const outcomes = frames.filter((entry) => entry.manifest.record_kind === 'outcome');

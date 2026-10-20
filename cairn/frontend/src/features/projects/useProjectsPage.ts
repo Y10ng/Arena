@@ -1,31 +1,19 @@
-import { computed, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, nextTick, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import {
-  api,
-  createProjectGroup,
-  deleteProjectGroup,
-  fetchText,
-  getProjectManagementOptions,
-  listProjectGroups,
-  moveProjectToGroup,
-  updateProjectGroup,
-} from '@/api/client'
+import { api, fetchText } from '@/api/client'
 import type {
-  ProjectGroup,
   ProjectSummary,
   ReauthorizeProjectRequest,
   Scenario,
 } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
-import { formatRelativeTime, statusText } from '@/lib/format'
-import { resolveProjectSummaryStatus } from './workspaceStatus'
+import { formatRelativeTime } from '@/lib/format'
+import { resolveProjectStatus } from './workspaceStatus'
 import {
   getProjectRuntimes,
   projectRuntimeBatchKey,
-  useRuntimeClock,
-  runtimeSnapshotExpired,
   projectActionAllowed,
   useProjectLifecycle,
 } from './projectRuntime'
@@ -40,17 +28,15 @@ type ReauthorizationConfirmation = {
 
 const segments = [
   { label: '全部项目', value: 'all' },
-  { label: '待启动', value: 'pending' },
-  { label: '活跃探索', value: 'active' },
-  { label: '暂停中 / 已暂停', value: 'paused' },
-  { label: '已结束', value: 'stopped' },
-  { label: '已完成', value: 'completed' },
+  ...['pending', 'active', 'paused', 'stopped', 'completed'].map((value) => ({
+    value,
+    label: resolveProjectStatus(value).label,
+  })),
 ]
 
 export const projectMatchesSearch = (
   project: ProjectSummary,
   query: string,
-  runtimeSubtitle: string,
   scenarioLabel: string,
   includeTenantAttribution = false,
 ): boolean => {
@@ -59,9 +45,8 @@ export const projectMatchesSearch = (
   const values = [
     project.title,
     project.id,
-    runtimeSubtitle,
+    resolveProjectStatus(project.status).label,
     scenarioLabel,
-    project.group_name || '',
   ]
   if (includeTenantAttribution) {
     values.push(project.tenant_id, project.tenant_name, project.tenant_owner_login || '')
@@ -71,7 +56,6 @@ export const projectMatchesSearch = (
 
 export const useProjectsPage = () => {
   const router = useRouter()
-  const route = useRoute()
   const authStore = useAuthStore()
   const uiStore = useUIStore()
   const queryClient = useQueryClient()
@@ -79,7 +63,6 @@ export const useProjectsPage = () => {
   const {
     data: projectsData,
     isLoading,
-    isFetching,
     isError,
     refetch,
   } = useQuery<ProjectSummary[]>({
@@ -91,14 +74,18 @@ export const useProjectsPage = () => {
   const runtimeProjectIds = computed(() =>
     (projectsData.value || []).map((project) => project.id).sort(),
   )
-  const { data: runtimeBatch, isError: runtimeError } = useQuery({
-    queryKey: computed(() => [...projectRuntimeBatchKey, runtimeProjectIds.value]),
-    queryFn: ({ signal }) => getProjectRuntimes(runtimeProjectIds.value, signal),
+  const {
+    data: runtimeBatch,
+    isError: runtimeError,
+    isFetching: runtimeFetching,
+    refetch: refetchRuntime,
+  } = useQuery({
+    queryKey: computed(() => [...projectRuntimeBatchKey, runtimeProjectIds.value] as const),
+    queryFn: ({ queryKey, signal }) => getProjectRuntimes([...queryKey[1]], signal),
     enabled: computed(() => runtimeProjectIds.value.length > 0),
     refetchInterval: 8000,
     retry: false,
   })
-  const runtimeNow = useRuntimeClock()
   const runtimeById = computed(
     () =>
       new Map((runtimeBatch.value?.items || []).map((runtime) => [runtime.project_id, runtime])),
@@ -109,27 +96,6 @@ export const useProjectsPage = () => {
     queryFn: () => api<Scenario[]>('GET', '/scenarios'),
     refetchInterval: 10000,
   })
-
-  // 项目组由当前认证会话的 Tenant 隔离。
-  const { data: groupsData, refetch: refetchGroups } = useQuery<ProjectGroup[]>({
-    queryKey: ['project-groups'],
-    queryFn: listProjectGroups,
-    refetchInterval: 10000,
-  })
-  const groups = computed(() => groupsData.value || [])
-
-  // 组过滤器：'all' = 全部，'ungrouped' = 未分组，其余为具体 group_id。
-  // 由 URL query（?group=xxx）驱动——左侧导航栏点击分组时写入 query，此处单向同步。
-  const selectedGroupId = ref<string>('all')
-  watch(
-    () => route.query.group,
-    (groupQuery) => {
-      const value = Array.isArray(groupQuery) ? groupQuery[0] : groupQuery
-      // 无 query 视为全部；未知值原样保留（组尚未加载完成时可能短暂不存在）
-      selectedGroupId.value = value ? String(value) : 'all'
-    },
-    { immediate: true },
-  )
 
   const projects = computed(() => projectsData.value || [])
   const hasProjectsSnapshot = computed(() => projectsData.value !== undefined)
@@ -161,15 +127,9 @@ export const useProjectsPage = () => {
   const deleteSaving = ref(false)
 
   const getSegmentCount = (val: string) => {
-    // 计数基于当前分组过滤后的项目集，选中分组时只统计该组内的状态分布。
     let list = projects.value
     if (showTenantAttribution.value && selectedTenantId.value !== 'all') {
       list = list.filter((project) => project.tenant_id === selectedTenantId.value)
-    }
-    if (selectedGroupId.value === 'ungrouped') {
-      list = list.filter((project) => !project.group_id)
-    } else if (selectedGroupId.value !== 'all') {
-      list = list.filter((project) => project.group_id === selectedGroupId.value)
     }
     if (val === 'all') return 0
     return list.filter((project) => project.status === val).length
@@ -179,47 +139,30 @@ export const useProjectsPage = () => {
     return scenarioLabels.value.get(project.scenario_key) || project.scenario_key || '默认自治探索'
   }
 
-  const projectRuntimeById = computed(
-    () =>
-      new Map(
-        projects.value.map((project) => [
-          project.id,
-          resolveProjectSummaryStatus({
-            project,
-            runtime: runtimeById.value.get(project.id),
-            runtimeUnavailable:
-              runtimeError.value ||
-              Boolean(
-                runtimeById.value.get(project.id) &&
-                runtimeSnapshotExpired(
-                  runtimeById.value.get(project.id)!,
-                  Math.max(runtimeNow.value, Date.now()),
-                ),
-              ),
-          }),
-        ]),
-      ),
-  )
-
-  const getProjectRuntime = (project: ProjectSummary) => projectRuntimeById.value.get(project.id)!
-
-  const getProjectSubtitle = (project: ProjectSummary): string => {
-    const runtime = getProjectRuntime(project)
-    return runtime.detail ? `${runtime.label} · ${runtime.detail}` : runtime.label
+  const retryingRefresh = ref(false)
+  const retryRefresh = async () => {
+    if (retryingRefresh.value) return
+    retryingRefresh.value = true
+    const previousIds = runtimeProjectIds.value.join(',')
+    try {
+      await refetch()
+      // ID 变化会自动获取新 query；只合并其在途请求，不在它已完成后再取一次。
+      await nextTick()
+      if (
+        runtimeProjectIds.value.length &&
+        (previousIds === runtimeProjectIds.value.join(',') || runtimeFetching.value)
+      ) await refetchRuntime({ cancelRefetch: false })
+    } finally {
+      retryingRefresh.value = false
+    }
   }
+  const getProjectStatus = (project: ProjectSummary) => resolveProjectStatus(project.status)
 
   const filteredProjects = computed(() => {
     let list = [...projects.value]
 
     if (showTenantAttribution.value && selectedTenantId.value !== 'all') {
       list = list.filter((project) => project.tenant_id === selectedTenantId.value)
-    }
-
-    // 组过滤：选定具体组只看该组；ungrouped 只看未分组；all 不限。
-    if (selectedGroupId.value === 'ungrouped') {
-      list = list.filter((project) => !project.group_id)
-    } else if (selectedGroupId.value !== 'all') {
-      list = list.filter((project) => project.group_id === selectedGroupId.value)
     }
 
     if (activeSegment.value !== 'all') {
@@ -231,7 +174,6 @@ export const useProjectsPage = () => {
         projectMatchesSearch(
           project,
           searchQuery.value,
-          getProjectSubtitle(project),
           getScenarioLabel(project),
           showTenantAttribution.value,
         ),
@@ -265,13 +207,6 @@ export const useProjectsPage = () => {
 
   const navigateToWorkspace = (id: string) => {
     router.push(`/projects/${id}`)
-  }
-
-  const getStatusClass = (status: string) => {
-    if (status === 'active') return 'status-active'
-    if (status === 'stopped') return 'status-stopped'
-    if (status === 'completed') return 'status-completed'
-    return 'status-neutral'
   }
 
   const { pendingProjectId, actionError, perform } = useProjectLifecycle(
@@ -386,43 +321,6 @@ export const useProjectsPage = () => {
     }
   }
 
-  // 移动项目到分组：把已有项目（含未分组）加入或换到指定分组。
-  const moveTarget = ref<ProjectSummary | null>(null)
-  const moveTargetGroupId = ref<string>('')
-  const moveGroups = ref<ProjectGroup[]>([])
-  const moveSaving = ref(false)
-
-  const openMoveDialog = async (project: ProjectSummary) => {
-    openDropdownId.value = null
-    try {
-      const options = await getProjectManagementOptions(project.id)
-      moveGroups.value = options.groups
-      moveTarget.value = project
-      // 现有项目的候选组必须来自目标项目 Tenant。
-      moveTargetGroupId.value = project.group_id || ''
-    } catch (err: any) {
-      uiStore.showToast(err.message || '加载项目分组失败', 'danger')
-    }
-  }
-
-  const saveMove = async () => {
-    if (!moveTarget.value || moveSaving.value) return
-    const id = moveTarget.value.id
-    const target = moveTargetGroupId.value || null
-    moveSaving.value = true
-
-    try {
-      await moveProjectToGroup(id, target)
-      moveTarget.value = null
-      uiStore.showToast('项目已移动到新分组', 'success')
-      queryClient.invalidateQueries({ queryKey: ['projects'] })
-    } catch (err: any) {
-      uiStore.showToast(err.message || '移动分组失败', 'danger')
-    } finally {
-      moveSaving.value = false
-    }
-  }
-
   const exportProjectYaml = async (id: string, title: string) => {
     openDropdownId.value = null
     try {
@@ -452,63 +350,6 @@ export const useProjectsPage = () => {
     }
   }
 
-  // 项目组 CRUD 的归属由服务端认证主体决定。
-  const getGroupName = (project: ProjectSummary): string => {
-    if (!project.group_id) return '未分组'
-    return project.group_name || project.group_id
-  }
-
-  // 侧栏分组计数：基于未过滤的全量项目集，'all' 为总数，'ungrouped' 为未分组数。
-  const getGroupCount = (groupId: string): number => {
-    const list = projects.value
-    if (groupId === 'all') return list.length
-    if (groupId === 'ungrouped') return list.filter((p) => !p.group_id).length
-    return list.filter((p) => p.group_id === groupId).length
-  }
-
-  const createGroup = async (name: string) => {
-    const trimmed = name.trim()
-    if (!trimmed) return
-    try {
-      await createProjectGroup({ name: trimmed })
-      uiStore.showToast('项目组已创建', 'success')
-      await refetchGroups()
-    } catch (err: any) {
-      uiStore.showToast(err.message || '创建项目组失败', 'danger')
-    }
-  }
-
-  const renameGroup = async (groupId: string, name: string) => {
-    const trimmed = name.trim()
-    if (!trimmed) return
-    try {
-      await updateProjectGroup(groupId, { name: trimmed })
-      uiStore.showToast('项目组已重命名', 'success')
-      await refetchGroups()
-    } catch (err: any) {
-      uiStore.showToast(err.message || '重命名项目组失败', 'danger')
-    }
-  }
-
-  const removeGroup = async (groupId: string) => {
-    try {
-      await deleteProjectGroup(groupId)
-      if (selectedGroupId.value === groupId) selectedGroupId.value = 'all'
-      uiStore.showToast('项目组已删除，组内项目已转为未分组', 'info')
-      await refetchGroups()
-      queryClient.invalidateQueries({ queryKey: ['projects'] })
-    } catch (err: any) {
-      uiStore.showToast(err.message || '删除项目组失败', 'danger')
-    }
-  }
-
-  watch(
-    () => uiStore.globalRefreshKey,
-    () => {
-      refetch()
-    },
-  )
-
   return {
     activeSegment,
     actionError,
@@ -523,53 +364,38 @@ export const useProjectsPage = () => {
     saveReauthorization,
     changeStatus,
     confirmDeleteProject,
-    createGroup,
     deleteSaving,
     deleteTarget,
     exportProjectYaml,
     filteredProjects,
     focusedIndex,
     formatRelativeTime,
-    getGroupName,
-    getGroupCount,
-    getProjectRuntime,
+    getProjectStatus,
     runtimeById,
-    getProjectSubtitle,
     getScenarioLabel,
     getSegmentCount,
-    getStatusClass,
-    groups,
     hasProjectsSnapshot,
     hasStaleProjectsError,
     isError,
-    isFetching,
     isLoading,
+    retryRefresh,
+    retryingRefresh,
     listElement,
     moveFocus,
-    moveGroups,
-    moveSaving,
-    moveTarget,
-    moveTargetGroupId,
     navigateToWorkspace,
     openDropdownId,
-    openMoveDialog,
     openRenameDialog,
     refetch,
-    removeGroup,
-    renameGroup,
     renameNewTitle,
     renameSaving,
     renameTarget,
     saveDelete,
-    saveMove,
     saveRename,
     searchQuery,
     segments,
     showTenantAttribution,
-    selectedGroupId,
     selectedTenantId,
     sortBy,
     tenantOptions,
-    statusText,
   }
 }

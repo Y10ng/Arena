@@ -3,10 +3,16 @@ from __future__ import annotations
 import pytest
 
 from cairn.dispatcher.tasks.report import _report_completeness_error
+from cairn.dispatcher.worker_protocol.submission import REPORT_FACT_REFS
 
 
 def complete_report(*ids: str) -> dict[str, object]:
     return {
+        "schema_version": 2,
+        "layout": [
+            *({"type": "fact", "ref": ref} for ref in REPORT_FACT_REFS),
+            *({"type": "fact", "ref": f"finding:{value}"} for value in ids),
+        ],
         "executive_summary": "仅解释冻结证据，建议修复权限边界。",
         "findings": [
             {
