@@ -2,7 +2,7 @@
   <Dialog
     :open="open"
     title="生成报告"
-    description="选择兼容的不可变模板版本，生成项目评估报告。"
+    description="选择模板生成项目评估报告，受理时冻结当前正文。"
     size="lg"
     close-label="关闭生成报告"
     :dismissible="!requestPending"
@@ -55,7 +55,7 @@
             <Skeleton height="4rem" />
           </div>
           <Alert v-else-if="catalog.length === 0" tone="warning" title="暂无可用报告模板">
-            请联系超级管理员发布至少一个未归档模板版本。
+            请联系超级管理员添加含正文的兼容模板。
           </Alert>
           <Alert
             v-else-if="compatibleTemplates.length === 0"
@@ -67,8 +67,10 @@
           <div v-else class="report-controls">
             <FormField
               v-slot="{ controlAttrs }"
-              label="报告模板版本"
-              hint="生成请求会固定模板、执行方案、有效 Prompt 与权威输入快照。"
+              label="报告模板"
+              :error="
+                selectedTemplateMissing ? '所选模板已删除或不再兼容，请重新选择。' : undefined
+              "
             >
               <Select
                 v-model="selectedTemplateValue"
@@ -82,59 +84,88 @@
             </Button>
           </div>
         </template>
-        <Alert v-if="requestError" tone="danger" title="报告请求失败">
+        <Alert
+          v-if="requestError"
+          :tone="requestUncertain ? 'warning' : 'danger'"
+          :title="requestUncertain ? '报告请求结果未确认' : '报告请求失败'"
+        >
           {{ requestError }}
+          <template v-if="requestUncertain" #actions>
+            <Button
+              variant="secondary"
+              size="sm"
+              :loading="reportBackgroundFetching"
+              @click="retryReport"
+              >刷新报告状态</Button
+            >
+          </template>
         </Alert>
 
-        <dl class="report-detail-list">
-          <div>
-            <dt>报告尝试</dt>
-            <dd>{{ report?.attempt_count ?? 0 }}</dd>
-          </div>
-          <div v-if="report?.requested_at">
-            <dt>请求时间</dt>
-            <dd>{{ dateTime(report.requested_at) }}</dd>
-          </div>
-          <div v-if="report?.requested_by">
-            <dt>请求人</dt>
-            <dd>{{ report.requested_by }}</dd>
-          </div>
-          <div v-if="report?.template_key && report.template_version">
-            <dt>模板来源</dt>
-            <dd>
-              <strong>{{ report.template_key }} · v{{ report.template_version }}</strong>
-              <code v-if="report.template_digest_sha256" class="report-digest">
-                {{ report.template_digest_sha256 }}
-              </code>
-            </dd>
-          </div>
-          <div v-if="report?.report_execution_plan_sha256">
-            <dt>执行方案</dt>
-            <dd>
-              <code class="report-digest">{{ report.report_execution_plan_sha256 }}</code>
-            </dd>
-          </div>
-          <div v-if="report?.input_snapshot_artifact_id">
-            <dt>输入快照</dt>
-            <dd>
-              <RouterLink :to="artifactLink(report.input_snapshot_artifact_id)">
-                {{ report.input_snapshot_artifact_id }}
-              </RouterLink>
-            </dd>
-          </div>
-          <div v-if="report?.next_attempt_at">
-            <dt>下次重试</dt>
-            <dd>{{ dateTime(report.next_attempt_at) }}</dd>
-          </div>
-          <div v-if="report?.artifact_id">
-            <dt>报告 Artifact</dt>
-            <dd>
-              <RouterLink :to="artifactLink(report.artifact_id)">{{
-                report.artifact_id
-              }}</RouterLink>
-            </dd>
-          </div>
-        </dl>
+        <div class="report-result-actions">
+          <RouterLink
+            v-if="report?.artifact_id"
+            :to="artifactLink(report.artifact_id)"
+            class="report-read-link"
+            @click="handleOpenChange(false)"
+            >阅读报告</RouterLink
+          >
+          <span v-if="report?.next_attempt_at" class="report-retry-time"
+            >下次重试：{{ dateTime(report.next_attempt_at) }}</span
+          >
+        </div>
+        <details v-if="report" class="report-technical-details">
+          <summary>生成详情</summary>
+          <dl class="report-detail-list">
+            <div>
+              <dt>报告尝试</dt>
+              <dd>{{ report?.attempt_count ?? 0 }}</dd>
+            </div>
+            <div v-if="report?.requested_at">
+              <dt>请求时间</dt>
+              <dd>{{ dateTime(report.requested_at) }}</dd>
+            </div>
+            <div v-if="report?.requested_by">
+              <dt>请求人</dt>
+              <dd>{{ report.requested_by }}</dd>
+            </div>
+            <div v-if="report?.template_key">
+              <dt>模板来源</dt>
+              <dd>
+                <strong
+                  >{{ report.template_key
+                  }}<template v-if="report.template_version != null">
+                    · v{{ report.template_version }}</template
+                  ></strong
+                >
+                <code v-if="report.template_digest_sha256" class="report-digest">
+                  {{ report.template_digest_sha256 }}
+                </code>
+              </dd>
+            </div>
+            <div v-if="report?.report_execution_plan_sha256">
+              <dt>执行方案</dt>
+              <dd>
+                <code class="report-digest">{{ report.report_execution_plan_sha256 }}</code>
+              </dd>
+            </div>
+            <div v-if="report?.input_snapshot_artifact_id">
+              <dt>输入快照</dt>
+              <dd>
+                <RouterLink :to="artifactLink(report.input_snapshot_artifact_id)">
+                  {{ report.input_snapshot_artifact_id }}
+                </RouterLink>
+              </dd>
+            </div>
+            <div v-if="report?.artifact_id">
+              <dt>报告 Artifact</dt>
+              <dd>
+                <RouterLink :to="artifactLink(report.artifact_id)">{{
+                  report.artifact_id
+                }}</RouterLink>
+              </dd>
+            </div>
+          </dl>
+        </details>
         <Alert v-if="report?.last_error" tone="danger" title="报告生成错误">
           <span class="report-full-text">{{ report.last_error }}</span>
         </Alert>
@@ -148,6 +179,7 @@ import { computed, ref, watch } from 'vue'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 
 import {
+  ApiError,
   getAssessmentReportFinalization,
   listReportTemplateCatalog,
   requestAssessmentReportFinalization,
@@ -181,6 +213,7 @@ const queryClient = useQueryClient()
 const selectedTemplateValue = ref('')
 const requestPending = ref(false)
 const requestError = ref('')
+const requestUncertain = ref(false)
 let requestGeneration = 0
 const eligible = computed(
   () =>
@@ -189,9 +222,7 @@ const eligible = computed(
 )
 const dialogEligible = computed(() => props.open && eligible.value && Boolean(props.projectId))
 const reportEligible = computed(
-  () =>
-    eligible.value ||
-    (props.capability.supported && props.projectStatus === 'paused'),
+  () => eligible.value || (props.capability.supported && props.projectStatus === 'paused'),
 )
 const dialogReportEligible = computed(
   () => props.open && reportEligible.value && Boolean(props.projectId),
@@ -222,18 +253,30 @@ const compatibleTemplates = computed(() => {
   if (!profile) return []
   return catalog.value.filter((template) => template.compatibility_profiles.includes(profile))
 })
-const templateOptions = computed(() =>
-  compatibleTemplates.value.map((template) => ({
-    value: `${template.key}@${template.version}`,
-    label: `${template.name} · v${template.version}`,
-  })),
+const selectedTemplate = computed(() =>
+  compatibleTemplates.value.find((template) => template.key === selectedTemplateValue.value),
 )
-const selectedTemplate = computed(() => {
-  const [key, versionText] = selectedTemplateValue.value.split('@')
-  const version = Number(versionText)
-  return compatibleTemplates.value.find(
-    (template) => template.key === key && template.version === version,
-  )
+const selectedTemplateMissing = computed(
+  () =>
+    Boolean(selectedTemplateValue.value) &&
+    !selectedTemplate.value &&
+    !catalogQuery.isPending.value &&
+    !catalogQuery.isError.value,
+)
+const templateOptions = computed(() => {
+  const options: { value: string; label: string; disabled?: boolean }[] =
+    compatibleTemplates.value.map((template) => ({
+      value: template.key,
+      label: template.name,
+    }))
+  if (selectedTemplateMissing.value) {
+    options.unshift({
+      value: selectedTemplateValue.value,
+      label: `${selectedTemplateValue.value}（不可用）`,
+      disabled: true,
+    })
+  }
+  return options
 })
 const report = computed(() => (reportEligible.value ? reportQuery.data.value || null : null))
 const generationActive = computed(
@@ -241,7 +284,7 @@ const generationActive = computed(
 )
 const actionLabel = computed(() => {
   if (report.value?.status === 'failed') return '重试生成'
-  if (report.value?.status === 'ready') return '生成新版本'
+  if (report.value?.status === 'ready') return '再次生成'
   return '生成报告'
 })
 const canRequest = computed(
@@ -249,6 +292,7 @@ const canRequest = computed(
     dialogEligible.value &&
     !generationActive.value &&
     !requestPending.value &&
+    !requestUncertain.value &&
     Boolean(selectedTemplate.value),
 )
 const reportStatus = computed(() => {
@@ -265,15 +309,11 @@ const reportInitialLoading = computed(
 )
 const reportInitialError = computed(
   () =>
-    dialogReportEligible.value &&
-    reportQuery.isError.value &&
-    reportQuery.data.value === undefined,
+    dialogReportEligible.value && reportQuery.isError.value && reportQuery.data.value === undefined,
 )
 const reportStaleError = computed(
   () =>
-    dialogReportEligible.value &&
-    reportQuery.isError.value &&
-    reportQuery.data.value !== undefined,
+    dialogReportEligible.value && reportQuery.isError.value && reportQuery.data.value !== undefined,
 )
 const reportBackgroundFetching = computed(
   () =>
@@ -295,6 +335,8 @@ const REPORT_REQUEST_ERROR_MESSAGES: Record<string, string> = {
   assessment_report_stopped_tasks_not_quiescent:
     '仍有评估任务正在排队或运行，请等待 Worker 完全退出后重试。',
   assessment_report_finalization_in_progress: '报告生成仍在进行，请等待当前任务结束。',
+  report_template_not_found: '所选模板已不存在，请刷新目录后重新选择。',
+  assessment_report_template_content_missing: '所选模板尚无正文，请联系管理员补全后再生成。',
 }
 
 const errorMessage = (error: unknown) => {
@@ -306,7 +348,14 @@ const artifactLink = (artifactId: string) => ({
   params: { id: props.projectId },
   query: { artifactId },
 })
-const retryReport = () => void reportQuery.refetch()
+const retryReport = async () => {
+  const requestProjectId = props.projectId
+  const result = await reportQuery.refetch()
+  if (props.projectId === requestProjectId && !result.isError && requestUncertain.value) {
+    requestUncertain.value = false
+    requestError.value = ''
+  }
+}
 const retryCatalog = () => void catalogQuery.refetch()
 
 function handleOpenChange(open: boolean) {
@@ -324,7 +373,6 @@ const requestReport = async () => {
   try {
     const finalization = await requestAssessmentReportFinalization(requestProjectId, {
       template_key: template.key,
-      template_version: template.version,
     })
     queryClient.setQueryData(['workspaceReportFinalization', requestProjectId], finalization)
     if (generation === requestGeneration && props.projectId === requestProjectId) {
@@ -332,8 +380,19 @@ const requestReport = async () => {
     }
   } catch (error) {
     if (generation === requestGeneration && props.projectId === requestProjectId) {
-      requestError.value = errorMessage(error)
-      uiStore.showToast(`报告生成请求失败：${requestError.value}`, 'danger')
+      requestUncertain.value = !(
+        error instanceof ApiError &&
+        error.status >= 400 &&
+        error.status < 500
+      )
+      requestError.value = requestUncertain.value
+        ? `${errorMessage(error)}。服务端可能已受理，请先刷新报告状态，不要重复提交。`
+        : errorMessage(error)
+      uiStore.showToast(
+        `${requestUncertain.value ? '报告请求结果未确认' : '报告生成请求失败'}：${requestError.value}`,
+        requestUncertain.value ? 'warn' : 'danger',
+      )
+      void queryClient.invalidateQueries({ queryKey: ['reportTemplateCatalog'] })
     }
   } finally {
     if (generation === requestGeneration) requestPending.value = false
@@ -341,22 +400,13 @@ const requestReport = async () => {
 }
 
 watch(
-  [compatibleTemplates, report],
-  ([templates, finalization]) => {
-    const values = new Set(templates.map((item) => `${item.key}@${item.version}`))
-    if (values.has(selectedTemplateValue.value)) return
-
-    const pinnedValue =
-      finalization?.template_key && finalization.template_version
-        ? `${finalization.template_key}@${finalization.template_version}`
-        : ''
-    if (pinnedValue && values.has(pinnedValue)) {
-      selectedTemplateValue.value = pinnedValue
-      return
-    }
-
-    const first = templates[0]
-    selectedTemplateValue.value = first ? `${first.key}@${first.version}` : ''
+  [() => props.projectId, compatibleTemplates, report],
+  ([, templates, finalization]) => {
+    // 已选身份失效时必须显式重选，不能在目录刷新后静默换成默认模板。
+    if (selectedTemplateValue.value) return
+    const pinnedKey = finalization?.template_key
+    selectedTemplateValue.value =
+      templates.find((item) => item.key === pinnedKey)?.key ?? templates[0]?.key ?? ''
   },
   { immediate: true },
 )
@@ -367,6 +417,7 @@ watch(
     requestGeneration += 1
     requestPending.value = false
     requestError.value = ''
+    requestUncertain.value = false
     selectedTemplateValue.value = ''
   },
   { flush: 'sync' },
@@ -388,17 +439,50 @@ watch(
 .report-controls > :first-child {
   flex: 1;
 }
+.report-result-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.report-read-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-height);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--accent);
+  text-decoration: none;
+}
+.report-read-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.report-retry-time {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.report-technical-details {
+  margin-top: var(--space-3);
+}
+.report-technical-details summary {
+  width: fit-content;
+  padding-block: var(--space-2);
+  color: var(--text-muted);
+  cursor: pointer;
+}
 .report-detail-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
   gap: var(--space-3);
-  margin: var(--space-4) 0 0;
+  margin: var(--space-2) 0 0;
 }
 .report-detail-list div {
   min-width: 0;
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1fr);
+  gap: var(--space-3);
 }
 .report-detail-list dt {
   color: var(--text-muted);

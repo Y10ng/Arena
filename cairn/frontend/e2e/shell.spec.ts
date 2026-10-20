@@ -61,7 +61,6 @@ async function mockAuthenticatedShell(page: Page) {
   await page.route('**/auth/session', (route) => route.fulfill({ json: session }))
   await page.route('**/auth/csrf', (route) => route.fulfill({ json: session }))
   await page.route('**/projects', (route) => route.fulfill({ json: [] }))
-  await page.route('**/project-groups', (route) => route.fulfill({ json: [] }))
   await page.route('**/monitoring/summary', (route) => route.fulfill({ json: monitoringSummary }))
   await page.route('**/project-resource-config', (route) =>
     route.fulfill({ json: projectResourceConfig }),
@@ -74,7 +73,6 @@ async function mockVulnerabilityDashboard(page: Page) {
   await page.route('**/projects', (route) =>
     route.fulfill({ json: [{ id: 'project-e2e', title: 'E2E 项目', status: 'active' }] }),
   )
-  await page.route('**/project-groups', (route) => route.fulfill({ json: [] }))
   await page.route('**/monitoring/summary', (route) =>
     route.fulfill({ json: vulnerabilityDashboardSummary }),
   )
@@ -209,7 +207,7 @@ test('disables severity segment displacement when reduced motion is requested', 
   await expect(criticalSegment).toHaveCSS('transform', 'none')
 })
 
-test('requires a real project group and includes it in the creation payload', async ({ page }) => {
+test('creates an ordinary project without any group input', async ({ page }) => {
   let createPayload: Record<string, unknown> | null = null
   await page.route('**/auth/session', (route) => route.fulfill({ json: session }))
   await page.route('**/auth/csrf', (route) => route.fulfill({ json: session }))
@@ -221,9 +219,6 @@ test('requires a real project group and includes it in the creation payload', as
     }
     await route.fulfill({ json: [] })
   })
-  await page.route('**/project-groups', (route) =>
-    route.fulfill({ json: [{ id: 'group-e2e', name: '红队项目组' }] }),
-  )
   await page.route('**/monitoring/summary', (route) => route.fulfill({ json: monitoringSummary }))
   await page.route('**/project-resource-config', (route) =>
     route.fulfill({ json: projectResourceConfig }),
@@ -261,19 +256,18 @@ test('requires a real project group and includes it in the creation payload', as
     route.fulfill({ json: [{ key: 'default', label: '默认场景' }] }),
   )
 
-  await page.goto('/#/projects/new')
+  await page.goto('/#/projects')
+  await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
   await expect(page.getByRole('dialog', { name: '新建项目', exact: true })).toBeVisible()
   await page.locator('#np-title').fill('分组创建合同')
 
   const createButton = page.getByRole('button', { name: '创建并启动' })
-  await expect(createButton).toBeDisabled()
-  await page.locator('#np-group-select').click()
-  await page.getByRole('option', { name: '红队项目组' }).click()
+  await expect(page.locator('#np-group-select')).toHaveCount(0)
   await expect(createButton).toBeEnabled()
   await createButton.click()
 
   await expect.poll(() => createPayload).not.toBeNull()
-  expect(createPayload).toMatchObject({ group_id: 'group-e2e' })
+  expect(createPayload).not.toHaveProperty('group_id')
 })
 
 test('renders shared Select portals with opaque light and dark surfaces', async ({ page }) => {
@@ -311,7 +305,8 @@ test('renders shared Select portals with opaque light and dark surfaces', async 
     route.fulfill({ json: [{ key: 'default', label: '默认场景' }] }),
   )
 
-  await page.goto('/#/projects/new')
+  await page.goto('/#/projects')
+  await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
   await page.locator('#np-execution-trigger').click()
   await page.locator('#np-worker-template').click()
 

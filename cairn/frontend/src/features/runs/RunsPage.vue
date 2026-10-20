@@ -1,5 +1,8 @@
 <template>
-  <div class="runs-container">
+  <div
+    class="runs-container"
+    :class="{ 'runs-container--reading': showDetail && Boolean(selectedRun) }"
+  >
     <!-- Left Master Column: Runs List -->
     <aside class="runs-sidebar">
       <div class="sidebar-header">
@@ -49,7 +52,7 @@
             size="sm"
             class="run-row"
             :class="{ active: selectedRunId === run.id }"
-            @click="selectRun(run.id)"
+            @click="openRun(run.id)"
           >
             <div class="row-top">
               <span class="run-business-title" :title="runBusinessTitle(run)">
@@ -88,9 +91,7 @@
           class="runs-list-state"
           :title="filtersActive ? '当前筛选条件没有匹配记录' : '没有运行记录'"
           :description="
-            filtersActive
-              ? '清除筛选条件可查看全部历史任务。'
-              : '项目状态请查看工作空间顶部。'
+            filtersActive ? '清除筛选条件可查看全部历史任务。' : '项目状态请查看工作空间顶部。'
           "
         />
       </template>
@@ -100,6 +101,9 @@
     <main class="run-details-panel" v-if="selectedRun">
       <!-- Detail Header -->
       <header class="detail-header">
+        <Button class="run-back" variant="ghost" size="sm" @click="showDetail = false"
+          >返回运行列表</Button
+        >
         <div class="header-left-info">
           <div class="title-row">
             <StatusBadge :status="selectedRun.status" size="sm" />
@@ -113,42 +117,61 @@
             <template v-if="runPriorityLabel(selectedRun)">
               · 优先级：{{ runPriorityLabel(selectedRun) }}
             </template>
-            <span class="mono">
-              · Run #{{ selectedRun.id }} · Session: {{ selectedRun.session_id || '—' }}
-            </span>
           </p>
         </div>
-
-        <!-- Claimed Executor Details -->
-        <Card class="executor-details" padding="sm" title="执行 Worker">
-          <span class="exec-label text-faint">执行 Worker</span>
-          <span class="exec-val mono"
-            >{{ selectedRun.worker_name }} ({{ selectedRun.worker_type }})</span
-          >
-        </Card>
+        <Popover>
+          <template #trigger><Button variant="secondary" size="sm">运行信息</Button></template>
+          <dl class="run-technical-information">
+            <div>
+              <dt>Run</dt>
+              <dd class="mono">{{ selectedRun.id }}</dd>
+            </div>
+            <div>
+              <dt>Session</dt>
+              <dd class="mono">{{ selectedRun.session_id || '—' }}</dd>
+            </div>
+            <div>
+              <dt>执行 Worker</dt>
+              <dd>{{ selectedRun.worker_name }} ({{ selectedRun.worker_type }})</dd>
+            </div>
+            <div>
+              <dt>任务类型</dt>
+              <dd>{{ selectedRun.task_type }}</dd>
+            </div>
+            <div>
+              <dt>Profile</dt>
+              <dd>{{ selectedRun.execution_profile || 'default' }}</dd>
+            </div>
+          </dl>
+        </Popover>
       </header>
 
-      <section class="run-business-summary" aria-label="本次运行结果" tabindex="0">
-        <span class="business-summary-label">本次运行结果</span>
-        <strong>{{ runResultText(selectedRun) }}</strong>
-        <span class="business-summary-technical mono text-faint">
-          {{ selectedRun.task_type }} · Profile: {{ selectedRun.execution_profile || 'default' }}
-        </span>
+      <section
+        v-if="!resultDuplicatesError"
+        :key="selectedRun.id"
+        class="run-business-summary"
+        aria-label="本次运行结果"
+      >
+        <details v-if="resultIsLong">
+          <summary>本次运行结果（展开全文）</summary>
+          <p class="run-result-content">{{ resultText }}</p>
+        </details>
+        <template v-else
+          ><span class="business-summary-label">本次运行结果</span
+          ><strong>{{ resultText }}</strong></template
+        >
       </section>
 
-      <Alert
+      <details
         v-if="selectedRun.error_message || selectedRun.error_type"
+        :key="`error:${selectedRun.id}`"
         class="error-banner"
-        tabindex="0"
         aria-label="运行错误"
-        tone="danger"
-        :title="`运行错误 (${selectedRun.error_type || 'Error'})`"
+        :open="!errorIsLong"
       >
+        <summary>运行错误 · {{ selectedRun.error_type || '未知类型' }}（查看原文）</summary>
         <p class="error-msg pre-wrap">{{ selectedRun.error_message || selectedRun.error_type }}</p>
-        <div v-if="selectedRun.error_type === 'worker_rejected'" class="rejection-details">
-          拒绝原因: {{ selectedRun.error_message }}
-        </div>
-      </Alert>
+      </details>
 
       <Alert
         v-if="linkedIntentOutcomeText(selectedRun)"
@@ -176,29 +199,26 @@
         variant="line"
         @update:model-value="activeDetailTab = $event"
       >
+        <template #actions>
+          <div v-if="activeDetailTab === 'terminal'" class="term-actions">
+            <a
+              v-if="stdoutDownloadUrl"
+              class="btn-term-action"
+              :href="stdoutDownloadUrl"
+              download
+              :title="stdoutDownloadTitle"
+              >{{ stdoutDownloadLabel }}</a
+            >
+            <Button variant="secondary" size="sm" title="重新加载流" @click="refetchTerminal"
+              >刷新</Button
+            >
+            <Checkbox v-model="autoScrollTerminal" label="自动滚动" />
+          </div>
+        </template>
         <template #panel="{ option }">
           <div class="tab-viewport">
-            <!-- 1. Terminal View -->
+            <!-- 终端日志保留原始内容与截断来源提示。 -->
             <div class="terminal-view" v-if="option.value === 'terminal'">
-              <div class="terminal-toolbar">
-                <span class="term-title">终端视图</span>
-                <div class="term-actions">
-                  <a
-                    v-if="stdoutDownloadUrl"
-                    class="btn-term-action"
-                    :href="stdoutDownloadUrl"
-                    download
-                    :title="stdoutDownloadTitle"
-                  >
-                    {{ stdoutDownloadLabel }}
-                  </a>
-                  <Button variant="secondary" size="sm" title="重新加载流" @click="refetchTerminal">
-                    刷新
-                  </Button>
-                  <Checkbox v-model="autoScrollTerminal" label="自动滚动" />
-                </div>
-              </div>
-
               <div class="terminal-output-nav" v-if="terminalOutputs.length > 1">
                 <Button
                   v-for="output in terminalOutputs"
@@ -371,6 +391,7 @@
 </template>
 
 <script setup lang="ts">
+import { computed, ref } from 'vue'
 import { DataTable, ErrorState, FilterBar, type DataTableColumn } from '@/components/patterns'
 import {
   Alert,
@@ -380,6 +401,7 @@ import {
   Checkbox,
   EmptyState,
   Input,
+  Popover,
   Select,
   Skeleton,
   Spinner,
@@ -478,6 +500,25 @@ const {
   terminalRecovered,
   terminalScreen,
 } = useRunsPage()
+
+const showDetail = ref(false)
+const openRun = (id: string) => {
+  selectRun(id)
+  showDetail.value = true
+}
+const resultText = computed(() => (selectedRun.value ? runResultText(selectedRun.value) : ''))
+const resultDuplicatesError = computed(
+  () =>
+    Boolean(selectedRun.value?.error_message || selectedRun.value?.error_type) &&
+    resultText.value === (selectedRun.value?.error_message || selectedRun.value?.error_type),
+)
+const resultIsLong = computed(
+  () => resultText.value.length > 240 || resultText.value.split('\n').length > 3,
+)
+const errorIsLong = computed(() => {
+  const message = selectedRun.value?.error_message || ''
+  return message.length > 240 || message.split('\n').length > 3
+})
 
 void terminalScreen
 </script>

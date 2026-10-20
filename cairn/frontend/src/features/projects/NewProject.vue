@@ -123,38 +123,6 @@
             />
           </FormField>
 
-          <FormField
-            id="np-group"
-            class="validation-anchor"
-            label="所属项目组"
-            for="np-group-select"
-            required
-            :error="validationErrors.group"
-          >
-            <div v-if="groupsLoading" aria-label="正在加载项目组">
-              <Skeleton class="select-skeleton" />
-            </div>
-            <ErrorState
-              v-else-if="groupsError"
-              title="项目组加载失败"
-              description="无法确认当前 Tenant 的项目组，暂时无法创建项目。"
-              @retry="refetchGroups()"
-            />
-            <EmptyState v-else-if="groups.length === 0" title="暂无可用项目组">
-              <template #description>
-                请先前往<router-link to="/projects">项目列表</router-link>创建项目组。
-              </template>
-            </EmptyState>
-            <Select
-              v-else
-              id="np-group-select"
-              v-model="form.group_id"
-              :options="groupOptions"
-              placeholder="请选择项目组"
-              required
-              @update:model-value="userEdited = true"
-            />
-          </FormField>
         </div>
 
         <FormField
@@ -580,14 +548,12 @@ import {
   createWorkerTemplate,
   updateWorkerTemplate,
   listLibraryCatalog,
-  listProjectGroups,
   listTenantWorkerOptions,
   listWorkerTemplates,
 } from '@/api/client'
 import type {
   AdvisoryLibrary,
   CreateProjectRequest,
-  ProjectGroup,
   ProjectResourceBatch,
   ScenarioCatalogEntry,
   TenantWorker,
@@ -677,7 +643,6 @@ const form = reactive({
   goal: '',
   scenario: '',
   tenant_worker_ids: [] as string[],
-  group_id: '',
   library_keys: [] as string[],
   explore_deadline: '',
   authorization_expires_at: '',
@@ -787,7 +752,6 @@ if (props.schedule?.project) {
     goal: project.goal,
     scenario: project.scenario,
     tenant_worker_ids: [...project.tenant_worker_ids],
-    group_id: project.group_id,
     library_keys: props.schedule.library_bindings.map((binding) => binding.library_key),
     explore_deadline: inputLocalTime(project.explore_deadline),
     authorization_expires_at: inputLocalTime(project.authorization_expires_at),
@@ -820,7 +784,6 @@ const scenarioTemplateMeta = reactive({
 
 const validationErrors = reactive({
   title: '',
-  group: '',
   origin: '',
   goal: '',
   exploreDeadline: '',
@@ -855,20 +818,6 @@ const {
 const allWorkers = computed(() => workersData.value || [])
 const workers = computed(() => allWorkers.value.filter((worker) => worker.available))
 
-const {
-  data: groupsData,
-  isLoading: groupsLoading,
-  isError: groupsError,
-  refetch: refetchGroups,
-} = useQuery<ProjectGroup[]>({
-  queryKey: ['project-groups'],
-  queryFn: listProjectGroups,
-})
-const groups = computed(() => groupsData.value || [])
-const groupOptions = computed<SelectOption[]>(() =>
-  groups.value.map((group) => ({ value: group.id, label: group.name })),
-)
-const selectedGroupExists = computed(() => groups.value.some((group) => group.id === form.group_id))
 
 const {
   data: libraryCatalogData,
@@ -969,7 +918,7 @@ const submitBlockReason = computed(() => {
   if (creationDeleted.value) return '原请求已保存但项目已删除，不能用此请求重新创建。'
   if (resourceBusy.value) return '资料操作尚未完成，请稍候。'
   if (resourcePending.value) return '仍有未完成或结果未确认的资料，请处理或明确移除后再创建。'
-  if (scenariosLoading.value || workersLoading.value || groupsLoading.value)
+  if (scenariosLoading.value || workersLoading.value)
     return '正在加载创建所需配置。'
   if (scenariosError.value || !selectedScenarioExists.value)
     return '请选择可用场景，或重试加载场景目录。'
@@ -977,7 +926,6 @@ const submitBlockReason = computed(() => {
     return '正在加载默认执行组合。'
   if (workerSelectionIssue.value) return workerSelectionIssue.value
   if (!form.tenant_worker_ids.length) return '请展开执行设置，配置本次 Worker。'
-  if (groupsError.value || !selectedGroupExists.value) return '请选择有效项目组，或重试加载项目组。'
   return ''
 })
 const canSubmitProject = computed(
@@ -1057,23 +1005,6 @@ watch(
     if (executionNeedsAttention.value && !formDisabled.value && props.open) void showSettings('execution')
   },
   { immediate: true, flush: 'post' },
-)
-
-watch(
-  groups,
-  () => {
-    // 项目组被删除或 Tenant 上下文切换后，不保留已经失效的创建选择。
-    if (!props.schedule && form.group_id && !selectedGroupExists.value) form.group_id = ''
-    if (selectedGroupExists.value) validationErrors.group = ''
-  },
-  { immediate: true },
-)
-
-watch(
-  () => form.group_id,
-  () => {
-    if (selectedGroupExists.value) validationErrors.group = ''
-  },
 )
 
 const setWorkerSelection = (workerId: string, selected: boolean) => {
@@ -1160,7 +1091,6 @@ const previewProject = computed<CreateProjectRequest | undefined>(() => {
     !form.title.trim() ||
     !form.origin.trim() ||
     !form.goal.trim() ||
-    !form.group_id ||
     !form.scenario ||
     !form.tenant_worker_ids.length
   )
@@ -1177,7 +1107,6 @@ const previewProject = computed<CreateProjectRequest | undefined>(() => {
     title: form.title,
     origin: form.origin,
     goal: form.goal,
-    group_id: form.group_id,
     scenario: form.scenario,
     tenant_worker_ids: [...form.tenant_worker_ids],
     ...(props.schedule?.project?.targets != null
@@ -1276,20 +1205,6 @@ const submitProject = async () => {
     await showSettings('execution', 'np-workers')
     return
   }
-  if (groupsLoading.value || groupsError.value) {
-    uiStore.showToast(
-      groupsLoading.value ? '项目组列表仍在加载，请稍后重试' : '无法确认可用项目组，请重试加载',
-      'danger',
-    )
-    return
-  }
-  if (!selectedGroupExists.value) {
-    validationErrors.group = '请选择有效的项目组'
-    uiStore.showToast('请选择有效的项目组', 'danger')
-    document.getElementById('np-group')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    return
-  }
-
   if (resourceBusy.value) {
     uiStore.showToast('辅助资料仍在上传，请稍后重试', 'danger')
     return
@@ -1324,7 +1239,6 @@ const submitProject = async () => {
       goal: form.goal,
       scenario: form.scenario,
       tenant_worker_ids: [...form.tenant_worker_ids],
-      group_id: form.group_id,
       ...effectiveDeadlines(),
       ...(resourceBatch.value ? { resource_batch_id: resourceBatch.value.id } : {}),
       library_keys: [...form.library_keys],

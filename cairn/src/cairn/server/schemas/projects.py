@@ -6,11 +6,11 @@ from datetime import datetime
 from uuid import UUID
 
 from cairn.assessment_contracts import DepthReviewDecision, ExperimentRecord
+from cairn.evidence_contracts import EvidenceItem, EvidenceRef, EvidenceSource
 from pydantic import ConfigDict
 
 from .artifacts import Artifact, FactEvidence
 from .common import *
-from .groups import ProjectGroup
 from .resources import CreateProjectResourceRequest, ProjectResource
 from .tasks import TaskRun
 from .tenant_workers import TenantWorker
@@ -23,30 +23,6 @@ class Fact(BaseModel):
     task_run_id: str | None = None
     creator: str | None = None
     created_at: str | None = None
-
-
-class EvidenceRef(BaseModel):
-    artifact_id: str
-    pointer: str = ""
-    verifier_run_id: str | None = None
-
-    @field_validator("artifact_id")
-    @classmethod
-    def validate_artifact_id(cls, value: str) -> str:
-        text = value.strip()
-        if not text:
-            raise ValueError("must not be empty")
-        return text
-
-    @field_validator("pointer", "verifier_run_id")
-    @classmethod
-    def validate_optional_text(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        text = value.strip()
-        if not text and value != "":
-            raise ValueError("must not be blank")
-        return text
 
 
 class VerificationResultInput(BaseModel):
@@ -249,6 +225,7 @@ class AssessmentReportFinalizationView(BaseModel):
     template_key: str | None = None
     template_version: int | None = None
     template_digest_sha256: str | None = None
+    template_compatibility_profiles: list[str] = Field(default_factory=list)
     input_snapshot_artifact_id: str | None = None
     input_snapshot_sha256: str | None = None
     report_policy_version: int | None = None
@@ -276,8 +253,9 @@ class AssessmentReportClaimView(AssessmentReportFinalizationView):
 
 
 class AssessmentReportGenerationRequest(BaseModel):
-    template_key: str = Field(min_length=1, max_length=128)
-    template_version: int = Field(ge=1)
+    model_config = ConfigDict(extra="forbid")
+
+    template_key: str = Field(pattern=r"^[a-z0-9_-]{1,128}$")
 
     @field_validator("template_key")
     @classmethod
@@ -560,9 +538,6 @@ class ProjectMeta(BaseModel):
     tenant_id: str = ""
     tenant_name: str = ""
     tenant_owner_login: str | None = None
-    # 所属项目组 id，null 表示未分组；group_name 是稳定的只读展示值。
-    group_id: str | None = None
-    group_name: str | None = None
     reason: ProjectReason | None = None
 
 
@@ -575,7 +550,6 @@ class ProjectSummary(ProjectMeta):
 
 
 class ProjectManagementOptions(BaseModel):
-    groups: list[ProjectGroup] = Field(default_factory=list)
     tenant_workers: list[TenantWorker] = Field(default_factory=list)
 
 
@@ -639,8 +613,6 @@ class CreateProjectRequest(BaseModel):
     library_keys: list[str] = Field(default_factory=list)
     # 新项目必须显式绑定至少一个同 Tenant 的可用 Worker ID。
     tenant_worker_ids: list[str] = Field(min_length=1)
-    # 新建项目必须显式绑定同 Tenant 的项目组；存量项目生命周期仍允许为空。
-    group_id: str
     explore_deadline: str | None = None
     # 创建方必须显式选择未来期限或以 null 表示无限期，不能靠字段缺失推导授权。
     authorization_expires_at: str | None
@@ -736,15 +708,6 @@ class CreateProjectRequest(BaseModel):
         if not cleaned:
             raise ValueError("at least one worker is required")
         return cleaned
-
-    @field_validator("group_id")
-    @classmethod
-    def validate_group_id(cls, value: str) -> str:
-        text = value.strip()
-        if not text:
-            raise ValueError("group id must not be empty")
-        return text
-
 
 class CreateHintRequest(BaseModel):
     content: str
@@ -986,8 +949,8 @@ class VulnerabilityIdentityInput(BaseModel):
         return text
 
 
-class ConcludeVulnerabilityInput(BaseModel):
-    """conclude 时自动确认漏洞（dispatcher 已 resolve packet_path→packet_artifact_id）。"""
+class _ConcludeVulnerabilityMetadata(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
     title: str
     severity: str
@@ -995,12 +958,7 @@ class ConcludeVulnerabilityInput(BaseModel):
     target: str = ""
     remediation: str = ""
     confidence: float = 0.5
-    packet_artifact_id: str | None = None
     slot_key: str | None = None
-    # repro_request/repro_response: worker 内联返回的原始 HTTP 请求/响应包（固定格式文本），
-    # 不依赖文件 artifact。空字符串=未提供。
-    repro_request: str = ""
-    repro_response: str = ""
     identity: VulnerabilityIdentityInput | None = None
 
     @field_validator("title", "severity")
@@ -1019,20 +977,27 @@ class ConcludeVulnerabilityInput(BaseModel):
             raise ValueError(f"severity must be one of {VULNERABILITY_SEVERITIES}")
         return text
 
-    @field_validator("repro_request", "repro_response")
-    @classmethod
-    def validate_repro(cls, value: str) -> str:
-        # 允许空（未提供）；非空则 trim 尾部空白，但保留内部格式（HTTP 包按行结构）
-        if value is None:
-            return ""
-        return value.rstrip()
-
     @field_validator("confidence")
     @classmethod
     def validate_confidence(cls, value: float) -> float:
         if not isinstance(value, (int, float)):
             raise ValueError("confidence must be a number 0-1")
         return max(0.0, min(1.0, float(value)))
+
+
+class ConcludeVulnerabilityInput(_ConcludeVulnerabilityMetadata):
+    """新发现仅写已解析为服务端 Artifact ID 的有序证据条目。"""
+
+    schema_version: Literal[2]
+    evidence_items: list[EvidenceItem]
+
+
+class HistoricalConcludeVulnerabilityInput(_ConcludeVulnerabilityMetadata):
+    """只用于已接受 conclude 的精确回执重放，不得接受为新发现。"""
+
+    packet_artifact_id: str | None = None
+    repro_request: str = ""
+    repro_response: str = ""
 
 
 class CoverageResultInput(BaseModel):
@@ -1143,7 +1108,7 @@ class ConcludeRequest(BaseModel):
     # default-copy-v1 必须携带结构化测试结果，服务端在写 Fact 前校验并推进 Coverage Cell。
     coverage_result: CoverageResultInput | None = None
     # 漏洞自动确认：fact 带 vulnerability 子字段时 dispatcher resolve 后透传，事务内写漏洞库。
-    vulnerability: ConcludeVulnerabilityInput | None = None
+    vulnerability: ConcludeVulnerabilityInput | HistoricalConcludeVulnerabilityInput | None = None
     # verifier Intent 只能提交针对绑定 observation 的独立复现结果。
     verification_result: VerificationResultInput | None = None
 
@@ -1236,21 +1201,6 @@ class UpdateProjectTitleRequest(BaseModel):
         if not text:
             raise ValueError("must not be empty")
         return text
-
-
-class MoveProjectToGroupRequest(BaseModel):
-    # 移动项目到指定分组；None/空表示移出分组（变为未分组）。
-    # 注意：本类名与 schemas/groups.py 的 UpdateProjectGroupRequest（重命名分组，字段 name）
-    # 含义不同，刻意改名避免在 server.models facade 里被后者覆盖导致端点拿错 schema。
-    group_id: str | None = None
-
-    @field_validator("group_id")
-    @classmethod
-    def validate_group_id(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        text = value.strip()
-        return text or None
 
 
 class ReauthorizeProjectRequest(BaseModel):
@@ -1536,17 +1486,17 @@ class VulnerabilityInput(BaseModel):
 
 
 class CreateVulnerabilityRequest(BaseModel):
-    """人工独立创建漏洞（无 source_fact_id），或服务端 conclude 自动确认时内部构造。"""
+    """人工独立创建，或服务端 conclude 在事务内构造一次真实发现。"""
+
+    model_config = ConfigDict(extra="forbid")
 
     title: str
     severity: str
     vuln_type: str = ""
     target: str = ""
-    packet_artifact_id: str | None = None
     remediation: str = ""
     confidence: float = 0.5
-    repro_request: str = ""
-    repro_response: str = ""
+    evidence_items: list[EvidenceItem] = Field(default_factory=list)
     # 自动确认时填；人工创建留空。
     source_fact_id: str | None = None
     slot_key: str | None = None
@@ -1576,13 +1526,14 @@ class CreateVulnerabilityRequest(BaseModel):
 
 
 class UpdateVulnerabilityRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     status: str | None = None
     severity: str | None = None
     remediation: str | None = None
     confidence: float | None = None
-    # 人工补录复现数据包（内联原始 HTTP 文本）；空字符串清除，非空覆盖。
-    repro_request: str | None = None
-    repro_response: str | None = None
+    # 完整替换人工条目列表，不允许逐字段修改某次自动发现。
+    evidence_items: list[EvidenceItem] | None = None
     # 报告阶段回写的编号复现步骤（markdown）；None=不改动。
     repro_steps: str | None = None
 
@@ -1626,10 +1577,8 @@ class Vulnerability(BaseModel):
     confidence: float = 0.5
     status: str = "new"
     source_fact_id: str | None = None
-    packet_artifact_id: str | None = None
+    evidence_items: list[EvidenceItem] = Field(default_factory=list)
     remediation: str = ""
-    repro_request: str = ""
-    repro_response: str = ""
     # 报告阶段生成的编号复现步骤（markdown），空=未生成。
     repro_steps: str = ""
     discovered_by_run_id: str | None = None
@@ -1669,12 +1618,10 @@ class VulnerabilityObservation(BaseModel):
     task_run_id: str | None = None
     worker: str | None = None
     slot_key: str | None = None
-    packet_artifact_id: str | None = None
+    evidence_items: list[EvidenceItem] = Field(default_factory=list)
     identity: dict[str, Any] = Field(default_factory=dict)
     severity: str
     confidence: float
-    repro_request: str = ""
-    repro_response: str = ""
     observed_at: str
 
 
@@ -1780,12 +1727,11 @@ class DuplicateVulnerabilityCandidatesResponse(BaseModel):
 
 
 class VulnerabilityDetail(Vulnerability):
-    """漏洞详情：在基础字段上聚合来源 fact 与产出 run 的证据，供详情页展示复现信息。
+    """主证据只选定一次真实发现；人工及未配对历史材料另保留可读入口。"""
 
-    packet_artifact_id 仍指向唯一"复现数据包"，但即便它为空（worker 未声明或文件在目标侧
-    未收集），source_fact.description 与 run 日志通常已包含完整复现分析，避免详情页一片空白。
-    """
-
+    observation_id: str | None = None
+    source: EvidenceSource = "historical"
+    record_evidence_items: list[EvidenceItem] = Field(default_factory=list)
     source_fact: VulnerabilitySourceFact | None = None
     # 产出该漏洞的 task_run 关联 artifacts（stdout/diagnostic 日志），供展开查看完整交互
     run_artifacts: list[VulnerabilityEvidenceArtifact] = []

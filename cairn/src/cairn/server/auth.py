@@ -151,7 +151,7 @@ def claim_legacy_tenant(login: str) -> dict[str, object]:
     if not normalized:
         raise ValueError("login must not be blank")
 
-    resource_tables = ("projects", "project_groups", "worker_templates")
+    resource_tables = ("projects", "worker_templates")
     with get_conn() as conn:
         if database_config().backend == "postgresql":
             conn.execute("SELECT pg_advisory_xact_lock(?)", (0x434149524E4C4547,))
@@ -733,6 +733,40 @@ def require_admin_route_access(
     return principal
 
 
+def verification_request_access_clause(principal: RequestPrincipal, *, alias: str = "vr") -> tuple[str, tuple]:
+    """复测记录及其内部 Project 共用 caller 范围；machine 仍由执行接口核对绑定。"""
+    if principal.is_super_admin or principal.kind == "machine":
+        return "1 = 1", ()
+    if principal.kind not in {"user", "integration"} or not principal.tenant_id:
+        raise HTTPException(403, "复测身份无权访问")
+    return (f"{alias}.tenant_id = ? AND {alias}.caller_type = ? AND {alias}.caller_id = ?",
+            (principal.tenant_id, principal.kind, principal.subject_id))
+
+
+def verification_project_access_clause(principal: RequestPrincipal, *, alias: str = "p") -> tuple[str, tuple]:
+    """仅限制关联复测的内部 Project，普通探索项目仍沿用原有 Tenant 范围。"""
+    access_clause, params = verification_request_access_clause(principal)
+    hidden = "vr.purge_state IS NOT NULL"
+    if principal.kind != "machine":
+        # 永久删除各阶段及已隐藏记录不得通过普通项目或聚合投影绕过。
+        hidden += " OR vr.deleted_at IS NOT NULL"
+    return (
+        f"NOT EXISTS (SELECT 1 FROM verification_requests vr WHERE vr.project_id = {alias}.id "
+        f"AND (NOT ({access_clause}) OR {hidden}))",
+        params,
+    )
+
+
+def _project_access_exists(conn, project_id: str, principal: RequestPrincipal) -> bool:
+    access_clause, access_params = verification_project_access_clause(principal)
+    sql = f"SELECT 1 FROM projects p WHERE p.id = ? AND ({access_clause})"
+    params = [project_id, *access_params]
+    if principal.kind != "machine" and not principal.is_super_admin:
+        sql += " AND p.tenant_id = ?"
+        params.append(principal.tenant_id)
+    return conn.execute(sql, tuple(params)).fetchone() is not None
+
+
 def require_tenant_project(
     project_id: str,
     request: Request,
@@ -740,19 +774,11 @@ def require_tenant_project(
 ) -> RequestPrincipal:
     """普通浏览器按 Tenant 隔离；Dispatcher 与超级管理员可访问全部项目。"""
     with get_conn() as conn:
-        if principal.kind == "machine" or principal.is_super_admin:
-            row = conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone()
-        elif principal.tenant_id is None:
-            row = None
-        else:
-            row = conn.execute(
-                "SELECT 1 FROM projects WHERE id = ? AND tenant_id = ?",
-                (project_id, principal.tenant_id),
-            ).fetchone()
-        if row is not None and principal.kind != "machine" and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+        exists = _project_access_exists(conn, project_id, principal)
+        if exists and principal.kind != "machine" and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
             from .services.project_records import require_unmanaged_project
             require_unmanaged_project(conn, project_id)
-    if row is None:
+    if not exists:
         # 对具体资源统一返回 404，避免泄漏其他 Tenant 的资源是否存在。
         raise HTTPException(404, "Project not found")
     return principal
@@ -767,19 +793,11 @@ def require_user_tenant_project(
     if principal.kind != "user":
         raise HTTPException(403, "User authentication required")
     with get_conn() as conn:
-        if principal.is_super_admin:
-            row = conn.execute("SELECT 1 FROM projects WHERE id = ?", (project_id,)).fetchone()
-        elif principal.tenant_id is None:
-            row = None
-        else:
-            row = conn.execute(
-                "SELECT 1 FROM projects WHERE id = ? AND tenant_id = ?",
-                (project_id, principal.tenant_id),
-            ).fetchone()
-        if row is not None and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+        exists = _project_access_exists(conn, project_id, principal)
+        if exists and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
             from .services.project_records import require_unmanaged_project
             require_unmanaged_project(conn, project_id)
-    if row is None:
+    if not exists:
         raise HTTPException(404, "Project not found")
     return principal
 

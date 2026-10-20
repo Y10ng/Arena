@@ -13,18 +13,11 @@ const mocks = vi.hoisted(() => ({
   projectsError: false,
   runtimeError: false,
   scenarios: [{ key: 'default', label: '默认场景' }],
-  groups: [] as Array<{ id: string; name: string; owner: string; created_at: string }>,
   api: vi.fn(),
-  createProjectGroup: vi.fn(),
-  deleteProjectGroup: vi.fn(),
   fetchText: vi.fn(),
   getProjectManagementOptions: vi.fn(),
   getTenantMonitoringSummary: vi.fn(),
-  listProjectGroups: vi.fn(),
-  moveProjectToGroup: vi.fn(),
-  updateProjectGroup: vi.fn(),
   projectsRefetch: vi.fn(),
-  groupsRefetch: vi.fn(),
   getQueryData: vi.fn(),
   setQueryData: vi.fn(),
   invalidateQueries: vi.fn(),
@@ -37,15 +30,10 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/api/client', () => ({
   api: mocks.api,
-  createProjectGroup: mocks.createProjectGroup,
-  deleteProjectGroup: mocks.deleteProjectGroup,
   fetchText: mocks.fetchText,
   getProjectManagementOptions: mocks.getProjectManagementOptions,
   getTenantMonitoringSummary: mocks.getTenantMonitoringSummary,
-  listProjectGroups: mocks.listProjectGroups,
-  moveProjectToGroup: mocks.moveProjectToGroup,
   tenantMonitoringQueryKey: ['tenant-monitoring-summary'],
-  updateProjectGroup: mocks.updateProjectGroup,
 }))
 
 vi.mock('@/stores/auth', () => ({
@@ -97,9 +85,6 @@ vi.mock('@tanstack/vue-query', () => ({
         isError: ref(mocks.runtimeError),
       }
     if (key[0] === 'scenarios') return { data: ref(mocks.scenarios) }
-    if (key[0] === 'project-groups') {
-      return { data: ref(mocks.groups), refetch: mocks.groupsRefetch }
-    }
     return { data: ref(undefined), isError: ref(false) }
   },
   useQueryClient: () => ({
@@ -129,19 +114,12 @@ const project: ProjectSummary = {
   tenant_id: 'tenant-a',
   tenant_name: 'Tenant A',
   tenant_owner_login: 'tenant-owner',
-  group_id: 'group-a',
-  group_name: 'Red Team',
   fact_count: 4,
   intent_count: 3,
   working_intent_count: 1,
   unclaimed_intent_count: 2,
   hint_count: 5,
 }
-
-const groups = [
-  { id: 'group-a', name: 'Red Team', owner: 'tenant-owner', created_at: '2026-08-18' },
-  { id: 'group-b', name: 'Blue Team', owner: 'tenant-owner', created_at: '2026-08-19' },
-]
 
 const wrappers: VueWrapper[] = []
 
@@ -200,7 +178,6 @@ beforeEach(() => {
   mocks.projectsFetching = false
   mocks.projectsError = false
   mocks.runtimeError = false
-  mocks.groups = groups.map((group) => ({ ...group }))
   mocks.authStore.isSuperAdmin = false
   mocks.uiStore.globalRefreshKey = 0
   mocks.route.query = {}
@@ -209,12 +186,9 @@ beforeEach(() => {
   mocks.api.mockReset().mockResolvedValue(undefined)
   mocks.fetchText.mockReset().mockResolvedValue('title: Assessment Workspace')
   mocks.getProjectManagementOptions.mockReset().mockResolvedValue({
-    groups: groups.map((group) => ({ ...group })),
     tenant_workers: [],
   })
-  mocks.moveProjectToGroup.mockReset().mockResolvedValue(project)
   mocks.projectsRefetch.mockReset()
-  mocks.groupsRefetch.mockReset()
   mocks.getQueryData.mockReset().mockReturnValue(mocks.projects)
   mocks.setQueryData.mockReset()
   mocks.invalidateQueries.mockReset().mockResolvedValue(undefined)
@@ -274,13 +248,13 @@ describe('Projects shared control migration', () => {
     expect(document.body.textContent).not.toContain('项目刷新失败')
   })
 
-  it('reports background fetching without hiding the custom keyboard list', async () => {
+  it('keeps the project count and keyboard list stable during background fetching', async () => {
     mocks.projectsFetching = true
     mountPage()
     await flushPromises()
 
     const status = document.body.querySelector<HTMLElement>('[role="status"]')
-    expect(status?.textContent).toContain('正在获取最新项目数据')
+    expect(status?.textContent).toContain('1 个项目')
     expect(status?.getAttribute('aria-live')).toBe('polite')
     expect(document.body.querySelector('[role="list"]')).not.toBeNull()
   })
@@ -441,39 +415,16 @@ describe('Projects shared control migration', () => {
     expect(mocks.uiStore.showToast).toHaveBeenCalledWith('rename rejected', 'danger')
   })
 
-  it('loads tenant groups and moves the project through the Select control', async () => {
-    mountPage()
-
-    await openProjectMenu()
-    await chooseMenuItem('移动到分组')
-
-    expect(mocks.getProjectManagementOptions).toHaveBeenCalledWith('project-a')
-    expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain(
-      'Assessment Workspace',
-    )
-
-    const trigger = document.body.querySelector<HTMLButtonElement>(
-      '[role="combobox"][aria-label="目标分组"]',
-    )
-    if (!trigger) throw new Error('找不到目标分组 Select')
-    trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }))
-    trigger.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0 }))
-    trigger.click()
+  it('keeps ordinary projects visible with no group filtering or move action', async () => {
+    mocks.route.query = { group: 'retired-group', create: '1' }
+    const wrapper = mountPage()
     await flushPromises()
-
-    const option = [...document.body.querySelectorAll<HTMLElement>('[role="option"]')].find(
-      (candidate) => candidate.textContent?.includes('Blue Team'),
-    )
-    if (!option) throw new Error('找不到 Blue Team 分组选项')
-    option.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0 }))
-    option.click()
-    await flushPromises()
-
-    bodyButton('移动').click()
-    await flushPromises()
-
-    expect(mocks.moveProjectToGroup).toHaveBeenCalledWith('project-a', 'group-b')
+    expect(wrapper.text()).toContain('Assessment Workspace')
+    expect(wrapper.text()).not.toContain('Red Team')
     expect(document.body.querySelector('[role="dialog"]')).toBeNull()
+    await openProjectMenu()
+    expect(document.body.querySelector('[role="menu"]')?.textContent).not.toContain('移动到分组')
+    expect(mocks.getProjectManagementOptions).not.toHaveBeenCalled()
   })
 
   it('keeps delete confirmation open and blocks duplicate deletion on failure', async () => {

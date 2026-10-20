@@ -279,7 +279,6 @@ def scenario_feature_schema() -> list[ScenarioFeatureSchemaItem]:
 
 def validate_scenario_features(scenarios: list[Scenario]) -> None:
     schema = {item.key: item for item in scenario_feature_schema()}
-    prompt_infos = {info.key: info for info in list_prompt_group_infos()}
     for scenario in scenarios:
         unknown_keys = sorted(set(scenario.features) - set(schema))
         if unknown_keys:
@@ -309,26 +308,6 @@ def validate_scenario_features(scenarios: list[Scenario]) -> None:
                     422,
                     f"Feature {key} for scenario {scenario.key} must be a string",
                 )
-    # 执行协议在项目创建时冻结；场景只选择报告模板，不保存协议版本。
-    for scenario in scenarios:
-        report_prompt_group = scenario.features.get("report_prompt_group") or DEFAULT_PROMPT_GROUP
-        report_prompt_group = report_prompt_group.strip()
-        info = prompt_infos.get(report_prompt_group)
-        if info is None:
-            raise HTTPException(422, f"Unknown report prompt group: {report_prompt_group}")
-        if PROMPT_CAPABILITY_DURABLE_REPORT not in info.capabilities:
-            raise HTTPException(
-                422,
-                f"Scenario {scenario.key}: report prompt group '{report_prompt_group}' "
-                "does not support durable reports",
-            )
-        try:
-            validate_report_prompt_resources(report_prompt_group)
-        except ValueError as exc:
-            raise HTTPException(
-                422,
-                f"Scenario {scenario.key}: invalid report prompt group '{report_prompt_group}'",
-            ) from exc
 
 
 def _latest_dispatcher_json_lists(

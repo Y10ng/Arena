@@ -7,20 +7,19 @@ import {
   listAdvisoryLibraryRevisions,
   listKnowledgeFiles,
   listKnowledgeSets,
+  listLibraryCatalog,
   readKnowledgeFile,
   writeKnowledgeFile,
 } from '@/api/client'
 import type {
+  AdvisoryLibrary,
   AdvisoryLibraryRevision,
   KnowledgeFile,
   KnowledgeFileContent,
   KnowledgeSet,
 } from '@/api/types'
 import { useUIStore } from '@/stores/ui'
-import {
-  normalizeKnowledgeFiles,
-  normalizeKnowledgeSets,
-} from '@/features/settings/knowledgeOptions'
+import { normalizeKnowledgeFiles } from '@/features/settings/knowledgeOptions'
 import { readUtf8File } from '@/features/projects/projectResources'
 import { formatError } from './consoleCommon'
 import {
@@ -56,6 +55,11 @@ export const useKnowledgeConsole = () => {
   const isSavingKnowledgeFile = ref(false)
   const isDeletingKnowledgeFile = ref(false)
   const isUploadingKnowledgeFile = ref(false)
+  const isEditingKnowledgeFile = ref(false)
+  const isRefreshingKnowledge = ref(false)
+  const knowledgeFileReadError = ref('')
+  const knowledgeSelectionMessage = ref('')
+  const loadingKnowledgeFilePath = ref('')
   const knowledgeUploadInput = ref<HTMLInputElement | null>(null)
   const selectedKnowledgeKey = ref<string | null>(null)
   const selectedKnowledgeFilePath = ref<string | null>(null)
@@ -68,6 +72,7 @@ export const useKnowledgeConsole = () => {
   const deleteKnowledgeFileTarget = ref<KnowledgeFileDeleteTarget | null>(null)
   let deleteKnowledgeSetTrigger: HTMLElement | null = null
   let deleteKnowledgeFileTrigger: HTMLElement | null = null
+  let deleteKnowledgeFileFocusFallbacks: HTMLElement[] = []
   const focusRestoreTimers = new Set<number>()
 
   onScopeDispose(() => {
@@ -130,6 +135,8 @@ export const useKnowledgeConsole = () => {
   const {
     data: knowledgeRevisionsData,
     isLoading: isLoadingKnowledgeRevisions,
+    isError: isKnowledgeRevisionsError,
+    error: knowledgeRevisionsError,
     refetch: refetchKnowledgeRevisions,
   } = useQuery<AdvisoryLibraryRevision[]>({
     queryKey: computed(() => ['knowledgeRevisions', selectedKnowledgeKey.value || '']),
@@ -140,7 +147,25 @@ export const useKnowledgeConsole = () => {
     enabled: computed(() => Boolean(selectedKnowledgeKey.value)),
   })
 
-  const knowledgeSets = computed(() => normalizeKnowledgeSets(knowledgeSetsData.value || []))
+  const {
+    data: libraryCatalog,
+    isError: isLibraryCatalogError,
+    error: libraryCatalogError,
+  } = useQuery<AdvisoryLibrary[]>({
+    queryKey: ['library-catalog'],
+    queryFn: listLibraryCatalog,
+  })
+
+  // 管理界面只展示接口实际返回的库，不补造内置库或空目录。
+  const knowledgeSets = computed(() =>
+    [...(knowledgeSetsData.value || [])].sort(
+      (a, b) => Number(b.builtin) - Number(a.builtin) || a.key.localeCompare(b.key),
+    ),
+  )
+  const knowledgeSetNames = computed(
+    () => new Map((libraryCatalog.value || []).map((library) => [library.key, library.name])),
+  )
+  const knowledgeSetName = (key: string) => knowledgeSetNames.value.get(key) || key
   const knowledgeFiles = computed(() => normalizeKnowledgeFiles(knowledgeFilesData.value || []))
   const knowledgeRevisions = computed(() => knowledgeRevisionsData.value || [])
   const currentKnowledgeRevision = computed(() => knowledgeRevisions.value[0] || null)
@@ -205,7 +230,10 @@ export const useKnowledgeConsole = () => {
     knowledgeFileReadController = null
     pendingKnowledgeFilePath = null
     isLoadingKnowledgeFile.value = false
+    loadingKnowledgeFilePath.value = ''
   }
+
+  onScopeDispose(abortKnowledgeFileRead)
 
   const clearKnowledgeFileDraft = () => {
     abortKnowledgeFileRead()
@@ -223,8 +251,25 @@ export const useKnowledgeConsole = () => {
   }
 
   const confirmDiscardKnowledgeChanges = () => {
+    if (isSavingKnowledgeFile.value) {
+      uiStore.showToast('文件正在保存，请稍候再离开。', 'warn')
+      return false
+    }
     if (!isKnowledgeFileDirty.value) return true
     return window.confirm('当前资料库文件有未保存修改，确定放弃这些修改吗？')
+  }
+
+  const editKnowledgeFile = () => {
+    if (selectedKnowledgeFilePath.value && !isLoadingKnowledgeFile.value)
+      isEditingKnowledgeFile.value = true
+  }
+
+  const closeKnowledgeFileEditor = () => {
+    if (!confirmDiscardKnowledgeChanges()) return false
+    resetKnowledgeFileDraft()
+    isEditingKnowledgeFile.value = false
+    if (!selectedKnowledgeFilePath.value) clearKnowledgeFileDraft()
+    return true
   }
 
   const isCurrentKnowledgeVisit = (key: string, visitGeneration: number) =>
@@ -237,13 +282,19 @@ export const useKnowledgeConsole = () => {
     selectedKnowledgeKey.value = key
     selectedKnowledgeDirectory.value = ROOT_KNOWLEDGE_DIRECTORY
     clearKnowledgeFileDraft()
+    knowledgeFileReadError.value = ''
+    knowledgeSelectionMessage.value = ''
+    isEditingKnowledgeFile.value = false
     return true
   }
 
-  const selectKnowledgeFile = async (path: string, options: { force?: boolean } = {}) => {
+  const selectKnowledgeFile = async (
+    path: string,
+    options: { force?: boolean; reload?: boolean } = {},
+  ) => {
     const key = selectedKnowledgeKey.value
     if (!key) return false
-    if (path === selectedKnowledgeFilePath.value) {
+    if (path === selectedKnowledgeFilePath.value && !options.reload) {
       if (pendingKnowledgeFilePath && pendingKnowledgeFilePath !== path) abortKnowledgeFileRead()
       return true
     }
@@ -258,6 +309,8 @@ export const useKnowledgeConsole = () => {
 
     try {
       isLoadingKnowledgeFile.value = true
+      loadingKnowledgeFilePath.value = path
+      knowledgeFileReadError.value = ''
       const file = await readKnowledgeFile(key, path, controller.signal)
       if (
         readGeneration !== knowledgeFileReadGeneration ||
@@ -265,6 +318,7 @@ export const useKnowledgeConsole = () => {
       )
         return false
       setKnowledgeFileDraft(file)
+      isEditingKnowledgeFile.value = false
       return true
     } catch (err: unknown) {
       if (
@@ -272,7 +326,7 @@ export const useKnowledgeConsole = () => {
         isCurrentKnowledgeVisit(key, visitGeneration) &&
         !isAbortError(err)
       ) {
-        uiStore.showToast(`读取资料库文件失败: ${formatError(err)}`, 'danger')
+        knowledgeFileReadError.value = `读取「${path}」失败：${formatError(err)}`
       }
       return false
     } finally {
@@ -283,6 +337,7 @@ export const useKnowledgeConsole = () => {
         knowledgeFileReadController = null
         pendingKnowledgeFilePath = null
         isLoadingKnowledgeFile.value = false
+        loadingKnowledgeFilePath.value = ''
       }
     }
   }
@@ -304,25 +359,40 @@ export const useKnowledgeConsole = () => {
   watch(
     knowledgeSets,
     (sets) => {
-      if (sets.length === 0) {
-        knowledgeSetVisitGeneration++
-        selectedKnowledgeKey.value = null
-        clearKnowledgeFileDraft()
-        return
-      }
-      if (!selectedKnowledgeKey.value) {
-        selectKnowledgeSet(sets[0].key, { force: true })
-        return
-      }
+      if (isLoadingKnowledgeSets.value || isKnowledgeSetsError.value) return
       if (
-        !sets.some((set) => set.key === selectedKnowledgeKey.value) &&
-        !isKnowledgeFileDirty.value
+        selectedKnowledgeKey.value &&
+        !sets.some((set) => set.key === selectedKnowledgeKey.value)
       ) {
-        selectKnowledgeSet(sets[0].key, { force: true })
+        knowledgeSelectionMessage.value = '当前资料库已不可用，请选择其他资料库。'
+        if (!isKnowledgeFileDirty.value && !isSavingKnowledgeFile.value) {
+          knowledgeSetVisitGeneration++
+          selectedKnowledgeKey.value = null
+          clearKnowledgeFileDraft()
+          isEditingKnowledgeFile.value = false
+        }
+        return
       }
+      if (!selectedKnowledgeKey.value && sets[0]) selectKnowledgeSet(sets[0].key, { force: true })
     },
     { immediate: true },
   )
+
+  watch(knowledgeFiles, (files) => {
+    if (isLoadingKnowledgeFiles.value || isKnowledgeFilesError.value || !selectedKnowledgeKey.value)
+      return
+    const path = selectedKnowledgeFilePath.value
+    if (
+      path &&
+      !files.some((file) => file.path === path) &&
+      !isKnowledgeFileDirty.value &&
+      !isSavingKnowledgeFile.value
+    ) {
+      clearKnowledgeFileDraft()
+      isEditingKnowledgeFile.value = false
+      knowledgeFileReadError.value = '当前文件已不在资料库中，请选择其他文件。'
+    }
+  })
 
   watch(selectedKnowledgeKey, () => {
     void refetchKnowledgeFiles()
@@ -351,6 +421,7 @@ export const useKnowledgeConsole = () => {
       await createKnowledgeSet(key)
       await refetchKnowledgeSets()
       void queryClient.invalidateQueries({ queryKey: ['scenarioOptions'] })
+      void queryClient.invalidateQueries({ queryKey: ['library-catalog'] })
       if (generation !== createGeneration) return
       if (newKnowledgeSetKey.value.trim() === key) newKnowledgeSetKey.value = ''
       if (
@@ -368,14 +439,20 @@ export const useKnowledgeConsole = () => {
     }
   }
 
-  const restoreDeleteTrigger = (trigger: HTMLElement | null, attempt = 0) => {
+  const restoreDeleteTrigger = (
+    trigger: HTMLElement | null,
+    fallbacks: HTMLElement[] = [],
+    attempt = 0,
+  ) => {
     if (!trigger || typeof document === 'undefined') return
     const action = trigger.dataset.consoleAction
     const candidate = trigger.isConnected
       ? trigger
-      : action
-        ? document.querySelector<HTMLElement>(`[data-console-action="${action}"]`)
-        : null
+      : (action
+          ? [...document.querySelectorAll<HTMLElement>('[data-console-action]')].find(
+              (element) => element.dataset.consoleAction === action,
+            )
+          : null) || fallbacks.find((element) => element.isConnected)
     if (!candidate) return
     if (attempt > 0 && (!('disabled' in candidate) || !(candidate as HTMLButtonElement).disabled)) {
       candidate.focus()
@@ -384,7 +461,7 @@ export const useKnowledgeConsole = () => {
     if (attempt < 10 && typeof window !== 'undefined') {
       const timer = window.setTimeout(() => {
         focusRestoreTimers.delete(timer)
-        if (typeof document !== 'undefined') restoreDeleteTrigger(trigger, attempt + 1)
+        if (typeof document !== 'undefined') restoreDeleteTrigger(trigger, fallbacks, attempt + 1)
       }, 20)
       focusRestoreTimers.add(timer)
     }
@@ -392,7 +469,13 @@ export const useKnowledgeConsole = () => {
 
   const openDeleteKnowledgeSet = (trigger: HTMLElement | null = null) => {
     const set = selectedKnowledgeSet.value
-    if (!set || !canDeleteSelectedKnowledgeSet.value || isDeletingKnowledgeSet.value) return
+    if (
+      !set ||
+      !canDeleteSelectedKnowledgeSet.value ||
+      isDeletingKnowledgeSet.value ||
+      deleteKnowledgeSetTarget.value
+    )
+      return
     deleteKnowledgeSetTarget.value = { ...set }
     deleteKnowledgeSetTrigger = trigger
   }
@@ -419,10 +502,11 @@ export const useKnowledgeConsole = () => {
         generation === deleteSetGeneration &&
         isCurrentKnowledgeVisit(targetKey, visitGeneration)
       ) {
-        uiStore.showToast('资料库已删除', 'success')
+        uiStore.showToast('资料库已归档', 'success')
       }
       await refetchKnowledgeSets()
       void queryClient.invalidateQueries({ queryKey: ['scenarioOptions'] })
+      void queryClient.invalidateQueries({ queryKey: ['library-catalog'] })
       if (generation === deleteSetGeneration && deleteKnowledgeSetTarget.value?.key === targetKey) {
         const trigger = deleteKnowledgeSetTrigger
         deleteKnowledgeSetTarget.value = null
@@ -434,7 +518,7 @@ export const useKnowledgeConsole = () => {
         generation === deleteSetGeneration &&
         isCurrentKnowledgeVisit(targetKey, visitGeneration)
       ) {
-        uiStore.showToast(`删除资料库失败: ${formatError(err)}`, 'danger')
+        uiStore.showToast(`归档资料库失败: ${formatError(err)}`, 'danger')
       }
     } finally {
       if (generation === deleteSetGeneration) isDeletingKnowledgeSet.value = false
@@ -446,7 +530,10 @@ export const useKnowledgeConsole = () => {
     const directory = selectedKnowledgeDirectory.value
     const files = knowledgeFiles.value
     if (!key || !confirmDiscardKnowledgeChanges()) return
+    abortKnowledgeFileRead()
     setKnowledgeFileDraft(null, nextKnowledgeFilePath(directory, files))
+    knowledgeFileReadError.value = ''
+    isEditingKnowledgeFile.value = true
   }
 
   const triggerKnowledgeUpload = () => {
@@ -474,6 +561,7 @@ export const useKnowledgeConsole = () => {
       await refetchKnowledgeSets()
       void queryClient.invalidateQueries({ queryKey: ['knowledgeFiles', targetKey] })
       void queryClient.invalidateQueries({ queryKey: ['knowledgeRevisions', targetKey] })
+      void queryClient.invalidateQueries({ queryKey: ['library-catalog'] })
       if (
         generation === uploadGeneration &&
         isCurrentKnowledgeVisit(targetKey, visitGeneration) &&
@@ -489,6 +577,7 @@ export const useKnowledgeConsole = () => {
           warnings: [],
           content: text,
         })
+        isEditingKnowledgeFile.value = false
         uiStore.showToast('文件已上传', 'success')
       }
     } catch (err: unknown) {
@@ -507,6 +596,7 @@ export const useKnowledgeConsole = () => {
   }
 
   const saveKnowledgeFile = async () => {
+    if (isSavingKnowledgeFile.value) return
     const targetKey = selectedKnowledgeKey.value
     const targetSelectedPath = selectedKnowledgeFilePath.value
     const targetPath = knowledgeFileDraftPath.value.trim()
@@ -527,6 +617,7 @@ export const useKnowledgeConsole = () => {
       void queryClient.invalidateQueries({ queryKey: ['knowledgeFiles', targetKey] })
       void queryClient.invalidateQueries({ queryKey: ['knowledgeRevisions', targetKey] })
       void queryClient.invalidateQueries({ queryKey: ['scenarioOptions'] })
+      void queryClient.invalidateQueries({ queryKey: ['library-catalog'] })
       if (
         generation === saveGeneration &&
         isCurrentKnowledgeVisit(targetKey, visitGeneration) &&
@@ -534,7 +625,10 @@ export const useKnowledgeConsole = () => {
       ) {
         selectedKnowledgeFilePath.value = saved.path
         knowledgeFileSavedSnapshot.value = acceptedSnapshot
-        if (knowledgeFileSnapshot() === acceptedSnapshot) setKnowledgeFileDraft(saved)
+        if (knowledgeFileSnapshot() === acceptedSnapshot) {
+          setKnowledgeFileDraft(saved)
+          isEditingKnowledgeFile.value = false
+        }
         uiStore.showToast('资料库文件已保存', 'success')
       }
     } catch (err: unknown) {
@@ -550,78 +644,145 @@ export const useKnowledgeConsole = () => {
     }
   }
 
-  const openDeleteKnowledgeFile = (trigger: HTMLElement | null = null) => {
-    const key = selectedKnowledgeKey.value
-    const path = selectedKnowledgeFilePath.value
-    if (!key || !path || isDeletingKnowledgeFile.value) return
-    deleteKnowledgeFileTarget.value = { key, path }
+  const openDeleteKnowledgeFile = (
+    target: KnowledgeFileDeleteTarget,
+    trigger: HTMLElement | null,
+  ) => {
+    if (isDeletingKnowledgeFile.value || deleteKnowledgeFileTarget.value) return
+    deleteKnowledgeFileTarget.value = { ...target }
     deleteKnowledgeFileTrigger = trigger
+    const row = trigger?.closest('.knowledge-navigation-row')
+    deleteKnowledgeFileFocusFallbacks = [
+      row?.nextElementSibling?.querySelector<HTMLElement>('.knowledge-navigation-item'),
+      row?.previousElementSibling?.querySelector<HTMLElement>('.knowledge-navigation-item'),
+      trigger
+        ?.closest('.knowledge-page')
+        ?.querySelector<HTMLElement>('[data-console-action="create-knowledge-file"]'),
+    ].filter((element): element is HTMLElement => Boolean(element))
   }
 
   const handleDeleteKnowledgeFileOpenChange = (open: boolean) => {
     if (open || isDeletingKnowledgeFile.value) return
     const trigger = deleteKnowledgeFileTrigger
+    const fallbacks = deleteKnowledgeFileFocusFallbacks
     deleteKnowledgeFileTarget.value = null
     deleteKnowledgeFileTrigger = null
-    restoreDeleteTrigger(trigger)
+    deleteKnowledgeFileFocusFallbacks = []
+    restoreDeleteTrigger(trigger, fallbacks)
   }
 
   const handleDeleteKnowledgeFile = async () => {
     const target = deleteKnowledgeFileTarget.value
     if (!target || isDeletingKnowledgeFile.value) return
     const { key: targetKey, path: targetPath } = target
+    if (
+      targetKey === selectedKnowledgeKey.value &&
+      targetPath === selectedKnowledgeFilePath.value &&
+      !confirmDiscardKnowledgeChanges()
+    )
+      return
     const visitGeneration = knowledgeSetVisitGeneration
     const draftGeneration = knowledgeDraftGeneration
     const generation = ++deleteFileGeneration
     try {
       isDeletingKnowledgeFile.value = true
       await deleteKnowledgeFile(targetKey, targetPath)
-      await refetchKnowledgeSets()
-      void queryClient.invalidateQueries({ queryKey: ['knowledgeFiles', targetKey] })
-      void queryClient.invalidateQueries({ queryKey: ['knowledgeRevisions', targetKey] })
       if (
         generation === deleteFileGeneration &&
-        isCurrentKnowledgeVisit(targetKey, visitGeneration) &&
-        selectedKnowledgeFilePath.value === targetPath
+        isCurrentKnowledgeVisit(targetKey, visitGeneration)
       ) {
-        if (knowledgeDraftGeneration === draftGeneration) clearKnowledgeFileDraft()
+        // 只取消被删除文件的读取；另一文件的在途选择与草稿不受影响。
+        if (pendingKnowledgeFilePath === targetPath) abortKnowledgeFileRead()
+        if (
+          selectedKnowledgeFilePath.value === targetPath &&
+          knowledgeDraftGeneration === draftGeneration
+        ) {
+          setKnowledgeFileDraft(null)
+          isEditingKnowledgeFile.value = false
+        }
         uiStore.showToast('资料库文件已删除', 'success')
       }
+      await refetchKnowledgeSets()
+      void queryClient.invalidateQueries({ queryKey: ['knowledgeRevisions', targetKey] })
+      void queryClient.invalidateQueries({ queryKey: ['library-catalog'] })
+      // 列表完成更新后再恢复焦点，避免焦点落到即将移除的行。
+      await queryClient.invalidateQueries({ queryKey: ['knowledgeFiles', targetKey] })
       if (
         generation === deleteFileGeneration &&
         deleteKnowledgeFileTarget.value?.key === targetKey &&
         deleteKnowledgeFileTarget.value.path === targetPath
       ) {
         const trigger = deleteKnowledgeFileTrigger
+        const fallbacks = deleteKnowledgeFileFocusFallbacks
         deleteKnowledgeFileTarget.value = null
         deleteKnowledgeFileTrigger = null
-        restoreDeleteTrigger(trigger)
+        deleteKnowledgeFileFocusFallbacks = []
+        if (isCurrentKnowledgeVisit(targetKey, visitGeneration))
+          restoreDeleteTrigger(trigger, fallbacks)
       }
     } catch (err: unknown) {
       if (
         generation === deleteFileGeneration &&
-        isCurrentKnowledgeVisit(targetKey, visitGeneration) &&
-        selectedKnowledgeFilePath.value === targetPath
+        isCurrentKnowledgeVisit(targetKey, visitGeneration)
       ) {
-        uiStore.showToast(`删除资料库文件失败: ${formatError(err)}`, 'danger')
+        uiStore.showToast(`删除资料库文件「${targetPath}」失败: ${formatError(err)}`, 'danger')
       }
     } finally {
       if (generation === deleteFileGeneration) isDeletingKnowledgeFile.value = false
     }
   }
 
+  const refreshKnowledgeLibrary = async () => {
+    if (isRefreshingKnowledge.value) return
+    const key = selectedKnowledgeKey.value
+    const path = selectedKnowledgeFilePath.value
+    const visitGeneration = knowledgeSetVisitGeneration
+    const readGeneration = knowledgeFileReadGeneration
+    const canReloadSelectedFile = !isLoadingKnowledgeFile.value
+    try {
+      isRefreshingKnowledge.value = true
+      await Promise.all([
+        refetchKnowledgeSets(),
+        ...(key ? [refetchKnowledgeFiles(), refetchKnowledgeRevisions()] : []),
+        queryClient.invalidateQueries({ queryKey: ['library-catalog'] }),
+      ])
+      if (
+        key &&
+        path &&
+        canReloadSelectedFile &&
+        readGeneration === knowledgeFileReadGeneration &&
+        isCurrentKnowledgeVisit(key, visitGeneration) &&
+        selectedKnowledgeFilePath.value === path &&
+        !isEditingKnowledgeFile.value &&
+        !isKnowledgeFileDirty.value &&
+        knowledgeFiles.value.some((file) => file.path === path)
+      ) {
+        await selectKnowledgeFile(path, { force: true, reload: true })
+      }
+    } finally {
+      isRefreshingKnowledge.value = false
+    }
+  }
+
   watch(
     () => uiStore.globalRefreshKey,
-    () => {
-      void queryClient.invalidateQueries({ queryKey: ['knowledgeSets'] })
-      void queryClient.invalidateQueries({ queryKey: ['knowledgeFiles'] })
-      void queryClient.invalidateQueries({ queryKey: ['knowledgeRevisions'] })
-    },
+    () => void refreshKnowledgeLibrary(),
   )
 
   return {
     formatError,
     canDeleteSelectedKnowledgeSet,
+    closeKnowledgeFileEditor,
+    editKnowledgeFile,
+    isEditingKnowledgeFile,
+    isRefreshingKnowledge,
+    isLibraryCatalogError,
+    libraryCatalogError,
+    knowledgeFileReadError,
+    knowledgeSelectionMessage,
+    knowledgeSetName,
+    loadingKnowledgeFilePath,
+    refreshKnowledgeLibrary,
     clearKnowledgeFileDraft,
     currentKnowledgeRevision,
     confirmDiscardKnowledgeChanges,
@@ -639,6 +800,8 @@ export const useKnowledgeConsole = () => {
     isDeletingKnowledgeSet,
     isKnowledgeFileDirty,
     isKnowledgeFilesError,
+    isKnowledgeRevisionsError,
+    knowledgeRevisionsError,
     isKnowledgeSetsError,
     isLoadingKnowledgeFile,
     isLoadingKnowledgeFiles,

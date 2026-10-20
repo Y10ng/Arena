@@ -1,11 +1,14 @@
 <template>
-  <div class="artifacts-page">
-    <Card class="artifacts-list-card" padding="md">
-      <div class="artifacts-list-header artifacts-list-header--actions">
-        <Tabs v-model="viewMode" :options="viewOptions" variant="pill" />
-      </div>
-
+  <div
+    class="artifacts-page"
+    :class="{
+      'artifacts-page--report': selectedArtifactIsReportMarkdown,
+      'artifacts-page--previewing': Boolean(selectedArtifact) && !directoryVisible,
+    }"
+  >
+    <Card v-show="!isReportReading" ref="fileList" class="artifacts-list-card" padding="md">
       <FilterBar label="产物筛选" class="artifacts-filter-bar">
+        <Tabs v-model="viewMode" :options="viewOptions" variant="pill" />
         <FormField label="搜索文件名" class="artifacts-search-field">
           <template #default="{ controlAttrs }">
             <Input
@@ -90,30 +93,9 @@
         >
           <template #cell-file="{ row }">
             <span class="artifact-file-name" :title="row.uri">{{ artifactFilename(row) }}</span>
-          </template>
-          <template #cell-kind="{ row }">
-            <Badge :tone="row.kind_deprecated ? 'warning' : 'neutral'" size="sm">
-              {{ artifactKindLabel(row.kind) }}
-            </Badge>
-          </template>
-          <template #cell-size="{ row }">
-            <span class="artifact-mono">{{ bytes(row.size) }}</span>
-          </template>
-          <template #cell-run="{ row }">
-            <Button
-              v-if="row.task_run_id"
-              variant="link"
-              size="sm"
-              :aria-label="`查看产物 ${artifactFilename(row)} 的运行 ${row.task_run_id}`"
-              @click="goToRun(row.task_run_id)"
-            >
-              #{{ row.task_run_id.slice(0, 8) }}
-            </Button>
-            <span v-else class="artifact-muted">—</span>
-          </template>
-          <template #cell-created="{ row }">
-            <span class="artifact-time" :title="row.created_at">
-              {{ formatRelativeTime(row.created_at) }}
+            <span class="artifact-file-secondary">
+              {{ artifactKindLabel(row.kind) }} · {{ bytes(row.size) }}
+              <span v-if="row.kind_deprecated"> · 历史类别</span>
             </span>
           </template>
           <template #cell-actions="{ row }">
@@ -130,7 +112,87 @@
       </template>
     </Card>
 
-    <Card class="artifact-preview-card" padding="none">
+    <ReportReader
+      v-if="selectedArtifact && selectedArtifactIsReportMarkdown"
+      v-show="isReportReading"
+      v-model:mode="reportMode"
+      class="artifact-report-reader"
+      :identity="artifactRowKey(selectedArtifact)"
+      :content="textPreviewContent"
+      :ready="hasTextPreview && !isPreviewLoading"
+    >
+      <template #title>
+        <div class="artifact-report-title">
+          <Button variant="ghost" size="sm" @click="returnToFiles"
+            ><ArrowLeft :size="16" aria-hidden="true" />返回文件</Button
+          >
+          <h2 :title="selectedArtifact.uri">{{ artifactFilename(selectedArtifact) }}</h2>
+        </div>
+      </template>
+      <template #actions>
+        <a class="artifact-download-link" :href="artifactContentUrl(selectedArtifact)" download
+          >下载完整报告</a
+        >
+        <Popover align="end" size="md">
+          <template #trigger><Button variant="ghost" size="sm">文件信息</Button></template>
+          <dl class="artifact-file-info">
+            <dt>大小</dt>
+            <dd>{{ bytes(selectedArtifact.size) }}</dd>
+            <dt>生成于</dt>
+            <dd>{{ formatRelativeTime(selectedArtifact.created_at) }}</dd>
+            <dt>SHA256</dt>
+            <dd>
+              {{ selectedArtifact.sha256
+              }}<Button variant="link" size="sm" @click="copySha">复制 HASH</Button>
+            </dd>
+            <template v-if="selectedArtifact.task_run_id"
+              ><dt>运行</dt>
+              <dd>
+                <Button variant="link" size="sm" @click="goToRun(selectedArtifact.task_run_id)"
+                  >查看运行</Button
+                >
+              </dd></template
+            >
+          </dl>
+        </Popover>
+      </template>
+      <template #notice>
+        <Alert
+          v-if="previewData?.truncated"
+          class="artifact-preview-alert"
+          tone="info"
+          :title="previewWindow === 'head' ? '当前仅显示报告开头' : '当前仅显示报告尾部'"
+        >
+          已读取 {{ bytes(previewData.bytes_read) }}，原文件共
+          {{ bytes(previewData.size) }}。目录仅覆盖已载入部分，下载可获取完整报告。
+          <template #actions
+            ><Button variant="secondary" size="sm" @click="togglePreviewWindow">{{
+              previewWindow === 'head' ? '查看文件尾部' : '查看文件开头'
+            }}</Button></template
+          >
+        </Alert>
+        <Alert
+          v-if="selectedArtifact.kind_deprecated"
+          class="artifact-preview-alert"
+          tone="warning"
+          title="历史兼容类别"
+          >{{ artifactDeprecationMessage(selectedArtifact) }}</Alert
+        >
+      </template>
+      <template #state>
+        <div v-if="isPreviewLoading" class="artifact-preview-loading" role="status">
+          <Spinner /><span>正在载入报告…</span>
+        </div>
+        <ErrorState
+          v-else
+          title="报告预览载入失败"
+          :description="previewError || '预览尚未载入，请重试或下载原文件。'"
+          @retry="retryPreview"
+        />
+      </template>
+    </ReportReader>
+
+    <Card v-else class="artifact-preview-card" padding="none">
       <EmptyState
         v-if="!selectedArtifact"
         class="artifact-preview-empty"
@@ -144,19 +206,34 @@
 
       <template v-else>
         <header class="artifact-preview-header">
+          <Button class="artifact-files-back" variant="ghost" size="sm" @click="returnToFiles"
+            ><ArrowLeft :size="16" aria-hidden="true" />返回文件</Button
+          >
           <div class="artifact-preview-title">
             <h2 :title="selectedArtifact.uri">{{ artifactFilename(selectedArtifact) }}</h2>
-            <div class="artifact-preview-meta">
-              <span
-                >大小 <strong>{{ bytes(selectedArtifact.size) }}</strong></span
-              >
-              <span aria-hidden="true">·</span>
-              <span class="artifact-sha" :title="selectedArtifact.sha256">
-                SHA256 <strong>{{ abbreviatedSha }}</strong>
-              </span>
-              <Button variant="link" size="sm" @click="copySha">复制 HASH</Button>
-            </div>
           </div>
+          <Popover align="end" size="md">
+            <template #trigger><Button variant="ghost" size="sm">文件信息</Button></template>
+            <dl class="artifact-file-info">
+              <dt>大小</dt>
+              <dd>{{ bytes(selectedArtifact.size) }}</dd>
+              <dt>生成于</dt>
+              <dd>{{ selectedArtifact.created_at }}</dd>
+              <dt>SHA256</dt>
+              <dd>
+                {{ selectedArtifact.sha256
+                }}<Button variant="link" size="sm" @click="copySha">复制 HASH</Button>
+              </dd>
+              <template v-if="selectedArtifact.task_run_id"
+                ><dt>运行</dt>
+                <dd>
+                  <Button variant="link" size="sm" @click="goToRun(selectedArtifact.task_run_id)"
+                    >查看运行</Button
+                  >
+                </dd></template
+              >
+            </dl>
+          </Popover>
           <a
             class="artifact-download-link"
             :href="artifactContentUrl(selectedArtifact)"
@@ -225,10 +302,7 @@
           </template>
 
           <div v-else-if="hasTextPreview" class="artifact-text-preview">
-            <div v-if="selectedArtifactIsReportMarkdown" class="artifact-rendered-report">
-              <SafeReportMarkdown :content="textPreviewContent" />
-            </div>
-            <MarkdownPreview v-else-if="selectedArtifactIsMarkdown" :content="textPreviewContent" />
+            <MarkdownPreview v-if="selectedArtifactIsMarkdown" :content="textPreviewContent" />
             <MonacoEditor
               v-else
               :model-value="textPreviewContent"
@@ -280,7 +354,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery } from '@tanstack/vue-query'
 import {
@@ -292,12 +366,13 @@ import {
 } from '@/api/client'
 import MarkdownPreview from '@/components/MarkdownPreview.vue'
 import { DataTable, ErrorState, FilterBar, type DataTableColumn } from '@/components/patterns'
-import SafeReportMarkdown from '@/features/reports/SafeReportMarkdown.vue'
+import { ArrowLeft } from '@lucide/vue'
+import ReportReader from '@/features/reports/ReportReader.vue'
 import {
   Alert,
-  Badge,
   Button,
   Card,
+  Popover,
   EmptyState,
   FormField,
   Input,
@@ -341,6 +416,10 @@ const kindFilter = ref<ArtifactKindFilter>('all')
 const filenameSearch = ref('')
 const selectedArtifactId = ref<string | null>(null)
 const invalidArtifactNotice = ref(false)
+const directoryVisible = ref(false)
+const fileList = ref<InstanceType<typeof Card> | null>(null)
+const reportMode = ref<'rendered' | 'raw'>('rendered')
+let previewAbort: AbortController | null = null
 const previewWindow = ref<ArtifactPreviewWindow>('tail')
 const previewData = ref<ArtifactPreview | null>(null)
 const previewError = ref('')
@@ -396,6 +475,9 @@ const selectedArtifactIsReportMarkdown = computed(() => {
   if (artifact?.kind !== 'report') return false
   return ['md', 'markdown'].includes(fileExtension(artifact.uri))
 })
+const isReportReading = computed(
+  () => selectedArtifactIsReportMarkdown.value && !directoryVisible.value,
+)
 const artifactWordWrap = computed<'on' | 'off'>(() =>
   selectedArtifact.value?.kind === 'raw_output' ? 'off' : 'on',
 )
@@ -413,10 +495,6 @@ const hasTextPreview = computed(() => {
 const textPreviewContent = computed(() =>
   hasTextPreview.value ? (previewData.value?.content ?? '') : '',
 )
-const abbreviatedSha = computed(() => {
-  const sha = selectedArtifact.value?.sha256 ?? ''
-  return sha.length > 16 ? `${sha.slice(0, 16)}…` : sha || '—'
-})
 const screenshotIdentity = computed(() => {
   const artifact = selectedArtifact.value
   return artifact ? `${projectVisitGeneration}:${artifact.project_id}:${artifact.id}` : ''
@@ -428,16 +506,9 @@ const screenshotFailed = computed(
 )
 
 const artifactColumns = [
-  { key: 'file', label: '文件名' },
-  { key: 'kind', label: '类别' },
-  { key: 'size', label: '大小' },
-  { key: 'run', label: 'Run' },
-  { key: 'created', label: '建立时间' },
+  { key: 'file', label: '文件' },
   { key: 'actions', label: '操作', align: 'end' },
-] satisfies readonly DataTableColumn<
-  ProjectArtifact,
-  'file' | 'kind' | 'size' | 'run' | 'created' | 'actions'
->[]
+] satisfies readonly DataTableColumn<ProjectArtifact, 'file' | 'actions'>[]
 
 function artifactRowKey(artifact: ProjectArtifact): string {
   return `${artifact.project_id}:${artifact.id}`
@@ -464,6 +535,8 @@ function queryArtifactId(): string | null {
 
 function invalidatePreview() {
   previewRequestGeneration += 1
+  previewAbort?.abort()
+  previewAbort = null
   previewData.value = null
   previewError.value = ''
   isPreviewLoading.value = false
@@ -504,6 +577,9 @@ async function loadPreview(artifact: ProjectArtifact, window = previewWindow.val
   const projectVisit = projectVisitGeneration
   const requestGeneration = ++previewRequestGeneration
   const artifactId = artifact.id
+  previewAbort?.abort()
+  const controller = new AbortController()
+  previewAbort = controller
   previewData.value = null
   previewError.value = ''
   isPreviewLoading.value = true
@@ -511,10 +587,14 @@ async function loadPreview(artifact: ProjectArtifact, window = previewWindow.val
   try {
     const data =
       window === 'tail'
-        ? await fetchArtifactTailPreview(projectId, artifactId)
-        : await fetchArtifactPreview(projectId, artifactId)
+        ? await fetchArtifactTailPreview(projectId, artifactId, controller.signal)
+        : await fetchArtifactPreview(projectId, artifactId, controller.signal)
     if (isCurrentPreviewSource(requestGeneration, projectId, projectVisit, artifactId, window)) {
-      previewData.value = data
+      if (data.project_id !== projectId || data.artifact_id !== artifactId) {
+        previewError.value = '服务端返回的项目或 Artifact 身份与所选文件不一致，已阻止渲染。'
+      } else {
+        previewData.value = data
+      }
     }
   } catch (caught) {
     if (isCurrentPreviewSource(requestGeneration, projectId, projectVisit, artifactId, window)) {
@@ -536,7 +616,10 @@ function applySelection(artifact: ProjectArtifact, updateRoute: boolean) {
     kindFilter.value = 'all'
   }
   selectedArtifactId.value = artifact.id
-  previewWindow.value = 'tail'
+  directoryVisible.value = false
+  reportMode.value = 'rendered'
+  previewWindow.value =
+    artifact.kind === 'report' && isMarkdownFile(artifact.uri, artifact.kind) ? 'head' : 'tail'
   invalidatePreview()
   if (updateRoute) {
     void router.replace({
@@ -548,8 +631,16 @@ function applySelection(artifact: ProjectArtifact, updateRoute: boolean) {
 }
 
 function selectArtifact(artifact: ProjectArtifact) {
+  directoryVisible.value = false
   if (isArtifactSelected(artifact)) return
   applySelection(artifact, true)
+}
+
+async function returnToFiles() {
+  directoryVisible.value = true
+  await nextTick()
+  const root = fileList.value?.$el as HTMLElement | undefined
+  root?.querySelector<HTMLElement>('[aria-current="true"] button')?.focus({ preventScroll: true })
 }
 
 function reconcileRouteSelection() {
@@ -663,6 +754,7 @@ watch(
 onBeforeUnmount(() => {
   mounted = false
   previewRequestGeneration += 1
+  previewAbort?.abort()
 })
 </script>
 

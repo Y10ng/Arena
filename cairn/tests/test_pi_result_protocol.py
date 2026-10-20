@@ -391,8 +391,26 @@ def test_goal_driven_bootstrap_decode_accepts_fact_without_complete():
     }
 
 
+@pytest.mark.parametrize("action", [
+    {"intents": [{"from": ["f1"], "description": "new work"}]},
+    {"abandon": ["i1"]},
+    {"discovered_surfaces": [{"surface_kind": "path", "surface_key": "/fixture"}]},
+])
+def test_reason_completion_rejects_nonempty_actions_in_python_and_dispatcher(action):
+    from cairn.dispatcher.contracts import PhaseContractError
+
+    data = {"complete": {"from": ["f1"], "description": "done"}, **action}
+    with pytest.raises(ValidationError):
+        validate_phase_data("reason_execute", data)
+    with pytest.raises(PhaseContractError):
+        validate_reason_payload({"protocol": "cairn-assessment-v2", "accepted": True,
+                                 "kind": "reason_result", "data": data},
+                                open_intents_empty=True, max_intents=3, goal_driven=True,
+                                surface_manifest=True)
+
+
 def test_every_executable_phase_schema_and_export_are_current():
-    assert len(PHASE_DATA_MODELS) == 8
+    assert len(PHASE_DATA_MODELS) == 9
     assert "healthcheck" not in PHASE_DATA_MODELS
     with pytest.raises(ValueError, match="unsupported result phase"):
         build_submit_result_schema("healthcheck")
@@ -617,8 +635,194 @@ def test_no_raw_report_updates_or_title_lookup():
     with pytest.raises(ValidationError):
         validate_phase_data("report_execute", {"vulnerability_updates": [], "report_markdown": "text"})
     payload = {"protocol": "cairn-assessment-v2", "accepted": True, "kind": "report_result",
-               "data": {"executive_summary": "no findings", "findings": []}}
+               "data": {"schema_version": 2, "executive_summary": "no findings", "findings": [],
+                        "layout": [{"type": "markdown", "markdown": "# Report"}]}}
     assert validate_report_payload(payload)[0] == "report"
+
+
+def test_worker_evidence_v2_is_single_source_and_rejects_legacy_worker_data():
+    from cairn.dispatcher.worker_protocol.submission import FactResult
+
+    item = {"id": "req-1", "kind": "http", "source": "capture",
+            "request": {"artifact_handle": "local-request"}}
+    finding = {
+        "schema_version": 2, "title": "Synthetic finding", "severity": "high",
+        "identity": {
+            "vulnerability_class": "broken_access_control",
+            "asset": {"host": "fixture.invalid", "port": 443},
+            "entrypoint": {"route": "/fixture"},
+        },
+        "evidence_items": [item],
+    }
+    fact = {"description": "Observed fixture", "vulnerability": finding}
+    assert FactResult.model_validate(fact).vulnerability.evidence_items[0].response is None
+    with pytest.raises(ValidationError, match="projected"):
+        FactResult.model_validate({**fact, "evidence_refs": []})
+    for phase in ("explore_execute", "bootstrap_conclude"):
+        with pytest.raises(ValidationError, match="projected"):
+            validate_phase_data(phase, {"fact": fact, "evidence_refs": []})
+    with pytest.raises(ValidationError):
+        FactResult.model_validate({**fact, "vulnerability": {**finding, "repro_request": "invented"}})
+    external = {
+        "schema_version": 3, "outcome": "confirmed", "summary": "合成观察",
+        "tested_scope": "本地合成材料", "limitations": [],
+        "key_evidence": [{"reason": "原件记录本次观察", "evidence_item_ids": ["req-1"]}],
+        "test_steps": [{"action": "登记本地合成原件", "observation": "登记成功", "evidence_item_ids": ["req-1"]}],
+        "evidence_items": [item],
+    }
+    assert validate_phase_data("external_verify_execute", external) == external
+    for changes in (
+        {"notes": "退役字段"}, {"schema_version": 2},
+        {"evidence_items": [item, item]},
+        {"key_evidence": [{"reason": "未知条目", "evidence_item_ids": ["missing"]}]},
+        {"test_steps": [{"action": "实际操作", "observation": "实际观察", "evidence_item_ids": ["missing"]}]},
+    ):
+        with pytest.raises(ValidationError):
+            validate_phase_data("external_verify_execute", {**external, **changes})
+    with pytest.raises(ValidationError):
+        validate_phase_data("external_verify_execute", {**external, "evidence_refs": []})
+    with pytest.raises(ValidationError, match="current execution evidence"):
+        validate_phase_data("external_verify_execute", {**external, "evidence_items": []})
+    with pytest.raises(ValidationError):
+        validate_phase_data("external_verify_execute", {
+            **external, "evidence_items": [{**item, "request_text": "invented"}],
+        })
+    legacy = {key: value for key, value in external.items() if key not in {"schema_version", "evidence_items"}}
+    legacy["evidence_refs"] = [{"artifact_id": "a1"}]
+    with pytest.raises(ValidationError):
+        validate_phase_data("external_verify_execute", legacy)
+
+
+@pytest.mark.parametrize("kind,source,content,valid", [
+    ("http", "capture", {"request": {"artifact_id": "a1"}, "response": {"artifact_id": "a2"}}, True),
+    ("http", "capture", {"request": {"artifact_id": "a1"}}, True),
+    ("http", "capture", {"response": {"artifact_id": "a2"}}, True),
+    ("artifact", "capture", {"artifact": {"artifact_id": "a1"}}, True),
+    ("text", "capture", {"artifact": {"artifact_id": "a1"}}, True),
+    ("http", "historical", {"request_text": "GET / HTTP/1.1\r\n\r\n  "}, True),
+    ("text", "historical", {"text": "历史原文\n  "}, True),
+    ("http", "capture", {"artifact": {"artifact_id": "a1"}}, False),
+    ("http", "capture", {"request": {"artifact_id": "a1"}, "artifact": {"artifact_id": "a2"}}, False),
+    ("http", "historical", {"text": "不可隐藏的正文"}, False),
+    ("artifact", "capture", {"request": {"artifact_id": "a1"}}, False),
+    ("text", "capture", {"response": {"artifact_id": "a1"}}, False),
+    ("artifact", "historical", {"artifact": {"artifact_id": "a1"}, "response_text": "HTTP/1.1 200 OK"}, False),
+    ("artifact", "historical", {"text": "附件应使用原件引用"}, False),
+    ("http", "capture", {"request_text": "GET / HTTP/1.1"}, False),
+    ("http", "capture", {}, False),
+])
+def test_evidence_kind_slots_agree_across_python_writes(kind, source, content, valid):
+    from cairn.evidence_contracts import EvidenceItem, WorkerEvidenceItem
+    from cairn.server.schemas.verification_requests import VerificationResult
+
+    item = {"id": "synthetic", "kind": kind, "source": source, **content}
+    inline = bool({"request_text", "response_text", "text"} & content.keys())
+    result = {
+        "schema_version": 3, "outcome": "confirmed", "summary": "合成结果",
+        "tested_scope": "仅隔离合同", "key_evidence": [], "test_steps": [], "limitations": [],
+        "evidence_items": [item],
+    }
+    for model, value, accepted in (
+        (EvidenceItem, item, valid),
+        (WorkerEvidenceItem, item, valid and not inline),
+        (VerificationResult, result, valid and not inline),
+    ):
+        if accepted:
+            parsed = model.model_validate(value)
+            assert parsed.model_dump(exclude_unset=True) == value
+        else:
+            with pytest.raises(ValidationError):
+                model.model_validate(value)
+
+
+@pytest.mark.parametrize("phase,prompt_file", [
+    ("explore_execute", "explore.md"), ("explore_conclude", "explore_conclude.md"),
+])
+def test_loaded_explore_guidance_submits_registered_finding(phase, prompt_file, tmp_path, monkeypatch):
+    from copy import deepcopy
+    from cairn.dispatcher.prompting import load_prompt
+    from cairn.dispatcher.tasks.artifact_records import resolve_declared_evidence_items
+    from cairn.dispatcher.tasks.common_base import ProcessArtifactRecord
+    from cairn.dispatcher.worker_protocol.submission import FactResult
+
+    monkeypatch.setenv("CAIRN_PROMPTS_ROOT", str(tmp_path))
+    instructions = load_prompt("goal-driven-v1", prompt_file)
+    assert "capture_http_evidence" in instructions and "evidence_items" in instructions
+    assert "packet_artifact_handle" not in instructions
+    data = {
+        "fact": {"description": "合成观察", "vulnerability": {
+            "schema_version": 2, "title": "合成发现", "severity": "high",
+            "identity": {"vulnerability_class": "broken_access_control",
+                         "asset": {"host": "fixture.invalid", "port": 443},
+                         "entrypoint": {"route": "/fixture"}},
+            "evidence_items": [{"id": "capture-1", "kind": "http", "source": "capture",
+                                "request": {"artifact_handle": "registered-request"},
+                                "response": {"artifact_handle": "registered-response"}}],
+        }},
+        "assessment_record": {"hypothesis": "合成权限假设", "outcome": "finding",
+                              "observations": ["合成观察"],
+                              "evidence_refs": [{"artifact_handle": "registered-request"}]},
+    }
+    assert validate_phase_data(phase, data, assessment_protocol=GOAL_DRIVEN_PROTOCOL) == data
+    finding = FactResult.model_validate(data["fact"]).vulnerability
+    resolved = resolve_declared_evidence_items(finding.evidence_items, ProcessArtifactRecord(
+        refs=[], artifact_ids_by_handle={"registered-request": "a1", "registered-response": "a2"},
+    ), require_current_run=True)
+    assert (resolved[0].request.artifact_id, resolved[0].response.artifact_id) == ("a1", "a2")
+    retired = deepcopy(data)
+    retired["fact"]["vulnerability"]["packet_artifact_handle"] = "registered-request"
+    with pytest.raises(ValidationError):
+        validate_phase_data(phase, retired, assessment_protocol=GOAL_DRIVEN_PROTOCOL)
+
+
+def test_worker_evidence_items_resolve_uploaded_versions_and_preserve_missing_side():
+    from cairn.dispatcher.tasks.artifact_records import (
+        UnresolvedArtifactEvidenceError, resolve_declared_evidence_items,
+    )
+    from cairn.dispatcher.tasks.common_base import ProcessArtifactRecord
+    from cairn.evidence_contracts import WorkerEvidenceItem, evidence_refs
+
+    item = WorkerEvidenceItem.model_validate({
+        "id": "request-only", "kind": "http", "source": "capture",
+        "request": {"artifact_handle": "local-request", "pointer": "bytes"},
+    })
+    uploaded = ProcessArtifactRecord(refs=[], artifact_ids_by_handle={"local-request": "a10"})
+    resolved = resolve_declared_evidence_items([item], uploaded, require_current_run=True)
+    assert resolved[0].request.artifact_id == "a10"
+    assert resolved[0].request.pointer == "bytes"
+    assert resolved[0].response is None
+    assert [ref.artifact_id for ref in evidence_refs(resolved)] == ["a10"]
+    with pytest.raises(UnresolvedArtifactEvidenceError):
+        resolve_declared_evidence_items([item], ProcessArtifactRecord(refs=[]), require_current_run=True)
+    historical = WorkerEvidenceItem.model_validate({
+        "id": "old", "kind": "artifact", "source": "historical", "artifact": {"artifact_id": "a9"},
+    })
+    with pytest.raises(UnresolvedArtifactEvidenceError, match="this execution"):
+        resolve_declared_evidence_items([historical], uploaded, require_current_run=True)
+
+    from cairn.dispatcher.contracts import extract_evidence_refs
+    from cairn.dispatcher.tasks.conclude_writer import (
+        CoverageEvidenceInsufficientError, build_vulnerability_for_conclude,
+    )
+
+    payload = {"accepted": True, "data": {"fact": {
+        "description": "Actual request without response",
+        "vulnerability": {
+            "schema_version": 2, "title": "Synthetic finding", "severity": "high",
+            "identity": {"vulnerability_class": "broken_access_control",
+                         "asset": {"host": "fixture.invalid", "port": 443},
+                         "entrypoint": {"route": "/fixture"}},
+            "evidence_items": [item.model_dump(exclude_none=True)],
+        },
+    }}}
+    assert [ref.artifact_id for ref in extract_evidence_refs(payload, section="fact")] == ["local-request"]
+    conclude = build_vulnerability_for_conclude(payload, uploaded, require_current_run_reproduction=True)
+    assert conclude["schema_version"] == 2
+    assert conclude["evidence_items"][0]["request"]["artifact_id"] == "a10"
+    assert "response" not in conclude["evidence_items"][0]
+    assert "repro_request" not in conclude
+    with pytest.raises(CoverageEvidenceInsufficientError):
+        build_vulnerability_for_conclude(payload, ProcessArtifactRecord(refs=[]))
 
 
 def test_depth_review_standalone_and_zero_selection():

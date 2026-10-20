@@ -794,3 +794,124 @@ def test_configure_upgrades_registered_postgres_and_preserves_custom_scenario(
         assert conn.execute(
             "SELECT * FROM scenarios ORDER BY key"
         ).fetchall() == scenarios_before_restart
+
+
+def test_postgres_v59_retires_groups_preserving_history_and_schedule_consumers(
+    empty_postgres_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import base64
+    from datetime import datetime, timedelta, timezone
+
+    from cairn.server.schemas.project_schedules import CreateScheduleRequest, ScheduleActionRequest, UpdateScheduleRequest
+    from cairn.server.schemas.projects import CreateProjectRequest
+    from cairn.server.services import model_credentials, project_schedules, tenant_workers
+    from cairn.server.services.project_records import create_project_record, get_project_detail, list_project_summaries
+    from cairn.server.services.project_resources import read_project_resource_content
+    from test_project_library_bindings import _principal, _worker
+
+    # 旧版本初始化也只作用于本 fixture 唯一新建的数据库。
+    with monkeypatch.context() as patch:
+        patch.setattr(db, "POSTGRES_MIGRATIONS", tuple(item for item in migrations.POSTGRES_MIGRATIONS if item.version <= 58))
+        db.configure(database_url=empty_postgres_url, artifact_path=tmp_path / "artifacts")
+    keyring = tmp_path / "keyring.json"
+    keyring.write_text(json.dumps({"active_version": "test-v1", "keys": {"test-v1": base64.b64encode(b"p" * 32).decode()}}))
+    keyring.chmod(0o600)
+    monkeypatch.setenv(model_credentials.KEYRING_FILE_ENV, str(keyring))
+    monkeypatch.setenv("CAIRN_PROJECT_RESOURCE_ROOT", str(tmp_path / "resources"))
+    monkeypatch.setattr(tenant_workers, "dispatcher_executor_available", lambda _conn: True)
+    principal = _principal("retirement-owner")
+    foreign = _principal("retirement-foreign")
+    worker = _worker(principal)
+    now = datetime(2030, 1, 1, 9, tzinfo=timezone.utc)
+    start = now + timedelta(hours=1)
+    project = CreateProjectRequest(
+        title="旧分类项目", origin="隔离验证背景", goal="检查持久化，不执行目标调用",
+        scenario="goal-driven-v1", tenant_worker_ids=[worker.id],
+        authorization_expires_at="2099-01-01T00:00:00Z",
+        targets=[{"type": "domain", "value": "authorized.example.test"}],
+    )
+    schedules = [project_schedules.create_schedule(CreateScheduleRequest(
+        request_id=uuid.uuid4(), mode=mode, timezone="UTC", start_at=start.isoformat(),
+        local_time="10:00" if mode != "once" else None,
+        weekdays=[1, 3] if mode == "weekly" else [], max_runs=3 if mode != "once" else None,
+        project=project,
+    ), principal, now=now) for mode in ("once", "daily", "weekly")]
+    pending_id = schedules[0]["project_id"]
+    execution = create_project_record(CreateProjectRequest.model_validate(project.model_dump() | {"resources": [
+        {"kind": "note", "path": "report.txt", "content": "original evidence\n"},
+    ]}), tenant_id=principal.tenant_id, creator=principal.subject_id)
+    execution_id = execution.project.id
+    resource_id = execution.resources[0].id
+    with db.get_conn() as conn:
+        conn.execute("INSERT INTO project_groups(id,name,owner,created_at,tenant_id) VALUES ('retired-group','历史分类',?,?,?)", (principal.subject_id, start.isoformat(), principal.tenant_id))
+        conn.execute("UPDATE projects SET group_id='retired-group'")
+        conn.execute("UPDATE counters SET value=19 WHERE name='project_group'")
+        conn.execute("INSERT INTO verification_integrations(id,tenant_id,name,token_hash,group_id,created_at,updated_at) VALUES ('retained-integration',?,'历史调用方',?,'retired-group',?,?)", (principal.tenant_id, "c" * 64, start.isoformat(), start.isoformat()))
+        conn.execute("INSERT INTO intents(id,project_id,description,creator,created_at) VALUES ('verification-intent',?,'历史复测','system',?)", (execution_id, start.isoformat()))
+        conn.execute("INSERT INTO verification_requests(id,schema_version,tenant_id,caller_type,caller_id,client_request_id,request_digest,mode,project_id,intent_id,report_type,report_resource_id,source_project_id,source_vulnerability_id,created_at,updated_at) VALUES ('retained-request',1,?,'integration','retained-integration','historical-client',?,'retest',?,'verification-intent','text',?,?,'historical-vulnerability',?,?)", (principal.tenant_id, "d" * 64, execution_id, resource_id, pending_id, start.isoformat(), start.isoformat()))
+        for schedule in schedules[1:]:
+            old = dict(schedule["project"], group_id="retired-group")
+            conn.execute("UPDATE project_schedules SET project_json=? WHERE id=?", (json.dumps(old, ensure_ascii=False), schedule["id"]))
+        conn.execute("UPDATE creation_requests SET request_digest=?", ("e" * 64,))
+        original_features = json.loads(conn.execute("SELECT features_json FROM scenarios WHERE key='goal-driven-v1'").fetchone()["features_json"])
+        features = {"sandbox": True, "nested": {"report_prompt_group": "preserved", "group_id": "not-a-classification"}, "report_policy_version": 1, "report_prompt_group": "historical-report"}
+        conn.execute("UPDATE scenarios SET features_json=? WHERE key='goal-driven-v1'", (json.dumps(features),))
+        snapshot = json.loads(conn.execute("SELECT scenario_snapshot_json FROM projects WHERE id=?", (pending_id,)).fetchone()["scenario_snapshot_json"])
+        snapshot["features"].update(report_policy_version=1, report_prompt_group="historical-report")
+        conn.execute("UPDATE projects SET scenario_snapshot_json=? WHERE id=?", (json.dumps(snapshot), pending_id))
+        tables = ("projects", "project_schedules", "verification_integrations", "creation_requests", "verification_requests", "facts", "intents", "targets", "project_tenant_workers", "project_resources", "artifacts", "vulnerabilities", "assessment_report_finalizations", "project_schedule_libraries", "schedule_resources", "project_schedule_occurrences")
+        before = {table: conn.execute(f"SELECT * FROM {table}").fetchall() for table in tables}
+        registry_before = conn.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
+        migrations.verify_or_apply(conn, migrations.POSTGRES_PROJECT_GROUP_RETIREMENT, lambda _conn: None)
+        # 每一行逐字段比对，只容许明确退场的列／顶层键变化。
+        for table, rows in before.items():
+            expected = []
+            for row in rows:
+                row = dict(row)
+                if table in {"projects", "verification_integrations"}:
+                    row.pop("group_id")
+                if table == "project_schedules" and row["mode"] in {"daily", "weekly"}:
+                    payload = json.loads(row["project_json"])
+                    payload.pop("group_id")
+                    row["project_json"] = payload
+                expected.append(row)
+            actual = conn.execute(f"SELECT * FROM {table}").fetchall()
+            if table == "project_schedules":
+                actual = [dict(row, project_json=json.loads(row["project_json"]) if row["project_json"] else None) for row in actual]
+            order_key = lambda item: json.dumps(dict(item), sort_keys=True, default=str)
+            assert sorted(actual, key=order_key) == sorted(expected, key=order_key), table
+        assert conn.execute("SELECT * FROM schema_migrations WHERE version<59 ORDER BY version").fetchall() == registry_before
+        assert conn.execute("SELECT to_regclass('project_groups') AS name").fetchone()["name"] is None
+        assert conn.execute("SELECT 1 FROM counters WHERE name='project_group'").fetchone() is None
+        assert conn.execute("SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name IN ('projects','verification_integrations','verification_configuration') AND column_name='group_id'").fetchone() is None
+        assert json.loads(conn.execute("SELECT features_json FROM scenarios WHERE key='goal-driven-v1'").fetchone()["features_json"]) == {key: value for key, value in features.items() if key not in {"report_policy_version", "report_prompt_group"}}
+        migrations.verify_or_apply(conn, migrations.POSTGRES_PROJECT_GROUP_RETIREMENT, lambda _conn: None)
+    # 任意遗留键的迁移保留已断言；消费阶段恢复为合法实时场景配置。
+    with db.get_conn() as conn:
+        conn.execute("UPDATE scenarios SET features_json=? WHERE key='goal-driven-v1'", (json.dumps(original_features),))
+    assert read_project_resource_content(execution_id, resource_id).content == b"original evidence\n"
+    summaries = list_project_summaries(tenant_id=principal.tenant_id, include_verification=False)
+    assert pending_id in {item.id for item in summaries}
+    assert execution_id not in {item.id for item in summaries}
+    capability = get_project_detail(execution_id).project.report_capability
+    assert capability.supported is False
+    assert capability.reason == "verification_request_managed"
+    with pytest.raises(HTTPException) as hidden:
+        project_schedules.get_schedule(schedules[0]["id"], foreign)
+    assert hidden.value.status_code == 404
+    daily = project_schedules.get_schedule(schedules[1]["id"], principal)
+    assert "group_id" not in daily["project"]
+    # 旧周期配置须继续支持编辑、暂停／恢复和消费，旧 pending 不再因无组受阻。
+    daily = project_schedules.update_schedule(daily["id"], UpdateScheduleRequest(
+        version=daily["version"], mode="daily", timezone="UTC", start_at=start.isoformat(),
+        local_time="10:00", max_runs=3, project=CreateProjectRequest.model_validate(daily["project"]),
+    ), principal, now=now)
+    for action in ("pause", "resume"):
+        daily = project_schedules.schedule_action(daily["id"], ScheduleActionRequest(version=daily["version"], action=action), principal, now=now)
+    assert project_schedules.consume_due_schedules(now=start) == {"processed": 3, "errors": 0}
+    assert get_project_detail(pending_id).project.status == "active"
+    for schedule in schedules[1:]:
+        saved = project_schedules.get_schedule(schedule["id"], principal)
+        assert saved["generated_count"] == 1
+        assert saved["last_result"]["status"] == "started"
+        assert "group_id" not in saved["project"]

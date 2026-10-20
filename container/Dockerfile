@@ -80,7 +80,7 @@ RUN set -eux; \
     case "$arch" in amd64|arm64) ;; *) echo "Unsupported architecture: $arch"; exit 1;; esac; \
     mkdir /tmp/cairn-web-tools; cd /tmp/cairn-web-tools; \
     gh_asset() { repo="$1"; tag="$2"; asset="$3"; out="$4"; \
-      curl -fL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 300 "https://github.com/${repo}/releases/download/${tag}/${asset}" -o "$out"; \
+      curl -fL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 3600 "https://github.com/${repo}/releases/download/${tag}/${asset}" -o "$out"; \
     }; \
     gh_asset projectdiscovery/katana v1.6.1 "katana_1.6.1_linux_${arch}.zip" katana.zip; \
     gh_asset projectdiscovery/nuclei v3.7.1 "nuclei_3.7.1_linux_${arch}.zip" nuclei.zip; \
@@ -106,8 +106,8 @@ RUN set -eux; \
       *) echo "Unsupported architecture: $arch"; exit 1 ;; \
     esac; \
     mkdir /tmp/cairn-search-tools; cd /tmp/cairn-search-tools; \
-    curl -fL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 300 -H 'Accept: application/octet-stream' "https://api.github.com/repos/BurntSushi/ripgrep/releases/assets/$rg_asset" -o ripgrep.tar.gz; \
-    curl -fL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 300 -H 'Accept: application/octet-stream' "https://api.github.com/repos/sharkdp/fd/releases/assets/$fd_asset" -o fd.tar.gz; \
+    curl -fL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 3600 -H 'Accept: application/octet-stream' "https://api.github.com/repos/BurntSushi/ripgrep/releases/assets/$rg_asset" -o ripgrep.tar.gz; \
+    curl -fL --retry 3 --retry-all-errors --connect-timeout 20 --max-time 3600 -H 'Accept: application/octet-stream' "https://api.github.com/repos/sharkdp/fd/releases/assets/$fd_asset" -o fd.tar.gz; \
     printf '%s  %s\n' "$rg_sha" ripgrep.tar.gz "$fd_sha" fd.tar.gz | sha256sum -c -; \
     tar -xzf ripgrep.tar.gz; tar -xzf fd.tar.gz; \
     install -m 0755 "ripgrep-15.1.0-${rust_target}/rg" /usr/local/bin/rg; \

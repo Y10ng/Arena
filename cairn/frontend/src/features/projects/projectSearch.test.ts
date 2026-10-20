@@ -19,8 +19,6 @@ const project: ProjectSummary = {
   tenant_id: 'tenant-foreign',
   tenant_name: 'Foreign Tenant',
   tenant_owner_login: 'foreign-owner',
-  group_id: 'group-red',
-  group_name: 'Red Team',
   fact_count: 0,
   intent_count: 0,
   working_intent_count: 0,
@@ -31,11 +29,10 @@ const project: ProjectSummary = {
 describe('projectMatchesSearch', () => {
   it.each([
     'foreign assessment',
-    'red team',
-    '运行中',
+    '进行中',
     '默认场景',
   ])('matches ordinary project fields for %s', query => {
-    expect(projectMatchesSearch(project, query, '运行中', '默认场景')).toBe(true)
+    expect(projectMatchesSearch(project, query, '默认场景')).toBe(true)
   })
 
   it.each([
@@ -43,12 +40,14 @@ describe('projectMatchesSearch', () => {
     'foreign tenant',
     'foreign-owner',
   ])('only matches tenant attribution for super administrators: %s', query => {
-    expect(projectMatchesSearch(project, query, '运行中', '默认场景')).toBe(false)
-    expect(projectMatchesSearch(project, query, '运行中', '默认场景', true)).toBe(true)
+    expect(projectMatchesSearch(project, query, '默认场景')).toBe(false)
+    expect(projectMatchesSearch(project, query, '默认场景', true)).toBe(true)
   })
 
-  it('trims input and rejects unrelated values', () => {
-    expect(projectMatchesSearch(project, '  red team  ', '运行中', '默认场景')).toBe(true)
-    expect(projectMatchesSearch(project, 'other tenant', '运行中', '默认场景', true)).toBe(false)
+  it('trims input and only searches the project short status, not runtime diagnostics', () => {
+    expect(projectMatchesSearch(project, '  foreign assessment  ', '默认场景')).toBe(true)
+    expect(projectMatchesSearch(project, 'other tenant', '默认场景', true)).toBe(false)
+    expect(projectMatchesSearch(project, '运行中', '默认场景')).toBe(false)
+    expect(projectMatchesSearch(project, '配置阻塞', '默认场景')).toBe(false)
   })
 })

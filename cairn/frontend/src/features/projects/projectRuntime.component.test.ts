@@ -25,7 +25,6 @@ vi.mock('@/api/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/api/client')>()),
   api: mocks.api,
   listVulnerabilities: vi.fn().mockResolvedValue([]),
-  listProjectGroups: vi.fn().mockResolvedValue([]),
 }))
 vi.mock('@/stores/workspace', () => ({ useWorkspaceStore: () => mocks.workspace }))
 vi.mock('@/stores/ui', () => ({ useUIStore: () => mocks.ui }))
@@ -94,6 +93,28 @@ const mountWorkspace = async () => {
   return wrapper
 }
 
+const summary = (id: string, status: ProjectSummary['status'] = 'active'): ProjectSummary => ({
+  ...detail(id).project,
+  status,
+  fact_count: 0,
+  intent_count: 1,
+  working_intent_count: 0,
+  unclaimed_intent_count: 1,
+  hint_count: 0,
+})
+const mountProjects = async () => {
+  wrapper = mount(Projects, {
+    attachTo: document.body,
+    global: {
+      plugins: [[VueQueryPlugin, { queryClient }]],
+      mocks: { $router: { push: vi.fn() } },
+      stubs: { RouterLink: { template: '<a><slot /></a>' } },
+    },
+  })
+  await settle()
+  return wrapper
+}
+
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] })
   runtime = runtimeFixture()
@@ -125,11 +146,11 @@ afterEach(() => {
 })
 
 describe('project runtime status and lifecycle with real queries and components', () => {
-  it('shows a short status and its reason without a diagnostic entry', async () => {
+  it('shows metadata status without runtime reasons or another diagnostic entry', async () => {
     const view = await mountWorkspace()
-    expect(view.findAll('[aria-label="项目运行状态"]')).toHaveLength(1)
-    expect(view.find('.workspace-header').text()).toContain('配置阻塞')
-    expect(view.find('.workspace-header').text()).toContain(runtime.message)
+    expect(view.findAll('[aria-label="项目状态"]')).toHaveLength(1)
+    expect(view.find('[aria-label="项目状态"]').text()).toBe('进行中')
+    expect(view.find('.workspace-header').text()).not.toContain(runtime.message)
     expect(view.text()).not.toContain('运行诊断')
     expect(
       mocks.api.mock.calls.filter(
@@ -139,7 +160,7 @@ describe('project runtime status and lifecycle with real queries and components'
     expect(mocks.api).toHaveBeenCalledWith('GET', '/projects/p1/task-runs')
   })
 
-  it('shows a query failure without blocking pause', async () => {
+  it('keeps the metadata label and pause entry when a runtime query fails', async () => {
     const view = await mountWorkspace()
     mocks.api.mockImplementation(async (_method: string, path: string) => {
       if (path.includes('/runtime')) throw new Error('secret upstream exception')
@@ -147,12 +168,15 @@ describe('project runtime status and lifecycle with real queries and components'
     })
     await queryClient.invalidateQueries({ queryKey: projectRuntimeKey('p1') })
     await settle()
-    expect(view.text()).toContain('状态暂未更新')
+    expect(view.find('[aria-label="项目状态"]').text()).toBe(
+      mocks.workspace.projectDetail.project.status === 'paused' ? '已暂停' : '进行中',
+    )
+    expect(view.find('.workspace-header').text()).not.toContain('状态暂未更新')
     expect(view.text()).not.toContain('secret upstream exception')
     expect(button('暂停项目').disabled).toBe(false)
   })
 
-  it('shows the draining pause without reporting physical completion', async () => {
+  it('shows paused metadata without adding runtime draining reasons to the title', async () => {
     const view = await mountWorkspace()
     mocks.api.mockImplementation(async (method: string, path: string) => {
       if (method === 'POST') {
@@ -178,10 +202,10 @@ describe('project runtime status and lifecycle with real queries and components'
     button('暂停项目').click()
     await settle()
     expect(mocks.api).toHaveBeenCalledWith('POST', '/projects/p1/pause')
-    expect(view.find('.workspace-header').text()).toContain('正在暂停')
-    expect(view.find('.workspace-header').text()).not.toContain('已暂停')
+    expect(view.find('[aria-label="项目状态"]').text()).toBe('已暂停')
+    expect(view.find('.workspace-header').text()).not.toContain('正在暂停')
     expect(button('继续项目').disabled).toBe(false)
-    expect(view.find('.workspace-header').text()).toContain('正在暂停，等待旧执行停止确认。')
+    expect(view.find('.workspace-status-reason').exists()).toBe(false)
     expect(
       mocks.api.mock.calls.some((call) => call[0] === 'PUT' && String(call[1]).includes('/status')),
     ).toBe(false)
@@ -238,7 +262,10 @@ describe('project runtime status and lifecycle with real queries and components'
     expect(mocks.api).toHaveBeenCalledWith('POST', '/projects/p1/resume')
     expect(view.text()).toContain('项目操作失败')
     expect(view.text()).toContain('旧执行仍在取消或清理中')
-    expect(view.text()).toContain('状态暂未更新')
+    expect(view.find('[aria-label="项目状态"]').text()).toBe(
+      mocks.workspace.projectDetail.project.status === 'paused' ? '已暂停' : '进行中',
+    )
+    expect(view.find('.workspace-header').text()).not.toContain('状态暂未更新')
   })
 
   it('requires explicit scope confirmation and does not resume after reauthorization', async () => {
@@ -419,14 +446,17 @@ describe('project runtime status and lifecycle with real queries and components'
     expect(button('暂停项目').disabled).toBe(false)
   })
 
-  it('renders unknown status without crashing on missing runtime structures', async () => {
+  it('keeps metadata status without crashing on missing runtime structures', async () => {
     runtime = runtimeFixture({
       actions: undefined as never,
       active_runs: undefined as never,
       dispatcher: undefined as never,
     })
     const view = await mountWorkspace()
-    expect(view.text()).toContain('状态暂未更新')
+    expect(view.find('[aria-label="项目状态"]').text()).toBe(
+      mocks.workspace.projectDetail.project.status === 'paused' ? '已暂停' : '进行中',
+    )
+    expect(view.find('.workspace-header').text()).not.toContain('状态暂未更新')
     expect(button('暂停项目').disabled).toBe(false)
   })
 
@@ -442,36 +472,41 @@ describe('project runtime status and lifecycle with real queries and components'
     expect(document.body.textContent).toContain('已结束')
   })
 
-  it('shows a connection warning only beside the project status, not in the run list', async () => {
+  it('does not inject Dispatcher warnings into the project title or run list', async () => {
     runtime = runtimeFixture({
       dispatcher: { status: 'unknown', freshness: 'stale', updated_at: null },
     })
     const view = await mountWorkspace()
-    expect(view.find('.workspace-header').text()).toContain('配置阻塞')
-    expect(view.find('.workspace-header').text()).toContain('Dispatcher 连接未及时更新')
+    expect(view.find('[aria-label="项目状态"]').text()).toBe('进行中')
+    expect(view.find('.workspace-header').text()).not.toContain('配置阻塞')
+    expect(view.find('.workspace-header').text()).not.toContain('Dispatcher 连接未及时更新')
     expect(view.find('.runs-sidebar').text()).toContain('没有运行记录')
     expect(view.find('.runs-sidebar').text()).not.toContain('Dispatcher 连接未及时更新')
   })
 
-  it('shows an unavailable state on the first failed query instead of pretending to wait', async () => {
+  it('shows project metadata even when the first runtime query fails', async () => {
     mocks.api.mockImplementation(async (_method: string, path: string) => {
       if (path.includes('/runtime')) throw new Error('upstream secret')
       return []
     })
     const view = await mountWorkspace()
-    expect(view.find('.workspace-header').text()).toContain('状态暂未更新')
+    expect(view.find('[aria-label="项目状态"]').text()).toBe('进行中')
+    expect(view.find('.workspace-header').text()).not.toContain('状态暂未更新')
     expect(view.text()).not.toContain('upstream secret')
     expect(button('暂停项目').disabled).toBe(false)
   })
 
-  it('marks cached status unavailable after sixty seconds without a new response', async () => {
+  it('does not replace project metadata when runtime expires after sixty seconds', async () => {
     const view = await mountWorkspace()
     mocks.api.mockImplementation((_method: string, path: string) =>
       path.includes('/runtime') ? new Promise(() => {}) : Promise.resolve([]),
     )
     await vi.advanceTimersByTimeAsync(64000)
     await settle()
-    expect(view.text()).toContain('状态暂未更新')
+    expect(view.find('[aria-label="项目状态"]').text()).toBe(
+      mocks.workspace.projectDetail.project.status === 'paused' ? '已暂停' : '进行中',
+    )
+    expect(view.find('.workspace-header').text()).not.toContain('状态暂未更新')
     expect(button('暂停项目').disabled).toBe(false)
   })
 
@@ -562,8 +597,144 @@ describe('project runtime status and lifecycle with real queries and components'
     expect(oldSignal?.aborted).toBe(true)
     finishOld(runtimeFixture({ message: '不应显示的旧项目结果' }))
     await settle()
-    expect(view.find('.workspace-header').text()).toContain('第二项目缺少模型配置')
+    expect(view.find('[aria-label="项目状态"]').text()).toBe('进行中')
+    expect(view.find('.workspace-header').text()).toContain('项目 p2')
+    expect(view.text()).not.toContain('第二项目缺少模型配置')
     expect(view.text()).not.toContain('不应显示的旧项目结果')
+  })
+
+  it('project list maps pending and active metadata without waiting for runtime', async () => {
+    projectList = [summary('p1', 'pending'), summary('p2')]
+    let finishBatch!: (value: { items: ProjectRuntime[] }) => void
+    mocks.api.mockImplementation(async (_method: string, path: string) => {
+      if (path === '/projects') return projectList
+      if (path.startsWith('/projects/runtime?'))
+        return new Promise((resolve) => { finishBatch = resolve })
+      return []
+    })
+    const view = await mountProjects()
+    expect(view.findAll('.project-row-status').map((row) => row.text())).toEqual(['待启动', '进行中'])
+    expect(view.text()).not.toContain('正在获取状态')
+    expect(view.text()).not.toContain('状态查询失败')
+    expect(view.text()).not.toContain('状态暂未更新')
+    finishBatch({ items: [
+      runtimeFixture({ project_id: 'p1', project_status: 'pending', state: 'pending',
+        code: 'project_pending_schedule_required', message: '尚未进入执行调度，请查看启动计划。',
+        dispatcher: { status: 'unknown', freshness: 'unknown', updated_at: null } }),
+      runtimeFixture({ project_id: 'p2' }),
+    ] })
+    await settle()
+    expect(view.findAll('.project-row-status')[0]!.text()).toContain('待启动')
+    expect(view.findAll('.project-row-status')[0]!.text()).not.toContain('Dispatcher')
+    expect(view.findAll('.project-row-status')[1]!.text()).toBe('进行中')
+    await vi.advanceTimersByTimeAsync(8000)
+    await settle()
+    expect(view.text()).toContain('2 个项目')
+    expect(view.text()).not.toContain('正在获取最新项目数据')
+    expect(view.text()).not.toContain('实时刷新')
+    expect(view.find('.refresh-indicator').exists()).toBe(false)
+    expect(mocks.api.mock.calls.filter((call) => call[1] === '/projects').length).toBeGreaterThan(1)
+    expect(mocks.api.mock.calls.filter((call) => String(call[1]).startsWith('/projects/runtime?')).length).toBeGreaterThan(1)
+  })
+
+  it('keeps runtime failure out of list status while retaining metadata failure and retry', async () => {
+    projectList = [summary('p1')]
+    const view = await mountProjects()
+    let failMetadata = false
+    let failRuntime = true
+    mocks.api.mockImplementation(async (_method: string, path: string) => {
+      if (path === '/projects') {
+        if (failMetadata) throw new Error('metadata unavailable')
+        return projectList
+      }
+      if (path.startsWith('/projects/runtime?')) {
+        if (failRuntime) throw new Error('private upstream failure')
+        return { items: [runtimeFixture({ message: '配置已核对，等待 Worker 容量。', state: 'waiting' })] }
+      }
+      return []
+    })
+    await queryClient.invalidateQueries({ queryKey: ['project-runtime-batch'] })
+    await settle()
+    expect(view.find('.project-row-status').text()).toBe('进行中')
+    expect(view.text()).not.toContain('运行状态未更新')
+    expect(view.text()).not.toContain('上次状态')
+    expect(view.text()).not.toContain('状态查询失败')
+    expect(view.text()).not.toContain('private upstream failure')
+    expect(view.find('.projects-stale-alert').exists()).toBe(false)
+
+    failMetadata = true
+    await queryClient.invalidateQueries({ queryKey: ['projects'] })
+    await settle()
+    expect(view.find('.projects-stale-alert').text()).toContain('项目刷新失败')
+    expect(view.text()).toContain('项目列表仍显示最近一次成功获取的数据')
+    const beforeMetadata = mocks.api.mock.calls.filter((call) => call[1] === '/projects').length
+    const beforeRuntime = mocks.api.mock.calls.filter((call) => String(call[1]).startsWith('/projects/runtime?')).length
+    failMetadata = false
+    failRuntime = false
+    button('重试刷新').click()
+    await settle()
+    expect(mocks.api.mock.calls.filter((call) => call[1] === '/projects')).toHaveLength(beforeMetadata + 1)
+    expect(mocks.api.mock.calls.filter((call) => String(call[1]).startsWith('/projects/runtime?'))).toHaveLength(beforeRuntime + 1)
+    expect(view.find('.project-row-status').text()).toBe('进行中')
+    expect(view.find('.projects-stale-alert').exists()).toBe(false)
+    expect(view.text()).not.toContain('配置已核对，等待 Worker 容量。')
+  })
+
+  it('project list metadata retry joins the runtime query for the refreshed ID set', async () => {
+    projectList = [summary('p1')]
+    const view = await mountProjects()
+    mocks.api.mockImplementation(async (_method: string, path: string) => {
+      if (path === '/projects') throw new Error('metadata unavailable')
+      if (path.startsWith('/projects/runtime?')) throw new Error('batch unavailable')
+      return []
+    })
+    await queryClient.invalidateQueries({ queryKey: ['projects'] })
+    await settle()
+    projectList = [summary('p1'), summary('p2', 'pending')]
+    mocks.api.mockImplementation(async (_method: string, path: string) => {
+      if (path === '/projects') return projectList
+      if (path.startsWith('/projects/runtime?')) {
+        const ids = new URL(path, 'https://example.test').searchParams.get('project_ids')!.split(',')
+        return { items: ids.map((project_id) => runtimeFixture({ project_id })) }
+      }
+      return []
+    })
+    const before = mocks.api.mock.calls.length
+    button('重试刷新').click()
+    await settle()
+    const batches = mocks.api.mock.calls.slice(before).filter((call) => String(call[1]).startsWith('/projects/runtime?'))
+    expect(batches).toHaveLength(1)
+    expect(new URL(String(batches[0]![1]), 'https://example.test').searchParams.get('project_ids')).toBe('p1,p2')
+    expect(view.findAll('.project-row')).toHaveLength(2)
+    expect(view.text()).not.toContain('运行状态未更新')
+  })
+
+  it('project list status ignores expired and incompatible runtime snapshots', async () => {
+    projectList = [summary('p1')]
+    const view = await mountProjects()
+    for (const snapshot of [
+      runtimeFixture({ observed_at: new Date(Date.now() - 60_001).toISOString() }),
+      runtimeFixture({ schema_version: 99 as 1 }),
+    ]) {
+      queryClient.setQueryData(['project-runtime-batch', ['p1']], { items: [snapshot] })
+      await settle()
+      expect(view.find('.project-row-status').text()).toBe('进行中')
+      expect(view.find('.projects-stale-alert').exists()).toBe(false)
+      expect(view.text()).not.toContain('上次状态')
+      expect(view.text()).not.toContain('运行快照已过期')
+      expect(view.text()).not.toContain('状态不兼容')
+    }
+  })
+
+  it('project list has no duplicate metadata refetch on the global refresh event', async () => {
+    projectList = [summary('p1')]
+    mocks.ui = reactive({ globalRefreshKey: 0, showToast: vi.fn() })
+    await mountProjects()
+    const beforeMetadata = mocks.api.mock.calls.filter((call) => call[1] === '/projects').length
+    mocks.ui.globalRefreshKey++
+    await queryClient.invalidateQueries()
+    await settle()
+    expect(mocks.api.mock.calls.filter((call) => call[1] === '/projects')).toHaveLength(beforeMetadata + 1)
   })
 
   it('requests one authorized batch for a list larger than ten projects', async () => {
@@ -595,6 +766,6 @@ describe('project runtime status and lifecycle with real queries and components'
       mocks.api.mock.calls.some((call) => /\/projects\/p\d+\/runtime/.test(String(call[1]))),
     ).toBe(false)
     expect(wrapper.findAll('.project-row')).toHaveLength(12)
-    expect(wrapper.text()).toContain('配置阻塞')
+    expect(wrapper.findAll('.project-row-status').every((row) => row.text() === '进行中')).toBe(true)
   })
 })

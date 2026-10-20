@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from cairn.assessment_contracts import GOAL_DRIVEN_PROTOCOL, validate_goal_driven_experiment
 from cairn.server.models import CoverageSlot
+from cairn.evidence_contracts import evidence_refs
 
 from .assessment_policy import (
     DEFAULT_COPY_BLOCKER_COOLDOWN_SECONDS,
@@ -557,29 +558,16 @@ def validate_structured_coverage_result(
         if policy.outcome_contract_version >= 2:
             if not coverage_result.baseline or not coverage_result.variants:
                 raise HTTPException(422, "finding_baseline_variants_required")
-            complete_exchange = bool(
-                vulnerability.repro_request and vulnerability.repro_response
-            )
-            packet_evidence = bool(vulnerability.packet_artifact_id) and _has_current_run_artifact(
-                conn,
-                project_id,
-                task_run_id,
-                [],
-                artifact_id=vulnerability.packet_artifact_id,
-            )
-            if not complete_exchange and not packet_evidence:
-                raise HTTPException(422, "finding_complete_reproduction_required")
+            if not _has_current_run_artifact(
+                conn, project_id, task_run_id, evidence_refs(vulnerability.evidence_items)
+            ):
+                raise HTTPException(422, "finding_evidence_current_run_required")
             if not _has_current_run_artifact(
                 conn, project_id, task_run_id, coverage_result.evidence_refs
             ):
                 raise HTTPException(422, "coverage_evidence_current_run_required")
         else:
-            has_reproduction = bool(
-                vulnerability.packet_artifact_id
-                or vulnerability.repro_request
-                or vulnerability.repro_response
-                or coverage_result.evidence_refs
-            )
+            has_reproduction = bool(evidence_refs(vulnerability.evidence_items))
             if not has_reproduction:
                 raise HTTPException(422, "finding requires reproduction evidence")
     elif outcome == "temporarily_blocked":
@@ -660,7 +648,8 @@ def validate_assessment_experiment(conn, project_id: str, intent, body, slot) ->
         )
         for ref in record.evidence_refs
     ]
-    supplied = {(ref.artifact_id, ref.pointer) for ref in body.evidence}
+    finding_refs = evidence_refs(body.vulnerability.evidence_items) if body.vulnerability is not None else []
+    supplied = {(ref.artifact_id, ref.pointer) for ref in [*body.evidence, *finding_refs]}
     if any((ref.artifact_id, ref.pointer) not in supplied for ref in refs):
         raise HTTPException(422, "experiment_evidence_must_appear_in_evidence")
     if not refs or not _has_current_run_artifact(
@@ -719,20 +708,10 @@ def validate_assessment_experiment(conn, project_id: str, intent, body, slot) ->
         if outcome == "finding":
             if vulnerability is None or vulnerability.identity is None:
                 raise HTTPException(422, "finding_requires_vulnerability_identity")
-            complete_exchange = bool(
-                vulnerability.repro_request and vulnerability.repro_response
-            )
-            packet_evidence = bool(
-                vulnerability.packet_artifact_id
-            ) and _has_current_run_artifact(
-                conn,
-                project_id,
-                body.task_run_id,
-                [],
-                artifact_id=vulnerability.packet_artifact_id,
-            )
-            if not complete_exchange and not packet_evidence:
-                raise HTTPException(422, "finding_complete_reproduction_required")
+            if not _has_current_run_artifact(
+                conn, project_id, body.task_run_id, evidence_refs(vulnerability.evidence_items)
+            ):
+                raise HTTPException(422, "finding_evidence_current_run_required")
         elif outcome == "temporarily_blocked" and (
             record.blocker_code.strip().lower() in _RUNTIME_FAILURE_BLOCKER_CODES
         ):

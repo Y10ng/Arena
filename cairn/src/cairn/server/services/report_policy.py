@@ -1,4 +1,4 @@
-"""基于项目冻结场景快照解析手动报告能力。"""
+"""普通探索项目新 generation 的平台显式报告策略。"""
 
 from __future__ import annotations
 
@@ -9,10 +9,12 @@ from typing import Any, Mapping
 
 from cairn.dispatcher.prompt_resources import DEFAULT_PROMPT_GROUP, validate_report_prompt_resources
 from cairn.dispatcher.prompting import load_prompt
+from .assessment_policy import execution_rejection_reason
 
 REPORT_POLICY_VERSION = 1
 REPORT_PACKET_VERSION = 2
-REPORT_OUTPUT_CONTRACT_VERSION = 2
+REPORT_OUTPUT_CONTRACT_VERSION = 3
+REPORT_DATA_SCHEMA_VERSION = 2
 REPORT_COMPLETENESS_RULE_VERSION = 1
 REPORT_TEMPLATE_PROFILE = "assessment-report-packet-v1"
 DEFAULT_REPORT_PROMPT_GROUP = DEFAULT_PROMPT_GROUP
@@ -106,7 +108,7 @@ def _supported_policy(
 
 
 def report_policy_from_project_row(row: Mapping[str, Any]) -> ReportPolicy:
-    """仅按冻结快照解析能力；历史缺失或损坏快照不读取实时场景兜底。"""
+    """新请求使用平台策略，执行画像与资料仍取真实项目快照，不改历史 generation。"""
     snapshot = _strict_snapshot(row)
     if snapshot is None:
         return _unsupported("missing_or_invalid_scenario_snapshot")
@@ -119,21 +121,14 @@ def report_policy_from_project_row(row: Mapping[str, Any]) -> ReportPolicy:
     if not isinstance(features, dict):
         return _unsupported("invalid_scenario_features")
 
-    policy_version = features.get("report_policy_version")
-    if policy_version not in (None, "", "0", "1"):
-        return _unsupported("unsupported_report_policy_version")
-    if policy_version == "1":
-        report_prompt_group = features.get("report_prompt_group")
-        if not isinstance(report_prompt_group, str) or not report_prompt_group.strip():
-            return _unsupported("report_prompt_group_missing")
-        report_prompt_group = report_prompt_group.strip()
-        return _supported_policy(
-            snapshot,
-            report_prompt_group=report_prompt_group,
-            source="explicit-v1",
-        )
-
-    return _unsupported("report_policy_not_enabled")
+    rejection = execution_rejection_reason(row)
+    if rejection:
+        return _unsupported(rejection)
+    return _supported_policy(
+        snapshot,
+        report_prompt_group=DEFAULT_REPORT_PROMPT_GROUP,
+        source="platform-v1",
+    )
 
 
 def freeze_report_execution_plan(
@@ -168,7 +163,13 @@ def parse_report_execution_plan(value: str) -> ReportExecutionPlan:
     loaded = json.loads(value)
     if not isinstance(loaded, dict):
         raise ValueError("report execution plan must be an object")
-    if loaded.get("version") != 2 or loaded.get("execution_contract_version") != 1 or loaded.get("execution_engine") != "pi" or loaded.get("packet_version") != REPORT_PACKET_VERSION:
+    if (
+        loaded.get("version") != 2
+        or loaded.get("execution_contract_version") != 1
+        or loaded.get("execution_engine") != "pi"
+        or loaded.get("packet_version") != REPORT_PACKET_VERSION
+        or loaded.get("output_contract_version") != REPORT_OUTPUT_CONTRACT_VERSION
+    ):
         raise ValueError("report_execution_contract_unsupported")
     return ReportExecutionPlan(**loaded)
 

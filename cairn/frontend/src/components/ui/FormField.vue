@@ -69,13 +69,14 @@ const controlAttrs = computed(() => ({
 .ui-form-field {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  min-width: 0;
+  gap: var(--space-2);
 }
 
 .ui-form-field__label {
-  color: var(--text-muted);
+  color: var(--text);
   font-size: var(--text-sm);
-  font-weight: var(--font-semibold);
+  font-weight: var(--font-medium);
   line-height: var(--leading-snug);
 }
 
@@ -96,6 +97,11 @@ const controlAttrs = computed(() => ({
 }
 
 .ui-form-field__hint {
-  color: var(--text-faint);
+  color: var(--text-muted);
+}
+
+.ui-form-field__error {
+  font-size: var(--text-md);
+  overflow-wrap: anywhere;
 }
 </style>

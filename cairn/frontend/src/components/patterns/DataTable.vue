@@ -28,31 +28,56 @@
         </tr>
       </thead>
       <tbody>
-        <tr
-          v-for="(row, rowIndex) in rows"
-          :key="rowKey(row, rowIndex)"
-          v-bind="resolvedRowAttrs(row, rowIndex)"
-        >
-          <td
-            v-for="column in columns"
-            :key="column.key"
-            :class="`data-table__cell--${column.align ?? 'start'}`"
-          >
-            <slot :name="`cell-${column.key}`" :row="row" :column="column" :row-index="rowIndex">
-              {{ column.value?.(row, rowIndex) }}
-            </slot>
-          </td>
-          <td v-if="hasActions" class="data-table__action-cell">
-            <Button
-              variant="link"
-              size="sm"
-              :aria-label="actionLabel?.(row, rowIndex)"
-              @click="emit('row-action', row)"
+        <template v-for="(row, rowIndex) in rows" :key="rowKey(row, rowIndex)">
+          <tr v-bind="resolvedRowAttrs(row, rowIndex)">
+            <td
+              v-for="column in columns"
+              :key="column.key"
+              :class="`data-table__cell--${column.align ?? 'start'}`"
             >
-              {{ actionColumnLabel }}
-            </Button>
-          </td>
-        </tr>
+              <slot :name="`cell-${column.key}`" :row="row" :column="column" :row-index="rowIndex">
+                {{ column.value?.(row, rowIndex) }}
+              </slot>
+            </td>
+            <td v-if="hasActions" class="data-table__action-cell">
+              <Button
+                variant="link"
+                size="sm"
+                :aria-label="actionLabel?.(row, rowIndex)"
+                :aria-expanded="isRowExpanded ? Boolean(isRowExpanded(row, rowIndex)) : undefined"
+                :aria-controls="isRowExpanded ? rowDetailId?.(row, rowIndex) : undefined"
+                @click.stop="emit('row-action', row)"
+              >
+                <ChevronDown
+                  v-if="isRowExpanded"
+                  :size="14"
+                  class="data-table__expand-icon"
+                  :class="{ 'is-expanded': isRowExpanded(row, rowIndex) }"
+                  aria-hidden="true"
+                />
+                {{
+                  isRowExpanded
+                    ? isRowExpanded(row, rowIndex)
+                      ? '收起'
+                      : '展开'
+                    : actionColumnLabel
+                }}
+              </Button>
+            </td>
+          </tr>
+          <tr v-if="isRowExpanded?.(row, rowIndex)" class="data-table__detail-row">
+            <td :colspan="columns.length + (hasActions ? 1 : 0)" class="data-table__detail-cell">
+              <div
+                :id="rowDetailId?.(row, rowIndex)"
+                class="data-table__detail"
+                role="region"
+                :aria-label="actionLabel?.(row, rowIndex)"
+              >
+                <slot name="row-detail" :row="row" :row-index="rowIndex" />
+              </div>
+            </td>
+          </tr>
+        </template>
       </tbody>
     </table>
   </div>
@@ -62,6 +87,7 @@
 import { computed } from 'vue'
 import type { HTMLAttributes } from 'vue'
 import Button from '../ui/Button.vue'
+import { ChevronDown } from '@lucide/vue'
 
 export type DataTableDensity = 'default' | 'compact'
 export type DataTableColumnAlign = 'start' | 'center' | 'end'
@@ -71,6 +97,7 @@ export type DataTableActiveRowAria = 'current' | 'selected'
 export type DataTableRowAttrs = Omit<HTMLAttributes, 'key' | 'ref'> & {
   key?: never
   ref?: never
+  [attribute: `data-${string}`]: string | number | boolean | undefined
 }
 
 export interface DataTableColumn<Row, ColumnKey extends string = string> {
@@ -100,6 +127,8 @@ const props = withDefaults(
     loading?: boolean
     loadingLabel?: string
     emptyLabel?: string
+    isRowExpanded?: (row: Row, rowIndex: number) => boolean
+    rowDetailId?: (row: Row, rowIndex: number) => string
     isRowActive?: (row: Row, rowIndex: number) => boolean
     activeRowAria?: DataTableActiveRowAria
     rowAttrs?: (row: Row, rowIndex: number) => DataTableRowAttrs
@@ -119,7 +148,11 @@ const props = withDefaults(
   },
 )
 
-defineSlots<DataTableSlots<Row, ColumnKey>>()
+defineSlots<
+  DataTableSlots<Row, ColumnKey> & {
+    'row-detail'?: (props: { row: Row; rowIndex: number }) => unknown
+  }
+>()
 
 const emit = defineEmits<{
   (event: 'row-action', row: Row): void
@@ -164,7 +197,7 @@ defineOptions({ name: 'DataTable' })
   min-width: 0;
   overflow-x: auto;
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--bg-surface);
 }
 
@@ -203,13 +236,13 @@ defineOptions({ name: 'DataTable' })
 .data-table th {
   background: var(--bg-inset);
   color: var(--text-muted);
-  font-size: var(--text-xs);
-  font-weight: var(--font-semibold);
-  letter-spacing: var(--tracking-wide);
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
   white-space: nowrap;
 }
 
 .data-table tbody tr {
+  height: calc(var(--control-height) + var(--space-4));
   transition: background-color var(--dur-fast) var(--ease);
 }
 
@@ -228,6 +261,10 @@ defineOptions({ name: 'DataTable' })
 .data-table--compact th,
 .data-table--compact td {
   padding: var(--space-2) var(--space-3);
+}
+
+.data-table--compact tbody tr {
+  height: calc(var(--control-height) + var(--space-2));
 }
 
 .data-table__cell--start {
@@ -272,7 +309,34 @@ defineOptions({ name: 'DataTable' })
   background: var(--surface-selected);
 }
 
+.data-table__expand-icon {
+  flex-shrink: 0;
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.data-table__expand-icon.is-expanded {
+  transform: rotate(180deg);
+}
+
+.data-table tbody .data-table__detail-row,
+.data-table tbody .data-table__detail-row:hover {
+  height: auto;
+  background: var(--bg-surface);
+}
+
+.data-table .data-table__detail-cell {
+  padding: 0;
+  vertical-align: top;
+}
+
+.data-table__detail {
+  min-width: 0;
+  padding: var(--space-4);
+  border-block-start: 1px solid var(--border-subtle);
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .data-table__expand-icon,
   .data-table tbody tr {
     transition: none;
   }

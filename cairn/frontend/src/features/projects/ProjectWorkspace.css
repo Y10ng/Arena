@@ -53,9 +53,7 @@
   display: grid;
   grid-template-areas:
     'title actions'
-    'status status'
-    'reasons reasons'
-    'meta meta';
+    'reasons reasons';
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-2) var(--space-4);
@@ -86,40 +84,23 @@
   margin: 0;
 }
 
-.workspace-meta {
-  display: flex;
-  grid-area: meta;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: var(--space-1) var(--space-4);
-  min-width: 0;
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-  overflow-wrap: anywhere;
-}
-
-.workspace-admin-meta summary {
-  color: var(--accent);
-  cursor: pointer;
-}
-
-.workspace-admin-meta dl {
+.workspace-project-information {
   display: grid;
-  gap: var(--space-1);
-  margin: var(--space-2) 0 0;
+  gap: var(--space-3);
+  margin: 0;
 }
 
-.workspace-admin-meta dl > div {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
+.workspace-project-information > div {
+  display: grid;
+  grid-template-columns: 100px minmax(0, 1fr);
+  gap: var(--space-3);
 }
 
-.workspace-admin-meta dt {
-  color: var(--text-faint);
+.workspace-project-information dt {
+  color: var(--text-muted);
 }
 
-.workspace-admin-meta dd {
+.workspace-project-information dd {
   margin: 0;
   overflow-wrap: anywhere;
 }
@@ -175,34 +156,13 @@
   width: 200px;
 }
 
-.header-middle {
-  display: flex;
-  grid-area: status;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  min-width: 0;
-}
-
 .header-action-reasons {
   display: grid;
   grid-area: reasons;
   gap: var(--space-1);
   color: var(--warning);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   overflow-wrap: anywhere;
-}
-
-.workspace-status-reason,
-.workspace-status-warning {
-  min-width: 0;
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-  overflow-wrap: anywhere;
-}
-
-.workspace-status-warning {
-  color: var(--warning);
 }
 
 .workspace-refresh-warning {
@@ -210,8 +170,8 @@
   border-bottom: 1px solid var(--warning);
   background: color-mix(in srgb, var(--warning) 8%, var(--bg-panel));
   color: var(--warning);
-  font-size: 10px;
-  text-align: center;
+  font-size: var(--text-md);
+  text-align: start;
 }
 
 .header-right {
@@ -227,7 +187,7 @@
 /* 按 Shell 侧栏之后的可用宽度换行，而非只看视口。 */
 @container workspace (max-width: 960px) {
   .workspace-header {
-    grid-template-areas: 'title' 'status' 'actions' 'reasons' 'meta';
+    grid-template-areas: 'title' 'actions' 'reasons';
     grid-template-columns: minmax(0, 1fr);
   }
   .header-right {
@@ -241,9 +201,6 @@
     gap: var(--space-2);
   }
   .header-left {
-    gap: var(--space-2);
-  }
-  .workspace-meta {
     gap: var(--space-2);
   }
   .header-right {
@@ -307,12 +264,28 @@
 
 /* Viewport area styling */
 .workspace-viewport {
-  flex-grow: 1;
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
   background-color: var(--bg-base);
-  min-height: 0; /* Important for flex child scrolling */
+  min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   position: relative;
+}
+
+.workspace-viewport > * {
+  flex: 1 0 auto;
+  min-width: 0;
+}
+
+/* 高度受控的阅读工作区只在内部滚动，普通路由继续由 viewport 滚动。 */
+.workspace-viewport > .artifacts-page,
+.workspace-viewport > .report-management,
+.workspace-viewport > .runs-container {
+  flex: 1 1 0;
+  min-height: 0;
 }
 
 .workspace-library-bindings {

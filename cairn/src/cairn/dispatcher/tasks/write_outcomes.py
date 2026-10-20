@@ -44,6 +44,9 @@ _STALE_CODES = {
     "reason_claim_mismatch",
     "stale_business_state",
     "vulnerability_observation_not_found",
+    "verification_execution_binding_mismatch",
+    "verification_execution_closed",
+    "verification_cancellation_pending",
 }
 _RECEIPT_CONFLICT_CODES = {
     "assessment_report_finish_receipt_conflict",
@@ -52,6 +55,7 @@ _RECEIPT_CONFLICT_CODES = {
     "execution_event_receipt_conflict",
     "receipt_conflict",
     "submission_conflict",
+    "verification_terminal_conflict",
 }
 
 

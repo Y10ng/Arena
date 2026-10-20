@@ -405,7 +405,7 @@ def list_admin_projects(
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT id, tenant_id, title, status, scenario_key, group_id, created_at
+            SELECT id, tenant_id, title, status, scenario_key, created_at
             FROM projects
             ORDER BY created_at DESC, id DESC
             LIMIT ? OFFSET ?

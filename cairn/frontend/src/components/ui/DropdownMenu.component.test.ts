@@ -51,6 +51,24 @@ describe('DropdownMenu', () => {
     expect(wrapper.emitted('select')).toContainEqual(['delete'])
   })
 
+  it('keeps disabled reasons in the menu and links the accessible description', async () => {
+    const reason = '该复测仍在执行，结束后才能删除记录和资料。'
+    const wrapper = mountMenu({
+      open: true,
+      items: [{ value: 'delete', label: '删除', disabled: true, description: reason }],
+    })
+    await flushPromises()
+
+    const item = document.body.querySelector<HTMLElement>('[role="menuitem"]')
+    const descriptionId = item?.getAttribute('aria-describedby')
+    expect(item?.textContent).toContain(reason)
+    expect(descriptionId).toBeTruthy()
+    expect(document.getElementById(descriptionId!)?.textContent).toBe(reason)
+    item?.click()
+    await flushPromises()
+    expect(wrapper.emitted('select')).toBeUndefined()
+  })
+
   it('opens from the trigger and restores focus after Escape', async () => {
     mountMenu()
     const trigger = document.body.querySelector<HTMLButtonElement>('button')

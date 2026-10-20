@@ -91,24 +91,6 @@ export const DEFAULT_FEATURE_SCHEMA: ScenarioFeatureSchemaItem[] = [
     runtime_driver: false,
     description: '冻结到项目的逐 Observation 独立漏洞复现契约版本。',
   },
-  {
-    key: 'report_policy_version',
-    label: 'Manual Report Policy Version',
-    value_type: 'enum',
-    default: '0',
-    options: ['0', '1'],
-    runtime_driver: false,
-    description: '仅控制项目完成后的手动报告能力，不改变探索与完成逻辑。',
-  },
-  {
-    key: 'report_prompt_group',
-    label: 'Report Prompt Group',
-    value_type: 'string',
-    default: '',
-    options: [],
-    runtime_driver: false,
-    description: '手动 durable 报告使用的独立 Prompt Group。',
-  },
 ]
 
 export interface ValidationResult {

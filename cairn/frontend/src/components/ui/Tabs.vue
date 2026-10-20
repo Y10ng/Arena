@@ -21,6 +21,9 @@
         </span>
       </TabsTrigger>
     </TabsList>
+    <div v-if="$slots.actions" class="ui-tabs__actions">
+      <slot name="actions" />
+    </div>
 
     <TabsContent
       v-for="option in options"
@@ -114,7 +117,7 @@ defineOptions({ name: 'UiTabs' })
 }
 
 .ui-tabs__trigger {
-  min-height: var(--control-height-sm);
+  min-height: var(--control-height);
   border: 0;
   border-radius: var(--radius-sm);
   padding: var(--space-2) var(--space-3);
@@ -126,8 +129,8 @@ defineOptions({ name: 'UiTabs' })
   flex: none;
   background: transparent;
   color: var(--text-muted);
-  font-size: var(--text-sm);
-  font-weight: var(--font-semibold);
+  font-size: var(--text-md);
+  font-weight: var(--font-medium);
   white-space: nowrap;
   cursor: pointer;
   transition:
@@ -140,7 +143,7 @@ defineOptions({ name: 'UiTabs' })
 }
 
 .ui-tabs__list--line .ui-tabs__trigger[data-state='active'] {
-  color: var(--text);
+  color: var(--accent);
 }
 
 .ui-tabs__list--line .ui-tabs__trigger[data-state='active']::after {

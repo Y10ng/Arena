@@ -53,7 +53,6 @@ const mocks = vi.hoisted(() => ({
       available: false,
     },
   ],
-  groups: [{ id: 'group-a', name: 'Red Team', owner: 'owner', created_at: '2026-08-20' }],
   libraries: [{ key: 'library-a', name: '授权资料', latest_version: 2, file_count: 3 }],
   templates: [
     {
@@ -95,7 +94,6 @@ vi.mock('@/api/client', async (importOriginal) => ({
   getProjectResourceBatch: mocks.getResourceBatch,
   importProjectResourceBatchZip: vi.fn(),
   listLibraryCatalog: vi.fn(),
-  listProjectGroups: vi.fn(),
   listTenantWorkerOptions: vi.fn(),
   listWorkerTemplates: vi.fn(),
   updateProjectResourceBatchMember: vi.fn(),
@@ -127,7 +125,6 @@ vi.mock('@tanstack/vue-query', () => ({
     const values: Record<string, unknown> = {
       'scenario-catalog': mocks.scenarios,
       'tenant-worker-options': mocks.workers,
-      'project-groups': mocks.groups,
       'library-catalog': mocks.libraries,
       'worker-templates': mocks.templates,
     }
@@ -236,7 +233,6 @@ beforeEach(() => {
     .mockReset()
     .mockImplementation(async (id, input) => ({ id, name: '默认 Worker 组', ...input }))
   mocks.invalidateQueries.mockReset().mockResolvedValue(undefined)
-  mocks.groups = [{ id: 'group-a', name: 'Red Team', owner: 'owner', created_at: '2026-08-20' }]
   mocks.createProject.mockReset().mockResolvedValue({ project: { id: 'project-created' } })
   mocks.getResourceConfig.mockReset().mockResolvedValue({
     kinds: ['note', 'script', 'file'],
@@ -299,7 +295,6 @@ describe('NewProject creation boundaries', () => {
     await setFieldValue('#np-title', '正文先填写')
     await setFieldValue('#np-origin-input', '  原始背景\n  保留格式  ')
     await setFieldValue('#np-goal-input', '用户目标')
-    await selectOption('np-group-select', 'Red Team')
     expect(buttonByText('创建并启动')?.disabled).toBe(true)
     mocks.queryFlags['worker-templates']!.isFetching.value = false
     await flushPromises()
@@ -314,7 +309,6 @@ describe('NewProject creation boundaries', () => {
     const random = vi.spyOn(crypto, 'getRandomValues').mockImplementationOnce(() => { throw new Error('随机源不可用') })
     await mountPage()
     await setFieldValue('#np-title', '本地失败')
-    await selectOption('np-group-select', 'Red Team')
     buttonByText('创建并启动')!.click()
     await flushPromises()
     expect(mocks.createProject).not.toHaveBeenCalled()
@@ -334,10 +328,9 @@ describe('NewProject creation boundaries', () => {
     mocks.createProject.mockRejectedValueOnce(new Error('连接断开'))
     await mountPage()
     await setFieldValue('#np-title', '缓存不可用')
-    await selectOption('np-group-select', 'Red Team')
     buttonByText('创建并启动')!.click()
     await flushPromises()
-    const original = structuredClone(mocks.createProject.mock.calls[0]![0])
+    const original = JSON.parse(JSON.stringify(mocks.createProject.mock.calls[0]![0]))
     expect(document.body.textContent).toContain('跨刷新查询入口未保存')
     expect(document.body.textContent).toContain('连接断开')
     expect(buttonByText('用原请求恢复提交')?.disabled).toBe(false)
@@ -353,7 +346,6 @@ describe('NewProject creation boundaries', () => {
     mocks.uiStore.showToast.mockImplementationOnce(() => { throw new Error('反馈不可用') })
     await mountPage()
     await setFieldValue('#np-title', '已确认成功')
-    await selectOption('np-group-select', 'Red Team')
     buttonByText('创建并启动')!.click()
     await flushPromises()
     expect(document.body.textContent).toContain('项目已创建，等待调度')
@@ -373,7 +365,7 @@ describe('NewProject creation boundaries', () => {
       id: 'history', mode: 'daily', timezone: 'Asia/Shanghai', start_at: '2099-06-01T09:00:00+08:00',
       local_time: '09:00', weekdays: [], end_date: null, max_runs: null, version: 7,
       resources: [], library_bindings: [], project: {
-        title: '既有计划', origin: '历史背景', goal: '历史目标', scenario: 'default', group_id: 'group-a',
+        title: '既有计划', origin: '历史背景', goal: '历史目标', scenario: 'default',
         tenant_worker_ids: ['worker-available'], targets,
       },
     } as unknown as ProjectSchedule)
@@ -643,7 +635,6 @@ describe('NewProject shared control migration', () => {
     expect(document.body.textContent).toContain('执行组合缺少角色：explore')
     expect(buttonByText('保存为默认组合')?.disabled).toBe(true)
     await setFieldValue('#np-title', 'Missing role')
-    await selectOption('np-group-select', 'Red Team')
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true }))
     await flushPromises()
     expect(mocks.createProject).not.toHaveBeenCalled()
@@ -659,7 +650,6 @@ describe('NewProject shared control migration', () => {
     )
     await setFieldValue('#np-goal-input', '重点检查普通用户之间的数据隔离及审批流程。')
 
-    await selectOption('np-group-select', 'Red Team')
     buttonByText('从资料库选择')?.click()
     await flushPromises()
     buttonByText('授权资料')?.click()
@@ -684,7 +674,6 @@ describe('NewProject shared control migration', () => {
       goal: '重点检查普通用户之间的数据隔离及审批流程。',
       scenario: 'default',
       tenant_worker_ids: ['worker-available'],
-      group_id: 'group-a',
       request_id: expect.any(String),
       explore_deadline: null,
       authorization_expires_at: null,
@@ -714,7 +703,6 @@ describe('NewProject shared control migration', () => {
     ).toBe(true)
 
     await setFieldValue('#np-title', 'Unlimited authorization')
-    await selectOption('np-group-select', 'Red Team')
     buttonByText('创建并启动')?.click()
     await flushPromises()
 
@@ -727,7 +715,6 @@ describe('NewProject shared control migration', () => {
       goal: 'default goal',
       scenario: 'default',
       tenant_worker_ids: ['worker-available'],
-      group_id: 'group-a',
       authorization_expires_at: null,
       library_keys: [],
     })
@@ -738,7 +725,6 @@ describe('NewProject shared control migration', () => {
     vi.mocked(api).mockRejectedValue(new ApiError('受控计划拒绝', 422, {}))
     await mountPage()
     await setFieldValue('#np-title', 'Independent stop time')
-    await selectOption('np-group-select', 'Red Team')
     await selectOption('schedule-mode', '单次定时')
     await setFieldValue('#schedule-timezone', 'Asia/Shanghai')
     await setFieldValue('#schedule-start', '2035-04-05T09:00')
@@ -768,7 +754,6 @@ describe('NewProject shared control migration', () => {
     await mountPage()
 
     await setFieldValue('#np-title', 'Retry project')
-    await selectOption('np-group-select', 'Red Team')
 
     const fileInput = document.querySelectorAll<HTMLInputElement>('input[type="file"]')[0]
     Object.defineProperty(fileInput, 'files', {
@@ -806,7 +791,6 @@ describe('NewProject shared control migration', () => {
     mocks.createProject.mockRejectedValueOnce(error)
     const wrapper = await mountPage()
     await setFieldValue('#np-title', 'Unconfirmed project')
-    await selectOption('np-group-select', 'Red Team')
 
     const fileInput = document.querySelector<HTMLInputElement>('input[type="file"]')!
     Object.defineProperty(fileInput, 'files', {
@@ -835,7 +819,6 @@ describe('NewProject shared control migration', () => {
     mocks.createProject.mockRejectedValueOnce(new Error('连接断开'))
     await mountPage()
     await setFieldValue('#np-title', 'Recover original request')
-    await selectOption('np-group-select', 'Red Team')
     buttonByText('创建并启动')?.click()
     await flushPromises()
 
@@ -878,7 +861,6 @@ describe('NewProject shared control migration', () => {
     mocks.router.push.mockRejectedValueOnce(new Error('导航不可用'))
     await mountPage()
     await setFieldValue('#np-title', 'Created project')
-    await selectOption('np-group-select', 'Red Team')
     buttonByText('创建并启动')?.click()
     await flushPromises()
 
@@ -936,7 +918,6 @@ describe('NewProject shared control migration', () => {
     )
     const wrapper = await mountPage()
     await setFieldValue('#np-title', 'Single request')
-    await selectOption('np-group-select', 'Red Team')
     buttonByText('创建并启动')?.click()
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true }))
     await flushPromises()
@@ -957,43 +938,15 @@ describe('NewProject shared control migration', () => {
     expect(mocks.router.push).toHaveBeenCalledWith('/projects/project-created')
   })
 
-  it('requires selecting a project group before creation', async () => {
+  it('creates without loading, selecting, or submitting project groups', async () => {
     await mountPage()
-
-    expect(buttonByText('创建并启动')?.disabled).toBe(true)
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true }))
+    await setFieldValue('#np-title', '无组项目')
+    expect(document.querySelector('#np-group-select')).toBeNull()
+    expect(mocks.queryData['project-groups']).toBeUndefined()
+    expect(buttonByText('创建并启动')?.disabled).toBe(false)
+    buttonByText('创建并启动')!.click()
     await flushPromises()
-    expect(mocks.createProject).not.toHaveBeenCalled()
-    expect(mocks.uiStore.showToast).toHaveBeenCalledWith('请选择有效的项目组', 'danger')
-  })
-
-  it('blocks creation while project groups are loading', async () => {
-    mocks.queryState = { 'project-groups': { loading: true } }
-    await mountPage()
-    expect(document.querySelector('[aria-label="正在加载项目组"]')).not.toBeNull()
-    expect(buttonByText('创建并启动')?.disabled).toBe(true)
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true }))
-    await flushPromises()
-    expect(mocks.createProject).not.toHaveBeenCalled()
-    expect(mocks.uiStore.showToast).toHaveBeenCalledWith('项目组列表仍在加载，请稍后重试', 'danger')
-  })
-
-  it('blocks creation when project groups are unavailable', async () => {
-    mocks.queryState = { 'project-groups': { error: true } }
-    await mountPage()
-    expect(document.body.textContent).toContain('项目组加载失败')
-    expect(buttonByText('创建并启动')?.disabled).toBe(true)
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true }))
-    await flushPromises()
-    expect(mocks.createProject).not.toHaveBeenCalled()
-    expect(mocks.uiStore.showToast).toHaveBeenCalledWith('无法确认可用项目组，请重试加载', 'danger')
-  })
-
-  it('blocks creation when the tenant has no project groups', async () => {
-    mocks.groups = []
-    await mountPage()
-
-    expect(document.body.textContent).toContain('暂无可用项目组')
-    expect(buttonByText('创建并启动')?.disabled).toBe(true)
+    expect(mocks.createProject).toHaveBeenCalledOnce()
+    expect(mocks.createProject.mock.calls[0]![0]).not.toHaveProperty('group_id')
   })
 })

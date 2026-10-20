@@ -30,10 +30,16 @@ from cairn.server.db_schema import (
     PROJECT_AUTHORIZATION_GRANTS_TABLE_SCHEMA,
     PROJECT_AUTHORIZATION_GRANTS_V2_TABLE_SCHEMA,
     PROJECT_SCHEDULES_V48_TABLE_SCHEMA,
+    POSTGRES_CURRENT_REPORT_TEMPLATES_V58_GUARD_SCHEMA,
+    POSTGRES_CURRENT_REPORT_TEMPLATES_V58_SCHEMA,
+    POSTGRES_PROJECT_GROUP_RETIREMENT_V59_SCHEMA,
     VERIFICATION_REQUESTS_V50_TABLE_SCHEMA,
     VERIFICATION_CONFIGURATION_V51_TABLE_SCHEMA,
     VERIFICATION_CONFIGURATION_V52_TABLE_SCHEMA,
     VERIFICATION_REQUESTS_V52_TABLE_SCHEMA,
+    VERIFICATION_REQUEST_DELETION_V54_SCHEMA,
+    VERIFICATION_REQUEST_PURGE_V55_TABLE_SCHEMA,
+    VERIFICATION_REQUEST_PURGE_V56_TABLE_SCHEMA,
     SCHEMA,
     SQLITE_ASSESSMENT_CHARGE_COMPENSATIONS_IMMUTABLE_SCHEMA,
     SQLITE_ASSESSMENT_REPORT_FINISH_RECEIPTS_IMMUTABLE_SCHEMA,
@@ -4489,6 +4495,238 @@ POSTGRES_VERIFICATION_DEDICATED_WORKER = Migration(
 )
 
 
+VULNERABILITY_EVIDENCE_ITEMS_V53 = """\
+ALTER TABLE vulnerabilities ADD COLUMN evidence_items_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE vulnerability_observations ADD COLUMN evidence_items_json TEXT NOT NULL DEFAULT '[]';
+MIGRATE observation original text AS historical HTTP entries;
+MIGRATE canonical original text AS manual entries OR unpaired historical entries;
+KEEP legacy columns unchanged AS historical archives;
+"""
+
+
+def _migrate_vulnerability_evidence_items_v53(conn) -> None:
+    """只迁移实际保存的原文；canonical 自动发现的两侧不能推断为同一交互。"""
+    for table in ("vulnerabilities", "vulnerability_observations"):
+        conn.execute(
+            f"ALTER TABLE {table} ADD COLUMN evidence_items_json TEXT NOT NULL DEFAULT '[]'"
+        )
+        rows = conn.execute(f"SELECT * FROM {table}").fetchall()
+        for row in rows:
+            observation = table == "vulnerability_observations"
+            manual = not observation and not any(
+                row[name]
+                for name in ("source_fact_id", "discovered_by_run_id", "discovered_by_worker")
+            )
+            source = "manual" if manual else "historical"
+            items: list[dict[str, object]] = []
+            request = row["repro_request"]
+            response = row["repro_response"]
+            if observation or manual:
+                if request or response:
+                    items.append({
+                        "id": "legacy-http", "kind": "http", "role": "primary",
+                        "title": "人工记录" if manual else "历史发现记录",
+                        "source": source,
+                        "request_text": request if request != "" else None,
+                        "response_text": response if response != "" else None,
+                    })
+            else:
+                for side, value, title in (
+                    ("request", request, "历史请求（未配对）"),
+                    ("response", response, "历史响应（未配对）"),
+                ):
+                    if value:
+                        items.append({
+                            "id": f"legacy-{side}", "kind": "text", "role": "supporting",
+                            "title": title, "source": "historical", "text": value,
+                        })
+            if row["packet_artifact_id"]:
+                items.append({
+                    "id": "legacy-artifact", "kind": "artifact", "role": "supporting",
+                    "title": "历史原件", "source": source,
+                    "artifact": {"artifact_id": row["packet_artifact_id"]},
+                })
+            conn.execute(
+                f"UPDATE {table} SET evidence_items_json = ? WHERE id = ? AND project_id = ?",
+                (json.dumps(items, ensure_ascii=False, separators=(",", ":")), row["id"], row["project_id"]),
+            )
+
+
+SQLITE_VULNERABILITY_EVIDENCE_ITEMS = Migration(
+    version=53,
+    name="vulnerability-evidence-items-v2",
+    checksum=sha256(VULNERABILITY_EVIDENCE_ITEMS_V53.encode("utf-8")).hexdigest(),
+    apply=_migrate_vulnerability_evidence_items_v53,
+)
+POSTGRES_VULNERABILITY_EVIDENCE_ITEMS = Migration(
+    version=53,
+    name="vulnerability-evidence-items-v2",
+    checksum=sha256(VULNERABILITY_EVIDENCE_ITEMS_V53.encode("utf-8")).hexdigest(),
+    apply=_migrate_vulnerability_evidence_items_v53,
+)
+
+
+def _apply_verification_request_deletion_v54(conn) -> None:
+    conn.execute(VERIFICATION_REQUEST_DELETION_V54_SCHEMA)
+
+
+SQLITE_VERIFICATION_REQUEST_DELETION = Migration(
+    version=54,
+    name="verification-request-record-deletion",
+    checksum=sha256(VERIFICATION_REQUEST_DELETION_V54_SCHEMA.encode("utf-8")).hexdigest(),
+    apply=_apply_verification_request_deletion_v54,
+)
+POSTGRES_VERIFICATION_REQUEST_DELETION = Migration(
+    version=54,
+    name="verification-request-record-deletion",
+    checksum=sha256(VERIFICATION_REQUEST_DELETION_V54_SCHEMA.encode("utf-8")).hexdigest(),
+    apply=_apply_verification_request_deletion_v54,
+)
+
+
+_VERIFICATION_REQUEST_COLUMNS_V54 = (
+    _VERIFICATION_REQUEST_COLUMNS_V51 + ", source_project_id, source_vulnerability_id, deleted_at"
+)
+_VERIFICATION_REQUEST_TABLE_V55, _VERIFICATION_REQUEST_INDEXES_V55 = VERIFICATION_REQUEST_PURGE_V55_TABLE_SCHEMA.split(
+    "CREATE INDEX ix_verification_requests_owner", 1,
+)
+VERIFICATION_REQUEST_PURGE_V55 = (
+    _VERIFICATION_REQUEST_TABLE_V55
+        .replace("CREATE TABLE verification_requests (", "CREATE TABLE verification_requests_v55 (")
+        .replace("REFERENCES verification_requests(id)", "REFERENCES verification_requests_v55(id)")
+    + f"INSERT INTO verification_requests_v55({_VERIFICATION_REQUEST_COLUMNS_V54}) "
+      f"SELECT {_VERIFICATION_REQUEST_COLUMNS_V54} FROM verification_requests;\n"
+      "DROP TABLE verification_requests;\n"
+      "ALTER TABLE verification_requests_v55 RENAME TO verification_requests;\n"
+    + "CREATE INDEX ix_verification_requests_owner" + _VERIFICATION_REQUEST_INDEXES_V55
+)
+
+
+def _apply_sqlite_verification_request_purge_v55(conn) -> None:
+    _execute_sqlite_statements(conn, VERIFICATION_REQUEST_PURGE_V55)
+
+
+def _apply_postgres_verification_request_purge_v55(conn) -> None:
+    conn.executescript(VERIFICATION_REQUEST_PURGE_V55)
+
+
+SQLITE_VERIFICATION_REQUEST_PURGE = Migration(
+    version=55,
+    name="verification-request-owned-data-purge",
+    checksum=sha256(VERIFICATION_REQUEST_PURGE_V55.encode("utf-8")).hexdigest(),
+    apply=_apply_sqlite_verification_request_purge_v55,
+)
+POSTGRES_VERIFICATION_REQUEST_PURGE = Migration(
+    version=55,
+    name="verification-request-owned-data-purge",
+    checksum=sha256(VERIFICATION_REQUEST_PURGE_V55.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_verification_request_purge_v55,
+)
+
+
+_VERIFICATION_REQUEST_COLUMNS_V55 = (
+    _VERIFICATION_REQUEST_COLUMNS_V54 + ", purge_state, purge_error, purge_batch_ids_json, deleted_execution_owner_id"
+)
+_VERIFICATION_REQUEST_TABLE_V56, _VERIFICATION_REQUEST_INDEXES_V56 = VERIFICATION_REQUEST_PURGE_V56_TABLE_SCHEMA.split(
+    "CREATE INDEX ix_verification_requests_owner", 1,
+)
+VERIFICATION_REQUEST_PURGE_V56 = (
+    _VERIFICATION_REQUEST_TABLE_V56
+        .replace("CREATE TABLE verification_requests (", "CREATE TABLE verification_requests_v56 (")
+        .replace("REFERENCES verification_requests(id)", "REFERENCES verification_requests_v56(id)")
+    + f"INSERT INTO verification_requests_v56({_VERIFICATION_REQUEST_COLUMNS_V55}) "
+      f"SELECT {_VERIFICATION_REQUEST_COLUMNS_V55} FROM verification_requests;\n"
+      "DROP TABLE verification_requests;\n"
+      "ALTER TABLE verification_requests_v56 RENAME TO verification_requests;\n"
+    + "CREATE INDEX ix_verification_requests_owner" + _VERIFICATION_REQUEST_INDEXES_V56
+)
+
+
+def _apply_sqlite_verification_request_purge_v56(conn) -> None:
+    _execute_sqlite_statements(conn, VERIFICATION_REQUEST_PURGE_V56)
+
+
+def _apply_postgres_verification_request_purge_v56(conn) -> None:
+    conn.executescript(VERIFICATION_REQUEST_PURGE_V56)
+
+
+SQLITE_VERIFICATION_REQUEST_PURGE_NULL_CHECKS = Migration(
+    version=56,
+    name="verification-request-purge-null-checks",
+    checksum=sha256(VERIFICATION_REQUEST_PURGE_V56.encode("utf-8")).hexdigest(),
+    apply=_apply_sqlite_verification_request_purge_v56,
+)
+POSTGRES_VERIFICATION_REQUEST_PURGE_NULL_CHECKS = Migration(
+    version=56,
+    name="verification-request-purge-null-checks",
+    checksum=sha256(VERIFICATION_REQUEST_PURGE_V56.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_verification_request_purge_v56,
+)
+
+
+POSTGRES_VERIFICATION_BATCH_SOURCE_V57 = """\
+ALTER TABLE project_resource_batches
+ADD COLUMN source_request_id TEXT REFERENCES verification_requests(id);
+"""
+
+
+def _apply_postgres_verification_batch_source_v57(conn) -> None:
+    conn.executescript(POSTGRES_VERIFICATION_BATCH_SOURCE_V57)
+
+
+POSTGRES_VERIFICATION_BATCH_SOURCE = Migration(
+    version=57,
+    name="verification-batch-source-request",
+    checksum=sha256(POSTGRES_VERIFICATION_BATCH_SOURCE_V57.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_verification_batch_source_v57,
+)
+
+
+def _apply_postgres_current_report_templates_v58(conn) -> None:
+    from cairn.server.services.assessment_attempts import (
+        _logical_executions,
+        execution_retry_eligibility,
+    )
+
+    conn.executescript(POSTGRES_CURRENT_REPORT_TEMPLATES_V58_GUARD_SCHEMA)
+    for report in conn.execute(
+        "SELECT project_id, generation_token FROM assessment_report_finalizations "
+        "WHERE status = 'failed' AND requested_at IS NOT NULL"
+    ).fetchall():
+        project = conn.execute("SELECT * FROM projects WHERE id = ?", (report["project_id"],)).fetchone()
+        runs = _logical_executions(conn, project, "report", None, report["generation_token"])
+        # 仅同执行代、同报告 generation 的恢复链阻止升级；退避不代表链已终结。
+        if runs and execution_retry_eligibility(
+            conn, project, "report", report_generation_token=report["generation_token"],
+            executions=runs, ignore_cooldown=True,
+        )["allowed"]:
+            raise RuntimeError("report_template_outstanding_generation_resolution_required")
+    conn.executescript(POSTGRES_CURRENT_REPORT_TEMPLATES_V58_SCHEMA)
+
+
+POSTGRES_CURRENT_REPORT_TEMPLATES = Migration(
+    version=58,
+    name="current-report-templates",
+    checksum=sha256((
+        POSTGRES_CURRENT_REPORT_TEMPLATES_V58_GUARD_SCHEMA
+        + POSTGRES_CURRENT_REPORT_TEMPLATES_V58_SCHEMA
+    ).encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_current_report_templates_v58,
+)
+
+
+def _apply_postgres_project_group_retirement_v59(conn) -> None:
+    conn.executescript(POSTGRES_PROJECT_GROUP_RETIREMENT_V59_SCHEMA)
+
+
+POSTGRES_PROJECT_GROUP_RETIREMENT = Migration(
+    version=59,
+    name="project-group-retirement",
+    checksum=sha256(POSTGRES_PROJECT_GROUP_RETIREMENT_V59_SCHEMA.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_project_group_retirement_v59,
+)
+
+
 SQLITE_MIGRATIONS = (
     SQLITE_BASELINE,
     SQLITE_IDENTITY_TENANT,
@@ -4542,6 +4780,10 @@ SQLITE_MIGRATIONS = (
     SQLITE_VERIFICATION_REQUESTS,
     SQLITE_VERIFICATION_CONFIGURATION,
     SQLITE_VERIFICATION_DEDICATED_WORKER,
+    SQLITE_VULNERABILITY_EVIDENCE_ITEMS,
+    SQLITE_VERIFICATION_REQUEST_DELETION,
+    SQLITE_VERIFICATION_REQUEST_PURGE,
+    SQLITE_VERIFICATION_REQUEST_PURGE_NULL_CHECKS,
 )
 POSTGRES_MIGRATIONS = (
     POSTGRES_BASELINE,
@@ -4596,6 +4838,13 @@ POSTGRES_MIGRATIONS = (
     POSTGRES_VERIFICATION_REQUESTS,
     POSTGRES_VERIFICATION_CONFIGURATION,
     POSTGRES_VERIFICATION_DEDICATED_WORKER,
+    POSTGRES_VULNERABILITY_EVIDENCE_ITEMS,
+    POSTGRES_VERIFICATION_REQUEST_DELETION,
+    POSTGRES_VERIFICATION_REQUEST_PURGE,
+    POSTGRES_VERIFICATION_REQUEST_PURGE_NULL_CHECKS,
+    POSTGRES_VERIFICATION_BATCH_SOURCE,
+    POSTGRES_CURRENT_REPORT_TEMPLATES,
+    POSTGRES_PROJECT_GROUP_RETIREMENT,
 )
 
 

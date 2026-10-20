@@ -34,6 +34,7 @@ from .assessment_convergence import assessment_execution_view, assessment_has_ru
 from .assessment_quality_snapshot import build_assessment_quality_snapshot
 from .ids import get_project_or_404
 from .report_policy import (
+    REPORT_DATA_SCHEMA_VERSION,
     freeze_report_execution_plan,
     parse_report_execution_plan,
     report_policy_from_project_row,
@@ -82,10 +83,28 @@ def _rows(
     return values
 
 
+def _report_discovery_rows(conn: sqlite3.Connection, project_id: str, *, observations: bool = False) -> list[dict[str, Any]]:
+    """正常报告仅投影迁移后的证据，旧列仍留在数据库作为原文存档。"""
+    from .vulnerabilities import read_vulnerability_evidence
+
+    table = "vulnerability_observations" if observations else "vulnerabilities"
+    order = "observed_at, id" if observations else "created_at, id"
+    rows = _rows(conn, f"SELECT * FROM {table} WHERE project_id = ? ORDER BY {order}", (project_id,), json_columns=("identity_json",))
+    for item in rows:
+        item["evidence_items"] = json.loads(item.pop("evidence_items_json"))
+        for column in ("packet_artifact_id", "repro_request", "repro_response"):
+            item.pop(column)
+        if not observations:
+            item["record_evidence_items"] = item["evidence_items"]
+            item.update(read_vulnerability_evidence(conn, project_id, item["id"]))
+    return rows
+
+
 def _finalization_view(row: sqlite3.Row) -> AssessmentReportFinalizationView:
     values = _row_dict(row)
     # digest 是内部 fencing material，不进入通用读取模型。
     values.pop("claim_sha256", None)
+    values["template_compatibility_profiles"] = _json_value(values.pop("template_profiles_json"), [])
     return AssessmentReportFinalizationView(**values)
 
 
@@ -147,6 +166,20 @@ def _validate_frozen_execution(row: sqlite3.Row) -> None:
         raise HTTPException(409, "assessment_report_prompt_digest_mismatch")
     if plan.report_prompt_digest_sha256 != prompt_digest:
         raise HTTPException(409, "assessment_report_execution_plan_prompt_mismatch")
+    profiles = _json_value(row["template_profiles_json"], None)
+    if (
+        not isinstance(profiles, list)
+        or not all(isinstance(profile, str) for profile in profiles)
+        or plan.template_profile not in profiles
+    ):
+        raise HTTPException(409, "assessment_report_template_profile_invalid")
+    markdown = row["template_markdown"]
+    if (
+        not isinstance(markdown, str)
+        or not markdown.strip()
+        or sha256(markdown.encode("utf-8")).hexdigest() != row["template_digest_sha256"]
+    ):
+        raise HTTPException(409, "assessment_report_template_digest_mismatch")
 
 
 def _canonical_json(value: dict[str, Any]) -> str:
@@ -237,7 +270,9 @@ def _expected_report_metadata(
         "format": "markdown",
         "report_generation_token": finalization["generation_token"],
         "report_template_key": finalization["template_key"],
-        "report_template_version": finalization["template_version"],
+        "packet_version": plan.packet_version,
+        "output_contract_version": plan.output_contract_version,
+        "report_data_schema_version": REPORT_DATA_SCHEMA_VERSION,
         "report_template_digest_sha256": finalization["template_digest_sha256"],
         "report_policy_version": finalization["report_policy_version"],
         "report_execution_plan_sha256": finalization[
@@ -376,6 +411,7 @@ def _validate_snapshot_artifact(
     digest_sha256: str,
 ) -> sqlite3.Row:
     error_code = "assessment_report_snapshot_artifact_invalid"
+    _validate_frozen_execution(finalization)
     snapshot_task_run = _snapshot_origin_task_run(conn, task_run)
     artifact = _artifact_row(
         conn,
@@ -394,7 +430,9 @@ def _validate_snapshot_artifact(
         "format": "json",
         "report_generation_token": finalization["generation_token"],
         "report_template_key": finalization["template_key"],
-        "report_template_version": finalization["template_version"],
+        "packet_version": plan.packet_version,
+        "output_contract_version": plan.output_contract_version,
+        "report_data_schema_version": REPORT_DATA_SCHEMA_VERSION,
         "report_template_digest_sha256": finalization["template_digest_sha256"],
         "report_execution_plan_sha256": finalization[
             "report_execution_plan_sha256"
@@ -403,7 +441,6 @@ def _validate_snapshot_artifact(
             "report_prompt_digest_sha256"
         ],
         "report_policy_version": finalization["report_policy_version"],
-        "packet_version": plan.packet_version,
         "snapshot_sha256": digest_sha256,
     }
     if (
@@ -433,6 +470,12 @@ def _validate_snapshot_artifact(
         or not isinstance(snapshot["report_packet"].get("project"), dict)
         or snapshot["report_packet"]["project"].get("id")
         != finalization["project_id"]
+        or snapshot.get("report_template") != {
+            "key": finalization["template_key"],
+            "markdown_content": finalization["template_markdown"],
+            "digest_sha256": finalization["template_digest_sha256"],
+            "compatibility_profiles": json.loads(finalization["template_profiles_json"]),
+        }
     ):
         raise HTTPException(409, error_code)
     return artifact
@@ -565,7 +608,6 @@ def request_assessment_report_generation(
     project_id: str,
     *,
     template_key: str,
-    template_version: int,
     requested_by: str,
 ) -> AssessmentReportFinalizationView:
     """冻结模板并创建一次显式报告生成请求，历史报告 Artifact 保持不变。"""
@@ -588,7 +630,6 @@ def request_assessment_report_generation(
     if current is not None and str(current["status"]) == "pending":
         if (
             current["template_key"] == template_key
-            and int(current["template_version"] or 0) == template_version
             and current["requested_at"] is not None
         ):
             # 已接受请求完全依赖冻结快照；幂等重试不重新读取实时模板或 Prompt。
@@ -598,7 +639,6 @@ def request_assessment_report_generation(
     template = require_report_template_profile(
         conn,
         template_key,
-        template_version,
         report_policy.template_profile,
     )
     try:
@@ -615,11 +655,11 @@ def request_assessment_report_generation(
             project_id, version, status, attempt_count, last_error,
             generation_started_at, generation_token,
             requested_at, requested_by, template_key, template_version,
-            template_digest_sha256, template_markdown,
+            template_digest_sha256, template_markdown, template_profiles_json,
             report_policy_version, report_execution_plan_json,
             report_execution_plan_sha256, report_prompt_digest_sha256,
             report_prompt_markdown, created_at, updated_at
-        ) VALUES (?, ?, 'pending', 0, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, 'pending', 0, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(project_id) DO UPDATE SET
             version = excluded.version,
             status = 'pending',
@@ -639,6 +679,7 @@ def request_assessment_report_generation(
             template_version = excluded.template_version,
             template_digest_sha256 = excluded.template_digest_sha256,
             template_markdown = excluded.template_markdown,
+            template_profiles_json = excluded.template_profiles_json,
             report_policy_version = excluded.report_policy_version,
             report_execution_plan_json = excluded.report_execution_plan_json,
             report_execution_plan_sha256 = excluded.report_execution_plan_sha256,
@@ -656,10 +697,11 @@ def request_assessment_report_generation(
             generation_token,
             now,
             requested_by,
-            template.template_key,
-            template.version,
+            template.key,
+            None,
             template.digest_sha256,
             template.markdown_content,
+            json.dumps(template.compatibility_profiles),
             report_policy.version,
             execution_plan_json,
             execution_plan_digest,
@@ -943,7 +985,7 @@ def claim_assessment_report_finalization(
             WHERE project_id = ?
               AND requested_at IS NOT NULL
               AND template_key IS NOT NULL
-              AND template_version IS NOT NULL
+              AND template_profiles_json IS NOT NULL
               AND template_digest_sha256 IS NOT NULL
               AND template_markdown IS NOT NULL
               AND report_policy_version IS NOT NULL
@@ -1005,7 +1047,10 @@ def claim_assessment_report_finalization(
                     "report_generation": {
                         "generation_token": row["generation_token"],
                         "template_key": row["template_key"],
-                        "template_version": row["template_version"],
+                        "template_compatibility_profiles": json.loads(row["template_profiles_json"]),
+                        "packet_version": plan.packet_version,
+                        "output_contract_version": plan.output_contract_version,
+                        "report_data_schema_version": REPORT_DATA_SCHEMA_VERSION,
                         "template_digest_sha256": row["template_digest_sha256"],
                         "report_execution_plan_sha256": row["report_execution_plan_sha256"],
                         "report_prompt_digest_sha256": row["report_prompt_digest_sha256"],
@@ -1016,6 +1061,7 @@ def claim_assessment_report_finalization(
         )
         response_values = _row_dict(row)
         response_values.pop("claim_sha256", None)
+        response_values["template_compatibility_profiles"] = json.loads(response_values.pop("template_profiles_json"))
         # 明文 token 只存在于本次响应内，数据库与 TaskRun 均只保存 digest。
         response_values["claim_token"] = claim_token
         return AssessmentReportClaimView(
@@ -1264,8 +1310,7 @@ def _persist_report_finish(
         "SELECT * FROM assessment_report_finalizations WHERE project_id = ?",
         (current["project_id"],),
     ).fetchone()
-    response_values = _row_dict(finalization)
-    response_values.pop("claim_sha256", None)
+    response_values = _finalization_view(finalization).model_dump()
     # receipt 描述被接受的 immutable 请求；finalization 可保留此前绑定的快照供后续重试。
     response_values["artifact_id"] = body.artifact_id
     response_values["input_snapshot_artifact_id"] = body.input_snapshot_artifact_id
@@ -1660,18 +1705,8 @@ def build_assessment_report_packet(
             json_columns=("target_ids_json", "evidence_json"),
         ),
         quality_snapshot=asdict(quality) if quality is not None else None,
-        vulnerabilities=_rows(
-            conn,
-            "SELECT * FROM vulnerabilities WHERE project_id = ? ORDER BY created_at, id",
-            (project_id,),
-            json_columns=("identity_json",),
-        ),
-        observations=_rows(
-            conn,
-            "SELECT * FROM vulnerability_observations WHERE project_id = ? ORDER BY observed_at, id",
-            (project_id,),
-            json_columns=("identity_json",),
-        ),
+        vulnerabilities=_report_discovery_rows(conn, project_id),
+        observations=_report_discovery_rows(conn, project_id, observations=True),
         verifications=_rows(
             conn,
             "SELECT * FROM vulnerability_verifications WHERE project_id = ? ORDER BY created_at, id",

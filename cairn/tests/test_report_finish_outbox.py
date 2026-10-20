@@ -694,6 +694,40 @@ def test_pending_output_digest_covers_exact_request_material():
     assert output.entry_sha256 == expected
 
 
+@pytest.mark.parametrize("legacy", [True, False])
+def test_exact_output_metadata_survives_restart_and_replay_without_added_defaults(tmp_path: Path, legacy: bool):
+    execution = _execution()
+    original = _output(execution).model_dump(mode="json")
+    metadata = dict(original["metadata"])
+    if legacy:
+        assert metadata["report_template_version"] == 2
+        assert not {"packet_version", "output_contract_version", "report_data_schema_version"} & metadata.keys()
+    else:
+        metadata.pop("report_template_version")
+        metadata.update(packet_version=2, output_contract_version=3, report_data_schema_version=2)
+    output = pending_report_output(execution, content=original["content"], metadata=metadata)
+    if legacy:
+        assert output.entry_sha256 == original["entry_sha256"]
+    outbox = ReportFinishOutbox(tmp_path / "outbox")
+    outbox.persist(output)
+    loaded = ReportFinishOutbox(outbox.root).entries()[0]
+    assert loaded.entry_sha256 == output.entry_sha256
+    assert loaded.model_dump(mode="json")["metadata"] == metadata
+    requests = []
+
+    class Client:
+        def create_artifact(self, project_id, **kwargs):
+            requests.append((project_id, kwargs))
+            return ApiResult(status_code=201, data={})
+
+    loaded.replay(Client())
+    assert requests == [(execution.project_id, {
+        "task_run_id": execution.task_run_id, "kind": output.kind, "category": output.category,
+        "filename": output.filename, "content": original["content"], "metadata": metadata,
+    })]
+    assert canonical_json(loaded.model_dump(mode="json")) == canonical_json(output.model_dump(mode="json"))
+
+
 def test_pending_output_rejects_digest_and_metadata_identity_changes():
     output = _output()
     payload = output.model_dump(mode="json")

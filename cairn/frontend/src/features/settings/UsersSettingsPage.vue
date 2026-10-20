@@ -568,10 +568,10 @@ void reload()
 }
 
 .current-user-label {
-  margin-left: 4px;
+  margin-left: var(--space-1);
   color: var(--text-faint);
-  font-size: 10px;
-  font-weight: 600;
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium);
 }
 
 .tenant-cell {
@@ -597,8 +597,8 @@ void reload()
 .dialog-note {
   margin: 0 0 var(--space-4);
   color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
 }
 
 @media (max-width: 640px) {

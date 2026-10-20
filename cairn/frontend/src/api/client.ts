@@ -4,10 +4,9 @@ import type {
   CoverageCell,
   CreateAdminUserRequest,
   CreateReportTemplateRequest,
-  CreateReportTemplateVersionRequest,
+  UpdateReportTemplateRequest,
   CreateProjectRequest,
   CreateProjectResourceRequest,
-  CreateProjectGroupRequest,
   CreateProjectHintRequest,
   CreateTargetRequest,
   CreateWorkerTemplateRequest,
@@ -23,6 +22,8 @@ import type {
   DispatcherWorkerConfig,
   DispatcherYamlDocument,
   EvidenceRef,
+  EvidenceItem,
+  EvidenceSource,
   FactEvidence,
   InfrastructureCapability,
   InfrastructureImage,
@@ -53,7 +54,6 @@ import type {
   DiscoverTenantModelRequest,
   TestTenantModelRequest,
   ProjectDetail,
-  ProjectGroup,
   ProjectManagementOptions,
   ProjectResource,
   ProjectResourceBatch,
@@ -65,8 +65,6 @@ import type {
   ProjectWorkerOption,
   ReportTemplate,
   ReportTemplateCatalogEntry,
-  ReportTemplateVersion,
-  ReportTemplateVersionDetail,
   ReportInventoryFilters,
   ReportInventoryPage,
   PromptFile,
@@ -79,7 +77,6 @@ import type {
   CreateTenantWorkerRequest,
   UpdateTenantModelRequest,
   UpdateTenantWorkerRequest,
-  UpdateProjectGroupRequest,
   UpdateProjectResourceBatchMemberRequest,
   UpdateProjectWorkersRequest,
   UpdateTargetRequest,
@@ -247,9 +244,9 @@ async function apiRequest<T>(
   return data as T
 }
 
-export async function fetchText(path: string): Promise<string> {
+export async function fetchText(path: string, signal?: AbortSignal): Promise<string> {
   const requestGeneration = authGenerationProvider?.() ?? 0
-  const response = await fetch(path, { credentials: 'same-origin' })
+  const response = await fetch(path, { credentials: 'same-origin', ...(signal ? { signal } : {}) })
   const text = await response.text()
   if (!response.ok) {
     if (response.status === 401) unauthorizedHandler?.(requestGeneration)
@@ -560,24 +557,6 @@ export const restorePromptGroup = (key: string) => {
   return api<PromptGroup>('POST', `/prompt-groups/${encodePathPart(key)}/restore`)
 }
 
-// 项目组归属由认证会话的 Tenant 决定，客户端不再提交可伪造的 owner。
-export const listProjectGroups = () => api<ProjectGroup[]>('GET', '/project-groups')
-
-export const createProjectGroup = (body: CreateProjectGroupRequest) =>
-  api<ProjectGroup>('POST', '/project-groups', body)
-
-export const updateProjectGroup = (id: string, body: UpdateProjectGroupRequest) =>
-  api<ProjectGroup>('PUT', `/project-groups/${encodeURIComponent(id)}`, body)
-
-export const deleteProjectGroup = (id: string) =>
-  api<void>('DELETE', `/project-groups/${encodeURIComponent(id)}`)
-
-// 把项目移动到指定分组（groupId 为空表示移出分组、变为未分组）。
-export const moveProjectToGroup = (projectId: string, groupId: string | null) =>
-  api<ProjectSummary>('PUT', `/projects/${encodeURIComponent(projectId)}/group`, {
-    group_id: groupId,
-  })
-
 export const updateProjectWorkers = (projectId: string, body: UpdateProjectWorkersRequest) =>
   api<ProjectSummary>('PUT', `/projects/${encodeURIComponent(projectId)}/workers`, body)
 
@@ -735,34 +714,14 @@ export const listReportTemplates = (signal?: AbortSignal) =>
 export const createReportTemplate = (body: CreateReportTemplateRequest) =>
   api<ReportTemplate>('POST', '/report-templates', body)
 
-export const archiveReportTemplate = (key: string) =>
+export const getReportTemplate = (key: string, signal?: AbortSignal) =>
+  api<ReportTemplate>('GET', `/report-templates/${encodePathPart(key)}`, undefined, signal)
+
+export const updateReportTemplate = (key: string, body: UpdateReportTemplateRequest) =>
+  api<ReportTemplate>('PUT', `/report-templates/${encodePathPart(key)}`, body)
+
+export const deleteReportTemplate = (key: string) =>
   api<void>('DELETE', `/report-templates/${encodePathPart(key)}`)
-
-export const listReportTemplateVersions = (key: string, signal?: AbortSignal) =>
-  api<ReportTemplateVersion[]>(
-    'GET',
-    `/report-templates/${encodePathPart(key)}/versions`,
-    undefined,
-    signal,
-  )
-
-export const createReportTemplateVersion = (
-  key: string,
-  body: CreateReportTemplateVersionRequest,
-) =>
-  api<ReportTemplateVersionDetail>(
-    'POST',
-    `/report-templates/${encodePathPart(key)}/versions`,
-    body,
-  )
-
-export const getReportTemplateVersion = (key: string, version: number, signal?: AbortSignal) =>
-  api<ReportTemplateVersionDetail>(
-    'GET',
-    `/report-templates/${encodePathPart(key)}/versions/${version}`,
-    undefined,
-    signal,
-  )
 
 export const getAssessmentReportFinalization = async (projectId: string, signal?: AbortSignal) => {
   try {
@@ -823,11 +782,8 @@ export interface Vulnerability {
   confidence: number
   status: 'new' | 'confirmed' | 'dismissed' | 'remediated'
   source_fact_id: string | null
-  packet_artifact_id: string | null
   remediation: string
-  // worker 内联返回的原始 HTTP 请求/响应包（固定格式文本），不依赖文件 artifact
-  repro_request: string
-  repro_response: string
+  evidence_items: EvidenceItem[]
   repro_steps: string
   discovered_by_run_id: string | null
   discovered_by_worker: string | null
@@ -860,12 +816,10 @@ export interface VulnerabilityObservation {
   task_run_id: string | null
   worker: string | null
   slot_key: string | null
-  packet_artifact_id: string | null
   identity: Record<string, unknown>
   severity: string
   confidence: number
-  repro_request: string
-  repro_response: string
+  evidence_items: EvidenceItem[]
   observed_at: string
 }
 
@@ -888,6 +842,9 @@ export interface VulnerabilityVerification {
 
 // 详情：聚合来源 fact、发现记录、独立验证与产出 run 证据，供完整审阅。
 export interface VulnerabilityDetail extends Vulnerability {
+  observation_id: string | null
+  source: EvidenceSource
+  record_evidence_items: EvidenceItem[]
   source_fact: VulnerabilitySourceFact | null
   run_artifacts: VulnerabilityEvidenceArtifact[]
   observations: VulnerabilityObservation[]
@@ -938,13 +895,11 @@ export interface CreateVulnerabilityRequest {
   severity: string
   vuln_type?: string
   target?: string
-  packet_artifact_id?: string | null
   remediation?: string
   confidence?: number
   source_fact_id?: string | null
   slot_key?: string | null
-  repro_request?: string
-  repro_response?: string
+  evidence_items?: EvidenceItem[]
 }
 
 export interface UpdateVulnerabilityRequest {
@@ -952,8 +907,7 @@ export interface UpdateVulnerabilityRequest {
   severity?: string
   remediation?: string
   confidence?: number
-  repro_request?: string
-  repro_response?: string
+  evidence_items?: EvidenceItem[]
   repro_steps?: string
 }
 
@@ -995,10 +949,10 @@ export const listAllVulnerabilities = (
   )
 }
 
-export const getVulnerability = (projectId: string, vulnId: string, signal?: AbortSignal) =>
+export const getVulnerability = (projectId: string, vulnId: string, signal?: AbortSignal, observationId?: string) =>
   api<VulnerabilityDetail>(
     'GET',
-    `/projects/${encodeURIComponent(projectId)}/vulnerabilities/${encodeURIComponent(vulnId)}`,
+    `/projects/${encodeURIComponent(projectId)}/vulnerabilities/${encodeURIComponent(vulnId)}${observationId ? `?${new URLSearchParams({ observation_id: observationId })}` : ''}`,
     undefined,
     signal,
   )

@@ -1,17 +1,10 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { reactive, ref, unref } from 'vue'
+import { reactive, ref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { VueWrapper } from '@vue/test-utils'
-import type { ProjectGroup } from '@/api/types'
 import FrontLayout from './FrontLayout.vue'
 
 const mocks = vi.hoisted(() => ({
-  groups: [] as ProjectGroup[],
-  createProjectGroup: vi.fn(),
-  deleteProjectGroup: vi.fn(),
-  listProjectGroups: vi.fn(),
-  groupsRefetch: vi.fn(),
-  invalidateQueries: vi.fn(),
   router: {
     push: vi.fn(),
     replace: vi.fn(),
@@ -21,6 +14,7 @@ const mocks = vi.hoisted(() => ({
     name: 'Projects',
     query: {} as Record<string, unknown>,
     params: {} as Record<string, string>,
+    matched: [] as Array<{ path: string }>,
   },
   authStore: {
     displayName: 'analyst',
@@ -48,9 +42,6 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/api/client', () => ({
   api: vi.fn().mockResolvedValue(undefined),
-  createProjectGroup: mocks.createProjectGroup,
-  deleteProjectGroup: mocks.deleteProjectGroup,
-  listProjectGroups: mocks.listProjectGroups,
 }))
 
 vi.mock('@/stores/auth', () => ({
@@ -71,38 +62,9 @@ vi.mock('vue-router', () => ({
 }))
 
 vi.mock('@tanstack/vue-query', () => ({
-  useQuery: ({ queryKey }: { queryKey: unknown }) => {
-    const resolvedKey = unref(queryKey)
-    const key = Array.isArray(resolvedKey) ? resolvedKey : []
-
-    if (key[0] === 'project-groups') {
-      return {
-        data: ref(mocks.groups),
-        refetch: mocks.groupsRefetch,
-      }
-    }
-
-    return { data: ref(undefined) }
-  },
-  useQueryClient: () => ({
-    invalidateQueries: mocks.invalidateQueries,
-  }),
+  useQuery: () => ({ data: ref(undefined) }),
+  useQueryClient: () => ({ invalidateQueries: vi.fn().mockResolvedValue(undefined) }),
 }))
-
-const groups: ProjectGroup[] = [
-  {
-    id: 'group-a',
-    name: 'Red Team',
-    owner: 'analyst',
-    created_at: '2026-08-20T00:00:00Z',
-  },
-  {
-    id: 'group-b',
-    name: 'Blue Team',
-    owner: 'analyst',
-    created_at: '2026-08-20T01:00:00Z',
-  },
-]
 
 const wrappers: VueWrapper[] = []
 const scrollIntoViewMock = vi.fn()
@@ -134,7 +96,7 @@ function mountLayout() {
       stubs: {
         RouterLink: {
           props: ['to'],
-          template: '<a :href="String(to)"><slot /></a>',
+          template: '<a :href="typeof to === \'string\' ? to : to.path || to.name"><slot /></a>',
         },
         RouterView: { template: '<div data-testid="router-view" />' },
       },
@@ -198,35 +160,6 @@ async function dispatchPaletteShortcut(modifier: 'ctrl' | 'meta') {
   return event
 }
 
-function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void
-  let reject!: (reason?: unknown) => void
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise
-    reject = rejectPromise
-  })
-  return { promise, resolve, reject }
-}
-
-async function openGroupMenu(groupName: string) {
-  const trigger = document.body.querySelector<HTMLButtonElement>(
-    `button[aria-label="项目组选项：${groupName}"]`,
-  )
-  if (!trigger) throw new Error(`找不到项目组菜单：${groupName}`)
-  trigger.click()
-  await flushPromises()
-  return trigger
-}
-
-async function chooseMenuItem(label: string) {
-  const item = [...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
-    (candidate) => candidate.textContent?.includes(label),
-  )
-  if (!item) throw new Error(`找不到菜单项：${label}`)
-  item.click()
-  await flushPromises()
-}
-
 beforeEach(() => {
   HTMLElement.prototype.hasPointerCapture = () => false
   HTMLElement.prototype.setPointerCapture = () => undefined
@@ -235,11 +168,11 @@ beforeEach(() => {
   scrollIntoViewMock.mockReset()
   mockMobileViewport(false)
 
-  mocks.groups = groups.map((group) => ({ ...group }))
   mocks.route.path = '/projects'
   mocks.route.name = 'Projects'
   mocks.route.query = {}
   mocks.route.params = {}
+  mocks.route.matched = []
   mocks.authStore.displayName = 'analyst'
   mocks.authStore.isSuperAdmin = false
   mocks.authStore.session = { tenant_id: 'tenant-a' }
@@ -266,11 +199,6 @@ beforeEach(() => {
     clearProject: vi.fn(),
   })
 
-  mocks.createProjectGroup.mockReset()
-  mocks.deleteProjectGroup.mockReset()
-  mocks.listProjectGroups.mockReset().mockResolvedValue(mocks.groups)
-  mocks.groupsRefetch.mockReset().mockResolvedValue(undefined)
-  mocks.invalidateQueries.mockReset().mockResolvedValue(undefined)
   mocks.router.push.mockReset().mockResolvedValue(undefined)
   mocks.router.replace.mockReset().mockResolvedValue(undefined)
   mocks.authStore.logout.mockReset().mockResolvedValue(undefined)
@@ -293,7 +221,7 @@ describe('FrontLayout overlay migration', () => {
     expect(sidebar.get('.brand-logo-mark').text()).toBe('A')
     expect(sidebar.find('a[href="/projects?group=ungrouped"]').exists()).toBe(false)
     expect(sidebar.text()).toContain('仪表盘')
-    expect(sidebar.text()).toContain('成果列表')
+    expect(sidebar.text()).toContain('漏洞')
     expect(sidebar.text()).toContain('Models')
     expect(sidebar.text()).toContain('Workers')
     expect(sidebar.text()).not.toContain('探索场景')
@@ -310,21 +238,17 @@ describe('FrontLayout overlay migration', () => {
     expect(adminSidebar.find('.dispatcher-status').exists()).toBe(true)
   })
 
-  it('uses independent accessible controls for project navigation and group creation', async () => {
+  it('navigates to tasks without project groups and ignores the retired g n shortcut', async () => {
     const wrapper = mountLayout()
-    const taskToggle = wrapper.get('.nav-group-header-wrapper > .nav-group-header')
-    const createButton = wrapper.get('button[aria-label="新建项目组"]')
-
-    expect(taskToggle.element.tagName).toBe('BUTTON')
-    expect(taskToggle.attributes('type')).toBe('button')
-    expect(createButton.element.tagName).toBe('BUTTON')
-    expect(createButton.attributes('type')).toBe('button')
-    expect(taskToggle.element.contains(createButton.element)).toBe(false)
-    expect(wrapper.find('.nav-group-header button').exists()).toBe(false)
-
-    await createButton.trigger('click')
+    const tasks = wrapper.findAll('a').find((link) => link.text() === '任务管理')!
+    expect(tasks.attributes('href')).toBe('Projects')
+    expect(wrapper.find('button[aria-label="新建项目组"]').exists()).toBe(false)
+    expect(wrapper.find('[href*="?group="]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('未分组')
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', bubbles: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', bubbles: true }))
     await flushPromises()
-    expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain('新建项目组')
+    expect(mocks.router.push).not.toHaveBeenCalled()
   })
 
   it('provides a reachable mobile close control and closes after mobile navigation only', async () => {
@@ -336,8 +260,8 @@ describe('FrontLayout overlay migration', () => {
     expect(mocks.uiStore.toggleSidebar).toHaveBeenCalledTimes(1)
 
     mocks.uiStore.toggleSidebar.mockClear()
-    const findingsLink = wrapper.findAll('a').find((link) => link.text() === '成果列表')
-    if (!findingsLink) throw new Error('找不到成果列表导航')
+    const findingsLink = wrapper.findAll('a').find((link) => link.text() === '漏洞')
+    if (!findingsLink) throw new Error('找不到漏洞导航')
     findingsLink.element.addEventListener('click', (event) => event.preventDefault())
     await findingsLink.trigger('click')
     expect(mocks.uiStore.toggleSidebar).toHaveBeenCalledTimes(1)
@@ -368,112 +292,6 @@ describe('FrontLayout overlay migration', () => {
 
     expect(mocks.authStore.logout).toHaveBeenCalledTimes(1)
     expect(mocks.router.replace).toHaveBeenCalledWith({ name: 'Login' })
-  })
-
-  it('trims a project group name, blocks duplicate creation, and navigates after success', async () => {
-    const pending = deferred<ProjectGroup>()
-    mocks.createProjectGroup.mockReturnValueOnce(pending.promise)
-    mountLayout()
-
-    const createTrigger = document.body.querySelector<HTMLElement>('.btn-group-add-inline')
-    if (!createTrigger) throw new Error('找不到新建项目组入口')
-    createTrigger.click()
-    await flushPromises()
-
-    const input = document.body.querySelector<HTMLInputElement>('#project-group-name')
-    expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain('新建项目组')
-    if (!input) throw new Error('找不到项目组名称输入框')
-    expect(document.activeElement).toBe(input)
-
-    input.value = '  Core Group  '
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-    await flushPromises()
-
-    bodyButton('确认创建').click()
-    bodyButton('确认创建').click()
-    await flushPromises()
-
-    expect(mocks.createProjectGroup).toHaveBeenCalledTimes(1)
-    expect(mocks.createProjectGroup).toHaveBeenCalledWith({ name: 'Core Group' })
-    expect(bodyButton('取消').disabled).toBe(true)
-
-    pending.resolve({
-      id: 'group-created',
-      name: 'Core Group',
-      owner: 'analyst',
-      created_at: '2026-08-20T02:00:00Z',
-    })
-    await flushPromises()
-
-    expect(document.body.querySelector('[role="dialog"]')).toBeNull()
-    expect(mocks.groupsRefetch).toHaveBeenCalledTimes(1)
-    expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['project-groups'] })
-    expect(mocks.router.push).toHaveBeenCalledWith('/projects?group=group-created')
-  })
-
-  it('keeps the create dialog and entered name when creation fails', async () => {
-    mocks.createProjectGroup.mockRejectedValueOnce(new Error('create rejected'))
-    mountLayout()
-
-    const createTrigger = document.body.querySelector<HTMLElement>('.btn-group-add-inline')
-    if (!createTrigger) throw new Error('找不到新建项目组入口')
-    createTrigger.click()
-    await flushPromises()
-
-    const input = document.body.querySelector<HTMLInputElement>('#project-group-name')
-    if (!input) throw new Error('找不到项目组名称输入框')
-    input.value = 'Persistent Group'
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-    await flushPromises()
-
-    bodyButton('确认创建').click()
-    await flushPromises()
-
-    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull()
-    expect(input.value).toBe('Persistent Group')
-    expect(mocks.uiStore.showToast).toHaveBeenCalledWith('create rejected', 'danger')
-  })
-
-  it('opens an accessible danger menu and preserves delete confirmation on failure', async () => {
-    const pending = deferred<void>()
-    mocks.deleteProjectGroup.mockReturnValueOnce(pending.promise)
-    mountLayout()
-
-    await openGroupMenu('Red Team')
-    expect(document.body.querySelector('[role="menu"]')).not.toBeNull()
-    await chooseMenuItem('删除分组')
-
-    expect(document.body.querySelector('[role="alertdialog"]')?.textContent).toContain('Red Team')
-    bodyButton('确认删除').click()
-    bodyButton('确认删除').click()
-    await flushPromises()
-
-    expect(mocks.deleteProjectGroup).toHaveBeenCalledTimes(1)
-    expect(mocks.deleteProjectGroup).toHaveBeenCalledWith('group-a')
-    expect(bodyButton('取消').disabled).toBe(true)
-
-    pending.reject(new Error('delete rejected'))
-    await flushPromises()
-
-    expect(document.body.querySelector('[role="alertdialog"]')).not.toBeNull()
-    expect(mocks.uiStore.showToast).toHaveBeenCalledWith('delete rejected', 'danger')
-  })
-
-  it('closes deletion, refreshes queries, and clears a deleted active group route', async () => {
-    mocks.route.query = { group: 'group-a' }
-    mocks.deleteProjectGroup.mockResolvedValueOnce(undefined)
-    mountLayout()
-
-    await openGroupMenu('Red Team')
-    await chooseMenuItem('删除分组')
-    bodyButton('确认删除').click()
-    await flushPromises()
-
-    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull()
-    expect(mocks.router.push).toHaveBeenCalledWith('/projects')
-    expect(mocks.groupsRefetch).toHaveBeenCalledTimes(1)
-    expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['projects'] })
-    expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['project-groups'] })
   })
 
   it('opens a named portalled command Dialog and focuses its combobox', async () => {
@@ -533,6 +351,7 @@ describe('FrontLayout overlay migration', () => {
 
   it('wraps keyboard selection, resets it after filtering, and executes the valid result', async () => {
     mocks.route.params = { id: 'project-a' }
+    mocks.route.matched = [{ path: '/projects/:id' }]
     mountLayout()
     await openCommandPalette()
     const input = paletteInput()
@@ -580,12 +399,14 @@ describe('FrontLayout overlay migration', () => {
   it('preserves role and project command visibility and supports mouse execution', async () => {
     mocks.authStore.isSuperAdmin = true
     mocks.route.params = { id: 'project-a' }
+    mocks.route.matched = [{ path: '/projects/:id' }]
     mountLayout()
     await openCommandPalette()
 
     const optionText = paletteOptions().map((option) => option.textContent || '')
     expect(optionText.some((text) => text.includes('转到全局监控大屏'))).toBe(true)
-    expect(optionText.some((text) => text.includes('管理 Users'))).toBe(true)
+    await typePaletteQuery('管理 Users')
+    expect(paletteOptions().some((option) => option.textContent?.includes('管理 Users'))).toBe(true)
 
     await typePaletteQuery('运行终端')
     const runsOption = paletteOptions().find((option) =>
@@ -606,6 +427,7 @@ describe('FrontLayout overlay migration', () => {
     mocks.route.name = 'WorkspaceRuns'
     mocks.route.path = '/projects/project-a/runs'
     mocks.route.params = { id: 'project-a' }
+    mocks.route.matched = [{ path: '/projects/:id' }]
     const wrapper = mountLayout()
 
     const breadcrumb = wrapper.get('nav[aria-label="面包屑"]')

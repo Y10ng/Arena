@@ -20,6 +20,7 @@ from cairn.assessment_contracts import (
 from cairn.dispatcher.worker_protocol import validate_result_envelope
 from cairn.dispatcher.worker_protocol.submission import ArtifactDeclaration, validate_phase_data
 from cairn.server.models import EvidenceRef
+from cairn.evidence_contracts import WorkerEvidenceItem, evidence_refs
 
 LOG = logging.getLogger(__name__)
 
@@ -343,7 +344,11 @@ def extract_evidence_refs(
     if section is not None:
         node = data.get(section)
         if isinstance(node, dict):
-            refs = _parse_evidence_refs(node, path=section)
+            if section == "fact" and node.get("vulnerability") is not None:
+                if "evidence_refs" in data:
+                    raise PhaseContractError("finding evidence_refs must be projected from evidence_items")
+                return _fact_evidence_refs(node)
+            refs = _fact_evidence_refs(node) if section == "fact" else _parse_evidence_refs(node, path=section)
             if refs:
                 return refs
         if section == "fact" and "evidence_refs" in data:
@@ -353,8 +358,23 @@ def extract_evidence_refs(
     for key in ("fact", "complete"):
         node = data.get(key)
         if isinstance(node, dict):
-            refs.extend(_parse_evidence_refs(node, path=key))
+            if key == "fact" and node.get("vulnerability") is not None and "evidence_refs" in data:
+                raise PhaseContractError("finding evidence_refs must be projected from evidence_items")
+            refs.extend(_fact_evidence_refs(node) if key == "fact" else _parse_evidence_refs(node, path=key))
     return refs
+
+
+def _fact_evidence_refs(fact: dict[str, Any]) -> list[EvidenceRef]:
+    vulnerability = _validate_vulnerability(fact)
+    if vulnerability is None:
+        return _parse_evidence_refs(fact, path="fact")
+    if "evidence_refs" in fact:
+        raise PhaseContractError("finding evidence_refs must be projected from evidence_items")
+    items = [WorkerEvidenceItem.model_validate(item) for item in vulnerability["evidence_items"]]
+    return _parse_evidence_refs(
+        {"evidence_refs": [ref.model_dump(exclude_none=True) for ref in evidence_refs(items)]},
+        path="fact.vulnerability",
+    )
 
 
 def extract_verification_result(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -881,16 +901,17 @@ def _validate_vulnerability(fact: dict[str, Any]) -> dict[str, Any] | None:
     severity = vuln.get("severity")
     if not isinstance(severity, str) or severity.strip().lower() not in VULNERABILITY_SEVERITIES:
         raise PhaseContractError(f"vulnerability.severity must be one of {sorted(VULNERABILITY_SEVERITIES)}")
-    packet_artifact_handle = vuln.get("packet_artifact_handle")
-    if packet_artifact_handle is not None:
-        packet_artifact_handle = _validate_artifact_handle(
-            packet_artifact_handle,
-            path="vulnerability.packet_artifact_handle",
-        )
-    if "packet_path" in vuln:
-        raise PhaseContractError(
-            "vulnerability.packet_path is not supported; use packet_artifact_handle"
-        )
+    if vuln.get("schema_version") != 2:
+        raise PhaseContractError("vulnerability.schema_version must be 2")
+    if {"packet_path", "packet_artifact_handle", "packet_artifact_id", "repro_request", "repro_response", "evidence_refs"}.intersection(vuln):
+        raise PhaseContractError("vulnerability must use evidence_items, not legacy reproduction fields")
+    raw_items = vuln.get("evidence_items")
+    if not isinstance(raw_items, list):
+        raise PhaseContractError("vulnerability.evidence_items must be an array")
+    try:
+        items = [WorkerEvidenceItem.model_validate(item) for item in raw_items]
+    except ValidationError as exc:
+        raise PhaseContractError("invalid vulnerability.evidence_items") from exc
     confidence = vuln.get("confidence", 0.5)
     if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
         raise PhaseContractError("vulnerability.confidence must be a number 0-1")
@@ -899,17 +920,10 @@ def _validate_vulnerability(fact: dict[str, Any]) -> dict[str, Any] | None:
         "severity": severity.strip().lower(),
         "vuln_type": (vuln.get("vuln_type") or "").strip() if isinstance(vuln.get("vuln_type"), str) else "",
         "target": (vuln.get("target") or "").strip() if isinstance(vuln.get("target"), str) else "",
-        "packet_artifact_handle": (
-            packet_artifact_handle.strip()
-            if isinstance(packet_artifact_handle, str)
-            else None
-        ),
+        "schema_version": 2,
+        "evidence_items": [item.model_dump(exclude_none=True) for item in items],
         "remediation": vuln.get("remediation") or "" if isinstance(vuln.get("remediation"), str) else "",
         "confidence": max(0.0, min(1.0, float(confidence))),
-        # repro_request/repro_response: worker 内联返回的原始 HTTP 请求/响应包（固定格式文本），
-        # 不依赖文件 artifact；空字符串=未提供。仅 trim 尾部空白，保留内部行结构。
-        "repro_request": vuln.get("repro_request", "").rstrip() if isinstance(vuln.get("repro_request"), str) else "",
-        "repro_response": vuln.get("repro_response", "").rstrip() if isinstance(vuln.get("repro_response"), str) else "",
         "identity": _validate_vulnerability_identity(vuln.get("identity")),
     }
 
@@ -1106,7 +1120,9 @@ def validate_reason_payload(
     if goal_driven and discovered_surfaces and complete is not None:
         raise PhaseContractError("completion cannot add discovered surfaces")
     if complete is not None:
-        if intents is not None:
+        if intents is not None and not isinstance(intents, list):
+            raise PhaseContractError("intents must be an array")
+        if intents:
             raise PhaseContractError("complete and intents cannot coexist")
         if not isinstance(complete, dict) or "from" not in complete or "description" not in complete:
             raise PhaseContractError("invalid complete payload")

@@ -6,7 +6,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 
-from cairn.server.auth import RequestPrincipal, require_dispatcher, require_super_admin, require_verification_caller
+from cairn.server.auth import RequestPrincipal, protect_cookie_request, require_dispatcher, require_super_admin, require_verification_caller
 from cairn.server.schemas.resources import UpdateProjectResourceBatchMemberRequest
 from cairn.server.schemas.verification_requests import (
     CreateVerificationIntegration, CreateVerificationRequest, CreateVerificationResourceBatch,
@@ -45,9 +45,10 @@ def list_requests(limit: int = Query(default=50, ge=1, le=200), offset: int = Qu
 
 @router.get("/verification-sources/projects/{project_id}/vulnerabilities/{vulnerability_id}/preview")
 def source_preview(project_id: str, vulnerability_id: str, response: Response,
-                   principal: RequestPrincipal = Depends(require_verification_caller)):
+                   principal: RequestPrincipal = Depends(require_verification_caller),
+                   observation_id: str | None = None):
     response.headers["Cache-Control"] = "no-store"
-    return service.preview_platform_vulnerability(project_id, vulnerability_id, principal)
+    return service.preview_platform_vulnerability(project_id, vulnerability_id, principal, observation_id=observation_id)
 
 
 @router.get("/verification-sources/projects/{project_id}/vulnerabilities/{vulnerability_id}/history")
@@ -61,6 +62,11 @@ def source_history(project_id: str, vulnerability_id: str, response: Response,
 @router.get("/verification-requests/{request_id}")
 def read_request(request_id: str, principal: RequestPrincipal = Depends(require_verification_caller)):
     return service.get_verification_request(request_id, principal)
+
+
+@router.delete("/verification-requests/{request_id}", status_code=204)
+def delete_request(request_id: str, principal: RequestPrincipal = Depends(require_verification_caller)):
+    service.delete_verification_request(request_id, principal)
 
 
 @router.post("/verification-requests/{request_id}/cancel")
@@ -80,6 +86,20 @@ def read_material(request_id: str, resource_id: str, principal: RequestPrincipal
     filename = PurePosixPath(material.path).name
     headers = NO_STORE | {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}"}
     return Response(material.content, media_type="application/octet-stream", headers=headers)
+
+
+@router.get("/verification-requests/{request_id}/materials/{resource_id}/preview")
+def preview_material(request_id: str, resource_id: str, response: Response,
+                     principal: RequestPrincipal = Depends(require_verification_caller)):
+    response.headers.update(NO_STORE)
+    return service.verification_material_preview(request_id, resource_id, principal)
+
+
+@router.get("/verification-requests/{request_id}/artifacts/{artifact_id}/preview")
+def preview_artifact(request_id: str, artifact_id: str, response: Response,
+                     principal: RequestPrincipal = Depends(require_verification_caller)):
+    response.headers.update(NO_STORE)
+    return service.verification_artifact_preview(request_id, artifact_id, principal)
 
 
 @router.get("/verification-requests/{request_id}/artifacts/{artifact_id}")
@@ -147,20 +167,24 @@ def readiness(response: Response, principal: RequestPrincipal = Depends(require_
 
 
 @router.get("/verification-configuration")
-def read_configuration(tenant_id: str = Query(min_length=1),
-                       principal: RequestPrincipal = Depends(require_super_admin)):
+def read_configuration(response: Response, tenant_id: str | None = Query(default=None, min_length=1),
+                       principal: RequestPrincipal = Depends(protect_cookie_request)):
+    response.headers["Cache-Control"] = "no-store"
     return configuration.get_verification_configuration(principal, tenant_id=tenant_id)
 
 
 @router.put("/verification-configuration")
-def update_configuration(body: UpdateVerificationConfiguration, tenant_id: str = Query(min_length=1),
-                         principal: RequestPrincipal = Depends(require_super_admin)):
+def update_configuration(body: UpdateVerificationConfiguration, response: Response,
+                         tenant_id: str | None = Query(default=None, min_length=1),
+                         principal: RequestPrincipal = Depends(protect_cookie_request)):
+    response.headers["Cache-Control"] = "no-store"
     return configuration.update_verification_configuration(body, principal, tenant_id=tenant_id)
 
 
 @router.get("/verification-configuration/options")
-def configuration_options(tenant_id: str = Query(min_length=1),
-                          principal: RequestPrincipal = Depends(require_super_admin)):
+def configuration_options(response: Response, tenant_id: str | None = Query(default=None, min_length=1),
+                          principal: RequestPrincipal = Depends(protect_cookie_request)):
+    response.headers["Cache-Control"] = "no-store"
     return configuration.verification_configuration_options(principal, tenant_id=tenant_id)
 
 
@@ -216,6 +240,13 @@ def execution_heartbeat(request_id: str, body: VerificationExecutionBinding, pri
 @router.post("/verification-requests/{request_id}/result")
 def execution_result(request_id: str, body: VerificationResultSubmission, principal: RequestPrincipal = Depends(require_dispatcher)):
     return service.submit_verification_result(request_id, body, principal)
+
+
+@router.post("/verification-requests/{request_id}/receipt")
+def execution_receipt(request_id: str, body: VerificationResultSubmission, response: Response,
+                      principal: RequestPrincipal = Depends(require_dispatcher)):
+    response.headers["Cache-Control"] = "no-store"
+    return service.verification_result_receipt(request_id, body, principal)
 
 
 @router.post("/verification-requests/{request_id}/failure")

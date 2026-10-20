@@ -85,15 +85,14 @@ const submit = async () => {
   display: grid;
   place-items: center;
   padding: var(--space-6);
-  background:
-    radial-gradient(circle at 20% 15%, var(--accent-dim), transparent 34%), var(--bg-base);
+  background-color: var(--bg-base);
 }
 
 .login-card {
   width: min(420px, 100%);
   gap: 0;
-  padding: 34px;
-  box-shadow: var(--shadow-pop);
+  padding: var(--space-6);
+  box-shadow: var(--shadow-xs);
 }
 
 .login-brand {
@@ -122,8 +121,10 @@ const submit = async () => {
 
 h1 {
   margin-top: 2px;
-  font-size: 24px;
-  letter-spacing: -0.02em;
+  font-size: var(--text-2xl);
+  font-weight: var(--font-semibold);
+  line-height: var(--leading-snug);
+  letter-spacing: var(--tracking-tight);
 }
 
 .login-copy {
@@ -138,7 +139,7 @@ h1 {
 }
 
 .login-error {
-  font-size: 12px;
+  font-size: var(--text-md);
 }
 
 @media (max-width: 520px) {

@@ -15,19 +15,23 @@
         <DropdownMenuLabel v-if="label" class="ui-dropdown-menu__label">
           {{ label }}
         </DropdownMenuLabel>
-        <template v-for="item in items" :key="item.value">
+        <template v-for="(item, index) in items" :key="item.value">
           <DropdownMenuSeparator v-if="item.separatorBefore" class="ui-dropdown-menu__separator" />
           <DropdownMenuItem
             class="ui-dropdown-menu__item"
             :class="{ 'ui-dropdown-menu__item--danger': item.tone === 'danger' }"
             :disabled="item.disabled"
             :text-value="item.label"
+            :aria-describedby="item.description ? `${menuId}-description-${index}` : undefined"
             @select="emit('select', item.value)"
           >
             <span v-if="$slots.icon" class="ui-dropdown-menu__icon" aria-hidden="true">
               <slot name="icon" :item="item" />
             </span>
-            <span class="ui-dropdown-menu__item-label">{{ item.label }}</span>
+            <span class="ui-dropdown-menu__item-text">
+              <span class="ui-dropdown-menu__item-label">{{ item.label }}</span>
+              <span v-if="item.description" :id="`${menuId}-description-${index}`" class="ui-dropdown-menu__description">{{ item.description }}</span>
+            </span>
             <span v-if="item.shortcut" class="ui-dropdown-menu__shortcut" aria-hidden="true">
               {{ item.shortcut }}
             </span>
@@ -40,6 +44,7 @@
 </template>
 
 <script setup lang="ts">
+import { useId } from 'vue'
 import {
   DropdownMenuContent,
   DropdownMenuItem,
@@ -59,6 +64,7 @@ export interface DropdownMenuOption {
   value: string
   label: string
   disabled?: boolean
+  description?: string
   shortcut?: string
   separatorBefore?: boolean
   tone?: DropdownMenuItemTone
@@ -91,6 +97,8 @@ const emit = defineEmits<{
   (event: 'select', value: string): void
 }>()
 
+const menuId = useId()
+
 defineOptions({ name: 'UiDropdownMenu' })
 </script>
 
@@ -102,11 +110,16 @@ defineOptions({ name: 'UiDropdownMenu' })
   border: calc(var(--space-1) / 4) solid var(--border-strong);
   border-radius: var(--radius-md);
   padding: var(--space-1);
-  z-index: var(--z-dropdown);
-  overflow: hidden;
+  z-index: var(--z-overlay-child);
+  max-height: min(var(--reka-dropdown-menu-content-available-height), 70dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--bg-elevated);
   box-shadow: var(--shadow-pop);
   color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
   transform-origin: var(--reka-dropdown-menu-content-transform-origin);
 }
 
@@ -122,16 +135,16 @@ defineOptions({ name: 'UiDropdownMenu' })
 }
 
 .ui-dropdown-menu__item {
-  min-height: var(--control-height-sm);
+  min-height: var(--control-height);
   border-radius: var(--radius-sm);
-  padding: var(--space-2) var(--space-3);
+  padding: calc(var(--space-1) * 1.5) var(--space-3);
   display: flex;
   align-items: center;
   gap: var(--space-2);
   outline: none;
   color: var(--text);
-  font-size: var(--text-sm);
-  line-height: var(--leading-snug);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
   cursor: default;
   user-select: none;
 }
@@ -161,12 +174,19 @@ defineOptions({ name: 'UiDropdownMenu' })
   justify-content: center;
 }
 
-.ui-dropdown-menu__item-label {
+.ui-dropdown-menu__item-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
   min-width: 0;
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.ui-dropdown-menu__description {
+  color: var(--text-muted);
+  font-weight: var(--font-normal);
 }
 
 .ui-dropdown-menu__shortcut {

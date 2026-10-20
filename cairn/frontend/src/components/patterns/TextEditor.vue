@@ -282,8 +282,10 @@ onUnmounted(stopResize)
 }
 
 .text-editor-toolbar {
-  min-height: 34px;
-  padding: 0 var(--space-2) 0 var(--space-3);
+  min-height: var(--control-height-lg);
+  padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
+  gap: var(--space-2);
+  flex-wrap: wrap;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -301,8 +303,9 @@ onUnmounted(stopResize)
 
 .text-editor-label {
   color: var(--text-muted);
-  font-size: 11.5px;
-  font-weight: 700;
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+  overflow-wrap: anywhere;
 }
 
 .text-editor-language {
@@ -310,29 +313,34 @@ onUnmounted(stopResize)
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 1px 5px;
-  font-size: 10px;
-  font-weight: 700;
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium);
 }
 
 .editor-tool-btn {
-  width: 28px;
-  height: 28px;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-sm);
+  background-color: transparent;
   color: var(--text-muted);
   cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
 }
 
-.editor-tool-btn:hover,
-.editor-tool-btn.active {
+.editor-tool-btn:hover {
   color: var(--text);
-  background-color: var(--bg-elevated);
+  background-color: var(--surface-hover);
 }
 
 .editor-tool-btn.active {
   color: var(--accent);
+  background-color: var(--surface-selected);
 }
 
 .text-editor-body,
@@ -362,7 +370,9 @@ onUnmounted(stopResize)
   z-index: 2;
   max-width: calc(100% - 76px);
   color: var(--text-faint);
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--text-md);
+  line-height: var(--leading-relaxed);
   pointer-events: none;
   white-space: nowrap;
   overflow: hidden;

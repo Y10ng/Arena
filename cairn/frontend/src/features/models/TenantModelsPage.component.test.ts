@@ -125,6 +125,31 @@ afterEach(() => {
 })
 
 describe('TenantModelsPage', () => {
+  it('saves without discovery or optional testing, preserving a blank saved Key and revision', async () => {
+    const wrapper = mountPage()
+    await flushPromises()
+    expect(wrapper.find('.step-number').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('真实请求由 Arena Server 发起')
+    const testSection = wrapper
+      .findAll('details')
+      .find((item) => item.text().includes('连接测试（可选）'))!
+    const headerSection = wrapper
+      .findAll('details')
+      .find((item) => item.text().includes('自定义 Headers'))!
+    expect(testSection.attributes('open')).toBeUndefined()
+    expect(headerSection.attributes('open')).toBeUndefined()
+    expect(headerSection.text()).toContain('名称和值将明文保存并完整回显')
+    button('保存 Model').click()
+    await flushPromises()
+    expect(mocks.discoverTenantModelDraft).not.toHaveBeenCalled()
+    expect(mocks.testTenantModelDraft).not.toHaveBeenCalled()
+    expect(mocks.updateTenantModel).toHaveBeenCalledWith(
+      model.id,
+      expect.objectContaining({ expected_revision: model.revision }),
+    )
+    expect(mocks.updateTenantModel.mock.calls[0]![1].api_key).toBeUndefined()
+  })
+
   it('uses Cairn Select for protocol, auth header and discovered Provider Model ID', async () => {
     mountPage()
     await flushPromises()

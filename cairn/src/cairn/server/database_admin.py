@@ -30,7 +30,6 @@ APPLICATION_TABLES = (
     "tenant_workers",
     "scenarios",
     "counters",
-    "project_groups",
     "worker_templates",
     "projects",
     "project_tenant_workers",

@@ -35,6 +35,7 @@ from cairn.server.schemas.candidates import (
 )
 
 from .audit_task_runs import authenticated_execution_owner
+from .ids import require_project_not_purging
 from .time_utils import utcnow
 
 _PRIVATE_KEY_MARKERS = (
@@ -91,6 +92,7 @@ def _load_locked_execution(conn, project_id: str, task_run_id: str) -> tuple[Any
     locked = conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
     if locked.rowcount != 1:
         raise HTTPException(404, "Project not found")
+    require_project_not_purging(conn, project_id)
     project = conn.execute(
         "SELECT * FROM projects WHERE id = ?",
         (project_id,),

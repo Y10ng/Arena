@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .common_base import *
+from .write_outcomes import WriteDisposition
 
 def record_protocol_write(
     client: CairnClient,
@@ -18,6 +19,7 @@ def record_protocol_write(
     from_ids: list[str] | None = None,
     created_id: str | None = None,
     evidence_count: int | None = None,
+    disposition: WriteDisposition | None = None,
 ) -> None:
     if task_run_id is None:
         return
@@ -30,8 +32,14 @@ def record_protocol_write(
         "status_code": response.status_code,
         "ok": response.ok,
     }
-    # conclude 的拒绝正文可能回显证据或业务值，诊断只保留 HTTP 状态。
-    if operation != "conclude" and not response.ok and response.text:
+    # 结构化回执只保存分类和短码，不能让拒绝正文回显证据或秘密。
+    if disposition is not None:
+        event_payload["disposition"] = disposition.disposition
+        if disposition.error_type is not None:
+            event_payload["error_type"] = disposition.error_type
+        if disposition.safe_code is not None:
+            event_payload["safe_code"] = disposition.safe_code
+    elif operation != "conclude" and not response.ok and response.text:
         event_payload["response_text"] = preview(response.text, limit=VALIDATION_REASON_LIMIT)
     if intent_id is not None:
         event_payload["intent_id"] = intent_id

@@ -1,47 +1,21 @@
 <template>
   <!-- eslint-disable-next-line vue/no-v-html -- 报告内容仅由禁用 HTML 与远程资源的 markdown-it 实例生成。 -->
-  <article class="safe-report-markdown" v-html="renderedContent" />
+  <article class="safe-report-markdown" v-html="document.html" />
 </template>
 
 <script setup lang="ts">
-import MarkdownIt from 'markdown-it'
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
+import { renderSafeReportMarkdown, type ReportHeading } from './safeReportMarkdown'
 
 const props = defineProps<{
   content: string
+  anchorPrefix?: string
 }>()
-
-const safeProtocols = new Set(['http:', 'https:', 'mailto:'])
-const markdown = new MarkdownIt({
-  breaks: false,
-  html: false,
-  linkify: false,
-  typographer: false,
-})
-const defaultValidateLink = markdown.validateLink.bind(markdown)
-const defaultLinkOpen =
-  markdown.renderer.rules.link_open ??
-  ((tokens, index, options, _environment, renderer) => renderer.renderToken(tokens, index, options))
-
-markdown.validateLink = (url) => {
-  if (!defaultValidateLink(url)) return false
-
-  const protocol = /^[a-z][a-z\d+.-]*:/i.exec(url)?.[0].toLowerCase()
-  return !protocol || safeProtocols.has(protocol)
-}
-
-markdown.renderer.rules.image = (tokens, index) =>
-  markdown.utils.escapeHtml(tokens[index]?.content || '')
-markdown.renderer.rules.link_open = (tokens, index, options, environment, renderer) => {
-  const href = tokens[index]?.attrGet('href') || ''
-  if (/^(?:https?:)?\/\//i.test(href)) {
-    tokens[index]?.attrSet('target', '_blank')
-    tokens[index]?.attrSet('rel', 'noopener noreferrer')
-  }
-  return defaultLinkOpen(tokens, index, options, environment, renderer)
-}
-
-const renderedContent = computed(() => markdown.render(props.content))
+const emit = defineEmits<{
+  headings: [headings: ReportHeading[]]
+}>()
+const document = computed(() => renderSafeReportMarkdown(props.content, props.anchorPrefix))
+watch(document, (value) => emit('headings', value.headings), { immediate: true })
 </script>
 
 <style scoped>

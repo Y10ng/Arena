@@ -208,13 +208,9 @@ def test_auth_cli_explicit_db_path_overrides_database_url_environment(
 def _seed_legacy_resources() -> None:
     with db.get_conn() as conn:
         conn.execute(
-            "INSERT INTO project_groups (id, name, owner, created_at, tenant_id) "
-            "VALUES ('grp_legacy', 'Legacy group', 'legacy', '2026-08-13T00:00:00Z', 'tenant_legacy')"
-        )
-        conn.execute(
-            "INSERT INTO projects (id, title, status, created_at, group_id, tenant_id) "
+            "INSERT INTO projects (id, title, status, created_at, tenant_id) "
             "VALUES ('proj_legacy', 'Legacy project', 'active', '2026-08-13T00:00:00Z', "
-            "'grp_legacy', 'tenant_legacy')"
+            "'tenant_legacy')"
         )
         conn.execute(
             "INSERT INTO worker_templates (id, name, owner, worker_names_json, created_at, tenant_id) "
@@ -258,13 +254,13 @@ def test_claim_legacy_tenant_cli_transfers_only_resources_and_audits_counts(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload == {
-        "counts": {"project_groups": 1, "projects": 1, "worker_templates": 1},
+        "counts": {"projects": 1, "worker_templates": 1},
         "login": "admin",
         "tenant_id": target["tenant_id"],
         "user_id": target["user_id"],
     }
     with db.get_conn() as conn:
-        for table in ("projects", "project_groups", "worker_templates"):
+        for table in ("projects", "worker_templates"):
             assert conn.execute(
                 f"SELECT COUNT(*) AS count FROM {table} WHERE tenant_id = 'tenant_legacy'"
             ).fetchone()["count"] == 0
@@ -287,7 +283,7 @@ def test_claim_legacy_tenant_cli_transfers_only_resources_and_audits_counts(
         "resource_id": "tenant_legacy",
         "outcome": "success",
         "metadata_json": json.dumps(
-            {"counts": {"project_groups": 1, "projects": 1, "worker_templates": 1}},
+            {"counts": {"projects": 1, "worker_templates": 1}},
             ensure_ascii=False,
             sort_keys=True,
         ),
@@ -303,8 +299,8 @@ def test_claim_legacy_tenant_is_idempotent_when_no_resources_remain(
     first = claim_legacy_tenant("admin")
     second = claim_legacy_tenant("ADMIN")
 
-    assert first["counts"] == {"projects": 1, "project_groups": 1, "worker_templates": 1}
-    assert second["counts"] == {"projects": 0, "project_groups": 0, "worker_templates": 0}
+    assert first["counts"] == {"projects": 1, "worker_templates": 1}
+    assert second["counts"] == {"projects": 0, "worker_templates": 0}
 
 
 def test_claim_legacy_tenant_fails_closed_for_invalid_target_or_legacy_kind(
@@ -347,7 +343,7 @@ def test_claim_legacy_tenant_rolls_back_if_any_resource_update_fails(
     with pytest.raises(Exception, match="simulated claim failure"):
         claim_legacy_tenant("admin")
     with db.get_conn() as conn:
-        for table in ("projects", "project_groups", "worker_templates"):
+        for table in ("projects", "worker_templates"):
             assert conn.execute(
                 f"SELECT COUNT(*) AS count FROM {table} WHERE tenant_id = 'tenant_legacy'"
             ).fetchone()["count"] == 1
@@ -417,7 +413,6 @@ def test_claim_legacy_tenant_cli_explicit_db_path_overrides_environment(
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["counts"] == {
-        "project_groups": 0,
         "projects": 0,
         "worker_templates": 0,
     }

@@ -50,7 +50,6 @@ async function mockCreation(page: Page, createStatus = 422) {
         csrf_token: 'ui-check',
       },
       '/projects': [],
-      '/project-groups': [{ id: 'group-check', name: '受控项目组' }],
       '/scenarios': [{ key: 'goal-driven-v1', label: '目标驱动探索' }],
       '/scenario-catalog': [
         {
@@ -104,11 +103,6 @@ async function mockCreation(page: Page, createStatus = 422) {
     await route.fulfill({ status: 503, json: { detail: `未配置的受控接口：${method} ${path}` } })
   })
   return requests
-}
-
-async function selectGroup(page: Page) {
-  await page.locator('#np-group-select').click()
-  await page.getByRole('option', { name: '受控项目组' }).click()
 }
 
 const completeWorkerIds = ['worker-bootstrap', 'worker-reason', 'worker-explore']
@@ -177,7 +171,6 @@ test('creation HTTP-equivalent randomUUID absence and optional cache failure sti
   await page.locator('#np-title').fill('受控 Origin 提交')
   await page.locator('#np-origin-input').fill('  仅核验已有资料\n排除任何外部访问  ')
   await page.locator('#np-goal-input').fill('保留用户目标')
-  await selectGroup(page)
   await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeDisabled()
   releaseDefault()
   await expect(page.locator('#np-execution-trigger')).toContainText('默认组合 · 受控 Worker')
@@ -331,7 +324,6 @@ test('execution defaults save a manual complete combination, reopen it and submi
     fullPage: true,
   })
   await page.locator('#np-title').fill('受控完整组合')
-  await selectGroup(page)
   await dialog.getByRole('button', { name: '完成设置', exact: true }).click()
   await dialog.getByRole('button', { name: '创建并启动' }).click()
   await expect(dialog.getByText('受控字段拒绝', { exact: true })).toBeVisible()
@@ -420,7 +412,6 @@ test('execution defaults retain invalid IDs, explain missing roles and never rep
       origin: '历史背景',
       goal: '历史目标',
       scenario: 'goal-driven-v1',
-      group_id: 'group-check',
       tenant_worker_ids: historicalIds,
       targets: [],
       explore_deadline: null,
@@ -519,7 +510,6 @@ test('project dialog preserves edits, nests the library picker, contains focus a
 
   await trigger.click()
   await page.locator('#np-title').fill('受控弹窗检查')
-  await selectGroup(page)
   await page.locator('#np-origin-input').fill('保留用户改写的背景与资料说明')
   await expect(dialog.locator('#np-execution-settings')).not.toBeVisible()
   await expect(dialog.locator('#np-timing-settings')).not.toBeVisible()
@@ -610,7 +600,6 @@ test('project dialog preserves edits, nests the library picker, contains focus a
   expect(payloads[0]).toMatchObject({
     origin: '保留用户改写的背景与资料说明',
     scenario: 'goal-driven-v1',
-    group_id: 'group-check',
     tenant_worker_ids: ['worker-check'],
     library_keys: [],
     explore_deadline: null,
@@ -622,16 +611,16 @@ test('project dialog preserves edits, nests the library picker, contains focus a
   await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeEnabled()
 })
 
-test('legacy entry opens the same dialog and a lost creation response cannot be blindly repeated or discarded', async ({
+test('the project list opens the dialog and a lost creation response cannot be blindly repeated or discarded', async ({
   page,
 }) => {
   const requests = await mockCreation(page, 0)
-  await page.goto('/#/projects/new')
+  await page.goto('/#/projects')
+  await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
   const dialog = page.getByRole('dialog', { name: '新建项目', exact: true })
   await expect(dialog).toBeVisible()
   await expect(page).toHaveURL(/#\/projects$/)
   await page.locator('#np-title').fill('未知创建结果')
-  await selectGroup(page)
   await dialog.getByRole('button', { name: '创建并启动' }).click()
   await expect(dialog.getByText('保存结果未确认', { exact: true })).toBeVisible()
   await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeDisabled()
@@ -680,7 +669,6 @@ test('scheduled creation preserves edited content, exposes settings on demand an
       origin: '仅验证界面，不执行任务',
       goal: '查看未来配置',
       scenario: 'goal-driven-v1',
-      group_id: 'group-check',
       tenant_worker_ids: ['worker-check'],
       targets: [],
       authorization_expires_at: null,
@@ -749,7 +737,6 @@ test('scheduled creation preserves edited content, exposes settings on demand an
   await expect(dialog.locator('.scenario-purpose')).toHaveCount(0)
   await expect(dialog.locator('.scenario-desc')).toHaveCount(0)
   await page.locator('#np-title').fill('受控计划界面检查')
-  await selectGroup(page)
   await page.locator('#np-origin-input').fill('用户自行改写的背景')
   await page.locator('#np-goal-input').fill('用户自行改写的目标')
   await dialog.getByRole('button', { name: /资料核验场景/ }).click()
@@ -876,7 +863,6 @@ test('once stop options use the plan timezone, isolate mode drafts and keep the 
   await expect(scene).toHaveAttribute('open')
   await scene.locator('summary').click()
   await page.locator('#np-title').fill('单次可选停止验证')
-  await selectGroup(page)
   await expect(scene).not.toHaveAttribute('open')
   await scene.locator('summary').click()
   await dialog.getByRole('button', { name: /目标驱动探索/ }).click()
@@ -969,7 +955,7 @@ test('historical once rescheduling and recurring edits preserve or explicitly cl
   const recurring = { ...base, id: 'recurring-history', mode: 'daily', project_id: null,
     local_time: '09:00', project: {
       title: '历史重复计划', origin: '历史背景', goal: '历史目标', scenario: 'goal-driven-v1',
-      group_id: 'group-check', tenant_worker_ids: ['worker-check'], targets: [],
+      tenant_worker_ids: ['worker-check'], targets: [],
       explore_deadline: deadline, authorization_expires_at: authorization,
     } }
   const updates: Array<Record<string, unknown>> = []
@@ -1095,7 +1081,6 @@ test('resource session survives collapsing during upload, failure, unsaved paths
   await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
   const dialog = page.getByRole('dialog', { name: '新建项目', exact: true })
   await page.locator('#np-title').fill('受控资料会话检查')
-  await selectGroup(page)
   const materials = dialog.locator('.project-materials')
   const summary = materials.locator(':scope > summary')
   await summary.click()

@@ -82,11 +82,15 @@ defineOptions({ name: 'UiPopover' })
   border: calc(var(--space-1) / 4) solid var(--border-strong);
   border-radius: var(--radius-lg);
   padding: var(--space-3);
-  z-index: var(--z-popover);
+  z-index: var(--z-overlay-child);
   overflow: auto;
   background: var(--bg-elevated);
   box-shadow: var(--shadow-pop);
   color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+  overscroll-behavior: contain;
   transform-origin: var(--reka-popover-content-transform-origin);
 }
 

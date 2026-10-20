@@ -383,7 +383,7 @@ def _business_snapshot(conn, project_id):
 def _report_ready(conn, project_id):
     with conn:
         requested = assessment_reports.request_assessment_report_generation(
-            conn, project_id, template_key="standard-pentest", template_version=1, requested_by="synthetic-user",
+            conn, project_id, template_key="standard-pentest", requested_by="synthetic-user",
         )
     claim = assessment_reports.claim_assessment_report_finalization(project_id, "reporter", principal=TEST_DISPATCHER)
     assert claim.generation_token == requested.generation_token
@@ -423,7 +423,14 @@ def _report_ready(conn, project_id):
         principal=TEST_DISPATCHER,
     )
     before = _business_snapshot(conn, project_id)
+    assert claim.template_markdown
     data = {
+        "schema_version": 2,
+        "layout": [
+            {"type": "markdown", "markdown": claim.template_markdown.replace("{{ report_title }}", "合成评估报告")},
+            *({"type": "fact", "ref": ref} for ref in report.REPORT_FACT_REFS),
+            *({"type": "fact", "ref": f"finding:{vuln['id']}"} for vuln in packet.vulnerabilities),
+        ],
         "executive_summary": "Synthetic orchestration evidence only; no real target or repair was executed.",
         "findings": [{
             "vulnerability_id": vuln["id"], "impact": "Limited to synthetic comparison",
@@ -437,9 +444,10 @@ def _report_ready(conn, project_id):
     }
     report_identity = report._write_report_results(
         _ArtifactServiceClient(), project_id, claim.task_run_id, data=data, report_packet_json=packet_json,
+        report_template_markdown=claim.template_markdown,
         report_generation_token=claim.generation_token, input_snapshot_artifact_id=snapshot.id,
         input_snapshot_sha256=digest, report_template_key=claim.template_key,
-        report_template_version=claim.template_version, report_template_digest_sha256=claim.template_digest_sha256,
+        report_template_digest_sha256=claim.template_digest_sha256,
         report_policy_version=plan["report_policy_version"],
         report_execution_plan_sha256=claim.report_execution_plan_sha256,
         report_prompt_digest_sha256=claim.report_prompt_digest_sha256,

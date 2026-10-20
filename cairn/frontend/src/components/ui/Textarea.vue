@@ -54,10 +54,11 @@ defineOptions({ name: 'UiTextarea', inheritAttrs: false })
   min-height: calc(var(--control-height) * 2);
   border: calc(var(--space-1) / 4) solid var(--border);
   border-radius: var(--radius-md);
-  background: var(--bg-surface);
+  background: var(--bg-inset);
   color: var(--text);
   padding: var(--space-2) var(--space-3);
-  line-height: var(--leading-normal);
+  font-size: var(--text-md);
+  line-height: var(--leading-relaxed);
   transition:
     background-color var(--dur-fast) var(--ease),
     border-color var(--dur-fast) var(--ease),
@@ -69,7 +70,7 @@ defineOptions({ name: 'UiTextarea', inheritAttrs: false })
 }
 
 .ui-textarea:focus {
-  border-color: var(--border-strong);
+  border-color: var(--accent);
   box-shadow: var(--ring);
 }
 

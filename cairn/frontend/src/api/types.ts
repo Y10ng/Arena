@@ -1,5 +1,4 @@
 export * from './types/projects'
-export * from './types/groups'
 export * from './types/worker_templates'
 export * from './types/scenarios'
 export * from './types/infra'

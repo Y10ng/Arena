@@ -56,6 +56,12 @@ def report_config(timeout: int = 600):
 
 def report_data(*ids: str) -> dict[str, object]:
     return {
+        "schema_version": 2,
+        "layout": [
+            {"type": "markdown", "markdown": "# Template"},
+            *({"type": "fact", "ref": ref} for ref in report.REPORT_FACT_REFS),
+            *({"type": "fact", "ref": f"finding:{value}"} for value in ids),
+        ],
         "executive_summary": "建议依据已有证据修复权限边界。",
         "findings": [{
             "vulnerability_id": value,
@@ -196,7 +202,7 @@ class FakePostCompletionClient:
                 "completeness_rule_version": 1,
                 "execution_profile_id": "default-copy-v2",
                 "knowledge_key": None,
-                "output_contract_version": 2,
+                "output_contract_version": 3,
                 "packet_version": 2,
                 "execution_contract_version": 1,
                 "execution_engine": "pi",
@@ -237,7 +243,7 @@ class FakePostCompletionClient:
                 "claim_token": self.claim_token,
                 "requested_at": "2026-08-17T00:01:00Z",
                 "template_key": "standard-pentest",
-                "template_version": 1,
+                "template_compatibility_profiles": ["assessment-report-packet-v1"],
                 "template_digest_sha256": sha256(b"# Template").hexdigest(),
                 "template_markdown": "# Template",
                 "report_execution_plan_json": self.execution_plan,
@@ -490,6 +496,12 @@ def test_post_completion_uses_claim_task_run_and_timeout_sized_lease(monkeypatch
     assert captured["task_run_id"] == "tr-claimed"
     assert captured["report_claim_token"] == client.claim_token
     assert captured["report_generation_token"] == client.generation_token
+    assert captured["report_template_key"] == "standard-pentest"
+    assert captured["report_template_markdown"] == "# Template"
+    assert captured["report_template_digest_sha256"] == sha256(b"# Template").hexdigest()
+    assert captured["report_template_compatibility_profiles"] == ["assessment-report-packet-v1"]
+    assert "report_template_version" not in captured
+    assert captured["report_execution_plan"]["output_contract_version"] == 3
     assert client.finalization_finishes == ["ready"]
 
 
@@ -1405,7 +1417,11 @@ def test_default_copy_packet_failure_stops_before_worker_and_artifact(
         durable_request=True,
         report_claim_token="claim-1",
         report_generation_token="generation-1",
-        report_execution_plan={},
+        report_execution_plan={"packet_version": 2, "output_contract_version": 3, "template_profile": "assessment-report-packet-v1"},
+        report_template_key="fixture",
+        report_template_markdown="# Template",
+        report_template_digest_sha256=sha256(b"# Template").hexdigest(),
+        report_template_compatibility_profiles=["assessment-report-packet-v1"],
         frozen_report_prompt="frozen prompt",
         container_runtime=container_runtime,
         finish_outbox=ephemeral_report_finish_outbox(),
@@ -1464,6 +1480,31 @@ def test_report_without_frozen_claim_never_starts_worker(monkeypatch) -> None:
         SimpleNamespace(name="worker", type="pi"), prompt_group="default-report",
     )
     assert outcome == "report_execution_plan_missing"
+
+
+@pytest.mark.parametrize(("field", "value", "error"), [
+    ("report_template_markdown", None, "report_template_snapshot_missing"),
+    ("report_template_digest_sha256", "0" * 64, "report_template_digest_mismatch"),
+    ("report_template_compatibility_profiles", ["other"], "report_template_profile_mismatch"),
+    ("report_execution_plan", {"packet_version": 2, "output_contract_version": 2}, "report_execution_plan_unsupported:output_contract_version"),
+])
+def test_report_rejects_incompatible_frozen_layout_before_worker(monkeypatch, field, value, error):
+    monkeypatch.setattr(report, "get_driver", lambda *args: pytest.fail("坏冻结合同不能启动 Worker"))
+    arguments = {
+        "task_run_id": "t", "report_generation_token": "g", "report_claim_token": "c",
+        "durable_request": True, "frozen_report_prompt": "frozen prompt",
+        "report_execution_plan": {"packet_version": 2, "output_contract_version": 3, "template_profile": "assessment-report-packet-v1"},
+        "report_template_key": "fixture", "report_template_markdown": "# Template",
+        "report_template_digest_sha256": sha256(b"# Template").hexdigest(),
+        "report_template_compatibility_profiles": ["assessment-report-packet-v1"],
+    }
+    arguments[field] = value
+    assert report.run_report_task(
+        report_config(), PacketFailureClient(), SimpleNamespace(),
+        SimpleNamespace(project=SimpleNamespace(id="p1")), "graph",
+        SimpleNamespace(name="worker", type="pi"), prompt_group="goal-driven-v1",
+        finish_outbox=ephemeral_report_finish_outbox(), **arguments,
+    ) == error
 
 
 def test_post_completion_report_defers_and_skips_existing_artifact(
@@ -1560,6 +1601,7 @@ def test_report_duplicate_titles_write_only_frozen_artifact() -> None:
     identity = report._write_report_results(
         client, "p1", "tr001", data=report_data("v001", "v002"),
         report_packet_json=json.dumps(packet), report_generation_token="generation-1",
+        report_template_markdown="# Template",
     )
     assert isinstance(identity, report.ReportArtifactIdentity)
     assert identity.artifact_id == "a001"

@@ -12,6 +12,8 @@ runtime:
   playwright_session_policy: "task"
 
 tasks:
+  # conclude_timeout 在正常 execute 中只决定一次剩余时间提示，不收权、不打断调用或延长硬截止。
+  # 显式 conclude／仅交付恢复仍只消费已有材料，并服从原冻结截止。
   bootstrap:
     timeout: 600
     conclude_timeout: 300

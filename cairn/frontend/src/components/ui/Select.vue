@@ -16,13 +16,13 @@
       :aria-label="ariaLabel || undefined"
     >
       <SelectValue :placeholder="placeholder" />
-      <SelectIcon class="ui-select__icon" aria-hidden="true">⌄</SelectIcon>
+      <SelectIcon class="ui-select__icon" aria-hidden="true"><ChevronDown :size="16" /></SelectIcon>
     </SelectTrigger>
 
     <SelectPortal>
       <SelectContent class="ui-select__content" :class="contentClass" position="popper" align="start" :side-offset="4">
         <SelectScrollUpButton class="ui-select__scroll-button" aria-label="向上滚动">
-          ↑
+          <ChevronUp :size="16" aria-hidden="true" />
         </SelectScrollUpButton>
         <SelectViewport class="ui-select__viewport">
           <SelectItem
@@ -34,13 +34,13 @@
             :text-value="option.label"
           >
             <SelectItemIndicator class="ui-select__indicator" aria-hidden="true">
-              ✓
+              <Check :size="14" />
             </SelectItemIndicator>
             <SelectItemText>{{ option.label }}</SelectItemText>
           </SelectItem>
         </SelectViewport>
         <SelectScrollDownButton class="ui-select__scroll-button" aria-label="向下滚动">
-          ↓
+          <ChevronDown :size="16" aria-hidden="true" />
         </SelectScrollDownButton>
       </SelectContent>
     </SelectPortal>
@@ -49,6 +49,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { Check, ChevronDown, ChevronUp } from '@lucide/vue'
 import {
   SelectContent,
   SelectIcon,
@@ -114,13 +115,15 @@ defineOptions({ name: 'UiSelect', inheritAttrs: false })
   min-height: var(--control-height);
   border: calc(var(--space-1) / 4) solid var(--border);
   border-radius: var(--radius-md);
-  padding: var(--space-2) var(--space-3);
+  padding: calc(var(--space-1) * 1.5) var(--space-3);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
   overflow: hidden;
-  background: var(--bg-surface);
+  background: var(--bg-inset);
   color: var(--text);
   text-align: left;
   transition:
@@ -135,7 +138,7 @@ defineOptions({ name: 'UiSelect', inheritAttrs: false })
 
 .ui-select__trigger:focus-visible,
 .ui-select__trigger[data-state='open'] {
-  border-color: var(--border-strong);
+  border-color: var(--accent);
   box-shadow: var(--ring);
 }
 
@@ -179,6 +182,9 @@ defineOptions({ name: 'UiSelect', inheritAttrs: false })
   background: var(--bg-elevated);
   box-shadow: var(--shadow-pop);
   color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
   transform-origin: var(--reka-select-content-transform-origin);
 }
 
@@ -191,16 +197,18 @@ defineOptions({ name: 'UiSelect', inheritAttrs: false })
 }
 
 .ui-select__item {
-  min-height: var(--control-height-sm);
+  min-height: var(--control-height);
   border-radius: var(--radius-sm);
-  padding: var(--space-2) var(--space-3) var(--space-2) calc(var(--space-3) + var(--space-4));
+  padding: calc(var(--space-1) * 1.5) var(--space-3) calc(var(--space-1) * 1.5) calc(var(--space-3) + var(--space-4));
   position: relative;
   display: flex;
   align-items: center;
   outline: none;
   color: var(--text);
-  font-size: var(--text-sm);
-  line-height: var(--leading-snug);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+  white-space: normal;
+  overflow-wrap: anywhere;
   cursor: default;
   user-select: none;
 }

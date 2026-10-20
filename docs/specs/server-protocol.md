@@ -1,5 +1,7 @@
 # Cairn 协作探索协议
 
+> 当前证据／复测合同按 2026-10-15 工作区源码同步：发现与独立复测共用 `EvidenceItem`，新 Finding 使用 v2，独立复测结果使用 v3，创建请求仍为 v1。代码合同不等于已部署或真实 pi 任务已验收；本轮实施记录见 [重设方案第11节](vulnerability-evidence-retest-redesign.md#11-完成定义与交付记录)。历史验收按各原记录理解。
+
 ---
 
 ## 本质
@@ -267,7 +269,9 @@ Body：
 
 #### POST /projects
 
-创建新项目。`origin` 和 `goal` 写入 `facts` 作为特殊 Fact，`hints` 可选。必须显式提供同 Tenant 的项目组 `group_id` 和完整 `tenant_worker_ids`；所选 Worker 均须配置可用，其 `task_types` 并集须覆盖 `bootstrap`、`reason`、`explore`，缺少角色返回 `422`。一个 Worker 可以支持多个角色，不要求恰好三个 Worker；临时满载或执行器离线不等于配置失效，创建不要求手工 connectivity 验证。新建页面可以从默认模板初始化，但本接口不读取默认模板，也不回退到首项或 Tenant 全池。当前创建请求拒绝额外字段（422），旧客户端不得继续发送 `explore_budget`、`exploration_limit` 或 `verification_reserve` 等已移除额度参数，也不再使用旧的 `preferred_workers`／`bootstrap_enabled` 创建参数。
+创建新项目。`origin` 和 `goal` 写入 `facts` 作为特殊 Fact，`hints` 可选。项目组已取消，请求不再接受 `group_id`，也不生成默认组。必须显式提供同 Tenant 的完整 `tenant_worker_ids`；所选 Worker 均须配置可用，其 `task_types` 并集须覆盖 `bootstrap`、`reason`、`explore`，缺少角色返回 `422`。一个 Worker 可以支持多个角色，不要求恰好三个 Worker；临时满载或执行器离线不等于配置失效，创建不要求手工 connectivity 验证。新建页面可以从默认模板初始化，但本接口不读取默认模板，也不回退到首项或 Tenant 全池。当前创建请求拒绝额外字段（422），旧客户端不得继续发送 `explore_budget`、`exploration_limit` 或 `verification_reserve` 等已移除额度参数，也不再使用旧的 `preferred_workers`／`bootstrap_enabled` 创建参数。
+
+项目组的 `/project-groups` CRUD 与 `PUT /projects/{project_id}/group` 已退场，不保留默认组或兼容转发。项目摘要、详情及管理员投影不再输出组字段；`GET /projects/{project_id}/management-options` 仅返回 `tenant_workers`，原 Worker 管理权限与变更语义保留。`group_id` 即使为 `null` 也属于新建请求的额外字段，返回 `422`。PostgreSQL v59 删除组关联列、组表与 counter，只移除旧重复计划 JSON 顶层的 `group_id`；历史创建／复测请求身份材料不改写。
 
 当前目标驱动执行没有项目级固定 Explore 次数上限或复核预留；discovery 与 verifier 都保留正常准入、证据接受和必要实质复核。`explore_deadline` 是唯一可选项目执行停止时间，省略或 `null` 表示不限期，非空值必须是含时区的未来绝对时间。到期停止新研究并按已有路径有序停止和收口，不代表 Goal 达成，也不只是停止新增 Explore。当前没有运行中编辑或自动延期 API，重新授权不延长这个执行停止时间；尚未触发的单次 `pending` 项目可通过计划编辑显式修改或取消该期限，见 `PUT /project-schedules/{schedule_id}`。
 
@@ -290,7 +294,6 @@ Body：
   "title": "xx渗透测试",
   "origin": "目标 http://192.168.1.10",
   "goal": "拿到 flag",
-  "group_id": "group_001",
   "tenant_worker_ids": ["worker_001"],
   "explore_deadline": null,
   "authorization_expires_at": null,
@@ -528,7 +531,6 @@ Body 为上述时间字段，可带可选 `project` 以计入授权和执行停�
     "title": "预约验证",
     "origin": "仅研究本次提供的资料并检查其中的安全边界；不访问资料中引用的外部地址。",
     "goal": "验证目标并保留证据",
-    "group_id": "group_001",
     "tenant_worker_ids": ["worker_001"],
     "authorization_expires_at": null,
     "explore_deadline": null,
@@ -632,7 +634,134 @@ Body 为 `{"version": 1, "action": "pause"}`，仍执行版本检查。
 
 `committed` 表示创建请求已提交，周期结果只有 schedule ID，单次结果同时有 project ID；`unknown` 表示当前未查到已提交身份，两个 ID 均为 `null`，不等于确认请求失败。关联项目后来被删除时，请求仍为 `committed` 且 `project_id` 可为 `null`；若已无关联业务结果，相同请求 ID 重试返回 `409`，不能把删除后的原请求重放成新创建。
 
+项目组退场不重算或清空历史创建请求摘要。跨版本的未知创建先通过本查询核对原业务结果；旧客户端带 `group_id` 的请求不符合当前 Schema，不能靠删字段、改请求 ID 或自动重提来猜测恢复。
+
 API 已发出但结果未确认时继续查询，或使用相同请求 ID、相同内容重试；不要自动换请求 ID 再创建，也不要在未确认前清掉待消费资料。已知成功但导航失败，只重试进入已知对象，不撤销成功事实。页面的可选 `sessionStorage` 仅缓存不透明 ID／operation，不保存 Origin、Goal、凭据或完整载荷；读取、损坏值、写入或清理失败均显示短提示，不阻断提交、不锁定按钮、不把已确认成功改成未知。缓存不可用时仍保留内存恢复依据，但跨刷新查询入口可能未保存，且不承诺刷新后恢复原载荷／File。此身份机制覆盖立即创建和计划保存，不扩展为上传／ZIP 或所有管理动作的通用去重机制。
+
+---
+
+### 报告模板与项目报告
+
+以下为当前工作区的报告合同，不表示运行服务、数据库或受管 Prompt 已更新，也不表示真实 pi 报告任务已验收。普通项目报告与后文独立漏洞复测的三段式结果报告是两条不同流程。
+
+#### 当前报告模板 CRUD
+
+一个模板由稳定 `key` 标识，只保存一份当前名称、说明、Markdown 正文及兼容 profiles。内置与自建模板使用相同编辑／真实删除接口；没有模板修订、发布、归档或恢复操作，也没有 `/report-templates/{key}/versions` 系列接口。
+
+模板管理沿用超级管理员权限，浏览器写请求继续校验 Cookie／CSRF；普通用户只读目录，不因此获得模板管理权限。
+
+| 接口 | 请求与返回 |
+| --- | --- |
+| `GET /report-template-catalog` | 认证后的只读目录；仅返回有非空正文的模板，每项为 `{key,name,description,digest_sha256,compatibility_profiles}`，不含正文或 `version` |
+| `GET /report-templates` | 超级管理员读取当前模板数组，包含当前正文及无正文的存量项 |
+| `GET /report-templates/{key}` | 超级管理员读取一个当前模板；可用于保存结果未知后的主动重新读取，不是历史版本查询 |
+| `POST /report-templates` | 一次提交名称、说明、正文及 profiles；成功返回 `201` 和完整当前模板，重复 key 返回 `409` |
+| `PUT /report-templates/{key}` | 一次覆盖当前名称、说明、正文及 profiles，返回完整当前模板；不是追加修订或局部 patch |
+| `DELETE /report-templates/{key}` | 真正删除当前模板及其当前 profile 关系，成功 `204`；不删除已冻结请求、历史输入或成品 |
+
+管理列表、详情及保存成功均使用同一形状：`{key,name,description,markdown_content,digest_sha256,compatibility_profiles,created_at,updated_at}`。`key` 不通过 PUT 修改；不存在的 key 在详情、更新和删除中返回 `404`，不能回退到内置或其他模板。
+
+创建 Body 示例（省略 `key` 时由 Server 生成）：
+
+```json
+{
+  "name": "简明评估报告",
+  "description": "按本次模板组织展示",
+  "markdown_content": "# {{ report_title }}\n\n## 评估结论\n\n## 发现与证据\n\n## 限制与后续建议\n",
+  "compatibility_profiles": ["assessment-report-packet-v1"]
+}
+```
+
+- POST 可显式提供符合 `[a-z0-9_-]{1,128}` 的 `key`，省略或 `null` 均自动生成；PUT 使用路径 key，不接受 Body `key`。两个写入 Schema 均拒绝额外字段（`422`），不能继续发送 `version/latest_version/archived_at`。
+- `name` 必填、裁剪后为 1–256 字符；`description` 可省略，默认空字符串、至多 2000 字符。`markdown_content` 必填，不能为 `null` 或全空白，至多 500000 UTF-8 字节；**正文不裁剪、不规范化换行**，`digest_sha256` 为所保存精确 UTF-8 字节的 SHA256，不由客户端指定。
+- `compatibility_profiles` 省略时使用 `["assessment-report-packet-v1"]`，显式空数组返回 `422`；条目是稳定标识，裁剪去重。PUT 中省略说明或 profiles 使用上述默认值，不表示保留旧值。profile 名称中的 `v1` 是兼容标识，不代表 Report Packet 的版本为 1。
+- 迁移保留的无正文模板以 `markdown_content:null`、`digest_sha256:null` 返回管理接口，可补正文后保存，但不会进入只读生成目录，也不能生成报告。当前写接口不能创建新的空正文项。
+
+#### 项目报告查询与仅 key 受理
+
+- `GET /projects/{project_id}/assessment-report-packet`：按既有项目归属权限读取结构化事实 Packet，当前 `version:2`；不是成品，也不是模板正文。
+- `GET /projects/{project_id}/assessment-report-finalization`：读取本项目当前生成状态，保留 `pending/running/ready/failed`、generation、Artifact 定位及摘要。普通状态读取不暴露 claim token；`template_version` 仅为可空历史字段，新请求为 `null`，`template_compatibility_profiles` 返回受理时冻结的 profiles。
+- `POST /projects/{project_id}/assessment-report-finalization/request`：沿用用户的 Tenant／Project 权限和写保护，成功返回 `202`。Body **仅接受**如下字段；旧 `template_version` 或其他额外字段返回 `422`，不会被忽略：
+
+```json
+{"template_key":"standard-pentest"}
+```
+
+普通有效探索项目的新 generation 统一使用平台报告策略与平台报告 Prompt，不要求历史冻结 features 含场景级报告 opt-in，也不改写旧项目快照。独立复测不进入此普通报告流程；坏执行快照、不可用资源、项目未完成或未停止、任务未静止等仍明确拒绝。没有显式 `requested_at` 不调度报告，不因创建或结束项目自动调用模型，也不通过报告请求恢复研究。受理事务锁定当前模板并一次冻结 `key`、精确正文、正文 SHA256、profiles，以及当时有效的执行计划和 Prompt 原文／摘要；编辑或删除与冻结操作串行化，不会混用不同保存的正文和 profiles。后续 claim、恢复与交付使用冻结输入，不重新读取实时模板或最新 Prompt。
+
+同一项目已存在由该 key 受理的 `pending` 请求时，在项目准入仍满足的前提下返回原请求及原 generation，**不重读模板**；即使当前模板已改名、改正文或删除，也不能把重试升级成新内容。pending 时改选其他 key 返回 `409 assessment_report_generation_pending`，有效 running lease 返回 `409 assessment_report_generation_running`。在允许发起新一轮时主动再次生成才读取当前模板，产生新 generation；旧成品与输入 Artifact 不改写。
+
+新受理不存在／已删除的 key 明确 `404`，没有默认模板 fallback；无正文返回 `409 assessment_report_template_content_missing`；当前 profiles 不含冻结策略所需 profile 时返回 `409 assessment_report_template_incompatible`。客户端目录或已打开选择失效不能成为静默换模板的理由。
+
+#### 输出版本、单一布局与事实边界
+
+下列版本互不替代，不能把成品协议版本解释为模板修订：
+
+| 合同 | 当前值 |
+| --- | --- |
+| Report Packet `version` / metadata `packet_version` | `2` |
+| Worker `ReportData.schema_version` / metadata `report_data_schema_version` | `2` |
+| 报告策略／执行计划 `output_contract_version` | `3` |
+| `report_policy_version` / `completeness_rule_version` | 均为 `1` |
+| ReportExecutionPlan `version` | `2`，执行合同 `execution_contract_version:1`、`execution_engine:"pi"` |
+| 输入快照容器 `version` | `1`，其内 `report_packet.version` 仍为 `2` |
+| finish `protocol` | `cairn-assessment-report-finish-v1` |
+
+新 Worker `report_execute` 数据为 `ReportData` v2：`schema_version:2`、非空 `executive_summary`、`findings`、非空 `layout`，以及可选 `limitations/artifacts`。每条 finding 以 `vulnerability_id` 对应冻结 Packet，保留 `impact/root_cause/repro_steps/remediation/regression_steps/limitations`；漏洞 ID 集合必须完整、唯一且不得增加未知 ID。
+
+`layout` 是唯一展示布局，条目仅为 `{"type":"markdown","markdown":"..."}` 或 `{"type":"fact","ref":"..."}`。`scope`、`counts`、`work_results`、`execution_status`、`limitations`、`evidence_index`，以及每个冻结漏洞的 `finding:<vulnerability_id>` 必须各引用恰好一次；缺失、重复、未知 ref 明确拒绝，不接受另一份整篇 Markdown 代替。
+
+模型以受理模板决定主标题、章节顺序、说明和建议，程序在 fact ref 原位展开冻结事实及对应 finding 解释，不在末尾补回固定十章。模板有 H1／H2 时，最终主标题的级别、文本及顺序须匹配；`{{ report_title }}` 仅表示该处报告标题意图，不是通用变量语言。事实块使用 H3／H4，Markdown 片段须独立闭合代码块和 HTML 注释，不能通过跨块 fence 隐藏事实。结构、事实 ID 和主标题校验不等于已经验证所有自由排版语义或真实模型遵循程度。
+
+#### 输入快照与 Artifact metadata
+
+claim 返回被冻结的 `template_markdown`、`template_digest_sha256`、`template_compatibility_profiles`、执行计划 JSON 和 Prompt 原文／摘要。Dispatcher 创建并绑定 `report-input-snapshot.json`：容器保留 `version:1`、非空 `graph_yaml`、Report Packet v2，并新增精确 `report_template` 对象：
+
+```text
+report_template = {
+  key,
+  markdown_content,
+  digest_sha256,
+  compatibility_profiles
+}
+```
+
+四字段必须与受理冻结值完全相等，包括正文原字节和 profiles 列表；不带 `version`，也不允许多加模板字段。Server 验证项目 ID、Packet 版本、冻结模板 digest／profile、计划与 Prompt 摘要，拒绝拿实时模板、另一模板或另一快照顶替。delivery 恢复沿原快照及其原始 TaskRun 定位，不重新渲染输入或补读 live 图。
+
+新输入与成品 Artifact 的 metadata 使用**精确键集合**，不是“至少包含”以下字段：
+
+| 范围 | 必需字段与值 |
+| --- | --- |
+| 两者共有 | `source:"report_task"`、`report_generation_token`、`report_template_key`、`report_template_digest_sha256`、`report_policy_version`、`report_execution_plan_sha256`、`report_prompt_digest_sha256`、`packet_version:2`、`output_contract_version:3`、`report_data_schema_version:2`、对象型 `runtime_context` |
+| 输入快照另有 | `format:"json"`、`snapshot_sha256` |
+| Markdown 成品另有 | `format:"markdown"`、`input_snapshot_artifact_id`、`input_snapshot_sha256`、`completeness_rule_version` |
+
+所有 provenance 值须与该次冻结请求／已绑定快照一致。**新 metadata 不含 `report_template_version`，连 `null` 也不写**；缺少字段、额外字段、错版本或错摘要均不能完成接受。`runtime_context` 由既有 Artifact 写入路径维护，不能删去以适配另一份键集合。
+
+#### 绑定输入、finish 与持久 receipt
+
+以下执行写入沿用认证 Dispatcher owner、项目／TaskRun、generation 和 claim fencing，不因模板可删除而放宽：
+
+| 接口 | Body 要点 |
+| --- | --- |
+| `POST /projects/{project_id}/assessment-report-finalization/claim` | `worker`、可选 `lease_seconds`；返回冻结 claim，或已恢复的 finish receipt，不将后者当作新执行许可 |
+| `POST /projects/{project_id}/assessment-report-finalization/snapshot` | `worker/claim_token/artifact_id/digest_sha256`，绑定该次输入的精确身份 |
+| `POST /projects/{project_id}/assessment-report-finalization/finish` | finish v1 的 `worker/claim_token/generation_token/task_run_id/status`、报告和输入各自的 Artifact ID／SHA256 对、`task_run_result` |
+| `POST /projects/{project_id}/assessment-report-finalization/finish-replay` | 同一 finish 事实，以 `claim_sha256/request_sha256` 代替明文 `claim_token`，仅用于原持久 outbox 重放 |
+
+snapshot／finish Schema 严格校验类型、标识符和额外字段。`ready` 必须携带完整报告与输入身份、且 `task_run_result.status="succeeded"`、`exit_code:0` 并无失败事实；`failed` 不能声明成品或成功的 TaskRun，错误类型与超时／取消状态须一致。
+
+首次接受核对认证执行 owner、Worker、TaskRun 类型及执行代次、generation、attempt 和 claim 摘要；普通 finish 还要求有效 lease。输入与成品须为本项目正确 TaskRun 的 `kind=report/category=deliverable`，URI 后缀和归属精确匹配；输入只能沿 Server 派生的 delivery_retry 链引用原始 Run。除 DB 的 ID、SHA256、size、严格 metadata 外，Server 实际读取安全路径下的普通文件，复核磁盘原字节大小／SHA256、严格 UTF-8 和非空 Markdown／合法快照 JSON，不能仅凭文件名或上传成功认定交付。
+
+TaskRun 终态、finalization 终态和不可变 receipt 在同一事务保存。receipt 返回 `protocol/task_run_id/request_sha256/finish_disposition/accepted_at` 及该次结果摘要；`request_sha256` 绑定规范化请求事实、project、认证 Dispatcher 身份和 claim 摘要。已存在同一 TaskRun receipt 时，相同规范请求直接返回原收据，不重跑任务、不重读当前模板、不改 accepted 时间；不同请求返回 `409 assessment_report_finish_receipt_conflict`。finish-replay 先复算请求摘要，不符返回 `409 assessment_report_finish_request_digest_mismatch`；即使允许原 lease 过期后的持久重放，仍不绕过执行归属、generation、claim 或 Artifact 检查。
+
+编辑／删除模板不会撤销冻结输入、既有 receipt 或已经接受的报告。旧 output2 冻结计划不被自动升级为 output3，也不为它另开一条新生成 pipeline；旧 ready 报告、旧快照和已经接受的精确 receipt 原样保留。
+
+#### GET /reports：新旧成品库存
+
+沿用浏览器用户只读权限、Tenant 隔离和超级管理员跨 Tenant 读取审计，支持 `q/project_id/template_key/date_from/date_to/page/page_size`，返回 `{items,total,page,page_size}`。库存依据已有报告 Artifact 及真实 provenance，不依赖当前模板存在；模板删除后，历史成品仍可筛选、阅读和按原项目权限下载。
+
+每项保留 Artifact、TaskRun、输入快照及各摘要身份，`template_version` 为 **`integer|null`**：历史成品保留 metadata 中真实的正整数修订；新成品为 `null`，另返回 `packet_version:2/output_contract_version:3/report_data_schema_version:2`。旧成品没有这三个协议字段时对应响应为 `null`，不伪造模板 `version:1`、不补新协议字段、不改写 Artifact metadata。混合旧 `report_template_version` 与任一新协议字段、或新形状版本不匹配的记录不作为合法新成品纳入库存。
 
 ---
 
@@ -759,6 +888,56 @@ Body：
 ```
 
 ---
+
+### 漏洞发现与有序证据 v2
+
+`cairn/evidence_contracts.py` 定义发现、详情和独立复测共用的 `EvidenceItem`。列表顺序就是证据顺序；每个条目包括：
+
+| 字段 | 合同 |
+| --- | --- |
+| `id` | 同一证据列表内唯一的非空条目 ID |
+| `kind` | `http`、`artifact` 或 `text` |
+| `role` | `primary`（默认）或 `supporting` |
+| `title` | 可选短标题，默认空字符串 |
+| `source` | `capture`、`manual` 或 `historical`，不把粘贴／历史正文冒充实际采集 |
+| `request` / `response` / `artifact` | 可选 `EvidenceRef`：`{artifact_id, pointer?, verifier_run_id?}`；缺哪侧就保留缺失 |
+| `request_text` / `response_text` / `text` | 人工／历史原文，逐字保留；`capture` 禁止内联正文 |
+
+类型与内容槽位由共享合同同时约束 Python 和生成的 JSON Schema：`http` 只使用 `request/response` 或合法人工／历史 `request_text/response_text`，允许真实单侧缺失；`artifact` 只使用 `artifact`；`text` 使用 `text` 原文或 `artifact` 原件引用。每条至少保留一个实际内容槽位，不允许错槽隐藏原件，不补包、不猜测或纠正类型。读写沿用同一共享合同；本轮不执行历史数据修复，不改写已接受的历史结果、摘要或原件。
+
+底层 `evidence_refs` 按条目、请求／响应／附件顺序去重投影，不另维护一份配对事实。Worker 使用同一共享结构的 `WorkerEvidenceItem`，只提交已登记原件的 `artifact_handle` 等引用，不接受内联报文；Dispatcher 上传并解析成服务端 Artifact ID，原件正文仍在 Artifact。默认 Explore 使用 `capture_http_evidence` 或既有登记方法生成对应条目；conclude 只整理已有证据，不能为满足新合同重新访问目标。实验记录及非 finding Fact 的合法 `evidence_refs` 不受替代影响。
+
+`conclude.vulnerability` 的新写入必须携带 `schema_version:2` 和 `evidence_items`，元数据保留 `title/severity/vuln_type/target/remediation/confidence/identity/slot_key`。生产 Worker Finding 的 `identity` 必填；新发现引用校验本轮 TaskRun，不使用 `repro_request/repro_response/packet_artifact_id` 拼接报文。旧结构仅能精确命中已接受 conclude 的原摘要回执，不得创建新 Fact／Observation，未命中返回 `422 vulnerability_schema_version_2_required`。
+
+以下仅演示新 conclude 的漏洞部分，ID 和内容均为合成占位；完整生产请求仍需合法的 Worker、TaskRun、实验与执行绑定：
+
+```json
+{
+  "schema_version": 2,
+  "title": "合成示例：资源读取边界待复核",
+  "severity": "medium",
+  "identity": {
+    "vulnerability_class": "access-control",
+    "asset": {"host": "app.example.test", "port": 443},
+    "entrypoint": {"route": "/example/resource"}
+  },
+  "evidence_items": [
+    {
+      "id": "exchange-1",
+      "kind": "http",
+      "role": "primary",
+      "title": "本次实际交互",
+      "source": "capture",
+      "request": {"artifact_id": "a_request_example"},
+      "response": {"artifact_id": "a_response_example"}
+    }
+  ]
+}
+```
+
+- `GET /projects/{project_id}/vulnerabilities/{vuln_id}?observation_id=...`：显式选择必须属于该漏洞，否则 `404`；省略时取 `observed_at DESC, id DESC` 的最新真实 Observation。没有 Observation 时才使用漏洞记录自身的人工／历史条目。返回选中 `observation_id/source/evidence_items`，`record_evidence_items` 单独保留记录层原材料，`observations` 保留历史入口；不逐字段从 canonical 或其他发现补请求／响应。
+- 人工创建／更新漏洞使用 `evidence_items`，新人工条目标为 `manual`；不能通过人工入口写自动发现来源或改写 Observation。旧 `repro_request/repro_response/packet_artifact_id` 不再是当前手工编辑合同。
+- SQLite／PostgreSQL 均登记 v53 `vulnerability-evidence-items-v2`，为漏洞和 Observation 增加 `evidence_items_json`。单条历史 Observation 的既存两侧保留为 `historical` HTTP 条目，人工记录为 `manual`；自动 canonical 的两侧分别迁为未配对的历史文本，不推断成同一次交互。旧列原样留档，不在新写入中继续双写；迁移登记不表示运行数据库已迁移。
 
 #### POST /projects/{project_id}/complete
 
@@ -976,7 +1155,7 @@ intents:
 
 ---
 
-## 外部漏洞复现／复测 v1
+## 外部漏洞复现／复测（创建 v1，结果 v3）
 
 复测使用独立记录和独立执行上下文，不进入普通 Bootstrap／Reason／自动探索／自动报告流程。外部报告是待验证资料，不是内部 Observation 或已确认漏洞。相关产品与交付范围见 [漏洞复测方案](vulnerability-retest-design.md)。
 
@@ -992,7 +1171,7 @@ intents:
 - `GET /api/v1/verification-configuration/options?tenant_id=...`：返回 `{models, engines, defaults}`；模型仅含 `id/display_name/model_name/protocol/enabled/credential_configured`，不返回组、普通 Worker 或密钥。
 - `/api/v1/verification-integrations?tenant_id=...`：列表、创建、改名／启停、停用和轮换；创建仅提交 `{name}`，修改仅接受 `name/enabled`。集成不再配置生效的 Worker 模板或项目组。创建与轮换返回 `{integration, token}`，明文仅返回一次且禁止缓存；稳定身份、归属及历史不因轮换而重建。按 ID 管理的路径同样必须提供 `tenant_id`。
 
-每次新受理只绑定该租户专用 Worker 的稳定身份，内部 Project 的 `group_id=NULL`，不造默认组、不要求三角色。`purpose` 由服务端维护，存量普通 Worker 为 `general`；普通列表、按 ID CRUD、模板及普通项目／计划绑定均排除专用用途，不能通过普通 Schema 覆盖用途。普通任务的组、三角色要求、配置及调度语义不变。v52 增量迁移保留 v50／v51 checksum、普通 Worker、历史请求／任务／资料／结果及集成身份；旧配置解除对普通 Worker／组的引用，管理员需明确保存新的专用配置，历史旧执行不静默换绑。
+每次新受理只绑定该租户专用 Worker 的稳定身份，内部隐藏 Project 保留 tenant／owner／caller 和来源关系，不要求三角色，也不按“无组”识别复测。`purpose` 由服务端维护，存量普通 Worker 为 `general`；普通列表、按 ID CRUD、模板及普通项目／计划绑定均排除专用用途，不能通过普通 Schema 覆盖用途。普通任务仍要求三角色，配置与调度语义不变。v52 增量迁移保留 v50／v51 checksum、普通 Worker、历史请求／任务／资料／结果及集成身份；当时的旧配置解除对普通 Worker／组的引用，管理员需明确保存新的专用配置，历史旧执行不静默换绑。项目组退场不改变既有复测请求指纹中的常量 `group_id:null`。
 
 ### 资料批次
 
@@ -1015,22 +1194,25 @@ intents:
   "external_id": "ISSUE-123",
   "mode": "retest",
   "title": "原报告问题修复后复测",
-  "origin": "仅在已明确授权的测试环境复测本报告描述的问题，不扩展到其他系统。",
-  "report": {"type": "markdown", "content": "# 待复测问题\n\n填写原条件、步骤、观察和修复变化。"},
+  "report": {"type": "markdown", "content": "# 合成待复测问题\n\n对象：https://app.example.test/example/resource。此处填写测试角色、原步骤、观察和修复变化；仅验证该主张。"},
   "authorization_expires_at": null
 }
 ```
 
-示例只说明协议，不代表目标或费用授权，并假定管理员已为认证所属租户保存可用的专用 Worker 与模型；无需项目组或外部令牌。外部和浏览器创建均不能指定执行资源，`group_id`、`worker_template_id`、`tenant_worker_id`、`tenant_worker_ids`、模型／Prompt 等额外字段明确返回 `422`，不静默忽略。未配置、资源失效、没有独立容量或容量未知时明确说明原因；配置有容量而暂时满载则排队。可选 `execution_deadline` 使用绝对时间；`previous_request_id` 只建立历史关系，不自动继承授权、Worker revision 或模型，再次复测在首次 claim 时采用专用配置。
+示例只说明协议，不代表目标或费用授权，并假定管理员已为认证所属租户保存可用的专用 Worker 与模型；无需项目组或外部令牌。外部和浏览器创建均不能指定执行资源，`group_id`、`worker_template_id`、`tenant_worker_id`、`tenant_worker_ids`、模型／Prompt 等额外字段明确返回 `422`，不静默忽略。未配置、资源失效、没有独立容量或容量未知时明确说明原因；配置有容量而暂时满载则排队。可选 `execution_deadline` 使用绝对时间；`previous_request_id` 本身只建立历史关系，不自动继承 Worker revision 或模型，再次复测在首次 claim 时采用专用配置。复制已核验的平台旧快照时，期限另由上一轮独立复测项目的当前有效边界继承。
 
-`report` 判别联合：`markdown/text` 使用 `content`；`file` 使用 `batch_member_id` 并要求 `resource_batch_id`；`platform_vulnerability` 使用真实 `project_id/vulnerability_id`，仅允许有来源访问权且来源租户与当前租户一致的用户，integration 明确拒绝。MD、TXT、DOCX、PNG、JPEG 可作手工主资料；附件可与内联正文或平台来源同时提交。主资料在受理时绑定为持久 ProjectResource，批次过期不影响已受理档案。
+`origin` 为可省略／可为 `null` 的补充资料原文，例如环境变化、修复说明或资料导航，不再是必填授权目标。平台来源自动提取源项目背景与已记录范围，外部来源由 Agent 从主资料识别所述漏洞对象；不要求再填 URL／范围表或确认一次授权。来源中的排除项、授权到期和费用边界仍适用，无关链接与附件指令不成为新增目标。普通项目 Origin 合同不变。
 
-平台来源由服务端读取漏洞原文字段、关联 Fact／Observation、适用复核说明及直接引用的合法 Artifact，保存原文 JSON 快照、来源清单和历史证据原字节为本次输入 ProjectResource。清单保留来源、摘要和不可携带的缺项，不复制整包 provenance、运行日志、Prompt、session 或配置，不伪造 Observation，也不将历史输入登记成本轮新 Artifact。execution input 与专用 Prompt 提供只读挂载索引；历史资料不是本轮观察，不扩大本次授权，不自动改写原漏洞状态。
+`report` 判别联合：`markdown/text` 使用 `content`；`file` 使用 `batch_member_id` 并要求 `resource_batch_id`；`platform_vulnerability` 使用真实 `project_id/vulnerability_id`，可加 `observation_id` 精确选择一次发现，仅允许有来源访问权且来源租户与当前租户一致的用户，integration 明确拒绝。所选 Observation 必须属于该漏洞；省略时按漏洞详情相同规则选最新真实发现，没有发现才读取记录层条目，缺失的一侧不从其他来源补齐。MD、TXT、DOCX、PNG、JPEG 可作手工主资料；附件可与内联正文或平台来源同时提交。主资料在受理时绑定为持久 ProjectResource，批次过期不影响已受理档案。
+
+内部 Project 的 Origin 由服务端自动组织 `mode/report`；平台来源另外携带 `project_context`、实际选中的 `observation_id` 和漏洞定位，有补充资料时放入 `additional_context`。文件来源提供已保存路径和摘要，平台来源指向资料清单，而非在内部 Origin 重复复制证据正文。这是来源导航，不是新的用户授权声明；新选平台漏洞的本次授权到期不晚于当前来源项目到期，复制旧快照则使用下述上一轮独立复测的当前有效边界。
+
+平台快照／清单为 `schema_version:2`：`evidence` 保存单一选中来源的 `observation_id/source/evidence_items`，`project_context` 保留源 Origin／Goal 原文、已有 Target、实际保存的授权记录及原文明确引用的 ProjectResource 导航。资源导航含 `copied:false`，未复制正文就列为缺项；不推断凭据或自动复制项目全部附件。只复制选中证据、对应 Fact 和上下文事实直接引用的合法 Artifact 原字节；其他 Observation／复核保留标识与历史入口，不搬运其全部正文。清单保留来源、摘要和不可携带的缺项，不复制整包 provenance、Harness 内部运行流、Prompt、session 或配置，不伪造 Observation，也不将历史输入登记成本轮新 Artifact。合法目标日志、工具输出及 `log/raw_output/.log` 不因类别或扩展名被排除；历史复制与新结果接受分别核对用途和归属，共用真实内部来源及秘密边界。execution input 与专用 Prompt 提供只读挂载索引；历史资料不是本轮观察，不自动改写原漏洞状态。
 
 - `GET /vulnerabilities?current_tenant_only=true`：复测候选只读取认证用户当前租户的漏洞，不接受客户端指定租户。该参数默认 `false`，超级管理员普通成果查看仍为全局，普通用户始终按所属租户隔离；复测入口及关联历史同样限定当前租户。
-- `GET /api/v1/verification-sources/projects/{project_id}/vulnerabilities/{vulnerability_id}/preview`：仅合法用户预览当前原文、相关材料及缺项，`Cache-Control: no-store`；受理时服务端重新读取，不信任客户端预览快照。
+- `GET /api/v1/verification-sources/projects/{project_id}/vulnerabilities/{vulnerability_id}/preview?observation_id=...`：仅合法用户预览选中发现的原文、相关材料及缺项；`observation_id` 可省略，选择规则与受理一致。`Cache-Control: no-store`；受理时服务端重新读取，不信任客户端预览快照。
 - 同路径 `/history`：仅合法用户按 `limit/offset` 查询该来源关联的独立复测历史。
-- 已受理请求以 `input_source` 返回来源项目／漏洞及 `input_mode=current_vulnerability/copied_snapshot`；来源 ID 存在请求行一处，不因源记录修改／删除级联删除档案。再次复测可复制旧输入批次，必须保留原始主资料、清单和历史证据的完整映射；或显式选择当前漏洞重新留档，两者不能混淆。复制旧平台 JSON 主资料仅在核验过的旧输入路径允许，普通文件上传不会因此放宽类型。
+- 已受理请求以 `input_source` 返回来源项目／漏洞及 `input_mode=current_vulnerability/copied_snapshot`；来源 ID 存在请求行一处，不因源记录修改／删除级联删除档案。再次复测可复制旧输入批次，必须保留原始主资料、清单和历史证据的完整映射；或显式选择当前漏洞重新留档，两者不能混淆。复制旧平台 JSON 主资料仅在核验过的旧输入路径允许，普通文件上传不会因此放宽类型。旧快照复制不重新查询原项目／漏洞；继承上一轮独立复测项目当前有效的 `authorization_expires_at`，与本次显式期限取更早值，已过期仍拒绝。源项目删除不使完整旧档案失效，也不解除原边界；重新选择当前漏洞仍要求当前来源存在。
 
 幂等键为租户＋真实调用者类型／ID＋`request_id`。新受理返回 `202` 和 Location；同键同输入返回 `200` 的原记录，先查重放再读取当前配置或批次，不重新选择 Worker、不再消费批次、不重复派发；同键不同输入返回 `409`。新 request_id 才是新的一轮复测。上下文、请求与资料绑定在同一事务中完成。指纹继续将旧协议缺省资源字段按 `group_id:null`、`worker_template_id:null` 计算，保证历史未显式选资源的等价输入仍可重放；旧客户端仍携带已删除字段时应修正请求，而不是自动换 ID 重建任务。
 
@@ -1039,22 +1221,51 @@ intents:
 - `GET /api/v1/verification-requests`：`{items,total}` 分页列表；支持 `limit/offset/external_id/mode/execution_status/outcome/source_project_id/source_vulnerability_id` 筛选，integration 仍只能查自己的记录。
 - `GET /api/v1/verification-requests/{id}`：本轮输入定位、实际配置、执行状态、结果／终止原因、过程、原件、允许交付的证据、历史及回收情况。`tenant_workers:[{id,display_name,revision}]` 未 claim 时 revision 为 `null`；`execution_binding` 未 claim 为 `null`，执行后只返回当次 `{worker_id,display_name,worker_revision,model_id,model_name,model_revision}` 安全历史摘要，不用当前 Worker 的模型冒充。`worker_template_id` 仅为历史字段，新受理为 `null`。`execution_message` 说明开始时采用专用配置、授权／截止阻塞或旧绑定不能自动替换，不新增持久业务状态。
 - `POST /api/v1/verification-requests/{id}/cancel`：请求停止；接收停止请求不是执行已经退出，重复取消不重复执行动作，不能覆盖已接受结果。
-- `GET /api/v1/verification-requests/{id}/report`：从唯一已接受结果生成 Markdown，不调用模型；结果未就绪返回明确错误。
+- `GET /api/v1/verification-requests/{id}/report`：从唯一已接受结果生成“结论／关键证据／测试过程”三段 Markdown，不调用模型。理由引用步骤，实际步骤按原条目展开允许交付的完整 UTF-8 原文，不使用预览截断文本；HTTP 缺侧、非 HTTP 观察、缺失／不可读／完整性异常、非 UTF-8／二进制均明确说明。原文使用安全 fence；不允许交付的正文不内嵌，原件链接仍需登录，不宣称为离线证据包。历史 `notes/tested_scope` 原文保留，不推断缺失步骤或 HTTP 配对；结果未就绪返回明确错误。
 - `GET /api/v1/verification-requests/{id}/materials/{resource_id}`：受控下载原件或派生资料。
-- `GET /api/v1/verification-requests/{id}/artifacts/{artifact_id}`：受控下载本轮允许交付证据，不开放任意 Project 下载。详情与下载复用持久终结结果的 `evidence_refs` 作为接受事实，仍核对本请求 Project／TaskRun 归属及原大小／SHA256；已接受证据不因模型当前 Header 改变而撤回。未接受材料和新交付继续检查当次凭据及内容边界，不保存历史明文秘密。来源与交付按材料类别、来源路径及明确内部文件身份排除内部资料，不因文件名含 `session`／`prompt` 等漏洞主题词误排合法证据。
+- `GET /api/v1/verification-requests/{id}/artifacts/{artifact_id}`：受控下载本轮允许交付证据，不开放任意 Project 下载。详情与下载复用持久终结结果的证据引用投影（v2／v3 由 `evidence_items` 派生）作为接受事实，仍核对本请求 Project／TaskRun 归属及原大小／SHA256；已接受证据不因模型当前 Header 改变而撤回。未接受材料和新交付继续检查当次凭据及内容边界，不保存历史明文秘密。来源与交付依据 Dispatcher 生产的 Harness `stream`、真实 `source_path/registered_path` 及明确内部文件身份排除内部资料；不以 `log/raw_output`、`.log`、文件名含 `session`／`prompt` 等漏洞主题词，或正文中的 `/root/`、`/home/` 目标路径误排合法证据。内部流本身仍不可交付，但任意 stdout／stderr 的同大小、同 SHA256 不构成另一份材料的来源证明。已登记受保护内部文件，以及同项目 TaskRun 的冻结 Prompt／Runner 实际加载指引，以可信内容身份识别未变形副本；Runner 在 `/opt/cairn/AGENTS.md` 加载点只审计 hash／大小，Dispatcher 将绑定一致的 `instructions_loaded` 投影为已有 `prompt_rendered`，不保存指引正文或进行任意改写检测。原件不做脱敏改写，真实执行凭据与内部材料仍不能交付。
+
+列表与详情统一返回 `can_delete:boolean`、`delete_block_reason:string|null`、`purge_state:null|"pending"`、`purge_error:string|null`。`DELETE /api/v1/verification-requests/{id}` 复用调用者归属、Cookie／CSRF：已有业务终结、所有 Run 真实终态、Run／Project／停止证明 generation 一致、`termination_confirmed=true` 且所有已分配环境的 `external_verification_cleanup.status=removed` 才能开始永久删除。无 Run 可为 `not_allocated`。未停止返回 `409`“请先停止并等待执行结束”；环境未回收返回 `409`“执行环境尚未回收，请等待回收完成后再删除”。显式 cancel 也可请求停止已交付结果但仍活动的执行，不覆盖其已接受结果或伪造终止／回收事实。
+
+v55 追加迁移替代主动删除的旧 v54 隐藏语义；v56 再追加修正 CHECK 的 NULL 三值逻辑，保证正常请求必需绑定和 purge 阶段组合不能因 UNKNOWN 被放行，不修改已应用的 v55 或自动修复历史行。主动删除先按 Project→Request 锁序提交 `pending`，再在相同所有者锁和删除 fence 下严格清除本轮资源、全部 Artifact（含内部档案）、本轮已消费批次残留；只在确认目录已不存在后清除批次记录、解绑并压缩 Request 为最小 `completed` 墓碑、删除独立 Project 及其子记录。最终 DB commit 成功才返回 `204`。文件或最终提交失败返回 `503`，保持 pending，可重复 DELETE 同一 ID 重试；不将部分已删材料恢复投影成正常档案。completed 重复删除幂等 `204`，不存在或跨调用者仍按原归属返回错误。v54 历史隐藏行不会在迁移或启动时自动硬清理。
+
+pending 仍在正常列表 total 内，`execution_status=cleanup_pending`、`can_delete=true`，详情只返回固定“复测清理未完成”及最小身份／时间／清理原因，`report/result/error=null`、正文空、业务集合空；不读取可能部分缺失的 Project、Run 或原件。pending 禁止报告、材料、Artifact、复制及新 previous 引用；普通 Project 共享鉴权及最终写事务也阻止 user／integration／machine 旁路。已删除后的专用 machine input／claim／heartbeat／result／failure／receipt／cancel-ack 向原执行身份返回明确 `410`，不再为旧 receipt 保留结果正文；其他 machine 返回隔离的 `404`。completed 不解引用已清空的 Project／Run。
+
+原漏洞、原 Observation／证据／上下文及已受理后轮的独立字节不变；已复制但未受理的新批次仍保留。复制和真正受理与删除共用 Project→Request 锁并重查来源；来源轮 pending／completed 或旧隐藏时，新 previous／来源复制返回 `410 {"detail":"来源复测已删除，不能复制或作为上一轮受理，请从原漏洞新建复测"}`，不得偷偷替换成当前漏洞快照。同键已受理重放仍先于来源检查；旧已删除创建 UUID 明确返回 `410 {"detail":"此 request_id 对应的复测记录已删除，请使用新的请求 ID"}`，不能复活。新的复测 raw 暂存位于本轮 Artifact 所有者目录，接收期间持有文件锁，最终发布重新取得 Project 锁并检查 fence；活动句柄未关闭时不能确认清理完成。清理只按服务端本轮拥有者和 `consumed_project_id`，不扫描共享 `.uploads`、不按 `source_resource_id` 扩散、不撤回用户下载或备份，也不承诺介质安全擦除。
 
 ### 执行状态、业务结果与回收
 
-`execution_status` 集中投影为 `queued/running/cancelling/completed/failed/cancelled`。`completed` 要求本轮结果及引用证据已持久化，且执行确认结束；TaskRun 退出 0 不足以认定完成。停止未确认时仍显示正在取消／运行，不将失联当已停止。平台运行、解析或交付故障以稳定 `error.code/message` 交付，`result` 为空，不冒充阴性结果。
+`execution_status` 集中投影为 `queued/running/cancelling/completed/failed/cancelled/cleanup_pending`；最后一种仅表示已明确发起永久删除但尚未完成清理，不是执行状态正常或结果可读。`completed` 要求本轮结果及引用证据已持久化，且执行确认结束；TaskRun 退出 0 不足以认定完成。停止未确认时仍显示正在取消／运行，不将失联当已停止。平台运行、解析或交付故障以稳定 `error.code/message` 交付，`result` 为空，不冒充阴性结果。
 
-`result` 字段：`outcome`、`summary`、`tested_scope`、`notes`、`limitations`、`reason_code`、`evidence_refs`。四态含义：
+新写入的 `VerificationResult` 固定 `schema_version:3`，字段为 `outcome`、`summary`、`tested_scope`、`key_evidence:[{reason,evidence_item_ids}]`、`test_steps:[{action,observation,evidence_item_ids}]`、`limitations`、可选 `reason_code` 及唯一主证据字段 `evidence_items`，不再写 `notes`。判断理由与实际步骤使用简体中文，协议、命令、标识符及证据原文保持原样。理由和步骤只能引用同一结果中存在的条目 ID，不能引用 handle；条目 ID 不能重复，不接受内联历史正文。未实际执行时如实使用空步骤，不编造操作或关联；底层引用由条目投影，不能另外提交 `evidence_refs`。查询响应为便于现有下载导航派生只读 `evidence_refs`，不将其写回结果，也不把投影传回提交接口。创建／详情外层的 `schema_version:1` 不随结果版本改变。四态含义：
 
 - `confirmed`：本轮证据支持报告主张，说明成立条件与影响。
 - `not_reproduced`：已实际测试的说明范围内未复现，不自动判定安全或已修复。
 - `environment_changed`：有本轮观察支持的环境／条件变化，不用来掩盖平台故障。
 - `insufficient_evidence`：明确缺口及未测试事项，可无执行证据。
 
-前三态必须引用已落盘且属于本请求当前执行的 Artifact。外部调用方无权提交、修改业务结果；内部回报绑定 Request、Project、有效 TaskRun、execution generation 及认领凭据，同内容重复交付幂等，冲突或迟到回报不能覆盖唯一终结。内部 Verifier 的 Observation／发现 session／独立性限制保持。
+前三态必须通过条目引用已落盘且属于本请求当前执行的 Artifact；证据不足可用空 `evidence_items`，但必须有非空限制说明。四态只描述本轮结果，不自动确认／修复／关闭原漏洞，也不写入一份内部 verifier 结论。外部调用方无权提交、修改业务结果；内部回报绑定 Request、Project、有效 TaskRun、execution generation 及认领凭据，同内容重复交付幂等，冲突或迟到回报不能覆盖唯一终结。内部 Verifier 的 Observation／发现 session／独立性限制保持。
+
+冻结的 `HistoricalVerificationResult`（v1，无结果 `schema_version`，使用 `evidence_refs`）和 `HistoricalVerificationResultV2`（`schema_version:2`，保留 `notes/evidence_items`）只用于历史读取及已接受终结的精确重放／receipt 核实，不能作为新结果写入；不转换旧结果、不补 v3 字段、不改旧 JSON／摘要／接受时间，也不以兼容为由重跑。未知结果版本明确报错。新 Worker 的 `external_verification_result.data` 只接受 v3；动态注入的 `result_schema` 和既有 `submission-v1.json` 导出合同一致，文件名不代表结果数据版本。登记信息由 Runner 注入，Dispatcher 只将 handle 解析成本轮 Artifact ID，保留条目 ID 及理由／步骤引用不变。
+
+合成的新结果正文示例（不是查询响应，也不是实际验收）：
+
+```json
+{
+  "schema_version": 3,
+  "outcome": "not_reproduced",
+  "summary": "合成示例：说明范围内未复现原主张。",
+  "tested_scope": "报告中的测试角色与资源读取路径",
+  "key_evidence": [{"reason":"响应拒绝当前角色读取所选资源，仅支持本次未复现。","evidence_item_ids":["exchange-1"]}],
+  "test_steps": [{"action":"使用报告所述角色请求所选资源。","observation":"收到拒绝访问响应。","evidence_item_ids":["exchange-1"]}],
+  "limitations": ["未验证其他角色和业务状态，不能推断已全部修复。"],
+  "evidence_items": [
+    {"id":"exchange-1","kind":"http","source":"capture","request":{"artifact_id":"a_request_example"},"response":{"artifact_id":"a_response_example"}}
+  ]
+}
+```
+
+pi 的 `capture_http_evidence` 实际用已有 curl 发出 HTTP/1.1 请求，登记每次交互的请求／响应原件、trace、可用的错误输出和采集状态，返回可直接提交的同一组 `evidence_items`。这是 curl 应用层 trace 字节，**不是网络帧**；默认不跟随重定向，每个已授权 Location 另行调用。超时／失败保留实际部分及缺侧，不能补造响应；请求体上限 1 MiB、响应限制 4 MiB，超限停止并如实留存。参数为必填 `url`，可选 `method/headers/body_path/timeout_seconds/title/role`；超时默认30秒、至多120秒且不超过原执行期限。无响应正文复制进工具回执，原件按受控读取路径消费；采集完成不等于漏洞确认或 Server 已接受。其他原有合法留证方法继续可用。
 
 外部执行使用专用 `external_verify` TaskRun 和 `external_verify_execute` phase／`external_verification_result` 结构化提交，Worker 能力仍映射已有 `explore`。直接创建 pi SDK session，不经过 Bootstrap／Reason／独立复核／自动报告。Dispatcher 显式读取随包发布的 `dispatcher/prompts/external-verification/agent.md`，通过现有 Prompt 审计记录指引与执行 Prompt 的 hash；指引缺失、为空或不可读时以 `verification_instructions_unavailable` 明确失败，不启动模型、不回退普通探索。上传材料中的同名文件不获得指令权限，不改变普通 runner loader。一次 session 允许多轮模型／工具交互，不代表一次模型调用。
 
@@ -1062,7 +1273,11 @@ intents:
 
 普通活动任务和普通报告先派发，原 `runtime.max_workers` 与 `max_running_projects` 仍留给普通任务；复测只使用执行器 `hard_cap - runtime.max_workers` 中额外容量，每 Dispatcher 最多并发一条，并受专用 Worker 自身容量约束。心跳 `runtime` 上报 `hard_cap` 和 `verification_capacity=min(1,max(0,hard_cap-max_workers))`；readiness 用有效心跳区分独立容量为零、未知和执行器离线，不把临时满载当永久不可用。不降低普通额度、不抢占或停止普通任务；共用宿主机、网络及模型限额仍存在资源竞争，不构成物理资源隔离。
 
-网络故障只补交固定结果／证据，不重新执行目标操作。执行与交付排空后按精确容器归属真正 remove；普通项目的回收策略不变。回收失败单独显示，已接受结果仍可查；原件、报告和服务端证据不依赖容器存活，不通过删除 Project 清理环境。
+网络故障只按原上限最多三次重放同一固定结果／证据，不重新执行目标操作。Dispatcher 分别记录 `verification_result`、`verification_failure`、`verification_receipt` 的 `protocol_write` 安全回执（HTTP status、disposition、error_type、受控 safe_code），不记录响应正文或认领凭据。确定性 422 为业务接受拒绝；执行绑定失效／关闭／取消竞争 409 为陈旧业务状态；终结收据冲突独立分类，不一律标成瞬态 `server_write_failed`。补报或后续成功不覆盖第一次拒绝。
+
+仅在 result 瞬态重放耗尽、failure 补报也未接受时，Dispatcher 单次调用 `POST /api/v1/verification-requests/{id}/receipt`，复用原冻结 `VerificationResultSubmission` 正文。该接口仅认证 Dispatcher 可用，沿原 Request／Project／TaskRun／generation／claim／执行 owner 校验，返回 `{terminal_kind,result_matches}` 和 `Cache-Control: no-store`，不改变终结、重跑目标或扩大普通详情权限。Server 用与结果接受相同的 Pydantic 完整结果及规范摘要比较；已接受结果可能已完成项目，查询不再要求执行窗口开放。只有 `terminal_kind=result` 且 `result_matches=true` 才将本次 Run 收敛为成功；不同结果、错误绑定、读取失败或任意409均不是成功证明。
+
+取消不在任务 future 返回前发送 cancel-ack，也不把此前提未满足的拒绝改写为 TaskRun 业务失败。保留真实执行 outcome，沿既有生命周期上报 Run 终态及同 generation 的 `termination_confirmed`，由 `finalize_verification_run` 收口 Request；既有 cancel-ack 接口仍只允许已经确认停止的执行。执行取消、终结接受和物理结束分别记录，ACK 不能代替停止证明。执行与交付排空后按精确容器归属真正 remove；普通项目的回收策略不变。回收失败单独显示，已接受结果仍可查；原件、报告和服务端证据不依赖容器存活，不通过删除 Project 清理环境。
 
 ## 消费者典型使用流程
 

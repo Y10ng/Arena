@@ -18,6 +18,10 @@ from cairn.assessment_contracts import (
     StructuredIntentBinding,
     Text,
 )
+from cairn.evidence_contracts import (
+    VerificationKeyEvidence, VerificationTestStep, WorkerEvidenceItem, evidence_refs,
+    validate_verification_evidence_links,
+)
 from cairn.server.schemas.candidates import CANDIDATE_MAX_ARTIFACT_BYTES
 from cairn.server.schemas.projects import VulnerabilityIdentityInput
 from .envelope import ASSESSMENT_PROTOCOL_ID, PHASE_RESULT_KINDS, validate_result_envelope
@@ -50,22 +54,34 @@ class ArtifactDeclaration(ResultModel):
 
 
 class Finding(ResultModel):
+    schema_version: Literal[2]
     title: Text
     severity: Literal["critical", "high", "medium", "low", "info"]
     vuln_type: str = ""
     target: str = ""
     confidence: float = Field(default=0.5, ge=0, le=1)
     remediation: str = ""
-    packet_artifact_handle: Text | None = None
-    repro_request: str = ""
-    repro_response: str = ""
     identity: VulnerabilityIdentityInput
+    evidence_items: list[WorkerEvidenceItem]
 
 
 class FactResult(ResultModel):
+    model_config = ConfigDict(json_schema_extra={
+        "allOf": [{
+            "if": {"required": ["vulnerability"], "properties": {"vulnerability": {"type": "object"}}},
+            "then": {"not": {"required": ["evidence_refs"]}},
+        }],
+    })
+
     description: Text
     vulnerability: Finding | None = None
     evidence_refs: list[AssessmentEvidenceRef] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_finding_evidence(self) -> FactResult:
+        if self.vulnerability is not None and "evidence_refs" in self.model_fields_set:
+            raise ValueError("finding fact evidence_refs are projected from vulnerability.evidence_items")
+        return self
 
 
 class CompleteResult(ResultModel):
@@ -115,9 +131,21 @@ class CoverageResult(ResultModel):
     attempted_strategies: list[Text] = Field(default_factory=list)
 
 
+_FINDING_DATA_EVIDENCE_CONSTRAINT = {
+    "if": {
+        "required": ["fact"],
+        "properties": {"fact": {
+            "required": ["vulnerability"],
+            "properties": {"vulnerability": {"type": "object"}},
+        }},
+    },
+    "then": {"not": {"required": ["evidence_refs"]}},
+}
+
+
 class BootstrapData(ResultModel):
     model_config = ConfigDict(json_schema_extra={
-        "allOf": [{
+        "allOf": [_FINDING_DATA_EVIDENCE_CONSTRAINT, {
             "if": {"required": ["coverage_scope_disposition"]},
             "then": {
                 "properties": {
@@ -136,6 +164,8 @@ class BootstrapData(ResultModel):
 
     @model_validator(mode="after")
     def validate_scope_disposition(self) -> BootstrapData:
+        if self.fact.vulnerability is not None and "evidence_refs" in self.model_fields_set:
+            raise ValueError("finding data evidence_refs are projected from vulnerability.evidence_items")
         # 显式声明零表面处置时，不能同时提交已发现表面。
         if ("coverage_scope_disposition" in self.model_fields_set
                 and self.discovered_surfaces):
@@ -150,12 +180,22 @@ class BootstrapConcludeData(BootstrapData):
 
 
 class ExploreData(ResultModel):
+    model_config = ConfigDict(json_schema_extra={
+        "allOf": [_FINDING_DATA_EVIDENCE_CONSTRAINT],
+    })
+
     fact: FactResult
     coverage_result: CoverageResult | None = None
     assessment_record: ExperimentRecord | None = None
     discovered_surfaces: list[SurfaceResult] = Field(default_factory=list)
     evidence_refs: list[AssessmentEvidenceRef] = Field(default_factory=list)
     artifacts: list[ArtifactDeclaration] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_finding_evidence(self) -> ExploreData:
+        if self.fact.vulnerability is not None and "evidence_refs" in self.model_fields_set:
+            raise ValueError("finding data evidence_refs are projected from vulnerability.evidence_items")
+        return self
 
 
 class VerificationResult(ResultModel):
@@ -172,23 +212,30 @@ class VerifierData(ResultModel):
 
 
 class ExternalVerificationData(ResultModel):
-    """外部资料验证不创建发现 Fact，也不声明内部 Observation 身份。"""
+    """新复测只填写一套有序原件关系；底层引用由条目投影。"""
 
     model_config = ConfigDict(json_schema_extra={
         "allOf": [{
             "if": {"properties": {"outcome": {"const": "insufficient_evidence"}}, "required": ["outcome"]},
             "then": {"properties": {"limitations": {"minItems": 1}}},
-            "else": {"properties": {"evidence_refs": {"minItems": 1}}},
+            "else": {"properties": {"evidence_items": {
+                "contains": {"anyOf": [
+                    {"required": [name], "properties": {name: {"type": "object"}}}
+                    for name in ("request", "response", "artifact")
+                ]},
+            }}},
         }],
     })
 
+    schema_version: Literal[3]
     outcome: Literal["confirmed", "not_reproduced", "environment_changed", "insufficient_evidence"]
     summary: Text
     tested_scope: Text
-    notes: Text
     limitations: list[Text]
     reason_code: Text | None = None
-    evidence_refs: list[AssessmentEvidenceRef]
+    key_evidence: list[VerificationKeyEvidence]
+    test_steps: list[VerificationTestStep]
+    evidence_items: list[WorkerEvidenceItem]
     artifacts: list[ArtifactDeclaration] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -196,8 +243,9 @@ class ExternalVerificationData(ResultModel):
         if self.outcome == "insufficient_evidence":
             if not self.limitations:
                 raise ValueError("insufficient_evidence requires explicit limitations")
-        elif not self.evidence_refs:
+        elif not evidence_refs(self.evidence_items):
             raise ValueError("tested outcomes require current execution evidence")
+        validate_verification_evidence_links(self.evidence_items, self.key_evidence, self.test_steps)
         return self
 
 
@@ -216,6 +264,18 @@ class RejectedOption(ResultModel):
 
 
 class ReasonData(ResultModel):
+    model_config = ConfigDict(json_schema_extra={
+        "allOf": [{
+            "if": {"required": ["complete"], "properties": {"complete": {"type": "object"}}},
+            "then": {"properties": {
+                "intents": {"anyOf": [{"type": "null"}, {"type": "array", "maxItems": 0}]},
+                "abandon": {"maxItems": 0},
+                "discovered_surfaces": {"maxItems": 0},
+                "depth_review": {"type": "null"},
+            }},
+        }],
+    })
+
     intents: list[IntentDecision] | None = None
     complete: CompleteResult | None = None
     depth_review: DepthReviewDecision | None = None
@@ -229,6 +289,20 @@ class ReasonData(ResultModel):
     evidence_refs: list[AssessmentEvidenceRef] = Field(default_factory=list)
     artifacts: list[ArtifactDeclaration] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def validate_completion_actions(self) -> ReasonData:
+        # 空数组／null 不产生业务动作；完成建议只能与真正的新动作互斥。
+        if self.complete is not None:
+            if self.intents:
+                raise ValueError("complete and intents cannot coexist")
+            if self.abandon:
+                raise ValueError("completion cannot discard obligations in the same decision")
+            if self.discovered_surfaces:
+                raise ValueError("completion cannot add discovered surfaces")
+            if self.depth_review is not None:
+                raise ValueError("depth_review must be an atomic standalone decision")
+        return self
+
 
 class ReportFinding(ResultModel):
     vulnerability_id: Text
@@ -240,9 +314,27 @@ class ReportFinding(ResultModel):
     limitations: str = ""
 
 
+REPORT_DATA_SCHEMA_VERSION = 2
+REPORT_FACT_REFS = (
+    "scope", "counts", "work_results", "execution_status", "limitations", "evidence_index",
+)
+
+
+class ReportMarkdownFragment(ResultModel):
+    type: Literal["markdown"]
+    markdown: Annotated[str, Field(min_length=1, pattern=r"\S")]
+
+
+class ReportFactReference(ResultModel):
+    type: Literal["fact"]
+    ref: Text
+
+
 class ReportData(ResultModel):
+    schema_version: Literal[2]
     executive_summary: Annotated[str, Field(min_length=1, max_length=20000, pattern=r"\S")]
     findings: list[ReportFinding]
+    layout: list[ReportMarkdownFragment | ReportFactReference] = Field(min_length=1)
     limitations: str = ""
     artifacts: list[ArtifactDeclaration] = Field(default_factory=list)
 

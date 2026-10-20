@@ -35,30 +35,30 @@ const normalizedTone = computed<BadgeTone>(() => (props.tone === 'warn' ? 'warni
   width: fit-content;
   max-width: 100%;
   border: calc(var(--space-1) / 4) solid var(--border);
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-sm);
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
   color: var(--text-muted);
-  font-weight: var(--font-semibold);
-  line-height: var(--leading-tight);
-  white-space: nowrap;
+  font-weight: var(--font-medium);
+  line-height: var(--leading-normal);
+  overflow-wrap: anywhere;
 }
 
 .ui-badge--sm {
-  min-height: var(--control-height-xs);
-  padding-inline: var(--space-2);
-  font-size: var(--text-2xs);
+  min-height: 20px;
+  padding-inline: 6px;
+  font-size: var(--text-xs);
 }
 
 .ui-badge--md {
-  min-height: var(--control-height-sm);
+  min-height: var(--control-height-xs);
   padding-inline: var(--space-2);
   font-size: var(--text-xs);
 }
 
 .ui-badge--lg {
-  min-height: var(--control-height);
+  min-height: var(--control-height-sm);
   padding-inline: var(--space-3);
   font-size: var(--text-sm);
 }

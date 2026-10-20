@@ -31,7 +31,6 @@ from .project_authorization import *
 from .project_targets import *
 from .project_reason import *
 from .project_completion import *
-from .project_groups import *
 from .worker_templates import *
 from .tenant_workers import *
 from .projects import *

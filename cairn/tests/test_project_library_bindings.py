@@ -16,7 +16,6 @@ from route_helpers import iter_app_routes
 from cairn.server.auth import RequestPrincipal, create_user_with_personal_tenant, require_user
 from cairn.server.models import CreateProjectRequest
 from cairn.server.routers.projects import get_library_catalog
-from cairn.server.schemas.groups import CreateProjectGroupRequest
 from cairn.server.schemas.libraries import LibraryFileWrite
 from cairn.server.schemas.models import CreateTenantModelRequest
 from cairn.server.schemas.tenant_workers import CreateTenantWorkerRequest
@@ -26,7 +25,6 @@ from cairn.server.services.libraries import (
     create_library,
     create_library_version,
 )
-from cairn.server.services.project_groups import create_project_group
 from cairn.server.services.project_records import (
     create_project_record,
     delete_project_record,
@@ -93,18 +91,12 @@ def _worker(principal: RequestPrincipal):
 
 
 def _request(principal: RequestPrincipal, worker_id: str, **updates) -> CreateProjectRequest:
-    group = create_project_group(
-        CreateProjectGroupRequest(name="Library Projects"),
-        tenant_id=principal.tenant_id,
-        actor_id=principal.subject_id,
-    )
     values = {
         "title": "Library-bound project",
         "origin": "https://example.com",
         "goal": "Audit the target",
         "scenario": "default",
         "tenant_worker_ids": [worker_id],
-        "group_id": group.id,
         "authorization_expires_at": None,
     }
     values.update(updates)

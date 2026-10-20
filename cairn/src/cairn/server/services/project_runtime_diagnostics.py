@@ -1017,7 +1017,14 @@ def build_project_runtime(
     )
     status = project["status"]
     state, code, message = "unknown", "scheduling_unobserved", "尚未收到本项目当前代次的调度决定，无法确认运行状态"
-    if status in {"stopped", "completed"} and report_attempts:
+    if status == "pending":
+        state, code, message = (
+            "pending",
+            "project_pending_schedule_required",
+            "尚未进入执行调度，请在启动计划中查看时间、原因或管理预约。",
+        )
+        scheduling = None
+    elif status in {"stopped", "completed"} and report_attempts:
         preferred_axis_task_run_id = report_attempts[0].id
         state, code, message = _attempt_projection(
             report_attempts,

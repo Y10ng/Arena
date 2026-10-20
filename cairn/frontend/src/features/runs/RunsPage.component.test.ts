@@ -153,6 +153,48 @@ beforeEach(() => {
 })
 
 describe('RunsPage details', () => {
+  it('opens a run and returns to the narrow list without stacking two high panels', async () => {
+    const state = createRunsPageState()
+    mocks.useRunsPage.mockReturnValue(state)
+    const wrapper = mount(RunsPage, { attachTo: document.body })
+    await flushPromises()
+    expect(wrapper.classes()).not.toContain('runs-container--reading')
+    await wrapper.get('.run-row').trigger('click')
+    expect(state.selectRun).toHaveBeenCalledWith('run-a')
+    expect(wrapper.classes()).toContain('runs-container--reading')
+    await wrapper.get('.run-back').trigger('click')
+    expect(wrapper.classes()).not.toContain('runs-container--reading')
+    expect(wrapper.find('.terminal-toolbar').exists()).toBe(false)
+    expect(wrapper.find('.runs-detail-tabs .ui-tabs__actions a[download]').exists()).toBe(true)
+    await wrapper.get('.run-row').trigger('click')
+    state.selectedRun.value = null as never
+    await flushPromises()
+    expect(wrapper.classes()).not.toContain('runs-container--reading')
+    wrapper.unmount()
+  })
+
+  it('keeps long results and errors intact in separate on-demand disclosure', async () => {
+    const state = createRunsPageState()
+    const result = '完整业务结果\n'.repeat(100)
+    const diagnostic = 'provider_error 原始诊断\n'.repeat(100)
+    state.runResultText.mockReturnValue(result)
+    state.selectedRun.value = {
+      ...state.selectedRun.value,
+      status: 'failed',
+      error_type: 'provider_error',
+      error_message: diagnostic,
+    } as never
+    mocks.useRunsPage.mockReturnValue(state)
+    const wrapper = mount(RunsPage, { attachTo: document.body })
+    await flushPromises()
+    expect(wrapper.get('.run-business-summary details').attributes('open')).toBeUndefined()
+    expect(wrapper.get('.error-banner').attributes('open')).toBeUndefined()
+    expect(wrapper.get('.run-result-content').element.textContent).toBe(result)
+    expect(wrapper.get('.error-msg').element.textContent).toBe(diagnostic)
+    expect(wrapper.get('.error-banner summary').text()).toContain('provider_error')
+    wrapper.unmount()
+  })
+
   it('keeps a normal success badge without result text or result tooltips on the card', async () => {
     const state = createRunsPageState()
     mocks.useRunsPage.mockReturnValue(state)

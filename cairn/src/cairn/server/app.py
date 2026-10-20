@@ -27,7 +27,6 @@ from cairn.server.routers import (
     libraries,
     monitoring,
     models,
-    project_groups,
     project_resources,
     project_schedules,
     project_runtime,
@@ -86,7 +85,6 @@ app.include_router(projects.router)
 app.include_router(project_schedules.router)
 app.include_router(verification_requests.router)
 app.include_router(project_resources.router)
-app.include_router(project_groups.router)
 app.include_router(worker_templates.router)
 app.include_router(models.router)
 app.include_router(tenant_workers.router)

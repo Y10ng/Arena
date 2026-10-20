@@ -13,7 +13,7 @@ from .assessment_policy import parse_scenario_snapshot, row_value
 from .common import *
 
 from .coverage_slots import reset_slot_for_abandoned_intent
-from .ids import get_project_or_404
+from .ids import get_project_or_404, lock_verification_project_write
 from .payload_values import dump_json, payload_text
 from cairn.server.models import ReportCapabilityView
 
@@ -80,6 +80,7 @@ def validate_task_runs_exist(
 def validate_task_run_exists(
     conn: sqlite3.Connection, project_id: str, task_run_id: str
 ) -> sqlite3.Row:
+    lock_verification_project_write(conn, project_id)
     row = conn.execute(
         "SELECT * FROM task_runs WHERE id = ? AND project_id = ?",
         (task_run_id, project_id),
@@ -552,7 +553,6 @@ def project_meta_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> Project
     tenant_id = str(row_value(row, "tenant_id") or "")
     tenant_name = ""
     tenant_owner_login = None
-    group_name = None
     if tenant_id:
         attribution = conn.execute(
             """
@@ -562,21 +562,16 @@ def project_meta_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> Project
                     JOIN users u ON u.id = tm.user_id
                     WHERE tm.tenant_id = t.id AND tm.role = 'owner'
                     ORDER BY tm.created_at, u.id
-                    LIMIT 1) AS tenant_owner_login,
-                   (SELECT pg.name
-                    FROM project_groups pg
-                    WHERE pg.id = ? AND pg.tenant_id = t.id
-                    LIMIT 1) AS group_name
+                    LIMIT 1) AS tenant_owner_login
             FROM tenants t
             WHERE t.id = ?
             """,
-            (row_value(row, "group_id"), tenant_id),
+            (tenant_id,),
         ).fetchone()
         if attribution is None:
             raise HTTPException(500, "Project tenant not found")
         tenant_name = str(attribution["tenant_name"])
         tenant_owner_login = attribution["tenant_owner_login"]
-        group_name = attribution["group_name"]
     from .assessment_convergence import assessment_execution_view, assessment_progress
 
     report_policy = report_policy_from_project_row(row)
@@ -612,11 +607,12 @@ def project_meta_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> Project
         vulnerability_fingerprint_version=row_value(
             row, "vulnerability_fingerprint_version"
         ),
+        # 独立复测复用执行快照，但其结果不能冒充普通项目报告能力。
         report_capability=ReportCapabilityView(
-            supported=report_policy.supported,
+            supported=verification is None and report_policy.supported,
             policy_version=report_policy.version,
-            template_profile=report_policy.template_profile or None,
-            reason=report_policy.reason,
+            template_profile=(report_policy.template_profile or None) if verification is None else None,
+            reason=report_policy.reason if verification is None else "verification_request_managed",
         ),
         explore_deadline=row_value(row, "explore_deadline"),
         authorization_expires_at=row_value(row, "authorization_expires_at"),
@@ -638,8 +634,6 @@ def project_meta_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> Project
         tenant_id=tenant_id,
         tenant_name=tenant_name,
         tenant_owner_login=tenant_owner_login,
-        group_id=row_value(row, "group_id"),
-        group_name=group_name,
         reason=project_reason_from_row(row),
     )
 

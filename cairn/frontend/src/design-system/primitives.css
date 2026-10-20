@@ -121,7 +121,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     background: var(--bg-surface);
-    box-shadow: var(--shadow-sm);
+    box-shadow: none;
   }
 
   :where(.console-page) {
@@ -231,7 +231,7 @@
 
   @media (max-width: 760px) {
     :where(.console-page) {
-      padding: var(--space-3);
+      padding: var(--space-4);
     }
 
     :where(.section-header, .page-header, .editor-title-row, .section-title-row) {

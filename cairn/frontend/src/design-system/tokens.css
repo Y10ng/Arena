@@ -1,32 +1,33 @@
 :root {
   color-scheme: dark;
 
-  /* Graphite 基础色阶：界面层次主要依靠明度与细边框。 */
-  --color-canvas: #0b0c0e;
-  --color-surface: #111317;
-  --color-surface-raised: #17191e;
-  --color-surface-inset: #08090b;
-  --color-surface-hover: #1d2026;
-  --color-surface-selected: #242831;
-  --color-surface-disabled: #15171b;
+  /* 工作台以近黑画布、炭灰面板和柔蓝强调建立层次，编辑区低于面板一级。 */
+  --color-canvas: #101114;
+  --color-sidebar: #15171b;
+  --color-surface: #1e2025;
+  --color-surface-raised: #1e2025;
+  --color-surface-inset: #15171b;
+  --color-surface-hover: #292c33;
+  --color-surface-selected: #293343;
+  --color-surface-disabled: #24262c;
   --color-overlay: rgb(0 0 0 / 58%);
 
-  --color-border-subtle: #202329;
-  --color-border: #2a2e35;
-  --color-border-strong: #3b4049;
+  --color-border-subtle: #2a2d34;
+  --color-border: #343840;
+  --color-border-strong: #49515e;
 
-  --color-text: #f2f3f5;
-  --color-text-secondary: #a8adb7;
-  --color-text-tertiary: #7d838e;
-  --color-text-disabled: #555b65;
-  --color-text-inverse: #0b0c0e;
-  --color-link: #9fc4dc;
-  --color-link-hover: #c5dfef;
+  --color-text: #ebedf0;
+  --color-text-secondary: #b1b6c0;
+  --color-text-tertiary: #9198a5;
+  --color-text-disabled: #737b88;
+  --color-text-inverse: #101114;
+  --color-link: #80b3ed;
+  --color-link-hover: #a6cdf5;
 
-  --color-accent: #e7e9ed;
-  --color-accent-hover: #ffffff;
-  --color-accent-soft: rgb(231 233 237 / 10%);
-  --color-accent-contrast: #101216;
+  --color-accent: #65a1e6;
+  --color-accent-hover: #7db0eb;
+  --color-accent-soft: rgb(101 161 230 / 15%);
+  --color-accent-contrast: #101114;
 
   /* 状态色仅用于反馈，不作为大面积品牌装饰。 */
   --color-success: #71b991;
@@ -58,7 +59,7 @@
   --text-md: 14px;
   --text-lg: 16px;
   --text-xl: 18px;
-  --text-2xl: 22px;
+  --text-2xl: 20px;
   --text-3xl: 28px;
   --font-normal: 400;
   --font-medium: 500;
@@ -83,24 +84,24 @@
   --space-10: 64px;
 
   --radius-none: 0;
-  --radius-sm: 3px;
-  --radius-md: 5px;
-  --radius-lg: 7px;
-  --radius-xl: 9px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
   --radius-2xl: 12px;
   --radius-full: 999px;
   --control-height-xs: 24px;
-  --control-height-sm: 28px;
-  --control-height: 32px;
-  --control-height-lg: 38px;
+  --control-height-sm: 32px;
+  --control-height: 36px;
+  --control-height-lg: 40px;
   --control-height-xl: 44px;
 
-  --shadow-xs: 0 1px 1px rgb(0 0 0 / 18%);
-  --shadow-sm: 0 1px 2px rgb(0 0 0 / 24%);
-  --shadow-md: 0 8px 24px rgb(0 0 0 / 28%);
-  --shadow-pop: 0 16px 40px rgb(0 0 0 / 38%), 0 0 0 1px rgb(255 255 255 / 3%);
-  --shadow-modal: 0 24px 72px rgb(0 0 0 / 48%), 0 0 0 1px rgb(255 255 255 / 4%);
-  --ring: 0 0 0 1px var(--color-canvas), 0 0 0 3px rgb(231 233 237 / 28%);
+  --shadow-xs: 0 1px 1px rgb(0 0 0 / 10%);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 16%);
+  --shadow-md: 0 8px 24px rgb(0 0 0 / 24%);
+  --shadow-pop: 0 12px 32px rgb(0 0 0 / 32%);
+  --shadow-modal: 0 20px 64px rgb(0 0 0 / 42%);
+  --ring: 0 0 0 1px var(--color-canvas), 0 0 0 3px rgb(101 161 230 / 35%);
 
   /* Shell、内容区与浮层尺寸统一由语义变量控制。 */
   --layout-sidebar-width: 248px;
@@ -130,11 +131,11 @@
   --z-overlay-child: 90;
 
   --dur-instant: 60ms;
-  --dur-fast: 100ms;
-  --dur: 160ms;
+  --dur-fast: 140ms;
+  --dur: 190ms;
   --dur-slow: 220ms;
-  --ease: cubic-bezier(0.2, 0, 0, 1);
-  --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-enter: var(--ease);
   --ease-exit: cubic-bezier(0.4, 0, 1, 1);
 
   /* CSS media query 暂不能可靠引用变量，这些值作为全项目断点规范。 */
@@ -152,7 +153,7 @@
   --surface-hover: var(--color-surface-hover);
   --surface-selected: var(--color-surface-selected);
   --surface-disabled: var(--color-surface-disabled);
-  --glass-bg: rgb(11 12 14 / 88%);
+  --glass-bg: rgb(21 23 27 / 96%);
 
   --border-faint: var(--color-border-subtle);
   --border-subtle: var(--color-border-subtle);
@@ -171,7 +172,7 @@
   --accent: var(--color-accent);
   --accent-hover: var(--color-accent-hover);
   --accent-dim: var(--color-accent-soft);
-  --accent-rgb: 231, 233, 237;
+  --accent-rgb: 101, 161, 230;
   --success: var(--color-success);
   --success-soft: var(--color-success-soft);
   --success-border: color-mix(in srgb, var(--color-success) 32%, transparent);
@@ -246,29 +247,30 @@
   color-scheme: light;
 
   --color-canvas: #f6f7f9;
+  --color-sidebar: #f0f2f6;
   --color-surface: #ffffff;
   --color-surface-raised: #ffffff;
-  --color-surface-inset: #f7f8fa;
-  --color-surface-hover: #f2f4f7;
-  --color-surface-selected: #e9edf3;
-  --color-surface-disabled: #f3f4f6;
+  --color-surface-inset: #f6f8fb;
+  --color-surface-hover: #edf1f6;
+  --color-surface-selected: #e7effa;
+  --color-surface-disabled: #f0f2f5;
   --color-overlay: rgb(15 23 42 / 28%);
 
-  --color-border-subtle: #eceff3;
-  --color-border: #dfe3e8;
-  --color-border-strong: #c8ced6;
+  --color-border-subtle: #e6e9ef;
+  --color-border: #d6dce5;
+  --color-border-strong: #aeb9c8;
 
-  --color-text: #171a1f;
+  --color-text: #20242b;
   --color-text-secondary: #4b5563;
-  --color-text-tertiary: #6b7280;
-  --color-text-disabled: #a4abb5;
+  --color-text-tertiary: #626b79;
+  --color-text-disabled: #87909e;
   --color-text-inverse: #ffffff;
-  --color-link: #315f7b;
-  --color-link-hover: #173f58;
+  --color-link: #2864a8;
+  --color-link-hover: #1c4d85;
 
-  --color-accent: #1f2937;
-  --color-accent-hover: #111827;
-  --color-accent-soft: rgb(31 41 55 / 7%);
+  --color-accent: #2e6fb9;
+  --color-accent-hover: #245d9f;
+  --color-accent-soft: rgb(46 111 185 / 10%);
   --color-accent-contrast: #ffffff;
 
   --color-success: #397556;
@@ -288,15 +290,15 @@
   --color-severity-info: #5f6b7a;
 
   --glass-bg: rgb(255 255 255 / 92%);
-  --accent-rgb: 31, 41, 55;
+  --accent-rgb: 46, 111, 185;
   --danger-rgb: 163, 72, 72;
   --console-accent-dim: rgb(132 103 37 / 10%);
-  --shadow-xs: 0 1px 2px rgb(15 23 42 / 4%);
-  --shadow-sm: 0 2px 8px rgb(15 23 42 / 6%);
-  --shadow-md: 0 12px 32px rgb(15 23 42 / 9%);
-  --shadow-pop: 0 18px 48px rgb(15 23 42 / 12%), 0 0 0 1px rgb(15 23 42 / 4%);
-  --shadow-modal: 0 28px 80px rgb(15 23 42 / 16%), 0 0 0 1px rgb(15 23 42 / 5%);
-  --ring: 0 0 0 1px var(--color-surface), 0 0 0 3px rgb(31 41 55 / 18%);
+  --shadow-xs: 0 1px 2px rgb(15 23 42 / 3%);
+  --shadow-sm: 0 1px 3px rgb(15 23 42 / 5%);
+  --shadow-md: 0 8px 24px rgb(15 23 42 / 8%);
+  --shadow-pop: 0 12px 32px rgb(15 23 42 / 12%);
+  --shadow-modal: 0 20px 64px rgb(15 23 42 / 16%);
+  --ring: 0 0 0 1px var(--color-surface), 0 0 0 3px rgb(46 111 185 / 28%);
 
   --graph-page-bg: var(--color-canvas);
   --graph-canvas-bg: #f7f7f5;

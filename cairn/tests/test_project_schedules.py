@@ -21,7 +21,6 @@ from cairn.project_authorization_contract import (
     origin_scope_digest, scope_source_from_descriptor, target_scope_v3,
 )
 from cairn.server import db
-from cairn.server.schemas.groups import CreateProjectGroupRequest
 from cairn.server.schemas.libraries import LibraryFileWrite
 from cairn.server.schemas.project_schedules import CreateScheduleRequest, ScheduleActionRequest, ScheduleTiming, UpdateScheduleRequest
 from cairn.server.schemas.projects import CreateProjectRequest, UpdateProjectStatusRequest, UpdateProjectWorkersRequest
@@ -32,7 +31,6 @@ from cairn.server.services import model_credentials
 from cairn.server.services.creation_requests import create_project_request, query_creation_request
 from cairn.server.services.libraries import archive_library, create_library, create_library_version
 from cairn.server.services.project_authorization import authorization_scope_projection, project_authorization_block_reason
-from cairn.server.services.project_groups import create_project_group
 from cairn.server.services.project_records import delete_project_record, get_project_detail, project_lifecycle_action, update_project_status_record, update_project_workers_record
 from cairn.server.services.project_resources import create_project_resource_batch, upload_project_resource_batch_file, project_resource_root, read_project_resource_content, cleanup_expired_project_resource_batches
 from cairn.server.services.project_schedules import create_schedule, consume_due_schedules, get_schedule, schedule_action, schedule_history, update_schedule
@@ -69,8 +67,7 @@ def schedule_env(request, tmp_path, monkeypatch):
     monkeypatch.setattr(worker_service, "dispatcher_executor_available", lambda conn: True)
     principal = _principal("schedule-user")
     worker = _worker(principal)
-    group = create_project_group(CreateProjectGroupRequest(name="计划验证"), tenant_id=principal.tenant_id, actor_id=principal.subject_id)
-    project = CreateProjectRequest(title="隔离计划", origin="背景 https://background.example.test 不等于授权", goal="验证计划事务", scenario="goal-driven-v1", tenant_worker_ids=[worker.id], group_id=group.id, authorization_expires_at=None, targets=[{"type": "domain", "value": "authorized.example.test"}])
+    project = CreateProjectRequest(title="隔离计划", origin="背景 https://background.example.test 不等于授权", goal="验证计划事务", scenario="goal-driven-v1", tenant_worker_ids=[worker.id], authorization_expires_at=None, targets=[{"type": "domain", "value": "authorized.example.test"}])
     yield principal, project
     db._reset_for_tests()
 

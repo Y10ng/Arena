@@ -3,6 +3,7 @@ import { assert, describe, it } from 'vitest'
 import type { KnowledgeFile } from '@/api/types'
 import {
   buildKnowledgeDirectoryGroups,
+  buildKnowledgeNavigation,
   knowledgeFileDirectory,
   knowledgeFileName,
   knowledgeFilePathInDirectory,
@@ -33,11 +34,39 @@ describe('knowledge console directory model', () => {
       makeFile('backend/api/openapi.md', 11),
     ])
 
-    assert.deepEqual(groups.map(group => [group.directory, group.files.length, group.totalSize]), [
-      ['', 1, 3],
-      ['backend/api', 1, 11],
-      ['frontend', 2, 12],
-    ])
+    assert.deepEqual(
+      groups.map((group) => [group.directory, group.files.length, group.totalSize]),
+      [
+        ['', 1, 3],
+        ['backend', 0, 0],
+        ['backend/api', 1, 11],
+        ['frontend', 2, 12],
+      ],
+    )
+  })
+
+  it('shows only expanded directories and reveals ancestors for matching file paths', () => {
+    const files = [makeFile('README.md'), makeFile('backend/api/openapi.md')]
+    assert.deepEqual(
+      buildKnowledgeNavigation(files, new Set()).map((entry) => entry.path),
+      ['backend', 'README.md'],
+    )
+    assert.deepEqual(
+      buildKnowledgeNavigation(files, new Set(['backend'])).map((entry) => entry.path),
+      ['backend', 'backend/api', 'README.md'],
+    )
+    assert.deepEqual(
+      buildKnowledgeNavigation(files, new Set(), 'API/OPEN').map((entry) => [
+        entry.path,
+        entry.depth,
+      ]),
+      [
+        ['backend', 0],
+        ['backend/api', 1],
+        ['backend/api/openapi.md', 2],
+      ],
+    )
+    assert.deepEqual(buildKnowledgeNavigation([], new Set()), [])
   })
 
   it('builds new file paths inside the selected directory', () => {

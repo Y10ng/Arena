@@ -2,38 +2,41 @@
   <section ref="page" class="verification-theme verification-page" aria-label="漏洞复现与复测">
     <header class="verification-heading">
       <h1>漏洞复现与复测</h1>
-      <Button v-if="auth.isSuperAdmin" variant="secondary" @click="router.push({ name: 'VerificationConfiguration' })">漏洞复测配置</Button>
-      <Button @click="openCreate"><template #icon><Plus :size="16" /></template>新建复测</Button>
+      <Button variant="secondary" @click="router.push({ name: 'VerificationConfiguration' })">漏洞复测配置</Button>
+      <Button data-verification-create @click="openCreate"><template #icon><Plus :size="16" /></template>新建复测</Button>
     </header>
     <form class="verification-filters" @submit.prevent="applyFilters">
       <FormField label="外部漏洞编号" for="verification-external"><Input id="verification-external" v-model="draft.external_id" placeholder="完整编号，精确匹配" /></FormField>
-      <FormField label="模式" for="verification-mode"><Select content-class="verification-theme verification-select" id="verification-mode" v-model="draft.mode" :options="modeOptions" /></FormField>
-      <FormField label="执行状态" for="verification-status"><Select content-class="verification-theme verification-select" id="verification-status" v-model="draft.execution_status" :options="statusOptions" /></FormField>
-      <FormField label="本轮结论" for="verification-outcome"><Select content-class="verification-theme verification-select" id="verification-outcome" v-model="draft.outcome" :options="outcomeOptions" /></FormField>
+      <FormField label="模式" for="verification-mode"><Select id="verification-mode" v-model="draft.mode" :options="modeOptions" /></FormField>
+      <FormField label="执行状态" for="verification-status"><Select id="verification-status" v-model="draft.execution_status" :options="statusOptions" /></FormField>
+      <FormField label="结果" for="verification-outcome"><Select id="verification-outcome" v-model="draft.outcome" :options="outcomeOptions" /></FormField>
       <Button type="submit" variant="secondary">筛选</Button>
       <Button variant="secondary" :loading="isFetching" @click="refresh">刷新</Button>
     </form>
+    <Alert v-if="actionError" tone="danger" title="操作未完成">{{ actionError }}<template #actions><Button variant="ghost" @click="actionError = ''">关闭提示</Button></template></Alert>
     <Alert v-if="isError && data" tone="warning" title="刷新失败">保留上次取得的记录，最新状态尚未确认。{{ errorMessage(error) }}</Alert>
     <Skeleton v-if="isLoading" aria-label="正在加载复测记录" />
     <ErrorState v-else-if="isError && !data" title="复测列表加载失败" :description="errorMessage(error)" @retry="refresh" />
-    <EmptyState v-else-if="!data?.items.length" title="暂无匹配的复测记录" description="可调整筛选条件，或新建一次漏洞复现／复测。" />
+    <EmptyState v-else-if="!data?.items.length" title="暂无匹配的复测记录" description="可调整筛选条件，或新建复测。" />
     <div v-else class="verification-list-table">
-      <DataTable :rows="data.items" :columns="columns" :row-key="(row) => row.id" caption="复测历史">
-        <template #cell-title="{ row }"><RouterLink v-slot="{ href }" :to="detailLocation(row.id)" custom><a :href="href" @click="openDetail($event, row.id)">{{ row.title }}</a></RouterLink><div class="verification-muted">{{ row.external_id || '无外部编号' }}</div></template>
-        <template #cell-source="{ row }"><span class="verification-muted">{{ row.source.type === 'integration' ? '外部调用' : '平台用户' }} · {{ row.source.name }}</span><div class="verification-muted">{{ row.input_source ? `平台漏洞 · ${row.input_source.vulnerability_id}${row.input_source.input_mode === 'copied_snapshot' ? ' · 历史快照' : ''}` : '手工资料' }}</div></template>
+      <p v-if="(filters.execution_status || filters.outcome) && data.items.some((item) => item.purge_state === 'pending')" class="verification-muted" role="status">筛选结果包含清理未完成记录，可在操作中重试。</p>
+      <DataTable :rows="data.items" :columns="columns" :row-key="(row) => row.id" caption="复测记录">
+        <template #cell-title="{ row }"><RouterLink v-slot="{ href }" :to="detailLocation(row.id)" custom><a :href="href" @click="openDetail($event, row.id)">{{ row.title }}</a></RouterLink><div v-if="row.external_id" class="verification-muted">{{ row.external_id }}</div><div v-if="row.purge_state === 'pending'" role="status">清理未完成，可在操作中重试。{{ row.purge_error }}</div></template>
+        <template #cell-source="{ row }"><template v-if="row.purge_state !== 'pending'">{{ row.input_source ? '平台漏洞' : row.source.type === 'integration' ? '外部调用' : '手工资料' }}<div class="verification-muted">{{ row.source.name }}</div></template><span v-else class="verification-muted">—</span></template>
         <template #cell-mode="{ row }">{{ modeLabels[row.mode] }}</template>
         <template #cell-status="{ row }"><Badge :tone="statusTone(row.execution_status)">{{ statusLabels[row.execution_status] }}</Badge></template>
-        <template #cell-result="{ row }"><Badge v-if="row.result" :tone="outcomeTone(row.result.outcome)">{{ outcomeLabels[row.result.outcome] }}</Badge><span v-else class="verification-muted">{{ row.error ? '执行错误，非业务结论' : '尚无结论' }}</span></template>
+        <template #cell-result="{ row }"><Badge v-if="row.result" :tone="outcomeTone(row.result.outcome)">{{ outcomeLabels[row.result.outcome] }}</Badge><span v-else class="verification-muted">{{ row.purge_state === 'pending' ? '—' : row.error ? '执行错误' : '尚无结果' }}</span></template>
         <template #cell-created="{ row }"><span class="verification-muted">{{ dateTime(row.created_at) }}</span></template>
+        <template #cell-actions="{ row }"><VerificationActions :request="row" @rerun="openAgain(row.id)" @deleted="afterDeleted" @error="actionError = $event" /></template>
       </DataTable>
     </div>
     <footer class="verification-actions verification-list-footer">
-      <span class="verification-muted">共 {{ data?.total ?? 0 }} 条 · 第 {{ Math.floor(offset / limit) + 1 }} 页</span>
-      <span class="verification-muted verification-refresh-note">{{ autoPaused ? '自动更新已暂停，可手动刷新继续' : hasActive ? '活动记录每 5 秒更新，最长 10 分钟' : '终态记录不自动更新' }}</span>
+      <span class="verification-muted verification-page-count">共 {{ data?.total ?? 0 }} 条 · 第 {{ Math.floor(offset / limit) + 1 }} 页</span>
+      <span v-if="autoPaused" class="verification-muted" role="status">自动更新已暂停，可手动刷新</span>
       <Button variant="secondary" size="sm" :disabled="offset === 0 || isFetching" @click="changePage(offset - limit)">上一页</Button>
       <Button variant="secondary" size="sm" :disabled="!data || offset + limit >= data.total || isFetching" @click="changePage(offset + limit)">下一页</Button>
     </footer>
-    <NewVerification v-if="createOpen" @close="closeCreate" />
+    <NewVerification v-if="createOpen" :key="authIdentity" @close="closeCreate" />
   </section>
 </template>
 <script setup lang="ts">
@@ -48,12 +51,15 @@ import { listVerificationRequests, type VerificationFilters, type VerificationSu
 import { useAuthStore } from '@/stores/auth'
 import { dateTime } from '@/lib/format'
 import NewVerification from './NewVerification.vue'
+import VerificationActions from './VerificationActions.vue'
 import { errorMessage, isActiveVerification, modeLabels, statusLabels, statusTone, outcomeLabels, outcomeTone, verificationListQuery } from './verificationPresentation'
 import './verifications.css'
 const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
+const authIdentity = computed(() => JSON.stringify([auth.authGeneration, auth.session?.user_id, auth.session?.tenant_id, auth.session?.role, auth.isSuperAdmin]))
 const page = ref<HTMLElement>()
+const actionError = ref('')
 const all = { value: 'all', label: '全部' }
 const modeOptions = [all, ...Object.entries(modeLabels).map(([value, label]) => ({ value, label }))]
 const statusOptions = [all, ...Object.entries(statusLabels).map(([value, label]) => ({ value, label }))]
@@ -87,21 +93,41 @@ function openDetail(event: MouseEvent, id: string) {
   void router.push(detailLocation(id))
 }
 function openCreate() { void router.push({ name: 'Verifications', query: { ...listContext(), create: '1' } }) }
-function closeCreate() {
+function openAgain(id: string) { void router.push({ name: 'Verifications', query: { ...listContext(), create: '1', source_request_id: id, return_to: 'list' } }) }
+async function closeCreate() {
   const source = route.query.source_request_id
-  if (typeof source === 'string') void router.push({ name: 'VerificationDetail', params: { id: source }, query: verificationListQuery(route.query) })
-  else if (typeof route.query.source_project_id === 'string' && typeof route.query.source_vulnerability_id === 'string') void router.push({ name: 'Findings', query: { vulnerabilityProjectId: route.query.source_project_id, vulnerabilityId: route.query.source_vulnerability_id } })
-  else void router.push({ name: 'Verifications', query: verificationListQuery(route.query) })
+  if (typeof source === 'string' && route.query.return_to !== 'list') {
+    await router.push({ name: 'VerificationDetail', params: { id: source }, query: verificationListQuery(route.query) })
+  } else if (typeof route.query.source_project_id === 'string' && typeof route.query.source_vulnerability_id === 'string') {
+    await router.push({ name: 'Findings', query: { vulnerabilityProjectId: route.query.source_project_id, vulnerabilityId: route.query.source_vulnerability_id } })
+  } else {
+    await router.push({ name: 'Verifications', query: verificationListQuery(route.query) })
+    await nextTick()
+    const trigger = typeof source === 'string' ? page.value?.querySelector<HTMLElement>(`[data-verification-actions="${CSS.escape(source)}"]`) : null
+    ;(trigger || page.value?.querySelector<HTMLElement>('[data-verification-create]'))?.focus()
+  }
+}
+async function afterDeleted() {
+  const identity = authIdentity.value
+  actionError.value = ''
+  const refreshed = await refetch()
+  if (identity !== authIdentity.value) return
+  if (refreshed.data && offset.value >= refreshed.data.total && offset.value > 0) {
+    await router.replace({ name: 'Verifications', query: { ...verificationListQuery(route.query), offset: String(Math.max(0, Math.ceil(refreshed.data.total / limit) - 1) * limit), scroll: undefined } })
+  }
+  await nextTick()
+  ;(page.value?.querySelector<HTMLElement>('[data-verification-actions]') || page.value?.querySelector<HTMLElement>('[data-verification-create]'))?.focus()
 }
 let refreshUntil = Date.now() + 10 * 60_000
 let refreshFailures = 0
 const autoPaused = ref(false)
 const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
-  queryKey: ['verification-requests', filters],
+  queryKey: computed(() => ['verification-requests', authIdentity.value, filters.value]),
   queryFn: async ({ signal }) => {
     try { const value = await listVerificationRequests(filters.value, signal); refreshFailures = 0; return value }
     catch (error) { if (!signal.aborted) refreshFailures++; throw error }
   },
+  enabled: computed(() => Boolean(auth.session?.tenant_id)),
   retry: false,
   refetchOnWindowFocus: false,
   refetchInterval: (query) => {
@@ -110,9 +136,8 @@ const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
     return 5000
   },
 })
-const hasActive = computed(() => data.value?.items.some((item) => isActiveVerification(item.execution_status)))
 function refresh() { refreshUntil = Date.now() + 10 * 60_000; refreshFailures = 0; autoPaused.value = false; void refetch() }
-watch(filters, () => { refreshUntil = Date.now() + 10 * 60_000; refreshFailures = 0; autoPaused.value = false })
+watch([authIdentity, filters], () => { refreshUntil = Date.now() + 10 * 60_000; refreshFailures = 0; autoPaused.value = false; actionError.value = '' })
 let restoredContext = ''
 watch([() => data.value?.items, () => route.query.scroll, createOpen], async () => {
   if (createOpen.value || !data.value) return
@@ -124,8 +149,9 @@ watch([() => data.value?.items, () => route.query.scroll, createOpen], async () 
   if (viewport) viewport.scrollTop = Math.max(0, Number(route.query.scroll) || 0)
 }, { immediate: true })
 const columns: DataTableColumn<VerificationSummary>[] = [
-  { key: 'title', label: '名称 / 外部编号' }, { key: 'source', label: '来源' },
+  { key: 'title', label: '名称' }, { key: 'source', label: '来源' },
   { key: 'mode', label: '模式' }, { key: 'status', label: '执行状态' },
-  { key: 'result', label: '本轮结论' }, { key: 'created', label: '创建时间' },
+  { key: 'result', label: '结果' }, { key: 'created', label: '创建时间' },
+  { key: 'actions', label: '操作', align: 'end' },
 ]
 </script>

@@ -1,49 +1,46 @@
 <template>
-  <section class="report-management" aria-labelledby="report-management-title">
-    <h3 id="report-management-title" class="sr-only">报告管理</h3>
+  <section class="report-management" aria-label="报告">
+    <div v-show="!isReading" class="report-filters">
+      <FilterBar label="报告筛选" class="report-filter-bar">
+        <FormField v-slot="{ controlAttrs }" label="搜索">
+          <Input v-model="searchSelection" v-bind="controlAttrs" placeholder="报告名或项目名" />
+        </FormField>
+        <FormField v-slot="{ controlAttrs }" label="项目 ID">
+          <Input v-model="projectSelection" v-bind="controlAttrs" placeholder="精确项目 ID" />
+        </FormField>
+        <template #status
+          >{{ total }} 份报告<span v-if="isFetching && reports.length"> · 同步中…</span></template
+        >
+        <template #actions>
+          <Button v-if="hasFilters" variant="ghost" size="sm" @click="clearFilters"
+            >清除筛选</Button
+          >
+          <Button variant="secondary" size="sm" :loading="isFetching" @click="refetch()"
+            >刷新</Button
+          >
+        </template>
+      </FilterBar>
+      <details class="report-extra-filters">
+        <summary>
+          模板与日期<span v-if="secondaryFilterSummary"> · {{ secondaryFilterSummary }}</span>
+        </summary>
+        <div class="report-extra-filter-fields">
+          <FormField v-slot="{ controlAttrs }" label="模板">
+            <Input v-model="templateSelection" v-bind="controlAttrs" placeholder="模板 key" />
+          </FormField>
+          <FormField v-slot="{ controlAttrs }" label="开始日期">
+            <Input v-model="dateFromSelection" v-bind="controlAttrs" type="date" />
+          </FormField>
+          <FormField v-slot="{ controlAttrs }" label="结束日期">
+            <Input v-model="dateToSelection" v-bind="controlAttrs" type="date" />
+          </FormField>
+        </div>
+      </details>
+    </div>
 
-    <FilterBar label="报告筛选" class="enterprise-filter-bar report-filter-bar">
-      <FormField label="搜索"
-        ><template #default="{ controlAttrs }"
-          ><Input
-            v-model="searchSelection"
-            v-bind="controlAttrs"
-            placeholder="报告名或项目名" /></template
-      ></FormField>
-      <FormField label="项目 ID"
-        ><template #default="{ controlAttrs }"
-          ><Input
-            v-model="projectSelection"
-            v-bind="controlAttrs"
-            placeholder="精确项目 ID" /></template
-      ></FormField>
-      <FormField label="模板"
-        ><template #default="{ controlAttrs }"
-          ><Input
-            v-model="templateSelection"
-            v-bind="controlAttrs"
-            placeholder="模板 key" /></template
-      ></FormField>
-      <FormField label="开始日期"
-        ><template #default="{ controlAttrs }"
-          ><Input v-model="dateFromSelection" v-bind="controlAttrs" type="date" /></template
-      ></FormField>
-      <FormField label="结束日期"
-        ><template #default="{ controlAttrs }"
-          ><Input v-model="dateToSelection" v-bind="controlAttrs" type="date" /></template
-      ></FormField>
-      <template v-if="isFetching && reports.length" #status>同步中…</template>
-      <template #actions>
-        <Button variant="secondary" size="sm" :loading="isFetching" @click="refetch()">刷新</Button>
-      </template>
-    </FilterBar>
-
-    <MasterDetail class="report-workspace">
-      <template #master>
-        <Card class="report-list-card" padding="none">
-          <div class="report-list-summary">
-            <strong>已完成报告</strong><span>{{ total }} 份</span>
-          </div>
+    <div class="report-workspace" :class="{ 'report-workspace--reading': isReading }">
+      <section v-show="!isReading" ref="directory" class="report-directory" aria-label="报告列表">
+        <div class="report-directory-scroll">
           <div
             v-if="isLoading && !reports.length"
             class="report-list-loading"
@@ -66,37 +63,33 @@
           <template v-else>
             <ErrorState
               v-if="isError"
-              class="report-list-background-error"
               title="报告同步失败"
               :description="listErrorMessage"
               @retry="refetch()"
             />
-            <DataTable
-              :rows="reports"
-              :columns="columns"
-              :row-key="reportRowKey"
-              :is-row-active="isSelected"
-              active-row-aria="current"
-              :action-label="reportActionLabel"
-              action-column-label="审阅"
-              caption="租户评估报告列表"
-              density="compact"
-              @row-action="selectReport"
-            >
-              <template #cell-report="{ row }"
-                ><div class="report-list-item">
-                  <strong :title="row.artifact_uri">{{ reportFilename(row) }}</strong
-                  ><span :title="row.project_title">{{ row.project_title }}</span>
-                </div></template
-              >
-              <template #cell-created="{ row }"
-                ><span class="finding-time" :title="row.created_at">{{
-                  formatRelativeTime(row.created_at)
-                }}</span></template
-              >
-            </DataTable>
+            <ul class="report-directory-list">
+              <li v-for="report in reports" :key="reportRowKey(report)">
+                <button
+                  type="button"
+                  class="report-directory-item"
+                  :aria-current="isSelected(report) ? 'true' : undefined"
+                  :aria-label="reportActionLabel(report)"
+                  @click="selectReport(report)"
+                >
+                  <strong :title="reportFilename(report)">{{ reportFilename(report) }}</strong>
+                  <span class="report-item-project" :title="report.project_title">{{
+                    report.project_title
+                  }}</span>
+                  <time :datetime="report.created_at" :title="report.created_at">{{
+                    formatRelativeTime(report.created_at)
+                  }}</time>
+                </button>
+              </li>
+            </ul>
           </template>
-          <footer class="report-pagination" aria-label="报告分页">
+        </div>
+        <footer class="report-pagination" aria-label="报告分页">
+          <div class="report-page-controls">
             <Button
               variant="secondary"
               size="sm"
@@ -112,126 +105,122 @@
               @click="setPage(page + 1)"
               >下一页</Button
             >
-            <FormField label="每页"
-              ><template #default="{ controlAttrs }"
-                ><Select
-                  v-model="pageSizeSelection"
-                  v-bind="controlAttrs"
-                  :options="pageSizeOptions" /></template
-            ></FormField>
-          </footer>
-        </Card>
-      </template>
+          </div>
+          <FormField v-slot="{ controlAttrs }" label="每页">
+            <Select v-model="pageSizeSelection" v-bind="controlAttrs" :options="pageSizeOptions" />
+          </FormField>
+        </footer>
+      </section>
 
-      <template #detail>
-        <Card class="report-preview-card" padding="none">
-          <EmptyState
-            v-if="!selectedReport"
-            title="选择一份报告开始审阅"
-            description="从左侧列表选择报告后，可查看内容与生成溯源。"
-          />
-          <template v-else>
-            <header class="report-preview-header">
-              <div>
-                <p class="report-preview-eyebrow">{{ selectedReport.project_title }}</p>
-                <h3>{{ reportFilename(selectedReport) }}</h3>
-                <div class="report-preview-meta">
-                  <span>{{ bytes(selectedReport.artifact_size) }}</span>
-                  <span>生成于 {{ formatRelativeTime(selectedReport.created_at) }}</span>
-                  <span :title="selectedReport.artifact_sha256"
-                    >SHA256 {{ abbreviatedHash(selectedReport.artifact_sha256) }}</span
-                  >
-                </div>
-              </div>
-              <div class="report-preview-actions">
-                <RouterLink
-                  class="report-download-link"
-                  :to="{
-                    name: 'WorkspaceVulnerabilities',
-                    params: { id: selectedReport.project_id },
-                  }"
-                  >打开项目</RouterLink
-                >
-                <a class="report-download-link" :href="reportContentUrl(selectedReport)" download
-                  >下载完整报告</a
-                >
-              </div>
-            </header>
-
-            <Alert
-              v-if="validPreview?.truncated"
-              class="report-preview-alert"
-              tone="info"
-              title="当前仅显示报告开头"
+      <ReportReader
+        v-if="selectedReport"
+        v-show="isReading"
+        v-model:mode="previewMode"
+        :identity="reportRowKey(selectedReport)"
+        :content="validPreview?.content ?? ''"
+        :ready="
+          Boolean(validPreview) && !isPreviewLoading && !isPreviewError && !previewIdentityMismatch
+        "
+      >
+        <template #title>
+          <div class="report-preview-title">
+            <Button
+              class="report-directory-back"
+              variant="ghost"
+              size="sm"
+              @click="returnToDirectory"
+              ><ArrowLeft :size="16" aria-hidden="true" />返回列表</Button
             >
-              已读取 {{ bytes(validPreview.bytes_read) }}，完整报告共
-              {{ bytes(validPreview.size) }}。请下载原文件获取全部内容。
-            </Alert>
-
-            <div class="report-preview-body" aria-live="polite">
-              <div v-if="isPreviewLoading" class="report-preview-loading" role="status">
-                <Spinner /><span>正在载入报告预览…</span>
-              </div>
-              <ErrorState
-                v-else-if="isPreviewError || previewIdentityMismatch"
-                :title="previewIdentityMismatch ? '报告预览身份不匹配' : '报告预览载入失败'"
-                :description="
-                  previewIdentityMismatch
-                    ? '服务端返回的项目或 Artifact 身份与所选报告不一致，已阻止渲染。'
-                    : previewErrorMessage
-                "
-                @retry="refetchPreview()"
-              />
-              <Tabs
-                v-else-if="validPreview"
-                v-model="previewMode"
-                class="report-preview-tabs"
-                :options="previewOptions"
-                variant="pill"
+            <h1 ref="reportHeading" tabindex="-1">{{ reportFilename(selectedReport) }}</h1>
+          </div>
+        </template>
+        <template #actions>
+          <a class="report-download-link" :href="reportContentUrl(selectedReport)" download
+            >下载完整报告</a
+          >
+          <Popover align="end" size="md">
+            <template #trigger><Button variant="ghost" size="sm">更多</Button></template>
+            <div class="report-file-info">
+              <RouterLink
+                :to="{
+                  name: 'WorkspaceVulnerabilities',
+                  params: { id: selectedReport.project_id },
+                }"
+                >打开项目</RouterLink
               >
-                <template #panel="{ option }">
-                  <SafeReportMarkdown
-                    v-if="option.value === 'rendered'"
-                    :content="validPreview.content"
-                  />
-                  <pre v-else class="report-raw-preview">{{ validPreview.content }}</pre>
+              <dl>
+                <dt>项目</dt>
+                <dd>{{ selectedReport.project_title }}</dd>
+                <dt>生成于</dt>
+                <dd>{{ selectedReport.created_at }}</dd>
+                <dt>大小</dt>
+                <dd>{{ bytes(selectedReport.artifact_size) }}</dd>
+                <dt>SHA256</dt>
+                <dd class="mono">{{ selectedReport.artifact_sha256 || '—' }}</dd>
+                <template v-if="selectedReport.template_key">
+                  <dt>模板</dt>
+                  <dd>
+                    {{ selectedReport.template_key
+                    }}<template v-if="selectedReport.template_version != null">
+                      · v{{ selectedReport.template_version }}</template
+                    >
+                  </dd>
                 </template>
-              </Tabs>
+              </dl>
             </div>
-          </template>
-        </Card>
-      </template>
-    </MasterDetail>
+          </Popover>
+        </template>
+        <template #notice>
+          <Alert
+            v-if="validPreview?.truncated"
+            class="report-preview-alert"
+            tone="info"
+            title="当前仅显示报告开头"
+          >
+            已读取 {{ bytes(validPreview.bytes_read) }}，完整报告共
+            {{ bytes(validPreview.size) }}。目录仅覆盖已载入部分，请下载原文件获取全部内容。
+          </Alert>
+        </template>
+        <template #state>
+          <div v-if="isPreviewLoading" class="report-preview-loading" role="status">
+            <Spinner /><span>正在载入报告预览…</span>
+          </div>
+          <ErrorState
+            v-else-if="isPreviewError || previewIdentityMismatch"
+            :title="previewIdentityMismatch ? '报告预览身份不匹配' : '报告预览载入失败'"
+            :description="
+              previewIdentityMismatch
+                ? '服务端返回的项目或 Artifact 身份与所选报告不一致，已阻止渲染。'
+                : previewErrorMessage
+            "
+            @retry="refetchPreview()"
+          />
+        </template>
+      </ReportReader>
+    </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ArrowLeft } from '@lucide/vue'
 import { useQuery } from '@tanstack/vue-query'
 import { fetchArtifactPreview, listReports, type ArtifactPreview } from '@/api/client'
 import type { ReportInventoryFilters, ReportInventoryItem, ReportInventoryPage } from '@/api/types'
-import {
-  DataTable,
-  ErrorState,
-  FilterBar,
-  MasterDetail,
-  type DataTableColumn,
-} from '@/components/patterns'
+import { ErrorState, FilterBar } from '@/components/patterns'
 import {
   Alert,
   Button,
-  Card,
   EmptyState,
   FormField,
   Input,
+  Popover,
   Select,
   Skeleton,
   Spinner,
-  Tabs,
-  type TabsOption,
 } from '@/components/ui'
-import SafeReportMarkdown from '@/features/reports/SafeReportMarkdown.vue'
+import ReportReader from '@/features/reports/ReportReader.vue'
 import { reportKeys } from '@/features/reports/reportQueries'
 import { bytes, formatRelativeTime } from '@/lib/format'
 
@@ -245,24 +234,47 @@ const positiveInteger = (value: unknown, fallback: number) => {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 const replaceQuery = (changes: Record<string, string | undefined>) =>
-  void router.replace({ query: { ...route.query, ...changes } })
+  router.replace({ query: { ...route.query, ...changes } })
 const filterModel = (key: string) =>
   computed({
     get: () => queryString(route.query[key]),
     set: (value: string) =>
-      replaceQuery({
+      void replaceQuery({
         [key]: value.trim() || undefined,
         page: undefined,
         reportId: undefined,
         reportProjectId: undefined,
       }),
   })
-
 const searchSelection = filterModel('reportQ')
 const projectSelection = filterModel('reportProject')
 const templateSelection = filterModel('reportTemplate')
 const dateFromSelection = filterModel('dateFrom')
 const dateToSelection = filterModel('dateTo')
+const secondaryFilterSummary = computed(() =>
+  [
+    templateSelection.value ? `模板：${templateSelection.value}` : '',
+    dateFromSelection.value ? `起：${dateFromSelection.value}` : '',
+    dateToSelection.value ? `止：${dateToSelection.value}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · '),
+)
+const hasFilters = computed(() =>
+  Boolean(searchSelection.value || projectSelection.value || secondaryFilterSummary.value),
+)
+function clearFilters() {
+  void replaceQuery({
+    reportQ: undefined,
+    reportProject: undefined,
+    reportTemplate: undefined,
+    dateFrom: undefined,
+    dateTo: undefined,
+    page: undefined,
+    reportId: undefined,
+    reportProjectId: undefined,
+  })
+}
 const pageSize = computed(() => {
   const value = positiveInteger(route.query.pageSize, DEFAULT_PAGE_SIZE)
   return VALID_PAGE_SIZES.includes(value as (typeof VALID_PAGE_SIZES)[number])
@@ -273,7 +285,7 @@ const page = computed(() => positiveInteger(route.query.page, 1))
 const pageSizeSelection = computed({
   get: () => String(pageSize.value),
   set: (value: string) =>
-    replaceQuery({
+    void replaceQuery({
       pageSize: value === String(DEFAULT_PAGE_SIZE) ? undefined : value,
       page: undefined,
       reportId: undefined,
@@ -293,7 +305,6 @@ const requestFilters = computed<ReportInventoryFilters>(() => ({
   page: page.value,
   page_size: pageSize.value,
 }))
-
 const { data, error, isError, isFetching, isLoading, refetch } = useQuery<ReportInventoryPage>({
   queryKey: computed(() => reportKeys.list(requestFilters.value)),
   queryFn: ({ queryKey, signal }) => {
@@ -316,7 +327,6 @@ const { data, error, isError, isFetching, isLoading, refetch } = useQuery<Report
   refetchInterval: 30_000,
   refetchOnWindowFocus: false,
 })
-
 const reports = computed(() => data.value?.items ?? [])
 const total = computed(() => data.value?.total ?? 0)
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
@@ -332,12 +342,12 @@ const selectedReport = computed(
 const listErrorMessage = computed(() =>
   error.value instanceof Error && error.value.message ? error.value.message : '请稍后重试。',
 )
-const previewMode = ref('rendered')
-const previewOptions = [
-  { value: 'rendered', label: '渲染视图' },
-  { value: 'raw', label: '原始 Markdown' },
-] satisfies readonly TabsOption[]
-
+const previewMode = ref<'rendered' | 'raw'>('rendered')
+// 列表态只收起阅读区，筛选、选择、正文模式与滚动位置都留在原上下文。
+const directoryVisible = ref(false)
+const directory = ref<HTMLElement | null>(null)
+const reportHeading = ref<HTMLElement | null>(null)
+const isReading = computed(() => Boolean(selectedReport.value) && !directoryVisible.value)
 const previewProjectId = computed(() => selectedReport.value?.project_id ?? '')
 const previewArtifactId = computed(() => selectedReport.value?.artifact_id ?? '')
 const {
@@ -348,8 +358,10 @@ const {
   refetch: refetchPreview,
 } = useQuery<ArtifactPreview>({
   queryKey: computed(() => reportKeys.preview(previewProjectId.value, previewArtifactId.value)),
-  queryFn: ({ signal }) =>
-    fetchArtifactPreview(previewProjectId.value, previewArtifactId.value, signal),
+  queryFn: ({ queryKey, signal }) => {
+    const [, , projectId, artifactId] = queryKey as ReturnType<typeof reportKeys.preview>
+    return fetchArtifactPreview(projectId, artifactId, signal)
+  },
   enabled: computed(() => Boolean(previewProjectId.value && previewArtifactId.value)),
   staleTime: 60_000,
 })
@@ -367,11 +379,6 @@ const previewErrorMessage = computed(() =>
     ? previewError.value.message
     : '请稍后重试。',
 )
-const columns = [
-  { key: 'report', label: '报告' },
-  { key: 'created', label: '生成时间' },
-] satisfies readonly DataTableColumn<ReportInventoryItem, 'report' | 'created'>[]
-
 function reportRowKey(item: ReportInventoryItem) {
   return `${item.project_id}:${item.artifact_id}`
 }
@@ -389,11 +396,22 @@ function isSelected(item: ReportInventoryItem) {
 function reportActionLabel(item: ReportInventoryItem) {
   return `审阅报告：${reportFilename(item)}`
 }
-function selectReport(item: ReportInventoryItem) {
-  replaceQuery({ reportProjectId: item.project_id, reportId: item.artifact_id })
+async function selectReport(item: ReportInventoryItem) {
+  await replaceQuery({ reportProjectId: item.project_id, reportId: item.artifact_id })
+  if (!isSelected(item)) return
+  directoryVisible.value = false
+  await nextTick()
+  reportHeading.value?.focus({ preventScroll: true })
+}
+async function returnToDirectory() {
+  directoryVisible.value = true
+  await nextTick()
+  directory.value
+    ?.querySelector<HTMLElement>('[aria-current="true"]')
+    ?.focus({ preventScroll: true })
 }
 function setPage(nextPage: number) {
-  replaceQuery({
+  void replaceQuery({
     page: nextPage <= 1 ? undefined : String(nextPage),
     reportId: undefined,
     reportProjectId: undefined,
@@ -402,10 +420,6 @@ function setPage(nextPage: number) {
 function reportContentUrl(item: ReportInventoryItem) {
   return `/projects/${encodeURIComponent(item.project_id)}/artifacts/${encodeURIComponent(item.artifact_id)}/content`
 }
-function abbreviatedHash(value: string) {
-  return value.length > 16 ? `${value.slice(0, 16)}…` : value || '—'
-}
-
 watch([pageCount, isFetching], ([count, fetching]) => {
   if (!fetching && page.value > count) setPage(count)
 })
@@ -419,9 +433,12 @@ watch([reports, isFetching], ([items, fetching]) => {
         item.artifact_id === selectedReportId.value && item.project_id === selectedProjectId.value,
     )
   )
-    replaceQuery({ reportId: undefined, reportProjectId: undefined })
+    void replaceQuery({ reportId: undefined, reportProjectId: undefined })
 })
-watch(selectedReport, () => {
+watch([previewProjectId, previewArtifactId], () => {
   previewMode.value = 'rendered'
+  directoryVisible.value = false
 })
 </script>
+
+<style src="./ReportManagement.css"></style>

@@ -46,9 +46,9 @@ export const routePageInventory = [
   { routeName: 'ChangePassword', file: 'src/features/auth/ChangePasswordPage.vue', area: 'auth' },
   { routeName: 'Overview', file: 'src/features/overview/Overview.vue', area: 'front' },
   { routeName: 'Findings', file: 'src/features/findings/FindingsPage.vue', area: 'front' },
+  { routeName: 'Reports', file: 'src/features/findings/ReportManagement.vue', area: 'front' },
   { routeName: 'Provenance', file: 'src/features/provenance/ProvenancePage.vue', area: 'front' },
   { routeName: 'Projects', file: 'src/features/projects/Projects.vue', area: 'front' },
-  { routeName: 'NewProject', file: 'src/features/projects/NewProject.vue', area: 'front' },
   { routeName: 'WorkspaceGraph', file: 'src/features/graph/GraphPage.vue', area: 'workspace' },
   { routeName: 'WorkspaceRuns', file: 'src/features/runs/RunsPage.vue', area: 'workspace' },
   {
@@ -105,7 +105,7 @@ export const routePageInventory = [
 ] as const satisfies readonly RoutePageInventoryItem[]
 
 const authPages = ['Login', 'ChangePassword'] as const
-const frontPages = ['Overview', 'Findings', 'Provenance', 'Projects', 'NewProject'] as const
+const frontPages = ['Overview', 'Findings', 'Reports', 'Provenance', 'Projects'] as const
 const workspacePages = [
   'WorkspaceGraph',
   'WorkspaceRuns',
@@ -236,7 +236,7 @@ export const componentMigrationRecords: readonly ComponentMigrationRecord[] = [
         'src/layouts/FrontLayout.vue',
         'src/features/projects/ProjectWorkspace.vue',
         'src/features/graph/GraphDetailsDrawer.vue',
-        'src/features/vulnerabilities/VulnerabilityDrawer.vue',
+        'src/features/vulnerabilities/VulnerabilityDetail.vue',
       ],
     },
     replacement: {
@@ -252,7 +252,7 @@ export const componentMigrationRecords: readonly ComponentMigrationRecord[] = [
     migrationStatus: 'migrated',
     verification: ['component'],
     notes: [
-      'Tooltip、Drawer、DropdownMenu 与 Popover primitive 已完成组件验证；ProjectWorkspace 已迁移项目工具 DropdownMenu，Projects 已迁移项目行操作 DropdownMenu，FrontLayout 已迁移账户 Popover 与项目组 DropdownMenu；VulnerabilityDrawer 已迁移 Cairn Drawer，保留详情证据、状态更新与 artifact 预览行为，并补齐加载、失败重试和 mutation 关闭保护；GraphDetailsDrawer 已迁移为单一 Cairn Drawer，保留节点、边、Evidence、Run、Artifact 与 Fact 重试行为，使用 inline Portal 兼容 Graph fullscreen，并移除旧 panel、header、close 与 body shell selector；声明的 legacy shell 已完成迁移，本次未执行 E2E、axe 或视觉验证。',
+      'Tooltip、Drawer、DropdownMenu 与 Popover primitive 已完成组件验证；ProjectWorkspace 已迁移项目工具 DropdownMenu，Projects 已迁移项目行操作 DropdownMenu，FrontLayout 已迁移账户 Popover 与项目组 DropdownMenu；VulnerabilityDetail 已从漏洞 Drawer 迁移为共享行内详情，保留详情证据、状态更新、artifact 预览及提交关闭保护；GraphDetailsDrawer 已迁移为单一 Cairn Drawer，保留节点、边、Evidence、Run、Artifact 与 Fact 重试行为，使用 inline Portal 兼容 Graph fullscreen，并移除旧 panel、header、close 与 body shell selector；声明的 legacy shell 已完成迁移，本次未执行 E2E、axe 或视觉验证。',
     ],
   },
   {
@@ -272,7 +272,8 @@ export const componentMigrationRecords: readonly ComponentMigrationRecord[] = [
       files: ['src/components/ui/Tabs.vue'],
     },
     pages: [
-      'Findings',
+      'Reports',
+      'ConsoleReportTemplates',
       'ConsoleDispatcher',
       'ConsolePrompts',
       'WorkspaceRuns',
@@ -281,7 +282,7 @@ export const componentMigrationRecords: readonly ComponentMigrationRecord[] = [
     migrationStatus: 'migrated',
     verification: ['component'],
     notes: [
-      'Tabs primitive 已完成组件验证；ConsoleDispatcher 已迁移表单/YAML 模式并保留 dirty confirmation 与序列化行为；PromptGroups 已迁移文件 Tabs，保留未保存确认，并仅在异步读取成功后提交 selection；Runs 已迁移运行详情 Tabs，并完成扁平事件合同、轮询选择保留、project/run/artifact stale response guard、stdout/stderr/diagnostic 选择及 preview/content 下载语义的组件验证；WorkspaceArtifacts 已迁移交付产物/诊断日志本地 Tabs，并保留 category、kind 与 artifactId 深链合同；Findings 已迁移漏洞管理/报告管理 URL Tabs，报告审阅区使用渲染/原文子 Tabs；跨路由 ProjectWorkspace tabs 不属于本地状态 Tabs。',
+      'Tabs primitive 已完成组件验证；ConsoleDispatcher 已迁移表单/YAML 模式并保留 dirty confirmation 与序列化行为；PromptGroups 已迁移文件 Tabs，保留未保存确认，并仅在异步读取成功后提交 selection；Runs 已迁移运行详情 Tabs，并完成扁平事件合同、轮询选择保留、project/run/artifact stale response guard、stdout/stderr/diagnostic 选择及 preview/content 下载语义的组件验证；WorkspaceArtifacts 已迁移交付产物/诊断日志本地 Tabs，并保留 category、kind 与 artifactId 深链合同；Findings 仅承载漏洞，Reports 独立为主导航并使用渲染/原文 Tabs；ConsoleReportTemplates 使用编辑/安全模板预览 Tabs；跨路由 ProjectWorkspace tabs 不属于本地状态 Tabs。',
       '本次未执行 E2E、axe 或视觉验证。',
     ],
   },

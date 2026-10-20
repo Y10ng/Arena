@@ -65,17 +65,18 @@ def get_monitoring_summary(
             conn,
             tenant_id=principal.tenant_id,
             long_running_seconds=long_running_seconds,
+            principal=principal,
         )
 
 
 @router.get(
     "/projects/{project_id}/monitoring/summary",
     response_model=TenantMonitoringSummary,
-    dependencies=[Depends(require_user_tenant_project)],
 )
 def get_project_monitoring_summary(
     project_id: str,
     long_running_seconds: Annotated[int, Query(ge=0)] = 1800,
+    principal: RequestPrincipal = Depends(require_user_tenant_project),
 ):
     """按目标项目 Tenant 返回监控，供超级管理员查看外部项目。"""
     with get_conn() as conn:
@@ -88,6 +89,7 @@ def get_project_monitoring_summary(
             conn,
             tenant_id=str(row["tenant_id"]),
             long_running_seconds=long_running_seconds,
+            principal=principal,
         )
 
 

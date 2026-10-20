@@ -22,6 +22,7 @@ import {
 import { preserveAnthropicSubmissionSchema } from "./anthropic-schema.js";
 import { ArtifactRegistry, ARTIFACT_KINDS, evidencePath, evidenceFailure } from "./artifacts.js";
 import { createCheckpointTool } from "./checkpoints.js";
+import { captureHttpEvidence, HTTP_EVIDENCE_PARAMETERS, type HttpEvidenceInput } from "./http-evidence.js";
 import { CandidateSpool, type CandidateAttempt, type CandidateOutcome } from "./candidate-spool.js";
 import { SubmissionState, safeSchemaIssue } from "./submission.js";
 import { AgentFailure, envelope, object, PHASE_RESULT_KINDS, type AgentEnvelope, type AgentRequest, type JsonObject } from "./protocol.js";
@@ -29,7 +30,7 @@ import { acquireSession, type SessionLease } from "./session.js";
 import { requestModel, REQUEST_PROVIDER, SDK_AUTH_PLACEHOLDER } from "./model.js";
 
 const SAFE_TOOLS = ["read_evidence", "register_artifact", "submit_result"];
-const BASE_EXECUTION_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls", ...SAFE_TOOLS];
+const BASE_EXECUTION_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls", "capture_http_evidence", ...SAFE_TOOLS];
 const MAX_RESULT_BYTES = 1024 * 1024;
 // deadline 限制总时长但不限制快速重复的截断请求；每个 Run 只提供两次续行，不借用结果修正额度。
 const MAX_OUTPUT_CONTINUATIONS = 2;
@@ -42,10 +43,6 @@ const SCHEMA_ERROR_BUDGET = 256;
 const SCHEMA_DIAGNOSTIC_VIEW_LIMIT = 32;
 const SCHEMA_COLLECTED_ERROR_BUDGET = 4096;
 const DEFAULT_BASH_TOOL_TIMEOUT_SECONDS = 120;
-const READONLY_CONCLUSION_PROMPT =
-  "The exploration window has ended. Do not run shell commands, tests, browsers, network requests, or other target actions. " +
-  "Use only existing evidence, register useful existing files, and call submit_result now. " +
-  "Report the evidence-backed observation and explicit limits; if the supplied schema cannot truthfully represent a result, submit accepted:false with a concise reason.";
 
 export function createRequestBashToolDefinition(
   cwd: string,
@@ -148,15 +145,13 @@ export interface RunnerOptions {
 export async function runRequest(request: AgentRequest, options: RunnerOptions = {}): Promise<AgentEnvelope> {
   const result = envelope(request);
   const deadline = performance.now() + request.timeout_seconds * 1000;
-  const initialReadonly = request.conclude_only || request.phase.endsWith("_conclude") || request.phase === "report_execute";
-  const concludeTimeoutSeconds = initialReadonly ? 0 : (request.conclude_timeout_seconds ?? 0);
-  const explorationDeadline = deadline - Math.min(request.timeout_seconds, concludeTimeoutSeconds) * 1000;
+  const readonly = request.conclude_only || request.phase.endsWith("_conclude") || request.phase === "report_execute";
+  const concludeTimeoutSeconds = readonly ? 0 : (request.conclude_timeout_seconds ?? 0);
+  const remainingTimeNoticeAt = deadline - Math.min(request.timeout_seconds, concludeTimeoutSeconds) * 1000;
   const safeTools = SAFE_TOOLS;
   let session: AgentSession | undefined;
   let lease: SessionLease | undefined;
   let cancelled: "cancelled" | "deadline_exceeded" | undefined;
-  let explorationDeadlineReached = !initialReadonly && performance.now() >= explorationDeadline;
-  let readonly = initialReadonly || explorationDeadlineReached;
   const checkpointCapability = request.capabilities?.execution_checkpoints;
   const executionTools = checkpointCapability && !readonly ? [...BASE_EXECUTION_TOOLS, "record_checkpoint"] : BASE_EXECUTION_TOOLS;
   let candidate: JsonObject | null = null;
@@ -190,7 +185,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
   const onAbort = () => stop("cancelled");
   options.signal?.addEventListener("abort", onAbort, { once: true });
   const timer = setTimeout(() => stop("deadline_exceeded"), request.timeout_seconds * 1000);
-  let conclusionTimer: NodeJS.Timeout | undefined;
+  let remainingTimeTimer: NodeJS.Timeout | undefined;
   const ensureActive = () => {
     if (options.signal?.aborted) stop("cancelled");
     if (performance.now() >= deadline) stop("deadline_exceeded");
@@ -251,29 +246,43 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
       await durableCapture(candidateSpool.appendOutcome(attempt.producer_candidate_key, outcome));
       candidateOutcomeCalls.add(toolCallId);
     };
-    const narrow = () => { readonly = true; session?.setActiveToolsByName(safeTools); };
-    const beginReadonlyConclusion = (abortCurrent: boolean) => {
-      if (readonly) return;
-      explorationDeadlineReached = true;
-      narrow();
-      audit("exploration_deadline", { conclude_timeout_seconds: concludeTimeoutSeconds });
-      if (abortCurrent) session?.agent.abort();
+    const notifyRemainingTime = () => {
+      if (candidate || cancelled) return;
+      const remainingSeconds = Math.max(0, Math.floor((deadline - performance.now()) / 1000));
+      audit("execution_time_notice", { remaining_seconds: remainingSeconds });
+      // 收尾窗口只提示剩余时间，不撤销工具权限、不打断在途调用或延长硬截止。
+      session?.agent.steer({ role: "user", content: `Approximately ${remainingSeconds} seconds remain before the original execution deadline. Prepare a truthful submission; authorized tools remain available until then.`, timestamp: Date.now() });
     };
     const bashToolTimeoutSeconds = request.bash_tool_timeout_seconds ?? DEFAULT_BASH_TOOL_TIMEOUT_SECONDS;
     const bashTool = createRequestBashToolDefinition(
       request.cwd,
       bashToolTimeoutSeconds,
-      () => Math.max(0, (explorationDeadline - performance.now()) / 1000),
+      () => Math.max(0, (deadline - performance.now()) / 1000),
     );
     const customTools: ToolDefinition[] = [
       bashTool as unknown as ToolDefinition,
+      {
+        name: "capture_http_evidence", label: "Capture HTTP evidence",
+        description: "Actually send one HTTP/1.1 request using curl and register the captured request/response bytes plus trace and capture status. Returns evidence_items ready for finding or external verification submission. These are application-layer/tool bytes, not network frames. Redirects are NOT followed; capture each authorized Location separately. Partial responses and missing sides remain truthful on timeout/failure. Optional body_path reads an existing authorized evidence file. No response body is copied into the tool reply. Request body limit 1 MiB, response limit 4 MiB; larger transfers stop and retain actual partial evidence. Use other existing tools for larger or specialized captures.",
+        parameters: HTTP_EVIDENCE_PARAMETERS, executionMode: "sequential",
+        async execute(_id, args, signal) {
+          ensureActive();
+          try {
+            const capture = await captureHttpEvidence(args as HttpEvidenceInput, {
+              cwd: request.cwd, sessionRoot: request.session_root, artifacts,
+              remainingSeconds: () => Math.max(0, (deadline - performance.now()) / 1000), signal,
+            });
+            audit("http_evidence_captured", { exit_code: capture.exit_code, interrupted: capture.interrupted, artifact_count: capture.artifacts.length });
+            return toolResult(capture);
+          } catch (error) { throw evidenceFailure(error); }
+        },
+      },
       {
         name: "submit_result", label: "Submit result",
         description: "Submit the typed business result. Wrapper identity and registered artifacts are added by the runner. This is a local candidate, not Server acceptance. Do not perform more target actions after submitting.",
         parameters: request.result_schema, executionMode: "sequential",
         prepareArguments(args) {
           attempted = true;
-          narrow();
           // SDK 默认会做类型转换；先严格校验原始参数，禁止字符串布尔值等被静默修复。
           if (invalidArgumentCalls.has(currentToolCallId) || !submission.repairable() || rejectSubmission(args)) throw new Error(submissionMessage());
           return args as never;
@@ -394,7 +403,12 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
     let instructions = "";
     try { instructions = await readFile("/opt/cairn/AGENTS.md", "utf8"); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-    const systemPrompt = `${instructions}\nYou are Cairn's pi agent. Follow the authorized task scope. Use submit_result for the final business result; prose/JSON text is never a submission. Register evidence files before using their handles. Do not write wrapper protocol, kind, project or task identity. Once concluding or repairing a result, only read existing evidence, register it and submit; never perform target actions. Local submission is not Server acceptance.`;
+    // 在加载点记录实际使用版本的内容身份，不读取宿主版本，也不向审计复制指引正文。
+    if (instructions) audit("instructions_loaded", {
+      prompt_name: "AGENTS.md", prompt_hash: createHash("sha256").update(instructions).digest("hex"),
+      prompt_bytes: Buffer.byteLength(instructions),
+    });
+    const systemPrompt = `${instructions}\nYou are Cairn's pi agent. Follow the authorized task scope. Use submit_result for the final business result; prose/JSON text is never a submission. Register evidence files before using their handles; capture_http_evidence already registers its actual captures and returns evidence_items ready for schema_version 2 findings or schema_version 3 external verification. External verification reasons and test steps reference those original item IDs via evidence_item_ids, not artifact handles. Use the same items, not separately authored evidence_refs or inline HTTP text. Do not write wrapper protocol, kind, project or task identity. Explicit delivery-only requests may only read existing evidence, register it and submit; normal execution keeps its authorized tools during result correction. After a valid submission, do not perform further target actions. Local submission is not Server acceptance.`;
     const created = await createAgentSession({
       cwd: request.cwd, agentDir: lease.directory, authStorage, modelRegistry: registry, model,
       thinkingLevel: "off", sessionManager: lease.manager,
@@ -410,8 +424,10 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
     const originalBefore = session.agent.beforeToolCall;
     session.agent.beforeToolCall = async (context, signal) => {
       ensureActive();
-      if (!readonly && concludeTimeoutSeconds > 0 && performance.now() >= explorationDeadline) {
-        beginReadonlyConclusion(false);
+      if (candidate && context.toolCall.name !== "submit_result") {
+        // SDK 会继续遍历同一响应的工具；固定候选后的尾随调用只跳过，不污染已完成的提交。
+        audit("submission_tail_skipped", { tool_call_id: context.toolCall.id });
+        return { block: true, reason: "A valid candidate is fixed; execution has ended" };
       }
       if (candidateCaptureError || providerError || invalidArgumentCalls.has(context.toolCall.id) || !submission.repairable()) {
         if (context.toolCall.name === "submit_result" && candidateAttempts.has(context.toolCall.id) && !candidateOutcomeCalls.has(context.toolCall.id)) {
@@ -419,13 +435,12 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
         }
         return { block: true, reason: submissionMessage() };
       }
-      if ((readonly && !safeTools.includes(context.toolCall.name)) || (candidate && context.toolCall.name !== "submit_result")) {
+      if (readonly && !safeTools.includes(context.toolCall.name)) {
         submission.reject("tool_permission");
         attempted = true;
         return { block: true, reason: "conclude_only: target actions are disabled" };
       }
       const inherited = await originalBefore?.(context, signal);
-      // 权限归属于实际调用入口；软截止后的 readonly 变化不能追溯否定已经获准的在途调用。
       if (!inherited?.block) authorizedToolCalls.add(context.toolCall.id);
       return inherited;
     };
@@ -466,11 +481,11 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
         }
       } else if (event.type === "tool_execution_start") {
         currentToolCallId = event.toolCallId;
-        if (event.toolName === "submit_result") { attempted = true; narrow(); }
+        if (event.toolName === "submit_result") attempted = true;
         audit(event.type, { tool_name: executionTools.includes(event.toolName) ? event.toolName : "unknown", tool_call_id: event.toolCallId, input_bytes: Buffer.byteLength(JSON.stringify(event.args)) });
       } else if (event.type === "tool_execution_end") {
         const authorizedAtEntry = authorizedToolCalls.delete(event.toolCallId);
-        if (!authorizedAtEntry && readonly && !safeTools.includes(event.toolName)) {
+        if (!candidate && !authorizedAtEntry && readonly && !safeTools.includes(event.toolName)) {
           attempted = true;
           submission.reject("tool_permission");
         }
@@ -493,7 +508,6 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
           if (block.name === "submit_result") {
             submission.attempts += 1;
             attempted = true;
-            narrow();
             if (oversizedArgumentIndexes.has(index)) {
               candidateCaptureError = new AgentFailure("candidate_spool_limit", "Candidate raw bytes exceed the byte limit");
               throw candidateCaptureError;
@@ -529,30 +543,17 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
         session?.agent.abort();
       }
     });
-    if (!initialReadonly && concludeTimeoutSeconds > 0) {
-      const delay = explorationDeadline - performance.now();
-      if (delay <= 0) {
-        explorationDeadlineReached = true;
-        narrow();
-        audit("exploration_deadline", { conclude_timeout_seconds: concludeTimeoutSeconds });
-      } else {
-        conclusionTimer = setTimeout(() => beginReadonlyConclusion(true), delay);
-      }
+    if (concludeTimeoutSeconds > 0) {
+      const delay = remainingTimeNoticeAt - performance.now();
+      if (delay <= 0) notifyRemainingTime();
+      else remainingTimeTimer = setTimeout(notifyRemainingTime, delay);
     }
     ensureActive();
     audit("session_start", { resume: request.resume, conclude_only: readonly });
-    const startedInConclusion = explorationDeadlineReached;
-    if (startedInConclusion) {
-      audit("readonly_conclusion", { remaining_seconds: Math.max(0, Math.floor((deadline - performance.now()) / 1000)) });
-    }
-    await session.prompt(startedInConclusion ? READONLY_CONCLUSION_PROMPT : request.prompt, { expandPromptTemplates: false });
+    await session.prompt(request.prompt, { expandPromptTemplates: false });
     while (truncatedWithoutToolCalls && !readonly && !attempted && !candidate
       && !candidateCaptureError && !providerError && !conflict) {
       ensureActive();
-      if (performance.now() >= explorationDeadline) {
-        beginReadonlyConclusion(false);
-        break;
-      }
       if (outputContinuations >= MAX_OUTPUT_CONTINUATIONS) {
         audit("output_truncation_limit", { stop_reason: "length", output_continuations: outputContinuations });
         throw new AgentFailure("submission_missing", `Model output truncation continuation limit reached after ${outputContinuations} continuations without a submission`);
@@ -560,24 +561,17 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
       outputContinuations += 1;
       audit("output_continuation", {
         stop_reason: "length", output_continuations: outputContinuations,
-        remaining_execution_seconds: Math.max(0, (explorationDeadline - performance.now()) / 1000),
+        remaining_execution_seconds: Math.max(0, (deadline - performance.now()) / 1000),
       });
       ensureActive();
       await session.prompt(OUTPUT_CONTINUATION_PROMPT, { expandPromptTemplates: false });
     }
-    if (explorationDeadlineReached && !startedInConclusion && !candidate && !candidateCaptureError && !providerError && !conflict) {
-      ensureActive();
-      narrow();
-      audit("readonly_conclusion", { remaining_seconds: Math.max(0, Math.floor((deadline - performance.now()) / 1000)) });
-      await session.prompt(READONLY_CONCLUSION_PROMPT, { expandPromptTemplates: false });
-    }
     while (!candidate && !candidateCaptureError && !providerError && !conflict && submission.repairable() && submission.repairs < request.max_result_repairs) {
       ensureActive();
-      narrow();
       submission.repairs += 1;
       attempted = false;
       audit("result_repair", { code: submission.code, ...submission.diagnostics() });
-      await session.prompt(`Your previous response was not accepted locally: ${submissionMessage()}. Only read existing evidence, register artifacts and submit_result. Do not repeat tests, shell commands or target requests.`, { expandPromptTemplates: false });
+      await session.prompt(`Your previous response was not accepted locally: ${submissionMessage()}. Correct the result in this session and use submit_result; do not replay completed actions. ${readonly ? "Only read existing evidence, register artifacts and submit; target actions remain disabled." : "Authorized tools remain available within the original deadline."}`, { expandPromptTemplates: false });
     }
     ensureActive();
     if (candidateCaptureError) throw candidateCaptureError;
@@ -605,7 +599,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
     if (result.error) result.error = { ...result.error, ...submission.diagnostics() };
     audit("session_end", { status: result.status, ...submission.diagnostics(), submission_id: result.submission_id });
     clearTimeout(timer);
-    if (conclusionTimer) clearTimeout(conclusionTimer);
+    if (remainingTimeTimer) clearTimeout(remainingTimeTimer);
     options.signal?.removeEventListener("abort", onAbort);
   }
   return result;

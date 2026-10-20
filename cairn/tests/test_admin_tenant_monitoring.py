@@ -201,7 +201,7 @@ def test_authenticated_alternate_admissions_bind_machine_owner(admission):
             seed_project(conn)
             conn.execute("UPDATE projects SET tenant_id = (SELECT tenant_id FROM projects WHERE id = 'identity-project') WHERE id = 'p1'")
         status, requested, _ = _admin_request("POST", f"/projects/{project_id}/assessment-report-finalization/request",
-            session_cookie=cookie, csrf_token=csrf, payload={"template_key": "standard-pentest", "template_version": 1})
+            session_cookie=cookie, csrf_token=csrf, payload={"template_key": "standard-pentest"})
         assert status == 202, requested
         path = f"/projects/{project_id}/assessment-report-finalization/claim"
         body = {"worker": "fixture"}
@@ -578,7 +578,7 @@ def test_real_http_report_delivery_route_constrains_executor_worker(monkeypatch,
         seed_project(conn, status="completed")
         conn.execute("UPDATE projects SET tenant_id = (SELECT tenant_id FROM projects WHERE id = 'identity-project') WHERE id = 'p1'")
     status, requested, _ = _admin_request("POST", "/projects/p1/assessment-report-finalization/request",
-        session_cookie=cookie, csrf_token=csrf, payload={"template_key": "standard-pentest", "template_version": 1})
+        session_cookie=cookie, csrf_token=csrf, payload={"template_key": "standard-pentest"})
     assert status == 202, requested
     loop, _, _ = _authenticated_scheduler(monkeypatch, tmp_path, token)
     try:

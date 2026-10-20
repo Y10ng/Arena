@@ -19,9 +19,9 @@
   text-align: left;
   cursor: pointer;
   transition:
-    background var(--dur-fast),
-    border-color var(--dur-fast),
-    box-shadow var(--dur-fast);
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
 }
 
 .tenant-workers-page .worker-card:hover:not(:disabled) {

@@ -2056,7 +2056,6 @@ def test_manual_report_request_freezes_template_and_is_pending_idempotent(monkey
             conn,
             "p1",
             template_key="full-technical",
-            template_version=1,
             requested_by="user-1",
         )
 
@@ -2071,7 +2070,6 @@ def test_manual_report_request_freezes_template_and_is_pending_idempotent(monkey
             conn,
             "p1",
             template_key="full-technical",
-            template_version=1,
             requested_by="user-1",
         )
         stored = conn.execute(
@@ -2082,7 +2080,7 @@ def test_manual_report_request_freezes_template_and_is_pending_idempotent(monkey
         assert first.requested_at is not None
         assert first.requested_by == "user-1"
         assert first.template_key == "full-technical"
-        assert first.template_version == 1
+        assert first.template_version is None
         assert first.template_digest_sha256
         assert stored is not None
         assert "Surface Manifest" in stored["template_markdown"]
@@ -2103,7 +2101,6 @@ def test_stopped_project_with_vulnerability_can_request_claim_and_finish(monkeyp
             conn,
             "p1",
             template_key="standard-pentest",
-            template_version=1,
             requested_by="user-1",
         )
         assert requested.status == "pending"
@@ -2131,7 +2128,6 @@ def test_stopped_zero_findings_can_request_but_active_runs_prevent_freezing() ->
             conn,
             "p1",
             template_key="standard-pentest",
-            template_version=1,
             requested_by="user-1",
         )
         assert requested.status == "pending"
@@ -2150,7 +2146,6 @@ def test_stopped_zero_findings_can_request_but_active_runs_prevent_freezing() ->
                 conn,
                 "p1",
                 template_key="standard-pentest",
-                template_version=1,
                 requested_by="user-1",
             )
         assert not_quiescent.value.detail == "assessment_report_tasks_not_quiescent"
@@ -2168,7 +2163,6 @@ def test_active_project_remains_ineligible_for_manual_report() -> None:
                 conn,
                 "p1",
                 template_key="standard-pentest",
-                template_version=1,
                 requested_by="user-1",
             )
         assert active.value.detail == "assessment_report_project_active"
@@ -2184,7 +2178,6 @@ def test_stopped_report_claim_rechecks_assessment_run_quiescence(monkeypatch) ->
         conn,
         "p1",
         template_key="standard-pentest",
-        template_version=1,
         requested_by="user-1",
     )
     conn.execute(
@@ -2216,7 +2209,6 @@ def test_stopped_project_cannot_resume_while_report_finalization_is_outstanding(
         conn,
         "p1",
         template_key="standard-pentest",
-        template_version=1,
         requested_by="user-1",
     )
     conn.commit()
@@ -2251,7 +2243,6 @@ def test_report_finalization_claim_is_leased_and_retryable(monkeypatch) -> None:
             conn,
             "p1",
             template_key="standard-pentest",
-            template_version=1,
             requested_by="user-1",
         )
         row = get_assessment_report_finalization(conn, "p1")
@@ -2299,7 +2290,6 @@ def make_persisted_conn() -> sqlite3.Connection:
         conn,
         "p1",
         template_key="standard-pentest",
-        template_version=1,
         requested_by="user-1",
     )
     return conn
@@ -2475,7 +2465,6 @@ def test_recompleted_project_does_not_reuse_previous_report(
             conn,
             "p1",
             template_key="standard-pentest",
-            template_version=1,
             requested_by="user-1",
         )
         assert pending.status == "pending"

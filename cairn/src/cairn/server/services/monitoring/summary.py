@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from cairn.server.auth import RequestPrincipal, verification_project_access_clause
+
 from .common import *
 from .agent_events import _agent_event_summary
 from .artifacts import _artifact_summary
@@ -83,20 +85,22 @@ def build_tenant_monitoring_summary(
     *,
     tenant_id: str,
     long_running_seconds: int = 1800,
+    principal: RequestPrincipal | None = None,
 ) -> TenantMonitoringSummary:
     """只聚合当前 Tenant 数据，并将共享 Dispatcher 降为无诊断 liveness。"""
     now = utcnow()
     # Tenant 读模型与全局 summary 使用相同的过期判定，避免展示已失效的运行状态。
     expire_workers(conn)
     expire_reason_leases(conn)
+    access_clause, access_params = ("1 = 1", ()) if principal is None else verification_project_access_clause(principal)
     totals = conn.execute(
-        """
+        f"""
         SELECT COUNT(*) AS project_count,
                SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active_project_count
-        FROM projects
-        WHERE tenant_id = ?
+        FROM projects p
+        WHERE p.tenant_id = ? AND ({access_clause})
         """,
-        (tenant_id,),
+        (tenant_id, *access_params),
     ).fetchone()
     dispatcher = _dispatcher_summary(conn, now)
     running, long_running, queued = _active_task_summaries(
@@ -106,6 +110,7 @@ def build_tenant_monitoring_summary(
         intent_timeout_seconds=get_intent_timeout(conn),
         reason_timeout_seconds=get_reason_timeout(conn),
         tenant_id=tenant_id,
+        principal=principal,
     )
 
     def tenant_task(task: MonitoringTaskRun) -> TenantTaskRunView:
@@ -138,10 +143,10 @@ def build_tenant_monitoring_summary(
         long_running_tasks=[tenant_task(item) for item in long_running],
         recent_failures=[
             tenant_task(item)
-            for item in _recent_failure_summaries(conn, now, tenant_id=tenant_id)
+            for item in _recent_failure_summaries(conn, now, tenant_id=tenant_id, principal=principal)
         ],
         vulnerabilities=VulnerabilitiesSummary(
-            **vulnerabilities_summary(conn, tenant_id=tenant_id)
+            **vulnerabilities_summary(conn, tenant_id=tenant_id, principal=principal)
         ),
     )
 

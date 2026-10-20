@@ -57,15 +57,6 @@
   flex-shrink: 0;
 }
 
-.project-row-reason {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .created-at {
   min-width: 60px;
   font-size: 11px;
