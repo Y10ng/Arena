@@ -10,9 +10,9 @@ docker build -t arena-worker:local container
 
 镜像名可自定义，在 `runtime/dispatch.yaml` 中设置 `container.image`；默认 `images: []` 会引用该镜像。已有显式 `images[]` 时，实际执行由画像的 `image_ref` 指向注册项的 `image`，按使用的映射修改即可。
 
-完整应用安装、使用已有镜像、端口配置与更新统一见[部署指南](../docs/deployment-linux-zh.md)。这里仅说明 Worker：`start.sh` 仅在默认镜像不存在时自动构建，不会因源码变化重建已有同名镜像；更新 Worker 源码或 Dockerfile 后须显式重新执行上述 `docker build`。部署 ZIP 不含 Worker 镜像，`deploy/update.sh` 也不会刷新已有镜像。
+完整应用安装、使用已有镜像、端口配置与更新统一见[部署指南](../docs/deployment-linux-zh.md)。`start.sh` 仅在默认镜像不存在时自动构建，不会因源码变化重建已有同名镜像；源码更新后须显式重新构建。**新部署包的 `deploy/update.sh --target OLD` 会在 install 后、start 及数据库迁移前，用新版代码带缓存构建配置中引用的默认本地镜像**，候选通过标签和无网络应用自检后才更新 tag。自定义引用保持不变并提示自行配套更新，缺失或无效引用明确失败；`-- --server-only` 明确跳过 Worker，不代表配套升级完成。部署 ZIP 仍不含 Worker 镜像或多阶段构建缓存。
 
-Dockerfile 从固定 Node 24.16.0 分发层提供二进制。pi builder 与最终运行镜像继承相同的 Kali/Node 基础层，builder 内执行 `npm ci`、TypeScript 编译和离线 SDK 自检，再复制 `dist` 与生产依赖；不复制宿主 `node_modules`。`.dockerignore` 排除宿主依赖、构建输出、运行目录与旧 CLI 配置。`AGENTS.md` 放在 `/opt/cairn/AGENTS.md`，由 runner 显式加载，不依赖 CLAUDE.md 自动发现。
+Dockerfile 从固定 Node 24.16.0 分发层提供二进制。pi builder 与最终运行镜像继承相同的 Kali/Node 基础层，builder 内执行 `npm ci`、TypeScript 编译和离线 SDK 自检，再复制生产依赖和 `dist`；不复制宿主 `node_modules`。与应用无关的工具 / MCP 安装、补丁和用户初始化均位于应用复制前，`node_modules` 在 `dist` 前，应用复制后仍执行自检。基础镜像 / 架构、安装输入一致且缓存有效时，源码 / 指引变化不会触发未变工具的安装，lock 不变则复用 `npm ci`；首次跨版、层重排、历史 timeout 变化或缺缓存仍可能下载，不保证旧机器首次零下载。`.dockerignore` 排除宿主依赖、构建输出、运行目录与旧 CLI 配置。`AGENTS.md` 靠后复制到 `/opt/cairn/AGENTS.md`，由 runner 显式加载，不依赖 CLAUDE.md 自动发现。
 
 离线自检命令为 `cairn-agent --version`、`cairn-agent --self-check`。Dispatcher readiness 只执行 `--self-check`，不创建普通请求、session 或候选结果，也不调用 provider；模型可用性由实际获准任务的正常执行结果体现。
 

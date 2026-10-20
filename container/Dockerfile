@@ -56,9 +56,6 @@ RUN set -eux; \
     printf '%s\n' '3bc7407cf2222d6a821dcc19c776e5a1b1cb9a9b' > /assets/jwt_tool/CAIRN_REVISION
 
 FROM worker-node-base AS worker-runtime
-LABEL io.cairn.agent.engine="pi" \
-      io.cairn.agent.version="1.0.0" \
-      io.cairn.pi-sdk.version="0.73.0"
 # 显式声明Web闭环与进程生命周期依赖，不再由Kali全套元包隐式提供。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash coreutils procps findutils grep sed gawk util-linux sudo tmux \
@@ -127,12 +124,6 @@ RUN python3 /tmp/cairn-patch-jwt-paths.py /opt/cairn/jwt_tool/jwt_tool.py && \
     chmod 0755 /usr/local/bin/jwt_tool
 COPY --from=web-assets /assets/wordlists /opt/cairn/wordlists/web
 COPY --from=web-assets --chown=kali:kali /assets/nuclei-templates /home/kali/.local/nuclei-templates
-COPY --from=pi-agent-builder /build/pi-agent/package.json /opt/cairn/pi-agent/package.json
-COPY --from=pi-agent-builder /build/pi-agent/dist /opt/cairn/pi-agent/dist
-COPY --from=pi-agent-builder /build/pi-agent/node_modules /opt/cairn/pi-agent/node_modules
-RUN chmod +x /opt/cairn/pi-agent/dist/cli.js && \
-    ln -s /opt/cairn/pi-agent/dist/cli.js /usr/local/bin/cairn-agent
-
 # 备用MCP只安装不启动；共享系统Chromium，不下载第二套浏览器。
 RUN PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g --no-audit --no-fund \
     @playwright/mcp@0.0.81 chrome-devtools-mcp@1.9.0 && npm cache clean --force
@@ -146,8 +137,7 @@ RUN python3 /tmp/cairn-patch-playwright-response.py /usr/local/lib/node_modules/
     rm /tmp/cairn-patch-playwright-response.py
 
 USER kali
-RUN cairn-agent --self-check && \
-    cd /tmp && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 playwright-cli install && \
+RUN cd /tmp && PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 playwright-cli install && \
     mkdir -p /home/kali/.config/nuclei /home/kali/workspace && \
     printf '%s\n' 'disable-update-check: true' \
     'update-template-dir: /home/kali/.local/nuclei-templates' > /home/kali/.config/nuclei/config.yaml && \
@@ -156,6 +146,18 @@ ENV TZ=Asia/Shanghai
 ENV PLAYWRIGHT_MCP_BROWSER=chromium
 ENV PLAYWRIGHT_MCP_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PYTHONUNBUFFERED=1
+
+USER root
+COPY --from=pi-agent-builder /build/pi-agent/package.json /opt/cairn/pi-agent/package.json
+COPY --from=pi-agent-builder /build/pi-agent/node_modules /opt/cairn/pi-agent/node_modules
+COPY --from=pi-agent-builder /build/pi-agent/dist /opt/cairn/pi-agent/dist
+RUN chmod +x /opt/cairn/pi-agent/dist/cli.js && \
+    ln -s /opt/cairn/pi-agent/dist/cli.js /usr/local/bin/cairn-agent
+USER kali
+RUN cairn-agent --self-check
+LABEL io.cairn.agent.engine="pi" \
+      io.cairn.agent.version="1.0.0" \
+      io.cairn.pi-sdk.version="0.73.0"
 
 # runner显式加载工具说明，不使用旧CLI自动发现、hooks或配置注入。
 COPY ./AGENTS.md /opt/cairn/AGENTS.md

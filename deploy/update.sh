@@ -11,7 +11,8 @@ usage() {
 
 从当前已解压的部署包更新一个没有 Git 的既有安装。脚本只替换部署程序文件，保留
 runtime、数据库 volume、cairn/.venv、Artifact 和项目上传资料。
-这不是源码同步工具，不更新前端源码或测试，也不重新构建已有 Worker 镜像。
+这不是源码同步工具，不更新前端源码或测试。默认本地 Worker 会带缓存重新构建；
+自定义镜像保留并提示自行配套更新。--server-only 明确跳过 Worker 准备。
 
 示例:
   ${SOURCE_ROOT}/deploy/update.sh --target /opt/arena
@@ -296,18 +297,55 @@ PY
 stage_root=""
 preserve_backup=1
 
+expected_state="running"
+for (( argument_index=0; argument_index<${#START_ARGS[@]}; argument_index++ )); do
+  case "${START_ARGS[argument_index]}" in
+    --server-only) expected_state="server-only" ;;
+    # 与 start.sh 一致，host / port 的值不作为独立开关解释。
+    --host|--port) argument_index=$((argument_index + 1)) ;;
+  esac
+done
+# 重试仍走完整更新入口，并保留空格等 shell 参数边界，不引导绕过 Worker 准备。
+printf -v retry_command '%q ' "${SOURCE_ROOT}/deploy/update.sh" --target "${TARGET_ROOT}" -- "${START_ARGS[@]}"
+
 if "${TARGET_ROOT}/deploy/install.sh"; then
   :
 else
   install_status=$?
   cat >&2 <<EOF
-更新后的依赖安装失败，服务保持停止。运行数据和数据库未被修改。
+更新后的依赖安装失败，服务保持停止；尚未进入 Worker 准备和数据库启动迁移。
+依赖或 legacy 私有配置可能已变化。旧程序备份不包含 runtime 或数据库，不是整体回滚保障。
 旧程序文件保留在：${backup_root}
-修复后执行：
-  ${TARGET_ROOT}/deploy/install.sh
-  ${TARGET_ROOT}/deploy/start.sh ${START_ARGS[*]}
+修复后重新执行完整更新：
+  ${retry_command}
 EOF
   exit "${install_status}"
+fi
+
+if [[ "${expected_state}" == "server-only" ]]; then
+  echo "按 --server-only 跳过 Worker 准备；本次不更新 Worker。"
+# 必须在新 shell 加载目标的新 helper、环境和依赖，不能复用当前 shell 的旧函数。
+elif bash -c '
+  set -euo pipefail
+  source "$1/deploy/common.sh"
+  ensure_runtime_dirs
+  acquire_operation_lock
+  ensure_application_initialized
+  load_runtime_env
+  cd "${ROOT_DIR}"
+  require_docker_daemon
+  ensure_dispatch_worker_image refresh
+' arena-update-worker "${TARGET_ROOT}"; then
+  echo "Worker 镜像准备完成；自定义引用未自动更新，已有项目容器不受替换。"
+else
+  worker_status=$?
+  cat >&2 <<EOF
+Worker 准备失败，服务保持停止；未进入 start.sh 或数据库启动迁移。
+旧程序文件保留在：${backup_root}
+此备份不包含 runtime 或数据库，不是整体回滚保障。修复后重新执行完整更新：
+  ${retry_command}
+EOF
+  exit "${worker_status}"
 fi
 
 if "${TARGET_ROOT}/deploy/start.sh" "${START_ARGS[@]}"; then
@@ -319,8 +357,9 @@ else
 请检查：
   ${TARGET_ROOT}/deploy/status.sh
   ${TARGET_ROOT}/deploy/logs.sh
-修复后重新执行：
-  ${TARGET_ROOT}/deploy/start.sh ${START_ARGS[*]}
+数据库可能已执行迁移，旧程序备份不构成数据库或整体回滚保障。
+修复后重新执行完整更新（不要跳过 Worker 准备或绕过迁移阻断）：
+  ${retry_command}
 EOF
   exit "${start_status}"
 fi
@@ -334,13 +373,6 @@ else
   exit "${status_code}"
 fi
 
-expected_state="running"
-for argument in "${START_ARGS[@]}"; do
-  if [[ "${argument}" == "--server-only" ]]; then
-    expected_state="server-only"
-    break
-  fi
-done
 actual_state=""
 while IFS= read -r status_line; do
   if [[ "${status_line}" == Status:* ]]; then
@@ -358,4 +390,5 @@ fi
 rm -rf -- "${backup_root}"
 backup_root=""
 preserve_backup=0
-echo "Arena 更新完成，原 runtime、数据库、Artifact、项目资料和本地 .venv 已保留。"
+echo "Arena 应用更新与启动检查完成，原 runtime、数据库、Artifact、项目资料和 .venv 位置已保留，依赖已同步。"
+echo "Worker 准备范围见上方输出；未替换已有项目容器，也未验证真实任务。"

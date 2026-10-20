@@ -258,16 +258,27 @@ PY
   export CAIRN_DATABASE_URL
 }
 
-resolve_dispatch_worker_image() {
+resolve_dispatch_worker_images() {
   "${PYTHON_BIN}" - "${DISPATCH_CONFIG}" <<'PY'
 from pathlib import Path
 import sys
+import yaml
 from cairn.dispatcher.config import DispatchConfig
 
-image = DispatchConfig.load(Path(sys.argv[1])).container.image
-if not image:
-    raise SystemExit("runtime/dispatch.yaml 的 container.image 不能为空")
-print(image)
+try:
+    config = DispatchConfig.load(Path(sys.argv[1]))
+except (ValueError, yaml.YAMLError):
+    # 校验异常可能包含完整模型绑定，不能把凭据输入写入部署日志。
+    raise SystemExit("Worker 配置加载失败；请检查 runtime/dispatch.yaml 的镜像、画像和模型绑定") from None
+# 基线用于启动自检，注册项和 allowed_images 还可被画像或场景直接选择。
+images = dict.fromkeys([
+    config.container.image,
+    *config.container.allowed_images,
+    *(entry.image for entry in config.images),
+])
+if any(not image or "\n" in image or "\r" in image for image in images):
+    raise SystemExit("runtime/dispatch.yaml 的 Worker 镜像引用不能为空或包含换行")
+print("\n".join(images))
 PY
 }
 
@@ -285,23 +296,53 @@ verify_pi_worker_image_labels() {
   fi
 }
 
-ensure_dispatch_worker_image() {
-  local image
-  image="$(resolve_dispatch_worker_image)" || return
-  if docker image inspect "${image}" >/dev/null 2>&1; then
-    verify_pi_worker_image_labels "${image}"
-    return $?
-  fi
-  if [[ "${image}" != "${DEFAULT_WORKER_IMAGE}" ]]; then
-    printf 'runtime/dispatch.yaml 配置的 Worker image 不存在: %s；请先 pull 或 build。\n' "${image}" >&2
-    return 1
-  fi
-  echo "未找到 ${DEFAULT_WORKER_IMAGE}，开始首次构建 Worker image。"
+build_default_dispatch_worker_image() (
+  local iid_file candidate
+  iid_file="$(mktemp "${RUNTIME_DIR}/.worker-image.XXXXXX")" || return
+  trap 'rm -f -- "${iid_file}"' EXIT
+  # 不直接覆盖可用 tag；构建或离线验收失败时保留原引用及所有构建缓存。
   docker build \
     -f "${ROOT_DIR}/container/Dockerfile" \
-    -t "${DEFAULT_WORKER_IMAGE}" \
+    --iidfile "${iid_file}" \
     "${ROOT_DIR}/container" || return
-  verify_pi_worker_image_labels "${image}"
+  candidate="$(<"${iid_file}")"
+  verify_pi_worker_image_labels "${candidate}" || return
+  "${PYTHON_BIN}" - "${DEPLOY_DIR}" "${candidate}" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from verify_deployment import verify_image, EXPECTED_CAIRN_AGENT_VERSION, EXPECTED_PI_SDK_VERSION
+
+verify_image(sys.argv[2], EXPECTED_CAIRN_AGENT_VERSION, EXPECTED_PI_SDK_VERSION)
+PY
+  local check_status=$?
+  [[ "${check_status}" == "0" ]] || return "${check_status}"
+  docker tag "${candidate}" "${DEFAULT_WORKER_IMAGE}" || return
+  printf '默认本地 Worker 已准备: %s (%s)；仅后续新建容器使用。\n' "${DEFAULT_WORKER_IMAGE}" "${candidate}"
+)
+
+ensure_dispatch_worker_image() {
+  local mode="${1:-missing}"
+  local images image build_default=0
+  images="$(resolve_dispatch_worker_images)" || return
+  while IFS= read -r image; do
+    if [[ "${image}" == "${DEFAULT_WORKER_IMAGE}" && "${mode}" == "refresh" ]]; then
+      build_default=1
+    elif docker image inspect "${image}" >/dev/null 2>&1; then
+      verify_pi_worker_image_labels "${image}" || return
+    elif [[ "${image}" == "${DEFAULT_WORKER_IMAGE}" ]]; then
+      build_default=1
+    else
+      printf 'runtime/dispatch.yaml 配置的 Worker image 不存在: %s；请先 pull、load 或 build 配套镜像。\n' "${image}" >&2
+      return 1
+    fi
+    if [[ "${mode}" == "refresh" && "${image}" != "${DEFAULT_WORKER_IMAGE}" ]]; then
+      printf '自定义 Worker 未自动更新: %s；需自行提供配套镜像，标签检查不证明版本配套。\n' "${image}" >&2
+    fi
+  done <<<"${images}"
+  if [[ "${build_default}" == "1" ]]; then
+    echo "使用本地缓存构建 ${DEFAULT_WORKER_IMAGE} 的新版候选镜像。"
+    build_default_dispatch_worker_image || return
+  fi
 }
 
 ensure_runtime_env() {

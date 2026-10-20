@@ -200,7 +200,7 @@ docker compose -p arena-db --env-file runtime/postgres.env \
 场景 profile_id → execution_profiles[].image_ref → images[].image
 ```
 
-`image_ref` 是注册 ID，不是 Docker tag；修改使用的注册项，保留画像中已有网络、capabilities、内存、swap、pids 设置。当前启动脚本还会检查 `container.image`，仅修改显式注册项不会改变它；保留它指向一个可用的配套镜像。无需为了默认安装新建显式列表。
+`image_ref` 是注册 ID，不是 Docker tag；修改使用的注册项，保留画像中已有网络、capabilities、内存、swap、pids 设置。启动和更新通过同一个 `DispatchConfig` 加载器检查基线 `container.image` 以及注册 / 允许选择的镜像；显式画像中的引用也必须有效，不会因基线镜像可用就忽略其他引用。无需为了默认安装新建显式列表。
 
 并发由 `runtime.max_workers`、`max_running_projects`、`max_project_workers` 等设置；任务超时在 `tasks` 中。修改后由调度循环读取，加载失败会保留上一份有效配置，原因见 Dispatcher 日志。Server 地址或执行身份变更需要显式重启；镜像和画像修改不会自动重建存量容器。
 
@@ -266,9 +266,16 @@ docker build -t arena-worker:local container/
 /新包解压目录/arena-实际版本-linux-code-only/deploy/update.sh --target /现有应用根目录
 ```
 
-它会停止应用、替换受管程序和静态资源、刷新依赖并启动，保留 `runtime`、数据库卷、运行数据和 Python 环境位置。它不是源码同步器，不用于需要保留开发源码或受管目录本地改动的 Git 工作区，也不会刷新已有 Worker 镜像。临时监听参数可在末尾通过 `-- --host 0.0.0.0 --port 8080` 传入；持久设置仍修改原安装的 `runtime/arena.env`。
+一条入口依次完成：**停止宿主应用 → 替换受管程序和静态资源 → install 同步依赖 → 准备 Worker → start（沿用现有 PostgreSQL 自动迁移）→ 检查服务状态**。Worker 准备使用原安装目录中的新版代码、Python 环境和运行配置；准备失败即中断，不继续 start 或迁移。无需另跑数据库迁移命令，也不升级 PostgreSQL 大版本。
 
-更新失败按输出处理，不能假定回退代码会恢复已经迁移的数据库。备份时同时保留数据库、数据目录、私有配置、完整 keyring 和 token。
+- 实际配置引用默认本地 `arena-worker:local` 时，即使镜像已存在也带缓存构建新版候选，通过标签和无网络应用自检后才更新默认 tag；构建或验收失败不覆盖原引用，不清理旧镜像或构建缓存。
+- 自定义镜像名、远端 tag/digest 和显式映射保持不变，不自动覆盖。更新器逐项说明未自动更新，需自行准备与新应用配套的镜像；已有镜像的标签检查不证明版本配套。缺失镜像或无效配置明确失败，不回退默认值。
+- `-- --server-only` 明确跳过 Worker 准备并仅启动 Server，不表示 Worker 已更新；仅用于有意选择的维护模式，不是 Worker 构建失败后的绕过办法。
+- **首次完整下载和构建可以接受，后续更新应复用未变化的安装层。** 同一基础镜像 / 架构、安装输入不变且有效构建缓存仍在时，源码或 AGENTS 更新复用工具安装层，lock 不变时复用 `npm ci` 层；编译和应用自检仍可重跑。本次层重排、历史 timeout 改动、base 变化或缓存缺失可能重跑安装，不保证任意旧机器首次升级零下载。仅 `docker load` 的最终镜像不等于拥有完整多阶段缓存。
+
+更新保留 `runtime`、完整 keyring / token、数据库卷、项目资料、Artifact、外置存储与 Python 环境位置，依赖仍会同步。tag 更新只影响后续新建容器，**不替换已有项目容器、不恢复或重跑任务**；宿主服务停止也不证明 Worker 已退出。更新前应结束或暂停相关任务并确认执行退出。它不是源码同步器，不用于需要保留开发源码或受管目录本地改动的 Git 工作区。临时监听参数可在末尾通过 `-- --host 0.0.0.0 --port 8080` 原样传入；持久配置仍修改原安装的 `runtime/arena.env`，已有外置静态资源路径不会被改写。
+
+失败时按输出检查，修复后**重新运行新包的完整 `update.sh --target ...` 命令并保留原参数**，不要直接 start 而漏掉 Worker 准备。迁移阻断按原错误处理，不删除项目、报告、归档材料或改 SQL 绕过。旧程序临时备份只覆盖程序文件，不含数据库 / runtime，也不保证依赖、配置、镜像或数据库整体回滚；install 可能已改变依赖或 legacy 私有配置，start 可能已执行迁移。升级前按需备份数据库、数据目录、私有配置、完整 keyring（含历史版本）和 token，外置文件一起保留。
 
 如需自行生成部署包，在完整源码根目录安装好依赖并完成 `build:server` 后执行 `python3 deploy/package_release.py`，默认产物为 `dist/arena-<version>-linux-code-only.zip`。这是可选分发操作，不是使用已有包的前置步骤，也不包含 Worker 镜像。
 

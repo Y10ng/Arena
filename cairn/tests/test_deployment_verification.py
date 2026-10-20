@@ -750,11 +750,20 @@ def test_worker_image_pi_labels_fail_closed_using_shell_stub(
     tmp_path: Path, common_script: Path, image: str, exists: bool, labels: str,
     build_exit: int, label_exit: int, expected: int,
 ) -> None:
-    """只调用 shell stub，检查缓存镜像拒绝及首次构建后的标签复验。"""
+    """只调用替身，检查已有镜像标签和候选验收后才更新引用。"""
     log = tmp_path / "docker-stub.log"
+    (common_script.parent / "verify_deployment.py").write_text(
+        'import os\nfrom pathlib import Path\n'
+        'EXPECTED_CAIRN_AGENT_VERSION = "1.0.0"\nEXPECTED_PI_SDK_VERSION = "0.73.0"\n'
+        'def verify_image(image, version, sdk):\n'
+        '    assert (image, version, sdk) == ("sha256:candidate", "1.0.0", "0.73.0")\n'
+        '    with Path(os.environ["LOG"]).open("a") as log:\n'
+        '        log.write("verify candidate\\n")\n',
+        encoding="utf-8",
+    )
     command = r'''
 source "$1"
-resolve_dispatch_worker_image() { printf '%s\n' "$IMAGE"; }
+resolve_dispatch_worker_images() { printf '%s\n' "$IMAGE"; }
 docker() {
   printf '%s\n' "$*" >>"$LOG"
   if [[ "$1 $2" == "image inspect" ]]; then
@@ -764,9 +773,15 @@ docker() {
     printf '%s\n' "$LABELS"
     return "$LABEL_EXIT"
   fi
-  [[ "$1" == "build" ]] || return 95
-  return "$BUILD_EXIT"
+  if [[ "$1" == "build" ]]; then
+    [[ "$BUILD_EXIT" == 0 ]] || return "$BUILD_EXIT"
+    while [[ "$1" != "--iidfile" ]]; do shift; done
+    printf '%s\n' sha256:candidate >"$2"
+    return 0
+  fi
+  [[ "$1 $2 $3" == "tag sha256:candidate arena-worker:local" ]] || return 95
 }
+ensure_runtime_dirs
 ensure_dispatch_worker_image
 '''
     result = subprocess.run(
@@ -784,6 +799,119 @@ ensure_dispatch_worker_image
     if should_check_labels and expected:
         assert "pi" in result.stderr and "不可执行" in result.stderr
     assert all(not line.startswith(("run ", "pull ", "rm ")) for line in calls)
+    if should_build and not expected:
+        assert calls[-2:] == ["verify candidate", "tag sha256:candidate arena-worker:local"]
+    else:
+        assert not any(line.startswith("tag ") for line in calls)
+
+
+@pytest.mark.parametrize("baseline,registered,profile_ref,expected", [
+    ("arena-worker:local", [], "default", ["arena-worker:local"]),
+    ("custom:base", [{"id": "runner", "image": "arena-worker:local"}], "runner",
+     ["custom:base", "arena-worker:local"]),
+    ("custom:base", [{"id": "default", "image": "registry.invalid/runner@sha256:" + "a" * 64}], "default",
+     ["custom:base", "registry.invalid/runner@sha256:" + "a" * 64]),
+    ("custom:base", [{"id": "runner", "image": "custom:profile"}], "missing", None),
+])
+def test_worker_image_resolution_uses_dispatch_registries(
+    tmp_path: Path, common_script: Path, baseline: str, registered: list[dict[str, str]],
+    profile_ref: str, expected: list[str] | None,
+) -> None:
+    config = yaml.safe_load((ROOT / "deploy/dispatch.yaml.example").read_text())
+    config["container"]["image"] = baseline
+    config["images"] = registered
+    config["execution_profiles"] = [{"id": "default", "image_ref": profile_ref}]
+    path = tmp_path / "dispatch.yaml"
+    content = yaml.safe_dump(config)
+    path.write_text(content)
+    result = subprocess.run(
+        ["bash", "-c", 'source "$1"; DISPATCH_CONFIG="$2"; resolve_dispatch_worker_images',
+         "bash", str(common_script), str(path)],
+        text=True, capture_output=True, check=False,
+    )
+    if expected is None:
+        assert result.returncode != 0
+        assert "Worker 配置加载失败" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.splitlines() == expected
+    assert path.read_text() == content
+
+
+@pytest.mark.parametrize("build_exit,check_exit,custom_missing,expected", [
+    (0, 0, False, 0), (21, 0, False, 21), (0, 22, False, 22), (0, 0, True, 1),
+])
+def test_worker_refresh_promotes_only_verified_candidate(
+    tmp_path: Path, common_script: Path, build_exit: int, check_exit: int,
+    custom_missing: bool, expected: int,
+) -> None:
+    log = tmp_path / "refresh.log"
+    (common_script.parent / "verify_deployment.py").write_text(
+        'import os\nfrom pathlib import Path\n'
+        'EXPECTED_CAIRN_AGENT_VERSION = "1.0.0"\nEXPECTED_PI_SDK_VERSION = "0.73.0"\n'
+        'def verify_image(image, version, sdk):\n'
+        '    with Path(os.environ["LOG"]).open("a") as log:\n'
+        '        log.write("verify candidate\\n")\n'
+        '    raise SystemExit(int(os.environ["CHECK_EXIT"]))\n',
+        encoding="utf-8",
+    )
+    command = r'''
+source "$1"
+resolve_dispatch_worker_images() { printf '%s\n' arena-worker:local custom:profile; }
+docker() {
+  printf '%s\n' "$*" >>"$LOG"
+  case "$1 $2" in
+    "image inspect")
+      if [[ "$#" == 3 ]]; then return "$CUSTOM_MISSING"; fi
+      printf '%s\n' 'pi 1.0.0 0.73.0';;
+    "build -f")
+      [[ "$BUILD_EXIT" == 0 ]] || return "$BUILD_EXIT"
+      while [[ "$1" != "--iidfile" ]]; do shift; done
+      printf '%s\n' sha256:candidate >"$2";;
+    "tag sha256:candidate")
+      [[ "$3" == arena-worker:local ]];;
+    *) return 95;;
+  esac
+}
+ensure_runtime_dirs
+ensure_dispatch_worker_image refresh
+'''
+    result = subprocess.run(
+        ["bash", "-c", command, "bash", str(common_script)],
+        env={**os.environ, "BUILD_EXIT": str(build_exit), "CHECK_EXIT": str(check_exit),
+             "CUSTOM_MISSING": str(int(custom_missing)), "LOG": str(log)},
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == expected, result.stderr
+    calls = log.read_text().splitlines()
+    assert not any(line.startswith("image inspect arena-worker:local") for line in calls)
+    assert sum(line.startswith("build ") for line in calls) == int(not custom_missing)
+    assert not any("--no-cache" in line or line.startswith(("pull ", "prune ", "rm ")) for line in calls)
+    assert not list((common_script.parent.parent / "runtime").glob(".worker-image.*"))
+    if not expected:
+        assert calls[-2:] == ["verify candidate", "tag sha256:candidate arena-worker:local"]
+        assert "自定义 Worker 未自动更新: custom:profile" in result.stderr
+    else:
+        assert not any(line.startswith("tag ") for line in calls)
+
+
+def test_custom_only_worker_refresh_does_not_build_or_retag(common_script: Path) -> None:
+    command = r'''
+source "$1"
+resolve_dispatch_worker_images() { printf '%s\n' custom:profile; }
+docker() {
+  [[ "$1 $2 $3" == "image inspect custom:profile" ]] || return 95
+  if [[ "$#" == 5 ]]; then printf '%s\n' 'pi 1.0.0 0.73.0'; fi
+}
+ensure_dispatch_worker_image refresh
+'''
+    result = subprocess.run(
+        ["bash", "-c", command, "bash", str(common_script)],
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "自定义 Worker 未自动更新: custom:profile" in result.stderr
+    assert "默认本地 Worker 已准备" not in result.stdout
 
 
 def test_placeholder_detection_rejects_unconfigured_files(tmp_path: Path) -> None:
