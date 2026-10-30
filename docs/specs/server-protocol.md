@@ -215,24 +215,27 @@ Body：
 
 ---
 
-### Tenant Worker 模板
+### 固定 Tenant Worker 配置
 
-#### GET /worker-templates
+`GET /tenant-workers` 返回当前认证 Tenant 的三个普通配置位置，依次为单一 `bootstrap`、`reason`、`explore`。新用户创建事务同时初始化三行，初始并发为 1／1／3；GET 不补写配置。`model_id` 可为 `null`，对应 `available: false`、`unavailable_reason: "model_unconfigured"`，不代表已有可执行模型。
 
-返回当前认证 Tenant 的模板列表。每项包含 `id`、`name`、`owner`、有序 `tenant_worker_ids`、历史只读 `worker_names`、`is_default`、`created_at`。`owner` 仅作创建者归因，不参与访问控制；其他 Tenant 的模板不可访问。同 Tenant 至多一个 `is_default: true`，允许没有默认；旧模板迁移为 `false`，不按名称或顺序猜测。
+`PUT /tenant-workers/{worker_id}` 完整提交 `model_id`（ID 或 `null`）、`max_running`（1–64）、`priority`（−10000–10000）、`enabled` 和 `expected_revision`。版本冲突返回 `409`；不能编辑身份、类型、引擎或名称，额外字段返回 `422`。模型必须属于同一 Tenant，跨 Tenant 资源按既有隔离规则拒绝。
 
-#### POST /worker-templates
-#### PUT /worker-templates/{template_id}
+普通新增／删除 Worker、`GET /tenant-workers/options`、`/worker-templates` CRUD 和默认组合已退场；项目重绑与 management-options 也不再提供。PostgreSQL v71 保留既有唯一角色的 ID、模型、并发、启用与 revision，仅补缺角色；多角色或重复候选会拒绝迁移，不按名称猜测。历史模板身份表因复测集成外键保留，但组合关联和默认标记已移除。
 
-创建提供 `name`、完整 `tenant_worker_ids`，可选 `is_default`（默认 `false`）；更新可提供 `name`、`tenant_worker_ids`、`is_default`，省略或 `null` 的更新字段保持原值。创建返回 `201` 和模板，更新返回模板。
+普通项目后续新执行解析当前配置，不因创建时绑定 revision 不同而返回 `binding_stale`；历史绑定 revision、已取得执行配置及 TaskRun provenance 不被批量改写。并发调低只限制后续派发，不取消在途执行。`purpose=verification` 专用配置及首次 claim 冻结仍独立，见复测协议。
 
-设置或修改默认模板时，成员须同 Tenant 且配置可用，`task_types` 并集覆盖 `bootstrap`、`reason`、`explore`；缺角色返回 `422`，一个多角色 Worker 也可合法。普通非默认模板不强制三角色。`is_default: true` 在同一事务取消本 Tenant 原默认并设置当前模板；Tenant 写锁与部分唯一索引保证切换一致，失败全部回滚。`is_default: false` 可明确取消默认，不选替代项。可用性不以临时容量或执行器在线性判断，不在线探测模型。
+### 首页轻量读取
 
-模板只保存 Worker ID，不复制模型、角色、并发或 revision。新建弹窗执行设置中的“保存为默认组合”复用上述接口：选中模板时设该模板为默认；手工组合更新已有默认，无默认时创建。普通勾选／提交项目不会隐式保存默认。保存默认本身不创建项目或计划、不启动执行；只影响以后新建时的首次初始化，不改当前草稿、已存项目绑定、计划输入或未知创建请求。
+`GET /overview` 仅接受 Cookie 用户身份，响应 `Cache-Control: no-store`：
 
-#### DELETE /worker-templates/{template_id}
+- `generated_at`：生成时间。
+- `projects: {total, by_status}`：可见普通项目统计，排除所有复测内部项目。
+- `vulnerabilities: {total, by_severity, by_status}`：沿用漏洞列表的 Tenant／caller／deleted／purge 范围，包含各生命周期状态，不等同已确认或未修复数量。
+- `project_previews`：最多 6 条 `id/title/status/created_at`；active → pending → paused → 其他，同组按 created_at、ID 降序。
+- `vulnerability_previews`：最多 5 条 `id/project_id/project_title/title/severity/status/created_at`；按 created_at、ID、project_id 降序。
 
-删除本 Tenant 模板，成功返回 `204`；删除默认不会自动提升其他模板。已存项目／计划仍使用自身显式绑定；已打开草稿保留原 IDs，页面具体提示所选模板已删除，须主动选择本次自定义或恢复默认。
+超级管理员延续全局视角并记录 `admin.overview.read`。业务查询为固定四次 SELECT，不读取完整正文／证据，不调用旧 summary、全项目列表或过期维护。前端缓存按用户／Tenant／角色隔离；可见且有 active/pending 项目时每 60 秒刷新，空闲和隐藏时不持续轮询，刷新失败保留上次数据及时间。
 
 ### Projects
 
@@ -269,9 +272,9 @@ Body：
 
 #### POST /projects
 
-创建新项目。`origin` 和 `goal` 写入 `facts` 作为特殊 Fact，`hints` 可选。项目组已取消，请求不再接受 `group_id`，也不生成默认组。必须显式提供同 Tenant 的完整 `tenant_worker_ids`；所选 Worker 均须配置可用，其 `task_types` 并集须覆盖 `bootstrap`、`reason`、`explore`，缺少角色返回 `422`。一个 Worker 可以支持多个角色，不要求恰好三个 Worker；临时满载或执行器离线不等于配置失效，创建不要求手工 connectivity 验证。新建页面可以从默认模板初始化，但本接口不读取默认模板，也不回退到首项或 Tenant 全池。当前创建请求拒绝额外字段（422），旧客户端不得继续发送 `explore_budget`、`exploration_limit` 或 `verification_reserve` 等已移除额度参数，也不再使用旧的 `preferred_workers`／`bootstrap_enabled` 创建参数。
+创建新项目。`origin` 和 `goal` 写入 `facts` 作为特殊 Fact，`hints` 可选。项目组已取消，请求不再接受 `group_id`，也不生成默认组。公开请求不接受 `tenant_worker_ids`（携带返回 `422`）；服务端按认证 Tenant 解析固定 bootstrap／reason／explore 三个身份。配置未就绪返回具体 Worker 原因（如 `model_unconfigured`），固定身份缺失返回 `409`；不借用其他 Tenant 模型、不选默认模板。临时满载或执行器离线不等于配置失效，创建不要求手工 connectivity 验证。当前创建请求拒绝额外字段（422），旧客户端不得继续发送 `explore_budget`、`exploration_limit` 或 `verification_reserve` 等已移除额度参数，也不再使用旧的 `preferred_workers`／`bootstrap_enabled` 创建参数。
 
-项目组的 `/project-groups` CRUD 与 `PUT /projects/{project_id}/group` 已退场，不保留默认组或兼容转发。项目摘要、详情及管理员投影不再输出组字段；`GET /projects/{project_id}/management-options` 仅返回 `tenant_workers`，原 Worker 管理权限与变更语义保留。`group_id` 即使为 `null` 也属于新建请求的额外字段，返回 `422`。PostgreSQL v59 删除组关联列、组表与 counter，只移除旧重复计划 JSON 顶层的 `group_id`；历史创建／复测请求身份材料不改写。
+项目组的 `/project-groups` CRUD 与 `PUT /projects/{project_id}/group` 已退场，不保留默认组或兼容转发。项目摘要、详情及管理员投影不再输出组字段；普通 Worker 重绑及 `GET /projects/{project_id}/management-options` 已退场，统一在 Worker 配置页编辑。`group_id` 即使为 `null` 也属于新建请求的额外字段，返回 `422`。PostgreSQL v59 删除组关联列、组表与 counter，只移除旧重复计划 JSON 顶层的 `group_id`；历史创建／复测请求身份材料不改写。
 
 当前目标驱动执行没有项目级固定 Explore 次数上限或复核预留；discovery 与 verifier 都保留正常准入、证据接受和必要实质复核。`explore_deadline` 是唯一可选项目执行停止时间，省略或 `null` 表示不限期，非空值必须是含时区的未来绝对时间。到期停止新研究并按已有路径有序停止和收口，不代表 Goal 达成，也不只是停止新增 Explore。当前没有运行中编辑或自动延期 API，重新授权不延长这个执行停止时间；尚未触发的单次 `pending` 项目可通过计划编辑显式修改或取消该期限，见 `PUT /project-schedules/{schedule_id}`。
 
@@ -294,7 +297,6 @@ Body：
   "title": "xx渗透测试",
   "origin": "目标 http://192.168.1.10",
   "goal": "拿到 flag",
-  "tenant_worker_ids": ["worker_001"],
   "explore_deadline": null,
   "authorization_expires_at": null,
   "hints": [
@@ -519,7 +521,7 @@ Body 为上述时间字段，可带可选 `project` 以计入授权和执行停�
 
 #### POST /project-schedules
 
-顶层必须提供 UUID `request_id`、时间字段及完整 `project`。`project.tenant_worker_ids` 必须显式完整提供，成员须同 Tenant 且配置可用，`task_types` 并集覆盖 `bootstrap`、`reason`、`explore`；保存单次／每日／每周计划及修改周期未来输入均检查此条件。返回 `201` 和计划详情；同身份同内容重试不重复保存或再次消费批次。保存后的绑定与周期输入不随默认模板变化；触发使用原先保存的 IDs 和既有可用性校验，不重读最新默认，不静默缩减组合。
+顶层必须提供 UUID `request_id`、时间字段及完整 `project`。`project` 不接受 `tenant_worker_ids`；单次／每日／每周保存、编辑及触发由服务端按所属 Tenant 解析当前固定三类配置，未就绪明确拒绝或按既有计划阻塞路径处理。返回 `201` 和计划详情；同身份同内容重试不重复保存或再次消费批次。已受理请求先按原请求身份恢复，不因当前 Worker 配置变化重建项目；历史摘要及收据不改写。周期 JSON 的旧 Worker IDs 在 v71 移除，其他输入原样保留；既有项目绑定来源仍保留，但后续新执行读取当前配置。
 
 ```json
 {
@@ -531,7 +533,6 @@ Body 为上述时间字段，可带可选 `project` 以计入授权和执行停�
     "title": "预约验证",
     "origin": "仅研究本次提供的资料并检查其中的安全边界；不访问资料中引用的外部地址。",
     "goal": "验证目标并保留证据",
-    "tenant_worker_ids": ["worker_001"],
     "authorization_expires_at": null,
     "explore_deadline": null,
     "library_keys": []
@@ -1208,6 +1209,8 @@ intents:
 内部 Project 的 Origin 由服务端自动组织 `mode/report`；平台来源另外携带 `project_context`、实际选中的 `observation_id` 和漏洞定位，有补充资料时放入 `additional_context`。文件来源提供已保存路径和摘要，平台来源指向资料清单，而非在内部 Origin 重复复制证据正文。这是来源导航，不是新的用户授权声明；新选平台漏洞的本次授权到期不晚于当前来源项目到期，复制旧快照则使用下述上一轮独立复测的当前有效边界。
 
 平台快照／清单为 `schema_version:2`：`evidence` 保存单一选中来源的 `observation_id/source/evidence_items`，`project_context` 保留源 Origin／Goal 原文、已有 Target、实际保存的授权记录及原文明确引用的 ProjectResource 导航。资源导航含 `copied:false`，未复制正文就列为缺项；不推断凭据或自动复制项目全部附件。只复制选中证据、对应 Fact 和上下文事实直接引用的合法 Artifact 原字节；其他 Observation／复核保留标识与历史入口，不搬运其全部正文。清单保留来源、摘要和不可携带的缺项，不复制整包 provenance、Harness 内部运行流、Prompt、session 或配置，不伪造 Observation，也不将历史输入登记成本轮新 Artifact。合法目标日志、工具输出及 `log/raw_output/.log` 不因类别或扩展名被排除；历史复制与新结果接受分别核对用途和归属，共用真实内部来源及秘密边界。execution input 与专用 Prompt 提供只读挂载索引；历史资料不是本轮观察，不自动改写原漏洞状态。
+
+> **2026-10-27 已实施及加载：**全局“溯源分析”按 `project-workspace-ui-design.md` **4.3** 退场，专用聚合 API 已删除。`verification_sources.py` 新平台来源快照的 `history_path` 为 `/projects/{project_id}/vulnerabilities/{vulnerability_id}`，内部验证 `detail_path` 在其后增加 `?observation_id={observation_id}`，沿用现有详情导航并保留来源与观察／验证身份。已有冻结快照正文及摘要不改写；当前前端未发现把这两个历史字段渲染为活动链接的消费者，不为旧字符串保留假 API。隔离 PostgreSQL 验证新导航与冻结成果保护，实际旧 API 返回 404；不改变证据复制、权限或历史输入合同。详见重设方案 **15.26.6**，未创建真实复测作验收。
 
 - `GET /vulnerabilities?current_tenant_only=true`：复测候选只读取认证用户当前租户的漏洞，不接受客户端指定租户。该参数默认 `false`，超级管理员普通成果查看仍为全局，普通用户始终按所属租户隔离；复测入口及关联历史同样限定当前租户。
 - `GET /api/v1/verification-sources/projects/{project_id}/vulnerabilities/{vulnerability_id}/preview?observation_id=...`：仅合法用户预览选中发现的原文、相关材料及缺项；`observation_id` 可省略，选择规则与受理一致。`Cache-Control: no-store`；受理时服务端重新读取，不信任客户端预览快照。

@@ -32,6 +32,7 @@ REPORT_FINISH_FALLBACK_CODES = frozenset(
     {
         "assessment_report_artifact_invalid",
         "assessment_report_snapshot_artifact_invalid",
+        "assessment_report_cancellation_pending",
     }
 )
 
@@ -158,7 +159,7 @@ class ReportOutputMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     source: Literal["report_task"] = "report_task"
-    format: Literal["markdown"] = "markdown"
+    format: Literal["markdown", "json"] = "markdown"
     report_generation_token: str | None = Field(default=None, max_length=256)
     report_template_key: str | None = Field(default=None, max_length=256)
     # 仅供已有 exact output 原样重放；新生成请求不再写入模板修订号。
@@ -219,7 +220,7 @@ class PendingReportOutput(_ReportJournalIdentity):
     artifact_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     kind: Literal["report"] = "report"
     category: Literal["deliverable"] = "deliverable"
-    filename: Literal["vulnerability-report.md"] = "vulnerability-report.md"
+    filename: Literal["vulnerability-report.md", "vulnerability-readable-report.json"] = "vulnerability-report.md"
     content: str = Field(min_length=1)
     metadata: ReportOutputMetadata
 
@@ -233,6 +234,9 @@ class PendingReportOutput(_ReportJournalIdentity):
             raise ValueError("report output exceeds durable size limit")
         if sha256(content_bytes).hexdigest() != self.artifact_sha256:
             raise ValueError("artifact_sha256 does not match report output")
+        expected_filename = "vulnerability-readable-report.json" if self.metadata.format == "json" else "vulnerability-report.md"
+        if self.filename != expected_filename:
+            raise ValueError("report filename does not match output format")
         if (
             self.metadata.report_generation_token != self.generation_token
             or self.metadata.input_snapshot_artifact_id
@@ -316,7 +320,7 @@ def pending_report_output(
         "artifact_sha256": artifact_sha256,
         "kind": "report",
         "category": "deliverable",
-        "filename": "vulnerability-report.md",
+        "filename": "vulnerability-readable-report.json" if parsed_metadata.format == "json" else "vulnerability-report.md",
         "content": content,
         "metadata": parsed_metadata.model_dump(mode="json"),
     }
@@ -588,11 +592,12 @@ def failed_finish_fallback(
     snapshot_invalid = (
         safe_code == "assessment_report_snapshot_artifact_invalid"
     )
+    cancelled = safe_code == "assessment_report_cancellation_pending"
     task_run_result = AssessmentReportTaskRunResult(
-        status="failed",
+        status="cancelled" if cancelled else "failed",
         exit_code=None,
-        error_type="artifact_error",
-        error_message="artifact_error",
+        error_type="cancelled" if cancelled else "artifact_error",
+        error_message="report_cancelled" if cancelled else "artifact_error",
         worker_failure=None,
     )
     values = {
@@ -1114,3 +1119,6 @@ class ReportFinishOutbox:
 
     def has_project(self, project_id: str) -> bool:
         return any(entry.project_id == project_id for entry in self.entries())
+
+    def has_generation(self, project_id: str, generation_token: str) -> bool:
+        return any(entry.project_id == project_id and entry.generation_token == generation_token for entry in self.entries())

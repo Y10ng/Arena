@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .projects import CreateProjectRequest
+from .test_egress import TestEgressInput
 
 
 class ScheduleTiming(BaseModel):
@@ -101,6 +102,7 @@ class UpdateScheduleRequest(ScheduleTiming):
     resource_ids: list[str] | None = None
     refresh_library_keys: list[str] = Field(default_factory=list)
     explore_deadline: str | None = None
+    test_egress: TestEgressInput | None = None
 
     @field_validator("explore_deadline")
     @classmethod
@@ -112,8 +114,8 @@ class UpdateScheduleRequest(ScheduleTiming):
         if self.mode == "once":
             if self.project is not None or self.resource_ids is not None or self.refresh_library_keys:
                 raise ValueError("单次计划输入归属于已创建项目，改期不重复提交输入")
-        elif "explore_deadline" in self.model_fields_set:
-            raise ValueError("周期执行停止边界应在未来项目配置中显式更新")
+        elif "explore_deadline" in self.model_fields_set or "test_egress" in self.model_fields_set:
+            raise ValueError("周期执行停止边界和测试出口应在未来项目配置中显式更新")
         elif self.project is None:
             raise ValueError("周期编辑必须提供完整未来输入")
         elif self.project.request_id is not None or self.project.resources:

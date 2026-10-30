@@ -23,7 +23,24 @@ from cairn.server.db_defaults import (
     DEFAULT_COPY_V2_ORIGIN_TEMPLATE,
     DEFAULT_REPORT_TEMPLATES,
 )
+from cairn.server.report_template_defaults_v60 import (
+    DEFAULT_REPORT_TEMPLATE_DESCRIPTION_V60,
+    DEFAULT_REPORT_TEMPLATE_KEY_V60,
+    DEFAULT_REPORT_TEMPLATE_MARKDOWN_V60,
+    DEFAULT_REPORT_TEMPLATE_NAME_V60,
+)
+from cairn.server.report_template_defaults_v62 import DEFAULT_REPORT_TEMPLATE_MARKDOWN_V62
+from cairn.server.report_template_defaults_v69 import (
+    DEFAULT_SINGLE_REPORT_TEMPLATE_KEY, DEFAULT_SINGLE_REPORT_TEMPLATE_MARKDOWN, SINGLE_REPORT_PROFILE,
+)
+from cairn.server.traffic_schema import (
+    POSTGRES_HTTP_TRAFFIC_V65_SCHEMA, POSTGRES_HTTP_TRAFFIC_STREAMING_V66_SCHEMA,
+    POSTGRES_HTTP_TRAFFIC_QUERY_V67_SCHEMA, traffic_request_location, traffic_request_address,
+)
 from cairn.server.db_schema import (
+    POSTGRES_REPORT_CANDIDATE_CAPACITY_V64_SCHEMA,
+    POSTGRES_DISCOVERY_READABLE_V63_SCHEMA,
+    POSTGRES_REPORT_SCOPES_V61_SCHEMA,
     ASSESSMENT_CHARGE_COMPENSATIONS_TABLE_SCHEMA,
     ASSESSMENT_REPORT_FINISH_RECEIPTS_TABLE_SCHEMA,
     EXECUTION_EVENTS_TABLE_SCHEMA,
@@ -4727,6 +4744,491 @@ POSTGRES_PROJECT_GROUP_RETIREMENT = Migration(
 )
 
 
+def _report_template_defaults_v60_sql() -> str:
+    content = DEFAULT_REPORT_TEMPLATE_MARKDOWN_V60
+    digest = sha256(content.encode("utf-8")).hexdigest()
+    key = _sql_text_literal(DEFAULT_REPORT_TEMPLATE_KEY_V60)
+    timestamp = "'2026-10-20T00:00:00Z'"
+    statements = [f"""\
+DO $report_template_default_v60$
+BEGIN
+    IF EXISTS (SELECT 1 FROM report_templates WHERE key = {key}) THEN
+        RAISE EXCEPTION 'report_template_default_key_conflict';
+    END IF;
+END
+$report_template_default_v60$;
+"""]
+    for template in DEFAULT_REPORT_TEMPLATES:
+        # v25 写入时仅移除了首尾空白；此处比较实际正文，不信任可修改的 digest。
+        historical_content = str(template["markdown"]).strip()
+        statements.append(
+            "UPDATE report_templates SET "
+            f"markdown_content = {_sql_text_literal(content)}, "
+            f"digest_sha256 = {_sql_text_literal(digest)}, updated_at = {timestamp} "
+            f"WHERE key = {_sql_text_literal(str(template['key']))} "
+            f"AND markdown_content = {_sql_text_literal(historical_content)};"
+        )
+    statements.append(
+        "INSERT INTO report_templates "
+        "(key, name, description, markdown_content, digest_sha256, created_at, updated_at) VALUES ("
+        f"{key}, {_sql_text_literal(DEFAULT_REPORT_TEMPLATE_NAME_V60)}, "
+        f"{_sql_text_literal(DEFAULT_REPORT_TEMPLATE_DESCRIPTION_V60)}, "
+        f"{_sql_text_literal(content)}, {_sql_text_literal(digest)}, {timestamp}, {timestamp});"
+    )
+    statements.append(
+        "INSERT INTO report_template_profiles (template_key, profile_id) "
+        f"VALUES ({key}, 'assessment-report-packet-v1');"
+    )
+    return "\n".join(statements)
+
+
+POSTGRES_REPORT_TEMPLATE_DEFAULTS_V60 = _report_template_defaults_v60_sql()
+
+
+def _apply_postgres_report_template_defaults_v60(conn) -> None:
+    conn.executescript(POSTGRES_REPORT_TEMPLATE_DEFAULTS_V60)
+
+
+POSTGRES_REPORT_TEMPLATE_DEFAULTS = Migration(
+    version=60,
+    name="three-section-report-template-defaults",
+    checksum=sha256(POSTGRES_REPORT_TEMPLATE_DEFAULTS_V60.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_report_template_defaults_v60,
+)
+
+
+def _apply_postgres_report_scopes_v61(conn) -> None:
+    conn.executescript(POSTGRES_REPORT_SCOPES_V61_SCHEMA)
+
+
+POSTGRES_REPORT_SCOPES = Migration(
+    version=61,
+    name="scoped-readable-report-finalization",
+    checksum=sha256(POSTGRES_REPORT_SCOPES_V61_SCHEMA.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_report_scopes_v61,
+)
+
+
+def _report_template_defaults_v62_sql() -> str:
+    # 仅升级系统种子且正文逐字未变的模板；用户新建副本即使同文也不更新。
+    keys = [str(template["key"]) for template in DEFAULT_REPORT_TEMPLATES]
+    keys.append(DEFAULT_REPORT_TEMPLATE_KEY_V60)
+    content = DEFAULT_REPORT_TEMPLATE_MARKDOWN_V62
+    return (
+        "UPDATE report_templates SET "
+        f"markdown_content = {_sql_text_literal(content)}, "
+        f"digest_sha256 = {_sql_text_literal(sha256(content.encode('utf-8')).hexdigest())}, "
+        "updated_at = '2026-10-21T00:00:00Z' "
+        f"WHERE key IN ({', '.join(_sql_text_literal(key) for key in keys)}) "
+        f"AND markdown_content = {_sql_text_literal(DEFAULT_REPORT_TEMPLATE_MARKDOWN_V60)};"
+    )
+
+
+POSTGRES_REPORT_TEMPLATE_DEFAULTS_V62 = _report_template_defaults_v62_sql()
+
+
+def _apply_postgres_report_template_defaults_v62(conn) -> None:
+    conn.executescript(POSTGRES_REPORT_TEMPLATE_DEFAULTS_V62)
+
+
+POSTGRES_READABLE_REPORT_TEMPLATE_DEFAULTS = Migration(
+    version=62,
+    name="key-evidence-report-template-defaults",
+    checksum=sha256(POSTGRES_REPORT_TEMPLATE_DEFAULTS_V62.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_report_template_defaults_v62,
+)
+
+
+def _apply_postgres_discovery_readable_v63(conn) -> None:
+    conn.executescript(POSTGRES_DISCOVERY_READABLE_V63_SCHEMA)
+
+
+POSTGRES_DISCOVERY_READABLE = Migration(
+    version=63,
+    name="discovery-observation-readable-content",
+    checksum=sha256(POSTGRES_DISCOVERY_READABLE_V63_SCHEMA.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_discovery_readable_v63,
+)
+
+
+def _apply_postgres_report_candidate_capacity_v64(conn) -> None:
+    conn.executescript(POSTGRES_REPORT_CANDIDATE_CAPACITY_V64_SCHEMA)
+
+
+POSTGRES_REPORT_CANDIDATE_CAPACITY = Migration(
+    version=64,
+    name="report-segment-candidate-capacity",
+    checksum=sha256(POSTGRES_REPORT_CANDIDATE_CAPACITY_V64_SCHEMA.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_report_candidate_capacity_v64,
+)
+
+
+def _apply_postgres_http_traffic_v65(conn) -> None:
+    conn.executescript(POSTGRES_HTTP_TRAFFIC_V65_SCHEMA)
+
+
+POSTGRES_HTTP_TRAFFIC = Migration(
+    version=65,
+    name="project-http-traffic",
+    checksum=sha256(POSTGRES_HTTP_TRAFFIC_V65_SCHEMA.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_http_traffic_v65,
+)
+
+
+def _apply_postgres_http_traffic_streaming_v66(conn) -> None:
+    conn.executescript(POSTGRES_HTTP_TRAFFIC_STREAMING_V66_SCHEMA)
+
+
+POSTGRES_HTTP_TRAFFIC_STREAMING = Migration(
+    version=66,
+    name="project-http-traffic-streaming",
+    checksum=sha256(POSTGRES_HTTP_TRAFFIC_STREAMING_V66_SCHEMA.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_http_traffic_streaming_v66,
+)
+
+
+def _apply_postgres_http_traffic_query_v67(conn) -> None:
+    conn.executescript(POSTGRES_HTTP_TRAFFIC_QUERY_V67_SCHEMA)
+    boundary = ("", "")
+    while True:
+        rows = conn.execute(
+            "SELECT project_id, id, record_json FROM http_flows WHERE (project_id, id) > (?, ?) "
+            "ORDER BY project_id, id LIMIT 500", boundary,
+        ).fetchall()
+        if not rows:
+            break
+        for row in rows:
+            url, path = traffic_request_location(json.loads(row["record_json"])["request"])
+            conn.execute(
+                "UPDATE http_flows SET request_url = ?, request_path = ? WHERE project_id = ? AND id = ?",
+                (url, path, row["project_id"], row["id"]),
+            )
+        boundary = (rows[-1]["project_id"], rows[-1]["id"])
+
+
+POSTGRES_HTTP_TRAFFIC_QUERY = Migration(
+    version=67,
+    name="project-http-traffic-query",
+    checksum=sha256(POSTGRES_HTTP_TRAFFIC_QUERY_V67_SCHEMA.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_http_traffic_query_v67,
+)
+
+
+def _apply_postgres_http_traffic_address_v68(conn) -> None:
+    boundary = ("", "")
+    while True:
+        rows = conn.execute(
+            "SELECT project_id, id, record_json FROM http_flows WHERE (project_id, id) > (?, ?) "
+            "ORDER BY project_id, id LIMIT 500", boundary,
+        ).fetchall()
+        if not rows:
+            break
+        for row in rows:
+            address = traffic_request_address(json.loads(row["record_json"])["request"])
+            conn.execute(
+                "UPDATE http_flows SET host = ?, request_url = ?, request_path = ? "
+                "WHERE project_id = ? AND id = ?",
+                (address["host"], address["request_url"], address["request_path"], row["project_id"], row["id"]),
+            )
+        boundary = (rows[-1]["project_id"], rows[-1]["id"])
+
+
+POSTGRES_HTTP_TRAFFIC_ADDRESS = Migration(
+    version=68,
+    name="project-http-traffic-request-address",
+    checksum=sha256(b"v68:derive-host-url-path-from-request-form-authority-host-only").hexdigest(),
+    apply=_apply_postgres_http_traffic_address_v68,
+)
+
+
+def _single_report_template_v69_sql() -> str:
+    # 分离单条导出，不更新共用默认正文、项目绑定或任何冻结快照。
+    content = DEFAULT_SINGLE_REPORT_TEMPLATE_MARKDOWN
+    return f"""DO $single_report_default_v69$
+    BEGIN
+        IF EXISTS (SELECT 1 FROM report_templates WHERE key = {_sql_text_literal(DEFAULT_SINGLE_REPORT_TEMPLATE_KEY)}) THEN
+            RAISE EXCEPTION 'single_report_template_default_key_conflict';
+        END IF;
+    END
+    $single_report_default_v69$;
+    WITH inserted AS (
+        INSERT INTO report_templates
+            (key, name, description, markdown_content, digest_sha256, created_at, updated_at)
+        SELECT {_sql_text_literal(DEFAULT_SINGLE_REPORT_TEMPLATE_KEY)}, '单漏洞逐步骤报告',
+            '基本信息、漏洞概述、逐步骤同源报文与修复建议；仅用于单漏洞直接导出。',
+            {_sql_text_literal(content)}, {_sql_text_literal(sha256(content.encode('utf-8')).hexdigest())},
+            '2026-10-26T00:00:00Z', '2026-10-26T00:00:00Z'
+        FROM report_templates
+        WHERE key = {_sql_text_literal(DEFAULT_REPORT_TEMPLATE_KEY_V60)}
+            AND markdown_content = {_sql_text_literal(DEFAULT_REPORT_TEMPLATE_MARKDOWN_V62)}
+        RETURNING key
+    )
+    INSERT INTO report_template_profiles (template_key, profile_id)
+    SELECT key, {_sql_text_literal(SINGLE_REPORT_PROFILE)} FROM inserted;"""
+
+
+POSTGRES_SINGLE_REPORT_TEMPLATE_V69_SQL = _single_report_template_v69_sql()
+
+
+def _apply_postgres_single_report_template_v69(conn) -> None:
+    conn.executescript(POSTGRES_SINGLE_REPORT_TEMPLATE_V69_SQL)
+
+
+POSTGRES_SINGLE_REPORT_TEMPLATE = Migration(
+    version=69,
+    name="single-vulnerability-step-report-default",
+    checksum=sha256(POSTGRES_SINGLE_REPORT_TEMPLATE_V69_SQL.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_single_report_template_v69,
+)
+
+
+POSTGRES_TEST_EGRESS_SQL = """
+ALTER TABLE projects ADD COLUMN test_egress_json TEXT NOT NULL DEFAULT
+    '{"mode":"direct","host":null,"port":null,"auth_configured":false,"revision":0}';
+ALTER TABLE projects ADD COLUMN test_egress_auth TEXT;
+ALTER TABLE project_schedules ADD COLUMN test_egress_auth TEXT;
+ALTER TABLE http_capture_scopes ADD COLUMN test_egress_json TEXT NOT NULL DEFAULT
+    '{"mode":"direct","host":null,"port":null,"auth_configured":false,"revision":0}';
+UPDATE project_schedules SET project_json =
+    (project_json::jsonb || jsonb_build_object('test_egress',
+        '{"mode":"direct","host":null,"port":null,"auth_configured":false,"revision":0}'::jsonb))::text
+    WHERE project_json IS NOT NULL;
+"""
+
+
+def _apply_postgres_test_egress(conn) -> None:
+    conn.executescript(POSTGRES_TEST_EGRESS_SQL)
+
+
+POSTGRES_TEST_EGRESS = Migration(
+    version=70,
+    name="project-test-egress",
+    checksum=sha256(POSTGRES_TEST_EGRESS_SQL.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_test_egress,
+)
+
+
+POSTGRES_FIXED_GENERAL_WORKERS_SQL = """
+-- 不按名称或顺序合并旧配置；有歧义时在任何数据改动前停止。
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM tenant_workers WHERE purpose = 'general'
+        AND task_types_json::jsonb NOT IN ('["bootstrap"]'::jsonb, '["reason"]'::jsonb, '["explore"]'::jsonb)
+    ) OR EXISTS (
+        SELECT 1 FROM tenant_workers WHERE purpose = 'general'
+        GROUP BY tenant_id, task_types_json::jsonb HAVING COUNT(*) > 1
+    ) THEN
+        RAISE EXCEPTION '普通 Worker 存在多角色或重复类型，需明确迁移映射';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM tenants t LEFT JOIN tenant_memberships tm
+            ON tm.tenant_id = t.id AND tm.role = 'owner'
+        WHERE t.kind = 'personal' GROUP BY t.id HAVING COUNT(tm.user_id) <> 1
+    ) THEN
+        RAISE EXCEPTION '个人 Tenant 所有者不唯一，不能初始化固定 Worker';
+    END IF;
+END $$;
+ALTER TABLE tenant_workers ALTER COLUMN model_id DROP NOT NULL;
+ALTER TABLE tenant_workers ADD CONSTRAINT tenant_workers_general_single_role CHECK (
+    purpose <> 'general' OR task_types_json::jsonb IN
+        ('["bootstrap"]'::jsonb, '["reason"]'::jsonb, '["explore"]'::jsonb)
+);
+CREATE UNIQUE INDEX ux_tenant_workers_general_role
+    ON tenant_workers (tenant_id, (task_types_json::jsonb->>0)) WHERE purpose = 'general';
+INSERT INTO tenant_workers
+    (id, tenant_id, purpose, display_name, model_id, engine, task_types_json,
+     max_running, priority, enabled, revision, created_by, created_at, updated_at)
+SELECT 'twr_' || replace(gen_random_uuid()::text, '-', ''), t.id, 'general', roles.kind,
+    NULL, 'pi', jsonb_build_array(roles.kind)::text, roles.capacity, 100, 1, 1, tm.user_id,
+    to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+    to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+FROM tenants t JOIN tenant_memberships tm ON tm.tenant_id = t.id AND tm.role = 'owner'
+CROSS JOIN (VALUES ('bootstrap', 1), ('reason', 1), ('explore', 3)) AS roles(kind, capacity)
+WHERE t.kind = 'personal' AND NOT EXISTS (
+    SELECT 1 FROM tenant_workers w WHERE w.tenant_id = t.id AND w.purpose = 'general'
+        AND w.task_types_json::jsonb = jsonb_build_array(roles.kind)
+);
+-- 保留已有绑定 revision，只补齐普通项目缺少的固定身份；不改写历史 TaskRun。
+INSERT INTO project_tenant_workers
+    (project_id, tenant_id, tenant_worker_id, tenant_worker_revision, position, created_at)
+SELECT p.id, p.tenant_id, w.id, w.revision,
+    COALESCE((SELECT MAX(b.position) + 1 FROM project_tenant_workers b WHERE b.project_id = p.id), 0)
+        + ROW_NUMBER() OVER (PARTITION BY p.id ORDER BY
+            CASE w.task_types_json::jsonb->>0 WHEN 'bootstrap' THEN 0 WHEN 'reason' THEN 1 ELSE 2 END) - 1,
+    to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+FROM projects p JOIN tenant_workers w ON w.tenant_id = p.tenant_id AND w.purpose = 'general'
+WHERE NOT EXISTS (SELECT 1 FROM verification_requests vr WHERE vr.project_id = p.id)
+    AND NOT EXISTS (SELECT 1 FROM project_tenant_workers b
+        WHERE b.project_id = p.id AND b.tenant_worker_id = w.id);
+UPDATE project_schedules SET project_json = (project_json::jsonb - 'tenant_worker_ids')::text
+    WHERE project_json IS NOT NULL AND project_json::jsonb ? 'tenant_worker_ids';
+-- 旧模板实体仍被历史复测集成外键引用；只退出可调度组合与默认偏好，不清除历史身份。
+DROP TABLE worker_template_tenant_workers;
+ALTER TABLE worker_templates DROP COLUMN is_default;
+"""
+
+
+def _apply_postgres_fixed_general_workers(conn) -> None:
+    conn.executescript(POSTGRES_FIXED_GENERAL_WORKERS_SQL)
+
+
+POSTGRES_FIXED_GENERAL_WORKERS = Migration(
+    version=71,
+    name="fixed-general-workers",
+    checksum=sha256(POSTGRES_FIXED_GENERAL_WORKERS_SQL.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_fixed_general_workers,
+)
+
+
+POSTGRES_AGENT_CONVERSATIONS_SQL = """
+CREATE SEQUENCE agent_message_revision;
+CREATE TABLE agent_conversations (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    worker_id TEXT NOT NULL REFERENCES tenant_workers(id),
+    created_by TEXT NOT NULL REFERENCES users(id),
+    session_id TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    UNIQUE(id, project_id)
+);
+CREATE TABLE agent_messages (
+    id BIGSERIAL PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    client_message_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    task_run_id TEXT,
+    answer TEXT,
+    error_code TEXT,
+    heartbeat_at TEXT,
+    artifact_ids_json TEXT NOT NULL DEFAULT '[]',
+    revision BIGINT NOT NULL DEFAULT nextval('agent_message_revision'),
+    FOREIGN KEY(conversation_id, project_id) REFERENCES agent_conversations(id, project_id) ON DELETE CASCADE,
+    FOREIGN KEY(task_run_id, project_id) REFERENCES task_runs(id, project_id),
+    UNIQUE(conversation_id, client_message_id),
+    UNIQUE(project_id, task_run_id)
+);
+CREATE INDEX agent_messages_conversation_order ON agent_messages(conversation_id, id);
+CREATE INDEX agent_messages_changes ON agent_messages(conversation_id, revision);
+"""
+
+
+def _apply_postgres_agent_conversations(conn) -> None:
+    conn.executescript(POSTGRES_AGENT_CONVERSATIONS_SQL)
+
+
+POSTGRES_AGENT_CONVERSATIONS = Migration(
+    version=72,
+    name="project-agent-conversations",
+    checksum=sha256(POSTGRES_AGENT_CONVERSATIONS_SQL.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_agent_conversations,
+)
+
+
+POSTGRES_AGENT_ACTIONS_SQL = """
+ALTER TABLE agent_messages ADD COLUMN submitted_by TEXT REFERENCES users(id);
+ALTER TABLE agent_messages ADD COLUMN submitted_tenant_id TEXT REFERENCES tenants(id);
+-- 历史消息没有受认证操作人，不从会话创建者推断或补发动作。
+CREATE TABLE agent_actions (
+    id TEXT PRIMARY KEY,
+    message_id BIGINT NOT NULL REFERENCES agent_messages(id) ON DELETE CASCADE,
+    tool_call_id TEXT NOT NULL,
+    method TEXT NOT NULL,
+    params_json TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('verification', 'report')),
+    verification_request_id TEXT,
+    generation_token TEXT,
+    source_vulnerability_id TEXT,
+    source_observation_id TEXT,
+    UNIQUE(message_id, tool_call_id),
+    CHECK ((kind = 'verification' AND verification_request_id IS NOT NULL AND generation_token IS NULL)
+        OR (kind = 'report' AND generation_token IS NOT NULL AND verification_request_id IS NULL))
+);
+"""
+
+
+def _apply_postgres_agent_actions(conn) -> None:
+    conn.executescript(POSTGRES_AGENT_ACTIONS_SQL)
+
+
+POSTGRES_AGENT_ACTIONS = Migration(
+    version=73,
+    name="project-agent-business-actions",
+    checksum=sha256(POSTGRES_AGENT_ACTIONS_SQL.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_agent_actions,
+)
+
+
+POSTGRES_INDEPENDENT_PROJECT_AGENT_SQL = """
+CREATE TABLE project_agent_configurations (
+    tenant_id TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+    model_id TEXT REFERENCES tenant_models(id) ON DELETE SET NULL,
+    updated_at TEXT NOT NULL
+);
+ALTER TABLE agent_conversations ADD COLUMN model_id TEXT REFERENCES tenant_models(id) ON DELETE SET NULL;
+-- 原位迁移仅替换执行来源；会话、消息、session、动作与历史 TaskRun 均不改写。
+UPDATE agent_conversations c SET model_id = w.model_id
+FROM tenant_workers w WHERE w.id = c.worker_id;
+ALTER TABLE agent_conversations DROP COLUMN worker_id;
+"""
+
+
+def _apply_postgres_independent_project_agent(conn) -> None:
+    conn.executescript(POSTGRES_INDEPENDENT_PROJECT_AGENT_SQL)
+
+
+POSTGRES_INDEPENDENT_PROJECT_AGENT = Migration(
+    version=74,
+    name="independent-project-agent-model",
+    checksum=sha256(POSTGRES_INDEPENDENT_PROJECT_AGENT_SQL.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_independent_project_agent,
+)
+
+
+POSTGRES_AGENT_USER_TASKS_SQL = """
+ALTER TABLE agent_conversations ADD COLUMN deleted_at TEXT;
+CREATE TABLE agent_attachments (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    conversation_id TEXT NOT NULL,
+    message_id BIGINT REFERENCES agent_messages(id),
+    artifact_id TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    uploaded_by TEXT NOT NULL REFERENCES users(id),
+    created_at TEXT NOT NULL,
+    removed_at TEXT,
+    FOREIGN KEY(conversation_id, project_id) REFERENCES agent_conversations(id, project_id),
+    FOREIGN KEY(artifact_id, project_id) REFERENCES artifacts(id, project_id)
+);
+CREATE INDEX agent_attachments_conversation ON agent_attachments(conversation_id, created_at, id);
+ALTER TABLE agent_actions DROP CONSTRAINT agent_actions_kind_check;
+ALTER TABLE agent_actions DROP CONSTRAINT agent_actions_check;
+ALTER TABLE agent_actions ADD COLUMN business_project_id TEXT;
+ALTER TABLE agent_actions ADD COLUMN intent_id TEXT;
+ALTER TABLE agent_actions ADD CONSTRAINT agent_actions_kind_check CHECK (kind IN ('verification', 'report', 'project', 'intent'));
+ALTER TABLE agent_actions ADD CONSTRAINT agent_actions_check CHECK (
+    (kind = 'verification' AND verification_request_id IS NOT NULL AND generation_token IS NULL AND business_project_id IS NULL AND intent_id IS NULL)
+    OR (kind = 'report' AND generation_token IS NOT NULL AND verification_request_id IS NULL AND business_project_id IS NULL AND intent_id IS NULL)
+    OR (kind = 'project' AND business_project_id IS NOT NULL AND intent_id IS NULL AND verification_request_id IS NULL AND generation_token IS NULL)
+    OR (kind = 'intent' AND business_project_id IS NOT NULL AND intent_id IS NOT NULL AND verification_request_id IS NULL AND generation_token IS NULL)
+);
+"""
+
+
+def _apply_postgres_agent_user_tasks(conn) -> None:
+    conn.executescript(POSTGRES_AGENT_USER_TASKS_SQL)
+
+
+POSTGRES_AGENT_USER_TASKS = Migration(
+    version=75,
+    name="project-agent-user-tasks",
+    checksum=sha256(POSTGRES_AGENT_USER_TASKS_SQL.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_agent_user_tasks,
+)
+
+
 SQLITE_MIGRATIONS = (
     SQLITE_BASELINE,
     SQLITE_IDENTITY_TENANT,
@@ -4845,6 +5347,22 @@ POSTGRES_MIGRATIONS = (
     POSTGRES_VERIFICATION_BATCH_SOURCE,
     POSTGRES_CURRENT_REPORT_TEMPLATES,
     POSTGRES_PROJECT_GROUP_RETIREMENT,
+    POSTGRES_REPORT_TEMPLATE_DEFAULTS,
+    POSTGRES_REPORT_SCOPES,
+    POSTGRES_READABLE_REPORT_TEMPLATE_DEFAULTS,
+    POSTGRES_DISCOVERY_READABLE,
+    POSTGRES_REPORT_CANDIDATE_CAPACITY,
+    POSTGRES_HTTP_TRAFFIC,
+    POSTGRES_HTTP_TRAFFIC_STREAMING,
+    POSTGRES_HTTP_TRAFFIC_QUERY,
+    POSTGRES_HTTP_TRAFFIC_ADDRESS,
+    POSTGRES_SINGLE_REPORT_TEMPLATE,
+    POSTGRES_TEST_EGRESS,
+    POSTGRES_FIXED_GENERAL_WORKERS,
+    POSTGRES_AGENT_CONVERSATIONS,
+    POSTGRES_AGENT_ACTIONS,
+    POSTGRES_INDEPENDENT_PROJECT_AGENT,
+    POSTGRES_AGENT_USER_TASKS,
 )
 
 

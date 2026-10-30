@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from cairn.evidence_contracts import (
     EvidenceItem, VerificationKeyEvidence, VerificationTestStep, evidence_refs,
-    validate_verification_evidence_links,
+    validate_verification_evidence_links, has_evidence,
 )
 
 from .projects import CreateProjectRequest, EvidenceRef
 from .tasks import CreateTaskRunRequest
+from .test_egress import TestEgressInput
 
 
 class InlineVerificationReport(BaseModel):
@@ -59,11 +61,28 @@ class CreateVerificationRequest(BaseModel):
     mode: Literal["reproduce", "retest"]
     title: str = Field(min_length=1, max_length=512)
     origin: str | None = None
+    target_url: str | None = Field(default=None, max_length=4096)
+
+    @field_validator("target_url")
+    @classmethod
+    def explicit_target_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = urlsplit(value)
+        if (not value or any(char.isspace() or ord(char) < 32 for char in value)
+                or "\\" in value or parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None or parsed.fragment):
+            raise ValueError("本次目标必须是明确的 HTTP(S) URL，不含凭据、空白或片段")
+        # 检查端口但保留用户输入，不改协议、域名或路径。
+        _ = parsed.port
+        return value
+
     report: Annotated[InlineVerificationReport | FileVerificationReport | PlatformVulnerabilityVerificationReport, Field(discriminator="type")]
     resource_batch_id: str | None = None
     previous_request_id: str | None = None
     authorization_expires_at: str | None = None
     execution_deadline: str | None = None
+    test_egress: TestEgressInput | None = None
 
     @field_validator("title")
     @classmethod
@@ -148,7 +167,8 @@ class HistoricalVerificationResultV2(BaseModel):
         return self
 
 
-class VerificationResult(BaseModel):
+class HistoricalVerificationResultV3(BaseModel):
+    """冻结 v3 读取与回执，不给已接受结果补写建议或改变摘要输入。"""
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal[3]
     outcome: Literal["confirmed", "not_reproduced", "environment_changed", "insufficient_evidence"]
@@ -180,7 +200,7 @@ class VerificationResult(BaseModel):
 
     @model_validator(mode="after")
     def require_current_evidence(self):
-        if self.outcome != "insufficient_evidence" and not self.evidence_refs:
+        if self.outcome != "insufficient_evidence" and not has_evidence(self.evidence_items, current=True):
             raise ValueError("本结论必须引用本轮实际证据")
         if self.outcome == "insufficient_evidence" and not any(item.strip() for item in self.limitations):
             raise ValueError("证据不足必须明确缺口和未测试事项")
@@ -189,6 +209,18 @@ class VerificationResult(BaseModel):
             raise ValueError("本轮证据必须引用原件，不能内联历史文本")
         validate_verification_evidence_links(self.evidence_items, self.key_evidence, self.test_steps)
         return self
+
+
+class VerificationResult(HistoricalVerificationResultV3):
+    schema_version: Literal[4]
+    remediation: str = Field(min_length=1, pattern=r"\S")
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def strict_schema_version(cls, value):
+        if type(value) is not int or value != 4:
+            raise ValueError("结果 schema_version 必须为整数 4")
+        return value
 
 
 class VerificationError(BaseModel):
@@ -206,7 +238,7 @@ class VerificationExecutionBinding(BaseModel):
 
 
 class VerificationResultSubmission(VerificationExecutionBinding):
-    result: VerificationResult | HistoricalVerificationResultV2 | HistoricalVerificationResult
+    result: VerificationResult | HistoricalVerificationResultV3 | HistoricalVerificationResultV2 | HistoricalVerificationResult
 
 
 class VerificationFailureSubmission(VerificationExecutionBinding):

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
+import json
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -17,6 +19,43 @@ ModelAuthHeader = Literal["authorization-bearer", "x-api-key"]
 class CustomModelHeader(BaseModel):
     name: str
     value: str
+
+
+class TenantModelExecutionBinding(BaseModel):
+    model_id: str
+    model_revision: int
+    credential_version_id: str
+    credential_version: int
+    credential_fingerprint: str
+    engine: Literal["pi"] = "pi"
+    protocol: ModelProtocol
+    model_name: str
+    base_url: str
+    inference_endpoint: str
+    auth_header: ModelAuthHeader
+    custom_headers: list[CustomModelHeader] = Field(default_factory=list)
+    api_key: str = Field(repr=False)
+
+    def execution_provenance(self) -> dict:
+        """执行审计只保存凭据版本与摘要，不保存可恢复的认证信息。"""
+        headers = json.dumps(
+            [header.model_dump() for header in self.custom_headers],
+            sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+        )
+        return {
+            "source": "tenant_model_binding",
+            "model_id": self.model_id,
+            "model_name": self.model_name,
+            "model_revision": self.model_revision,
+            "credential_version_id": self.credential_version_id,
+            "credential_version": self.credential_version,
+            "credential_fingerprint": self.credential_fingerprint,
+            "engine": self.engine,
+            "protocol": self.protocol,
+            "auth_header": self.auth_header,
+            "inference_endpoint": self.inference_endpoint,
+            "custom_headers_sha256": sha256(headers.encode("utf-8")).hexdigest(),
+        }
 
 
 class TenantModelConfig(BaseModel):

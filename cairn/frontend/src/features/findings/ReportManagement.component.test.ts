@@ -8,6 +8,8 @@ import ReportManagement from './ReportManagement.vue'
 
 const mocks = vi.hoisted(() => ({
   fetchArtifactPreview: vi.fn(),
+  api: vi.fn(),
+  fetchText: vi.fn(),
   listReports: vi.fn(),
   query: {} as Record<string, string | undefined>,
   replace: vi.fn(),
@@ -23,6 +25,8 @@ vi.mock('@/api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/client')>()
   return {
     ...actual,
+    api: mocks.api,
+    fetchText: mocks.fetchText,
     fetchArtifactPreview: mocks.fetchArtifactPreview,
     listReports: mocks.listReports,
   }
@@ -33,6 +37,7 @@ const initialReportPage: ReportInventoryPage = {
     {
       project_id: 'project / one',
       project_title: '项目一',
+      source_status: 'available',
       task_run_id: 'run / one',
       artifact_id: 'report / one',
       artifact_uri: 'artifact://reports/Final%20Report.md',
@@ -74,6 +79,8 @@ beforeEach(() => {
     })
   mocks.listReports.mockReset().mockResolvedValue(reportPage.value)
   mocks.fetchArtifactPreview.mockReset()
+  mocks.api.mockReset().mockResolvedValue([])
+  mocks.fetchText.mockReset()
   preview.value = undefined
   mocks.useQuery
     .mockReset()
@@ -127,6 +134,46 @@ const matchingPreview = (): ArtifactPreview => ({
 })
 
 describe('ReportManagement', () => {
+  it('超过64KiB可读取完整正文和尾部目录，图片列表失败不阻断且切换取消旧读取', async () => {
+    Object.assign(mocks.query, { reportId: 'report / one', reportProjectId: 'project / one' })
+    preview.value = matchingPreview()
+    mocks.api.mockRejectedValue(new Error('可选图片不可用'))
+    const full = '# 安全评估报告\n\n' + '合成正文\n'.repeat(16000) + '\n## 完整尾部章节\n最后一段'
+    mocks.fetchText.mockResolvedValue(full)
+    const wrapper = mountPage()
+    await flushPromises()
+    await wrapper.findAll('button').find((button) => button.text() === '读取完整报告')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('最后一段')
+    expect(wrapper.get('[aria-label="当前报告章节目录"]').text()).toContain('完整尾部章节')
+    expect(wrapper.text()).not.toContain('当前仅显示报告开头')
+    expect(wrapper.text()).toContain('证据图片清单读取失败')
+    const signal = mocks.fetchText.mock.calls[0]![1] as AbortSignal
+    expect(mocks.fetchText).toHaveBeenCalledWith('/projects/project%20%2F%20one/artifacts/report%20%2F%20one/content', signal, 'no-store')
+    mocks.query.reportId = undefined
+    await flushPromises()
+    expect(signal.aborted).toBe(true)
+    expect(wrapper.text()).not.toContain('最后一段')
+  })
+
+  it.each(['deleted', 'unknown'] as const)('档案来源状态%s可见但不阻止冻结正文与导出', async (status) => {
+    reportPage.value.items[0]!.source_status = status
+    Object.assign(mocks.query, { reportId: 'report / one', reportProjectId: 'project / one' })
+    preview.value = matchingPreview()
+    const wrapper = mountPage()
+    await flushPromises()
+    const label = status === 'deleted' ? '历史档案 · 来源已删除' : '历史档案 · 来源状态未知'
+    expect(wrapper.get('[aria-label="报告列表"]').text()).toContain(label)
+    expect(wrapper.get('.report-preview-title').text()).toContain(label)
+    expect(wrapper.text()).toContain('安全评估报告')
+    expect(wrapper.get('.report-export button').text()).toBe('导出报告')
+    expect(wrapper.get('.report-export button').attributes('disabled')).toBeUndefined()
+    const options = mocks.useQuery.mock.calls[1]?.[0] as { queryFn: (value: { queryKey: string[]; signal: AbortSignal }) => Promise<unknown> }
+    const signal = new AbortController().signal
+    await options.queryFn({ queryKey: ['reports', 'preview', 'project / one', 'report / one'], signal })
+    expect(mocks.fetchArtifactPreview).toHaveBeenCalledWith('project / one', 'report / one', signal)
+  })
+
   it('uses final inventory filters, hierarchical keys, pagination, and AbortSignal', async () => {
     Object.assign(mocks.query, {
       reportQ: 'final report',
@@ -202,9 +249,8 @@ describe('ReportManagement', () => {
     expect(wrapper.find('[role="tab"]').exists()).toBe(false)
     expect(reader.text()).toContain('当前仅显示报告开头')
     expect(reader.text()).toContain('目录仅覆盖已载入部分')
-    expect(wrapper.get('a[download]').attributes('href')).toBe(
-      '/projects/project%20%2F%20one/artifacts/report%20%2F%20one/content',
-    )
+    expect(reader.findAll('button').some((button) => button.text() === '导出报告')).toBe(true)
+    expect(wrapper.find('a[download]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('执行计划摘要')
     expect(wrapper.text()).not.toContain('输入快照 Artifact')
 
@@ -224,14 +270,20 @@ describe('ReportManagement', () => {
     mocks.query.reportId = 'report / one'
     preview.value = {
       ...matchingPreview(),
-      content: '# **安全**评估 `报告`\n\n## 证据\n\n```md\n# 不是章节\n```\n\n## 证据\n\n后续工作\n---',
+      content:
+        '# **安全**评估 `报告`\n\n## 证据\n\n```md\n# 不是章节\n```\n\n## 证据\n\n后续工作\n---',
     }
     const wrapper = mountPage()
     await flushPromises()
 
     const directory = wrapper.get('nav[aria-label="当前报告章节目录"]')
     const entries = directory.findAll('button')
-    expect(entries.map((entry) => entry.text())).toEqual(['安全评估 报告', '证据', '证据', '后续工作'])
+    expect(entries.map((entry) => entry.text())).toEqual([
+      '安全评估 报告',
+      '证据',
+      '证据',
+      '后续工作',
+    ])
     const headings = wrapper.findAll('.safe-report-markdown h1, .safe-report-markdown h2')
     expect(headings.map((heading) => heading.text())).toEqual(entries.map((entry) => entry.text()))
     expect(new Set(headings.map((heading) => heading.attributes('id'))).size).toBe(4)
@@ -244,24 +296,30 @@ describe('ReportManagement', () => {
     expect(mocks.query.reportId).toBe('report / one')
   })
 
-  it.each([null, 2])('shows historical template version %s only when present in on-demand file information', async (version) => {
-    reportPage.value.items[0]!.template_version = version
-    mocks.query.reportProjectId = 'project / one'
-    mocks.query.reportId = 'report / one'
-    preview.value = matchingPreview()
-    const wrapper = mountPage()
-    await flushPromises()
+  it.each([null, 2])(
+    'shows historical template version %s only when present in on-demand file information',
+    async (version) => {
+      reportPage.value.items[0]!.template_version = version
+      mocks.query.reportProjectId = 'project / one'
+      mocks.query.reportId = 'report / one'
+      preview.value = matchingPreview()
+      const wrapper = mountPage()
+      await flushPromises()
 
-    expect(document.body.querySelector('.report-file-info')).toBeNull()
-    await wrapper.findAll('button').find((button) => button.text() === '更多')!.trigger('click')
-    await flushPromises()
+      expect(document.body.querySelector('.report-file-info')).toBeNull()
+      await wrapper
+        .findAll('button')
+        .find((button) => button.text() === '更多')!
+        .trigger('click')
+      await flushPromises()
 
-    const info = document.body.querySelector('.report-file-info')!
-    expect(info.textContent).toContain(version == null ? 'durable' : 'durable · v2')
-    if (version == null) expect(info.textContent).not.toMatch(/durable\s*·\s*v/)
-    expect(info.textContent).not.toMatch(/v(?:null|undefined)/)
-    expect(info.querySelector('a')?.getAttribute('data-to')).toContain('WorkspaceVulnerabilities')
-  })
+      const info = document.body.querySelector('.report-file-info')!
+      expect(info.textContent).toContain(version == null ? 'durable' : 'durable · v2')
+      if (version == null) expect(info.textContent).not.toMatch(/durable\s*·\s*v/)
+      expect(info.textContent).not.toMatch(/v(?:null|undefined)/)
+      expect(info.querySelector('a')?.getAttribute('data-to')).toContain('WorkspaceVulnerabilities')
+    },
+  )
 
   it('captures preview identity from the request key and forwards cancellation', async () => {
     mocks.query.reportProjectId = 'project / one'
@@ -304,7 +362,10 @@ describe('ReportManagement', () => {
     await flushPromises()
     const directory = wrapper.get<HTMLElement>('.report-directory')
     directory.element.scrollTop = 180
-    await wrapper.findAll('button').find((button) => button.text() === '原文')!.trigger('click')
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '原文')!
+      .trigger('click')
     const pane = wrapper.get<HTMLElement>('[aria-label="报告原文"]')
     pane.element.scrollTop = 120
     await pane.trigger('scroll')
@@ -330,30 +391,46 @@ describe('ReportManagement', () => {
     expect(document.activeElement).toBe(wrapper.get('.report-preview-title h1').element)
   })
 
-  it.each(['project_id', 'artifact_id'] as const)('blocks rendering when preview %s does not match', async (field) => {
-    mocks.query.reportProjectId = 'project / one'
-    mocks.query.reportId = 'report / one'
-    preview.value = { ...matchingPreview(), [field]: 'other-identity', content: '# 不应显示' }
-    const wrapper = mountPage()
-    await flushPromises()
+  it.each(['project_id', 'artifact_id'] as const)(
+    'blocks rendering when preview %s does not match',
+    async (field) => {
+      mocks.query.reportProjectId = 'project / one'
+      mocks.query.reportId = 'report / one'
+      preview.value = { ...matchingPreview(), [field]: 'other-identity', content: '# 不应显示' }
+      const wrapper = mountPage()
+      await flushPromises()
 
-    expect(wrapper.text()).toContain('报告预览身份不匹配')
-    expect(wrapper.find('.safe-report-markdown').exists()).toBe(false)
-    expect(wrapper.find('.report-reader-raw').exists()).toBe(false)
-    expect(wrapper.find('nav[aria-label="当前报告章节目录"]').exists()).toBe(false)
-    expect(wrapper.text()).not.toContain('不应显示')
-  })
+      expect(wrapper.text()).toContain('报告预览身份不匹配')
+      expect(wrapper.find('.safe-report-markdown').exists()).toBe(false)
+      expect(wrapper.find('.report-reader-raw').exists()).toBe(false)
+      expect(wrapper.find('nav[aria-label="当前报告章节目录"]').exists()).toBe(false)
+      expect(wrapper.text()).not.toContain('不应显示')
+    },
+  )
 
-  it('uses compact accessible directory entries with filename, project, and secondary time', () => {
+  it('shows a visible heading and semantic columns with independent report read actions', () => {
     const wrapper = mountPage()
     const item = wrapper.get('.report-directory-item')
 
-    expect(wrapper.find('table').exists()).toBe(false)
+    expect(wrapper.get('.report-page-header h1').text()).toBe('报告')
+    expect(wrapper.findAll('th').map((cell) => cell.text())).toEqual([
+      '报告名称',
+      '所属项目',
+      '生成时间',
+    ])
     expect(item.attributes('aria-label')).toBe('审阅报告：Final Report.md')
     expect(item.get('strong').attributes('title')).toBe('Final Report.md')
-    expect(item.get('.report-item-project').attributes('title')).toBe('项目一')
-    expect(item.get('time').attributes('datetime')).toBe('2026-08-21T00:00:00Z')
+    expect(wrapper.get('.report-item-project').attributes('title')).toBe('项目一')
+    expect(wrapper.get('time').attributes('datetime')).toBe('2026-08-21T00:00:00Z')
     expect(wrapper.get('.report-pagination').attributes('aria-label')).toBe('报告分页')
+  })
+
+  it('distinguishes a filtered empty result from the absence of completed reports', () => {
+    mocks.query.reportQ = 'no-match'
+    reportPage.value = { ...initialReportPage, items: [], total: 0 }
+    const wrapper = mountPage()
+    expect(wrapper.text()).toContain('没有匹配的报告')
+    expect(wrapper.text()).not.toContain('暂无已完成报告')
   })
 
   it('writes composite selection and pagination while preserving unrelated query values', async () => {

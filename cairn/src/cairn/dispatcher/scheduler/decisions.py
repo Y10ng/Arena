@@ -66,7 +66,7 @@ class DispatchDecisionsMixin:
                 code, items = candidate_code, blocked
                 break
         reasons = {item.get("reason") for item in items}
-        if len(reasons) == 1 and reasons <= {"engine_unsupported", "model_disabled", "credential_missing", "binding_stale"}:
+        if len(reasons) == 1 and reasons <= {"engine_unsupported", "model_unconfigured", "model_disabled", "model_incomplete", "model_protocol_unsupported", "credential_missing"}:
             code = next(iter(reasons))
         retries = [item["retry_after_seconds"] for item in items if isinstance(item.get("retry_after_seconds"), (int, float))]
         retry_at = None

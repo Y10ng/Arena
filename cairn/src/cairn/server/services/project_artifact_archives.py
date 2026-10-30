@@ -130,6 +130,7 @@ class _VulnerabilityEvidence:
     verifications: list[dict[str, Any]]
     facts: dict[str, dict[str, Any]]
     artifacts: list[_ArtifactEvidence]
+    flow_evidence: dict[str, dict] = field(default_factory=dict)
 
 
 def create_project_vulnerability_evidence_archive(
@@ -226,7 +227,11 @@ def _load_project_vulnerability_evidence(project_id: str) -> list[_Vulnerability
         facts = _load_rows_by_id(conn, "facts", project_id, fact_ids)
         fact_evidence = _load_fact_evidence(conn, project_id, fact_ids)
 
+        from .flow_evidence import flow_metadata_allowed, resolve_flow_evidence
+        from .verification_requests import _artifact_deliverable
+
         relations_by_vulnerability: dict[str, dict[str, list[_EvidenceRelation]]] = {}
+        flows_by_vulnerability: dict[str, dict] = {}
         all_artifact_ids: set[str] = set()
         for vulnerability in vulnerabilities:
             vulnerability_id = str(vulnerability["id"])
@@ -265,6 +270,35 @@ def _load_project_vulnerability_evidence(project_id: str) -> list[_Vulnerability
                     fact_evidence,
                     f"verification {verification_id} fact evidence",
                 )
+            flows = flows_by_vulnerability[vulnerability_id] = {}
+            items = [*vulnerability["evidence_items"], *(item for observation in observations_by_vulnerability.get(vulnerability_id, [])
+                                                       for item in observation["evidence_items"])]
+            for item in items:
+                flow_id = item.get("flow_id")
+                if not flow_id or flow_id in flows:
+                    continue
+                flow = resolve_flow_evidence(conn, project_id, flow_id)
+                if not flow_metadata_allowed(conn, flow, public=True):
+                    flows[flow_id] = {key: flow[key] for key in (
+                        "flow_id", "project_id", "scope", "revision", "state", "representation", "record_sha256", "projections",
+                    )}
+                    flows[flow_id]["unavailable"] = "结构化头超出普通交付边界；未包含元信息或正文原件，权威流量未改写。"
+                    for projection in flow["projections"].values():
+                        if projection is not None:
+                            relations.pop(projection["body_artifact_id"], None)
+                    continue
+                flows[flow_id] = {**flow, "body_delivery": {}}
+                for side, projection in flow["projections"].items():
+                    if projection is None:
+                        continue
+                    artifact_id = projection["body_artifact_id"]
+                    artifact = conn.execute("SELECT * FROM artifacts WHERE project_id = ? AND id = ?", (project_id, artifact_id)).fetchone()
+                    if not _artifact_deliverable(conn, artifact):
+                        relations.pop(artifact_id, None)
+                        flows[flow_id]["body_delivery"][side] = "正文超出普通交付边界；原件未改写。"
+                        continue
+                    flows[flow_id]["body_delivery"][side] = {"artifact_id": artifact_id}
+                    _add_relation(relations, artifact_id, _EvidenceRelation(f"flow {flow_id} {side} body"))
             relations_by_vulnerability[vulnerability_id] = relations
             all_artifact_ids.update(relations)
 
@@ -289,6 +323,7 @@ def _load_project_vulnerability_evidence(project_id: str) -> list[_Vulnerability
                 verifications=verifications_by_vulnerability.get(vulnerability_id, []),
                 facts=facts,
                 artifacts=artifact_evidence,
+                flow_evidence=flows_by_vulnerability[vulnerability_id],
             )
         )
     return result
@@ -442,6 +477,11 @@ def _write_vulnerability(
             for item in evidence.observations
         ]}, ensure_ascii=False, indent=2,
     ))
+    if evidence.flow_evidence:
+        _write_text_member(archive, f"{directory}/flow-evidence.json", json.dumps(
+            {"notice": "结构化重建，非原始字节流；正文按精确 Artifact/hash 保存，缺侧与交付限制不补造。",
+             "flows": evidence.flow_evidence}, ensure_ascii=False, indent=2,
+        ))
     # 原文独立导出，不经过 Markdown 展示、换行归一化或首尾空白裁剪。
     for source, items in sources:
         for index, item in enumerate(items, start=1):

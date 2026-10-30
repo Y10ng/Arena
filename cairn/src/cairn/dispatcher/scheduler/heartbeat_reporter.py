@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 
+from .agent_chat import AGENT_CAPACITY
 from .common import *
 
 
@@ -100,6 +101,7 @@ class HeartbeatReporterMixin:
             "max_workers": self.config.runtime.max_workers,
             "hard_cap": self.bootstrap.hard_cap,
             "verification_capacity": min(1, max(0, self.bootstrap.hard_cap - self.config.runtime.max_workers)),
+            "agent_capacity": AGENT_CAPACITY,
             "max_running_projects": self.config.runtime.max_running_projects,
             "max_project_workers": self.config.runtime.max_project_workers,
             "interval": self.config.runtime.interval,

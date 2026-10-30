@@ -9,6 +9,7 @@ from cairn.dispatcher.runtime.containers import CandidateExecutionCheck, canonic
 from cairn.dispatcher.tasks.candidate_capture_outbox import CandidateCaptureOutbox
 from cairn.dispatcher.tasks.report_finish_outbox import ReportFinishOutbox
 
+from .agent_chat import AGENT_CAPACITY, AgentChatMixin
 from .candidate_recovery import CandidateRecoveryMixin
 from .cleanup import CleanupMixin
 from .common import *
@@ -23,6 +24,7 @@ from .worker_runtime import WorkerRuntimeMixin
 
 
 class DispatcherLoop(
+    AgentChatMixin,
     ConfigRuntimeMixin,
     CandidateRecoveryMixin,
     StaleReconcileMixin,
@@ -95,6 +97,8 @@ class DispatcherLoop(
         # 首次认证心跳前没有执行 namespace，禁止提前接触容器或启动自检。
         self.container_manager = None
         self.executor = ThreadPoolExecutor(max_workers=max(1, bootstrap.hard_cap))
+        # Agent 独占一个真实线程，研究池满载时仍能执行；不改变研究 hard_cap。
+        self.agent_executor = ThreadPoolExecutor(max_workers=AGENT_CAPACITY, thread_name_prefix="project-agent")
         self.cleanup_executor = ThreadPoolExecutor(max_workers=8)
         # futures 只保存当前进程提交的任务；Server 中旧 running 由启动 reconcile 处理。
         self.futures: dict[Future[str], RunningTask] = {}
@@ -151,6 +155,7 @@ class DispatcherLoop(
                     sorted({task.project_id for task in self.futures.values()}),
                 )
             self.executor.shutdown(wait=True)
+            self.agent_executor.shutdown(wait=True)
             self._reap_futures()
             try:
                 # Docker 与 HTTP client 关闭前只做一次有界 candidate 恢复/重放。
@@ -233,6 +238,8 @@ class DispatcherLoop(
                         self._validate_server_settings()
                         self._settings_checked = True
                     self._reap_futures()
+                    # 先停止重启前所有测试 scope，再允许 candidate/stale 恢复及新派发。
+                    self.container_manager.traffic_execution.recover()
                     # candidate fence 必须先于 stale reconcile、任何新派发与破坏性清理恢复。
                     candidate_recovery_complete = self._refresh_candidate_recovery()
                     # durable report finish 必须先于 stale reconcile 和新 report claim 重放。

@@ -131,6 +131,15 @@ def create_user_with_personal_tenant(
             "INSERT INTO tenant_memberships (tenant_id, user_id, role, created_at) VALUES (?, ?, 'owner', ?)",
             (tenant_id, user_id, now),
         )
+        for task_type, max_running in (("bootstrap", 1), ("reason", 1), ("explore", 3)):
+            conn.execute(
+                """INSERT INTO tenant_workers
+                   (id, tenant_id, purpose, display_name, model_id, engine, task_types_json,
+                    max_running, priority, enabled, revision, created_by, created_at, updated_at)
+                   VALUES (?, ?, 'general', ?, NULL, 'pi', ?, ?, 100, 1, 1, ?, ?, ?)""",
+                (f"twr_{uuid4().hex}", tenant_id, task_type, json.dumps([task_type]),
+                 max_running, user_id, now, now),
+            )
         write_security_audit(
             conn,
             actor_type=audit_actor.kind if audit_actor is not None else "system",

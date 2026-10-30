@@ -13,7 +13,6 @@ const cancelProjectResourceBatchMock = vi.fn()
 const deactivateProjectResourceMock = vi.fn()
 const fetchTextMock = vi.fn()
 const getProjectManagementOptionsMock = vi.fn()
-const updateProjectWorkersMock = vi.fn()
 const routerPush = vi.fn()
 const showToast = vi.fn()
 const runtimeOverride = ref<ProjectRuntime | null>(null)
@@ -174,7 +173,6 @@ function mockWorkspaceDependencies() {
     importProjectResourceBatchZip: vi.fn(),
     listVulnerabilities: vi.fn(),
     updateProjectResourceBatchMember: vi.fn(),
-    updateProjectWorkers: updateProjectWorkersMock,
     uploadProjectResourceBatchFile: uploadProjectResourceBatchFileMock,
   }))
 }
@@ -255,7 +253,6 @@ afterEach(() => {
   deactivateProjectResourceMock.mockReset()
   fetchTextMock.mockReset()
   getProjectManagementOptionsMock.mockReset()
-  updateProjectWorkersMock.mockReset()
   routerPush.mockReset()
   showToast.mockReset()
 })
@@ -550,75 +547,14 @@ describe('ProjectWorkspace shared control migration', () => {
     wrapper.unmount()
   }, 15_000)
 
-  it('announces the Worker loading state through a live status region', async () => {
-    const options = deferred<{ tenant_workers: [] }>()
-    getProjectManagementOptionsMock.mockReturnValue(options.promise)
+  it('移除项目重绑入口，保留代理设置', async () => {
     const wrapper = await mountWorkspace()
-
-    await selectMoreItem(wrapper, 'Workers')
-    await wrapper.vm.$nextTick()
-
-    const status = document.body.querySelector<HTMLElement>('[role="status"][aria-live="polite"]')
-    expect(status?.textContent).toContain('正在加载可用 Worker')
-    expect(status?.querySelectorAll('.worker-dialog-skeleton')).toHaveLength(2)
-
-    options.resolve({ tenant_workers: [] })
+    await wrapper.get('button[aria-label="项目更多操作"]').trigger('click')
     await flushPromises()
-    wrapper.unmount()
-  }, 15_000)
-
-  it('loads Worker options, preserves the binding payload, and blocks duplicate saves', async () => {
-    getProjectManagementOptionsMock.mockResolvedValue({
-      tenant_workers: [
-        {
-          id: 'worker_1',
-          display_name: '主 Worker',
-          model_id: 'model_1',
-          model_display_name: 'Claude',
-          task_types: ['bootstrap', 'reason'],
-          available: true,
-        },
-      ],
-    })
-    const save = deferred<void>()
-    updateProjectWorkersMock.mockReturnValue(save.promise)
-    const wrapper = await mountWorkspace()
-
-    await selectMoreItem(wrapper, 'Workers')
-
-    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')
-    expect(dialog?.textContent).toContain('更新项目 Workers')
-    expect(dialog?.textContent).toContain('主 Worker')
-
-    const checkbox = document.body.querySelector<HTMLInputElement>('input[type="checkbox"]')!
-    dialog?.querySelector<HTMLElement>('.project-worker-option strong')?.click()
-    await flushPromises()
-    expect(checkbox.checked).toBe(true)
-
-    dialog?.querySelector<HTMLElement>('.project-worker-option small')?.click()
-    await flushPromises()
-    expect(checkbox.checked).toBe(false)
-    dialog?.querySelector<HTMLElement>('.project-worker-option small')?.click()
-    await flushPromises()
-    expect(checkbox.checked).toBe(true)
-
-    const saveButton = buttonByText('保存绑定')
-    saveButton?.click()
-    saveButton?.click()
-    await flushPromises()
-
-    expect(updateProjectWorkersMock).toHaveBeenCalledOnce()
-    expect(updateProjectWorkersMock).toHaveBeenCalledWith('proj_test', {
-      tenant_worker_ids: ['worker_1'],
-    })
-    expect(buttonByText('取消')?.disabled).toBe(true)
-    expect(document.body.querySelector('button[aria-label="关闭"]')).toBeNull()
-
-    save.resolve()
-    await flushPromises()
-
-    expect(document.body.querySelector('[role="dialog"]')).toBeNull()
-    expect(workspaceStore.loadProject).toHaveBeenCalledWith('proj_test')
+    const labels = [...document.body.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)
+    expect(labels.some((label) => label?.includes('Workers'))).toBe(false)
+    expect(labels.some((label) => label?.includes('代理设置'))).toBe(true)
+    expect(getProjectManagementOptionsMock).not.toHaveBeenCalled()
     wrapper.unmount()
   }, 15_000)
 

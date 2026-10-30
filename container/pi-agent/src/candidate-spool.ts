@@ -7,6 +7,7 @@ import {
   CANDIDATE_FRAME_PROTOCOL,
   CANDIDATE_SPOOL_HARD_LIMITS,
   CANDIDATE_SPOOL_ROOT,
+  candidateLimits,
   object,
   type AgentRequest,
   type JsonObject,
@@ -15,7 +16,6 @@ import {
 const FRAME_MAGIC = Buffer.from("CRNCND01", "ascii");
 const FRAME_HEADER_BYTES = FRAME_MAGIC.length + 8;
 const FRAME_CHECKSUM_BYTES = 32;
-const MAX_ARTIFACTS = CANDIDATE_SPOOL_HARD_LIMITS.max_artifacts;
 const MAX_OUTCOMES_PER_CANDIDATE = 64;
 const MAX_CANDIDATE_POSITION = 1_000_000;
 const ARTIFACT_KINDS = new Set([
@@ -29,7 +29,7 @@ const CANDIDATE_OUTCOME_CODES = new Set([
   ...SUBMISSION_FAILURE_CODES,
   "candidate_admission_rejected", "candidate_manifest_invalid", "candidate_outcome_invalid", "candidate_spool_conflict",
   "candidate_spool_invalid", "candidate_spool_limit", "candidate_spool_unavailable", "locally_validated", "provider_auth",
-  "provider_error", "provider_rate_limit", "result_schema", "runner_error",
+  "provider_error", "provider_rate_limit", "model_output_limit", "result_schema", "runner_error",
 ]);
 const SUBMISSION_ISSUE_KEYWORDS = new Set([
   "schema", "strict_json", "input_size", "type", "required", "additionalProperties", "const", "enum", "anyOf", "oneOf",
@@ -131,8 +131,8 @@ function validArtifactHandle(value: unknown): value is string {
 function compareAscii(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
-function validArtifactManifest(value: unknown): value is CandidateArtifactIdentity[] {
-  if (!Array.isArray(value) || value.length > MAX_ARTIFACTS) return false;
+function validArtifactManifest(value: unknown, maximum: number): value is CandidateArtifactIdentity[] {
+  if (!Array.isArray(value) || value.length > maximum) return false;
   let previous = "";
   const handles = new Set<string>();
   for (const artifact of value) {
@@ -194,6 +194,8 @@ function validOutcomeManifest(manifest: JsonObject, allowedPaths: ReadonlySet<st
 }
 function decodeSpool(buffer: Buffer, request: AgentRequest): DecodedFrame[] {
   const capability = request.capabilities.candidate_capture;
+  if (!capability) throw candidateFailure("candidate_spool_invalid", "Candidate capture capability is missing");
+  const limits = candidateLimits(request);
   const allowedPaths = submissionSchemaPaths(request.result_schema);
   if (buffer.length > capability.max_spool_bytes || buffer.length > CANDIDATE_SPOOL_HARD_LIMITS.max_spool_bytes) {
     throw candidateFailure("candidate_spool_limit", "Candidate spool exceeds the byte limit");
@@ -213,7 +215,7 @@ function decodeSpool(buffer: Buffer, request: AgentRequest): DecodedFrame[] {
     offset += FRAME_MAGIC.length;
     const manifestLength = buffer.readUInt32BE(offset); offset += 4;
     const rawLength = buffer.readUInt32BE(offset); offset += 4;
-    if (manifestLength === 0 || manifestLength > capability.max_manifest_bytes || manifestLength > CANDIDATE_SPOOL_HARD_LIMITS.max_manifest_bytes) {
+    if (manifestLength === 0 || manifestLength > capability.max_manifest_bytes || manifestLength > limits.max_manifest_bytes) {
       throw candidateFailure("candidate_spool_limit", "Candidate manifest exceeds the byte limit");
     }
     if (rawLength > capability.max_candidate_bytes || rawLength > CANDIDATE_SPOOL_HARD_LIMITS.max_candidate_bytes) {
@@ -251,7 +253,7 @@ function decodeSpool(buffer: Buffer, request: AgentRequest): DecodedFrame[] {
       if (manifest.parent_producer_candidate_key !== previousCandidateKey) throw candidateFailure("candidate_spool_invalid", "Candidate parent lineage is invalid");
       if (manifest.project_id !== request.project_id || manifest.task_run_id !== request.task_run_id || manifest.phase !== request.phase || manifest.session !== request.session
         || manifest.binding_sha256 !== sha256(canonicalCandidateJson(request.binding)) || manifest.result_schema_sha256 !== sha256(canonicalCandidateJson(request.result_schema))
-        || !validArtifactManifest(manifest.artifacts)) throw candidateFailure("candidate_spool_invalid", "Candidate execution identity is invalid");
+        || !validArtifactManifest(manifest.artifacts, limits.max_artifacts)) throw candidateFailure("candidate_spool_invalid", "Candidate execution identity is invalid");
       try { new TextDecoder("utf-8", { fatal: true }).decode(raw); }
       catch { throw candidateFailure("candidate_spool_invalid", "Candidate raw bytes must be valid UTF-8"); }
       if (manifest.raw_size_bytes !== raw.length || manifest.raw_sha256 !== sha256(raw)) throw candidateFailure("candidate_spool_invalid", "Candidate raw identity is invalid");
@@ -286,7 +288,7 @@ async function ensureSpoolRoot(): Promise<void> {
 }
 function frame(manifest: JsonObject, raw: Buffer, maxManifestBytes: number): { bytes: Buffer; manifestBytes: Buffer; requestSha256: string } {
   const manifestBytes = Buffer.from(canonicalCandidateJson(manifest), "utf8");
-  if (manifestBytes.length === 0 || manifestBytes.length > maxManifestBytes || manifestBytes.length > CANDIDATE_SPOOL_HARD_LIMITS.max_manifest_bytes) {
+  if (manifestBytes.length === 0 || manifestBytes.length > maxManifestBytes) {
     throw candidateFailure("candidate_spool_limit", "Candidate manifest exceeds the byte limit");
   }
   const header = Buffer.alloc(FRAME_HEADER_BYTES);
@@ -297,8 +299,8 @@ function frame(manifest: JsonObject, raw: Buffer, maxManifestBytes: number): { b
   const checksum = createHash("sha256").update(payload).digest();
   return { bytes: Buffer.concat([payload, checksum]), manifestBytes, requestSha256: sha256(manifestBytes, raw) };
 }
-function validateArtifacts(artifacts: readonly CandidateArtifactIdentity[]): CandidateArtifactIdentity[] {
-  if (artifacts.length > MAX_ARTIFACTS) throw candidateFailure("candidate_spool_limit", "Candidate artifact identity count exceeds the limit");
+function validateArtifacts(artifacts: readonly CandidateArtifactIdentity[], maximum: number): CandidateArtifactIdentity[] {
+  if (artifacts.length > maximum) throw candidateFailure("candidate_spool_limit", "Candidate artifact identity count exceeds the limit");
   const result = artifacts.map((artifact) => {
     if (!artifact || !validArtifactHandle(artifact.handle) || typeof artifact.kind !== "string" || !ARTIFACT_KINDS.has(artifact.kind) || typeof artifact.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(artifact.sha256) || !Number.isSafeInteger(artifact.size_bytes) || artifact.size_bytes < 0) {
       throw candidateFailure("candidate_manifest_invalid", "Candidate artifact identity is invalid");
@@ -316,6 +318,7 @@ export class CandidateSpool {
   private readonly resultSchemaSha256: string;
   private readonly forbidden: Buffer[];
   constructor(private readonly request: AgentRequest) {
+    if (!request.capabilities.candidate_capture) throw candidateFailure("candidate_spool_invalid", "Candidate capture capability is missing");
     this.capability = request.capabilities.candidate_capture;
     this.bindingSha256 = sha256(canonicalCandidateJson(request.binding));
     this.resultSchemaSha256 = sha256(canonicalCandidateJson(request.result_schema));
@@ -332,7 +335,7 @@ export class CandidateSpool {
   }
   private async append(manifest: JsonObject, raw: Buffer): Promise<{ requestSha256: string; frames: DecodedFrame[] }> {
     await ensureSpoolRoot();
-    const encoded = frame(manifest, raw, this.capability.max_manifest_bytes);
+    const encoded = frame(manifest, raw, Math.min(this.capability.max_manifest_bytes, candidateLimits(this.request).max_manifest_bytes));
     const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
     let existed = true;
     try { await lstat(this.capability.spool_path); }
@@ -376,6 +379,9 @@ export class CandidateSpool {
       await file?.close();
     }
   }
+  admitRaw(raw: Buffer): void {
+    if (this.forbidden.some((literal) => literal.length > 0 && raw.indexOf(literal) !== -1)) throw candidateFailure("candidate_admission_rejected", "Candidate contains a forbidden runtime literal");
+  }
   async appendCandidate(assistantTurn: number, contentIndex: number, rawInput: Buffer, artifacts: readonly CandidateArtifactIdentity[] = []): Promise<CandidateAttempt> {
     if (!Number.isSafeInteger(assistantTurn) || assistantTurn < 1 || assistantTurn > MAX_CANDIDATE_POSITION
       || !Number.isSafeInteger(contentIndex) || contentIndex < 0 || contentIndex > MAX_CANDIDATE_POSITION) {
@@ -385,7 +391,7 @@ export class CandidateSpool {
     if (raw.length > this.capability.max_candidate_bytes || raw.length > CANDIDATE_SPOOL_HARD_LIMITS.max_candidate_bytes) throw candidateFailure("candidate_spool_limit", "Candidate raw bytes exceed the byte limit");
     try { new TextDecoder("utf-8", { fatal: true }).decode(raw); }
     catch { throw candidateFailure("candidate_manifest_invalid", "Candidate raw bytes must be valid UTF-8"); }
-    if (this.forbidden.some((literal) => literal.length > 0 && raw.indexOf(literal) !== -1)) throw candidateFailure("candidate_admission_rejected", "Candidate contains a forbidden runtime literal");
+    this.admitRaw(raw);
     let existing: DecodedFrame[] = [];
     try {
       const file = await open(this.capability.spool_path, constants.O_RDONLY | (typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0));
@@ -428,7 +434,7 @@ export class CandidateSpool {
       session: this.request.session,
       binding_sha256: this.bindingSha256,
       result_schema_sha256: this.resultSchemaSha256,
-      artifacts: validateArtifacts(artifacts),
+      artifacts: validateArtifacts(artifacts, candidateLimits(this.request).max_artifacts),
       raw_sha256: sha256(raw),
       raw_size_bytes: raw.length,
     };

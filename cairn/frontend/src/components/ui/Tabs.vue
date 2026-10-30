@@ -142,6 +142,10 @@ defineOptions({ name: 'UiTabs' })
   color: var(--text);
 }
 
+.ui-tabs__trigger:focus-visible {
+  outline-offset: -2px;
+}
+
 .ui-tabs__list--line .ui-tabs__trigger[data-state='active'] {
   color: var(--accent);
 }
@@ -151,7 +155,7 @@ defineOptions({ name: 'UiTabs' })
   height: calc(var(--space-1) / 2);
   position: absolute;
   right: var(--space-2);
-  bottom: calc(var(--space-1) / -4);
+  bottom: 0;
   left: var(--space-2);
   border-radius: var(--radius-full);
   background: var(--accent);

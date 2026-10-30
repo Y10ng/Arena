@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { TestEgressInput, TestEgressPublic } from './testEgress'
 import type { CreateProjectRequest, ProjectLibraryBinding, ProjectResourceKind } from './types'
 
 export type ScheduleMode = 'once' | 'daily' | 'weekly'
@@ -17,6 +18,7 @@ export interface CreateScheduleRequest extends ScheduleRules {
   project: CreateProjectRequest
 }
 export interface UpdateScheduleRequest extends ScheduleRules {
+  test_egress?: TestEgressInput
   version: number
   project?: CreateScheduleRequest['project']
   resource_ids?: string[]
@@ -35,6 +37,7 @@ export interface ScheduleOccurrence {
   reason: string | null
 }
 export interface ProjectSchedule extends ScheduleRules {
+  test_egress?: TestEgressPublic
   id: string
   tenant_id: string
   creator_id: string
@@ -49,7 +52,7 @@ export interface ProjectSchedule extends ScheduleRules {
   authorization_expires_at?: string | null
   created_at: string
   updated_at: string
-  project: CreateScheduleRequest['project'] | null
+  project: (Omit<CreateProjectRequest, 'test_egress'> & { test_egress?: TestEgressPublic }) | null
   resources: Array<{
     id: string
     path: string

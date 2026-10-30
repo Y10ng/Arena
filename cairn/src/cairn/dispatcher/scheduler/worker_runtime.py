@@ -45,7 +45,14 @@ class WorkerRuntimeMixin(DispatchDecisionsMixin):
                     project.project.id,
                     project.project.scenario_key,
                 )
-        scenarios = self.client.list_scenarios()
+        # catalog fallback 只能提供旧容器参数，不能把旧项目升级为新执行拓扑。
+        scenarios = [
+            scenario.model_copy(update={"features": {
+                key: value for key, value in scenario.features.items()
+                if key != "http_traffic_execution_version"
+            }})
+            for scenario in self.client.list_scenarios()
+        ]
         by_key = {scenario.key: scenario for scenario in scenarios}
         requested = project.project.scenario_key
         if requested in by_key:
@@ -154,6 +161,9 @@ class WorkerRuntimeMixin(DispatchDecisionsMixin):
             dns=self.config.container.dns,
             cap_add=effective_caps,
             features={
+                **({"http_traffic_execution_version": 1}
+                   if type(scenario.features.get("http_traffic_execution_version")) is int
+                   and scenario.features["http_traffic_execution_version"] == 1 else {}),
                 "profile_id": profile.id,
                 "image_ref": profile.image_ref,
                 "isolation": profile.isolation,
@@ -262,7 +272,7 @@ class WorkerRuntimeMixin(DispatchDecisionsMixin):
                 continue
             workers.append(self._project_worker_config(binding))
             reason = getattr(binding, "unavailable_reason", None)
-            if reason in {"model_disabled", "credential_missing", "binding_stale", "engine_unsupported"}:
+            if reason in {"model_unconfigured", "model_disabled", "model_incomplete", "model_protocol_unsupported", "credential_missing", "engine_unsupported"}:
                 unavailable_reasons[str(getattr(binding, "id"))] = reason
         for worker in workers:
             # 排除顺序决定审计中的 blocked 分类，优先解释启用状态和能力，再解释容量和退避。
@@ -401,8 +411,7 @@ class WorkerRuntimeMixin(DispatchDecisionsMixin):
                 task_type,
             )
         except requests.RequestException as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-            self._observe_decision(project_id, "binding_stale" if status in (404, 409) else "binding_failed", task_type=task_type, worker_id=worker.id)
+            self._observe_decision(project_id, "binding_failed", task_type=task_type, worker_id=worker.id)
             LOG.warning(
                 "execution binding resolution failed project=%s worker=%s task=%s error=%s",
                 project_id,
@@ -453,7 +462,7 @@ class WorkerRuntimeMixin(DispatchDecisionsMixin):
             worker_id = str(candidate.get("id") or "")
             binding = bindings.get(worker_id)
             if binding is None:
-                self._observe_decision(project_id, "binding_stale", task_type=task_type)
+                self._observe_decision(project_id, "binding_failed", task_type=task_type)
                 continue
             materialized = self._materialize_worker(
                 project_id,
@@ -463,6 +472,14 @@ class WorkerRuntimeMixin(DispatchDecisionsMixin):
             if materialized is None:
                 continue
             worker, provenance, circuit_key = materialized
+            # 候选快照之后可能调低并发；只收紧新派发，不触碰已在途的 future。
+            running_counts = self._worker_counts()
+            if running_counts.get(worker.name, 0) >= worker.max_running:
+                selection.blocked_busy.append(
+                    self._worker_blocked_runtime_context(worker, running_counts, reason="busy")
+                )
+                self._observe_selection(project_id, task_type, selection)
+                continue
             retry_after = self._binding_auth_circuit_retry_after(circuit_key)
             if retry_after is None:
                 return worker, provenance, circuit_key
@@ -529,6 +546,8 @@ class WorkerRuntimeMixin(DispatchDecisionsMixin):
     def _worker_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         for task in self.futures.values():
+            if task.task_type == "agent_chat":
+                continue
             counts[task.worker_name] = counts.get(task.worker_name, 0) + 1
         return counts
 
@@ -561,6 +580,7 @@ class WorkerRuntimeMixin(DispatchDecisionsMixin):
             "engine": worker.engine,
             "type": worker.type,
             "model_id": worker.model_id,
+            "max_output_tokens": worker.model_binding.max_output_tokens if worker.model_binding is not None else None,
             "priority": worker.priority,
             "running": running_counts.get(worker.name, 0),
             "max_running": worker.max_running,

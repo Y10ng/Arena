@@ -15,6 +15,7 @@ from typing import Any, Callable, Iterator
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import HTTPException
+from pydantic import ValidationError
 import yaml
 
 from cairn.dispatcher.config import DispatchConfig
@@ -383,8 +384,23 @@ class DispatcherConfigStore:
                 os.fsync(handle.fileno())
             try:
                 DispatchConfig.load(tmp_path)
+            except ValidationError as exc:
+                # 只投影固定字段名，不返回原始 input、ctx 或可能反射凭据的 validator 消息。
+                safe_fields = {
+                    "runtime", "tasks", "bootstrap", "reason", "explore", "report",
+                    "max_workers", "max_running_projects", "max_project_workers", "interval",
+                    "healthcheck_timeout", "timeout", "conclude_timeout", "max_intents",
+                    "max_output_tokens", "execution_profiles", "mem_limit", "memswap_limit",
+                    "pids_limit", "container", "image_ref", "network_policy", "isolation",
+                }
+                fields = []
+                for error in exc.errors(include_input=False, include_context=False):
+                    location = error["loc"]
+                    if location and all(type(part) is int or part in safe_fields for part in location):
+                        fields.append(".".join(str(part) for part in location))
+                detail = "、".join(dict.fromkeys(fields)) or "未展示的运行配置"
+                raise HTTPException(422, f"Invalid dispatch.yaml: {detail} 配置无效，请检查字段及资源约束") from exc
             except Exception as exc:
-                # Pydantic 错误可能包含 input_value，控制面只返回错误类型以免反射 credential。
                 raise HTTPException(422, f"Invalid dispatch.yaml: {type(exc).__name__}") from exc
             os.replace(tmp_path, self.path)
             os.chmod(self.path, 0o600, follow_symlinks=False)

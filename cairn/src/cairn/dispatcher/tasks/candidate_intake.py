@@ -16,6 +16,7 @@ from cairn.dispatcher.tasks.candidate_capture_outbox import (
     CandidateCaptureOutbox,
     CandidateCaptureOutboxError,
     PendingCandidateCapture,
+    PERMANENT_CANDIDATE_REJECTIONS,
 )
 from cairn.dispatcher.tasks.common_base import LOG
 from cairn.dispatcher.worker_protocol.submission import (
@@ -25,8 +26,9 @@ from cairn.dispatcher.worker_protocol.submission import (
     SUBMISSION_ISSUE_KEYWORDS,
     submission_schema_paths,
 )
+from cairn.server.schemas.candidates import candidate_artifact_limit, candidate_manifest_byte_limit
 from cairn.dispatcher.workers.base import (
-    CANDIDATE_FRAME_PROTOCOL, CANDIDATE_MAX_ARTIFACTS, CANDIDATE_MAX_ARTIFACT_BYTES,
+    CANDIDATE_FRAME_PROTOCOL, CANDIDATE_MAX_ARTIFACT_BYTES,
     WorkerCandidateSpool,
 )
 
@@ -141,8 +143,8 @@ def _required_text(value: object) -> bool:
     return isinstance(value, str) and bool(value)
 
 
-def _validate_artifacts(value: object) -> None:
-    if not isinstance(value, list) or len(value) > CANDIDATE_MAX_ARTIFACTS:
+def _validate_artifacts(value: object, *, phase: str) -> None:
+    if not isinstance(value, list) or len(value) > candidate_artifact_limit(phase):
         raise CandidateIntakeError("candidate artifact identity list is invalid")
     handles: list[str] = []
     for artifact in value:
@@ -238,7 +240,7 @@ def _validate_candidate_manifest(
         or manifest["raw_sha256"] != sha256(raw).hexdigest()
     ):
         raise CandidateIntakeError("candidate raw identity mismatch")
-    _validate_artifacts(manifest["artifacts"])
+    _validate_artifacts(manifest["artifacts"], phase=phase)
 
 
 def _validate_outcome_manifest(
@@ -329,7 +331,7 @@ def decode_candidate_spool(
         if spool[offset : offset + 8] != _FRAME_MAGIC:
             raise CandidateIntakeError("candidate spool frame magic is invalid")
         manifest_length, raw_length = struct.unpack(">II", spool[offset + 8 : offset + 16])
-        if manifest_length <= 0 or manifest_length > descriptor.max_manifest_bytes:
+        if manifest_length <= 0 or manifest_length > min(descriptor.max_manifest_bytes, candidate_manifest_byte_limit(phase)):
             raise CandidateIntakeError("candidate manifest exceeds its byte limit")
         if raw_length > descriptor.max_candidate_bytes:
             raise CandidateIntakeError("candidate raw bytes exceed their byte limit")
@@ -444,6 +446,8 @@ class CandidateIntakeSummary:
     received: int = 0
     replayed: int = 0
     pending: int = 0
+    rejected: int = 0
+    rejection_http_status: int | None = None
     integrity_error: str | None = None
     blocked_project_ids: set[str] = field(default_factory=set)
 
@@ -592,7 +596,28 @@ def deliver_candidate_entries(
         if entry.capture_id in blocked_captures:
             summary.pending += 1
             continue
-        disposition, response = _deliver_entry(client, entry)
+        try:
+            rejection = outbox.rejection(entry)
+            if rejection is None:
+                disposition, response = _deliver_entry(client, entry)
+                detail = response.data.get("detail") if isinstance(response.data, dict) else None
+                if (entry.record_kind == "candidate" and response.status_code == 409
+                        and isinstance(detail, str) and detail in PERMANENT_CANDIDATE_REJECTIONS):
+                    rejection = outbox.reject(entry, status_code=response.status_code, code=detail)
+            if rejection is not None:
+                summary.rejected += 1
+                if summary.integrity_error is None:
+                    summary.integrity_error = rejection.code
+                    summary.rejection_http_status = rejection.status_code
+                # 拒绝不是 accepted；物理执行仍由 fence 独立隔离，不能在这里释放。
+                continue
+        except CandidateCaptureOutboxError:
+            summary.pending += 1
+            summary.integrity_error = "candidate_outbox_invalid"
+            summary.rejection_http_status = None
+            summary.blocked_project_ids.add(entry.project_id)
+            blocked_captures.add(entry.capture_id)
+            continue
         if disposition == "accepted":
             try:
                 removed = outbox.remove(entry)
@@ -600,9 +625,8 @@ def deliver_candidate_entries(
                 removed = False
             if not removed:
                 summary.pending += 1
-                summary.integrity_error = (
-                    summary.integrity_error or "candidate_outbox_invalid"
-                )
+                summary.integrity_error = "candidate_outbox_invalid"
+                summary.rejection_http_status = None
                 summary.blocked_project_ids.add(entry.project_id)
                 blocked_captures.add(entry.capture_id)
                 continue
@@ -614,10 +638,14 @@ def deliver_candidate_entries(
         summary.pending += 1
         summary.blocked_project_ids.add(entry.project_id)
         blocked_captures.add(entry.capture_id)
-        if disposition == "conflict":
-            summary.integrity_error = summary.integrity_error or "candidate_receipt_conflict"
-        elif disposition == "rejected":
-            summary.integrity_error = summary.integrity_error or "candidate_capture_rejected"
+        # 不让同批已终结拒绝掩盖未知冲突；未知项仍须阻断恢复收尾。
+        if summary.integrity_error is None or summary.integrity_error in PERMANENT_CANDIDATE_REJECTIONS:
+            if disposition == "conflict":
+                summary.integrity_error = "candidate_receipt_conflict"
+                summary.rejection_http_status = response.status_code
+            elif disposition == "rejected":
+                summary.integrity_error = "candidate_capture_rejected"
+                summary.rejection_http_status = response.status_code
     return summary
 
 
@@ -738,6 +766,8 @@ def intake_worker_candidates(
     summary.received = delivered.received
     summary.replayed = delivered.replayed
     summary.pending = delivered.pending
+    summary.rejected = delivered.rejected
+    summary.rejection_http_status = delivered.rejection_http_status
     summary.integrity_error = delivered.integrity_error
     summary.blocked_project_ids = delivered.blocked_project_ids
     return summary

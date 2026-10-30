@@ -108,6 +108,20 @@ class PhaseContractError(ValueError):
         self.public_reason = message if public_reason is None else public_reason
 
 
+REASON_OUTPUT_ERRORS = {
+    "reason_completion_sources_invalid": "complete.from must contain at least one existing non-goal Fact ID used for the completion decision",
+    "reason_decision_empty": "open_intents is empty; submit a supported decision, a grounded complete result, or an explicit rejection",
+}
+
+
+class ReasonOutputError(PhaseContractError):
+    """仅声明可通过重新生成纠正、且尚未进入业务写入的 Reason 输出问题。"""
+
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(REASON_OUTPUT_ERRORS[code])
+
+
 @dataclass(frozen=True, slots=True)
 class DeclaredArtifact:
     handle: str
@@ -908,9 +922,16 @@ def _validate_vulnerability(fact: dict[str, Any]) -> dict[str, Any] | None:
     raw_items = vuln.get("evidence_items")
     if not isinstance(raw_items, list):
         raise PhaseContractError("vulnerability.evidence_items must be an array")
+    raw_steps = vuln.get("reproduction_steps", [])
+    if not isinstance(raw_steps, list):
+        raise PhaseContractError("vulnerability.reproduction_steps must be an array")
     try:
         items = [WorkerEvidenceItem.model_validate(item) for item in raw_items]
-    except ValidationError as exc:
+        from cairn.evidence_contracts import VerificationTestStep, validate_verification_evidence_links
+
+        steps = [VerificationTestStep.model_validate(step) for step in raw_steps]
+        validate_verification_evidence_links(items, [], steps)
+    except (ValidationError, ValueError) as exc:
         raise PhaseContractError("invalid vulnerability.evidence_items") from exc
     confidence = vuln.get("confidence", 0.5)
     if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
@@ -922,6 +943,7 @@ def _validate_vulnerability(fact: dict[str, Any]) -> dict[str, Any] | None:
         "target": (vuln.get("target") or "").strip() if isinstance(vuln.get("target"), str) else "",
         "schema_version": 2,
         "evidence_items": [item.model_dump(exclude_none=True) for item in items],
+        "reproduction_steps": [step.model_dump() for step in steps],
         "remediation": vuln.get("remediation") or "" if isinstance(vuln.get("remediation"), str) else "",
         "confidence": max(0.0, min(1.0, float(confidence))),
         "identity": _validate_vulnerability_identity(vuln.get("identity")),
@@ -1124,8 +1146,10 @@ def validate_reason_payload(
             raise PhaseContractError("intents must be an array")
         if intents:
             raise PhaseContractError("complete and intents cannot coexist")
-        if not isinstance(complete, dict) or "from" not in complete or "description" not in complete:
+        if not isinstance(complete, dict) or "description" not in complete:
             raise PhaseContractError("invalid complete payload")
+        if not isinstance(complete.get("from"), list) or not complete["from"]:
+            raise ReasonOutputError("reason_completion_sources_invalid")
         return "complete", complete, abandon
     if intents is not None:
         if not isinstance(intents, list):
@@ -1195,7 +1219,7 @@ def validate_reason_payload(
             and not abandon
             and (structured_cells is None or structured_cells)
         ):
-            raise PhaseContractError("intents must not be empty when open_intents is empty")
+            raise ReasonOutputError("reason_decision_empty")
         # 超出本轮预算属于确定性契约错误，不能静默丢弃 Worker 决策。
         if len(intents) > max_intents:
             raise PhaseContractError(f"intents must contain at most {max_intents} items")
@@ -1207,7 +1231,7 @@ def validate_reason_payload(
         and not abandon
         and (structured_cells is None or structured_cells)
     ):
-        raise PhaseContractError("intents is required when open_intents is empty")
+        raise ReasonOutputError("reason_decision_empty")
     return "noop", None, abandon
 
 
@@ -1528,8 +1552,8 @@ def validate_report_payload(payload: dict[str, Any]) -> tuple[str, dict[str, Any
     if not isinstance(data, dict):
         raise PhaseContractError("report data must be an object")
     validated = validate_phase_data("report_execute", data)
-    ids = [item["vulnerability_id"] for item in validated["findings"]]
-    if len(ids) != len(set(ids)):
-        raise PhaseContractError("report contains duplicate vulnerability IDs")
+    handles = [item["artifact_handle"] for item in validated["segment_refs"]]
+    if len(handles) != len(set(handles)):
+        raise PhaseContractError("report contains duplicate segment references")
     _validate_artifact_declarations(data)
     return "report", validated

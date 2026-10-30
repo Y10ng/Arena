@@ -45,15 +45,15 @@ AUTHORIZATION_DECISIONS = {
 # 只允许固定错误码进入租户视图，不转发 dispatcher 的原始异常或运行配置。
 DECISIONS = {
     **AUTHORIZATION_DECISIONS,
-    "no_candidates": ("blocked", "没有可执行的 Worker，请检查项目绑定与模型配置"),
-    "engine_unsupported": ("blocked", "绑定的 Worker 引擎不受支持，请重新绑定 pi Worker"),
+    "no_candidates": ("blocked", "没有可执行的 Worker，请检查 Worker 与模型配置"),
+    "engine_unsupported": ("blocked", "Worker 引擎不受支持，请检查 Worker 配置"),
     "worker_disabled": ("blocked", "绑定的 Worker 已禁用，请检查 Worker 配置"),
-    "worker_task_type": ("blocked", "Worker 不支持当前任务类型，请调整项目绑定"),
+    "worker_task_type": ("blocked", "Worker 不支持当前任务类型，请检查 Worker 配置"),
+    "model_unconfigured": ("blocked", "Worker 未配置模型，请前往 Worker 配置"),
     "model_disabled": ("blocked", "Worker 对应的模型已禁用"),
     "model_protocol_unsupported": ("blocked", "Worker 对应的模型协议不受支持"),
     "model_incomplete": ("blocked", "模型配置不完整，请检查模型名称和接口"),
     "credential_missing": ("blocked", "模型凭据尚未配置，请在模型设置中补全"),
-    "binding_stale": ("blocked", "Worker 配置已变更，请重新确认项目的 Worker 绑定"),
     "binding_failed": ("blocked", "无法获取执行绑定，请检查 Worker 和模型配置"),
     "binding_auth_circuit": ("waiting", "模型认证失败后暂缓执行，请检查凭据和重试窗口"),
     "worker_capacity": ("waiting", "Worker 执行容量已满，等待当前任务释放容量"),
@@ -94,7 +94,7 @@ CANDIDATE_RECOVERY_MESSAGES = {
     "exec_inspection_unavailable": "Docker 暂时无法检查原 exec，已保留执行现场并等待自动重试",
     "exec_identity_mismatch": "原 exec 身份与容器不一致，已隔离本项目并等待管理员核查",
     "exec_terminal_state_invalid": "原 exec 状态不完整，尚不能确认执行已停止",
-    "termination_proof_unavailable": "原 exec 已退出，但进程组停止凭据尚未成立，暂不释放执行",
+    "termination_proof_unavailable": "取消已请求，正在等待原执行及其后代的终止确认；确认前不会派发重复执行",
     "execution_control_invalid": "原执行控制凭据无效，已隔离本项目并等待管理员核查",
     "task_run_authority_unavailable": "无法从 Server 核对原 Run 终态，不能对共享容器中的执行发送信号",
     "task_run_owner_mismatch": "原 Run 的 Dispatcher 归属不符，不能终止该任务执行",
@@ -126,7 +126,7 @@ ERRORS = {
     "provider_rate_limit": "模型请求受到限流，请等待退避窗口",
     "provider_error": "模型请求失败，请查看对应运行记录",
     "request_contract": "执行请求不符合协议，请修复配置或请求构造后再恢复",
-    "business_acceptance": "执行结果未通过业务验收，本代不再自动重试",
+    "business_acceptance": "执行结果未通过业务验收，请查看失败原因和当前调度状态",
     "contract_error": "执行契约校验失败，本代不再自动重试",
     "protocol_error": "执行结果协议校验失败，本代不再自动重试",
     "result_schema": "执行结果不符合约定，尚未被接受为评估成果",
@@ -254,7 +254,7 @@ def _candidate_recovery(
     runs = {
         str(row["id"]): row
         for row in conn.execute(
-            "SELECT id, runtime_context_json FROM task_runs "
+            "SELECT id, execution_generation, runtime_context_json FROM task_runs "
             "WHERE project_id = ? AND execution_generation <= ?",
             (project_id, generation),
         ).fetchall()
@@ -278,7 +278,12 @@ def _candidate_recovery(
         if context.get("dispatcher_id") != dispatcher_id:
             continue
         lifecycle = context.get("execution_lifecycle")
-        if isinstance(lifecycle, dict) and lifecycle.get("termination_confirmed") is True and lifecycle.get("cleanup_confirmed") is True:
+        recovery = context.get("candidate_recovery")
+        if (isinstance(lifecycle, dict) and lifecycle.get("generation") == run["execution_generation"]
+                and lifecycle.get("termination_confirmed") is True
+                and (lifecycle.get("cleanup_confirmed") is True
+                     or isinstance(recovery, dict) and recovery.get("physical_proof_version") == 2)):
+            # 已接受的终止证明优先于尚未刷新的 heartbeat，不把待清理误报为仍待终止。
             continue
         valid.append(item)
     if not valid:
@@ -317,7 +322,7 @@ def _retry_decision(conn, project, now: str):
     for scope in scopes:
         token = None
         if scope["task_type"] == "report":
-            report = conn.execute("SELECT generation_token, status FROM assessment_report_finalizations WHERE project_id = ?", (project["id"],)).fetchone()
+            report = conn.execute("SELECT generation_token, status FROM assessment_report_finalizations WHERE project_id = ? AND scope_key = ''", (project["id"],)).fetchone()
             if report is None or report["status"] == "ready":
                 continue
             token = report["generation_token"]
@@ -351,7 +356,7 @@ def _report_retry_decision(conn, project, now: str):
     from .assessment_attempts import execution_retry_eligibility
 
     finalization = conn.execute(
-        "SELECT generation_token, status FROM assessment_report_finalizations WHERE project_id = ?",
+        "SELECT generation_token, status FROM assessment_report_finalizations WHERE project_id = ? AND scope_key = ''",
         (project["id"],),
     ).fetchone()
     if finalization is None or finalization["status"] == "ready":
@@ -396,7 +401,7 @@ def _attempts(conn, project_id: str) -> list[RuntimeAttempt]:
 
 def _current_report_attempts(conn, project) -> list[RuntimeAttempt]:
     finalization = conn.execute(
-        "SELECT generation_token FROM assessment_report_finalizations WHERE project_id = ?",
+        "SELECT generation_token FROM assessment_report_finalizations WHERE project_id = ? AND scope_key = ''",
         (project["id"],),
     ).fetchone()
     if finalization is None:
@@ -688,9 +693,9 @@ def _verified_report_finish_receipt(conn, project_id: str, run):
         SELECT status, generation_token, artifact_id,
                input_snapshot_artifact_id, input_snapshot_sha256
         FROM assessment_report_finalizations
-        WHERE project_id = ?
+        WHERE project_id = ? AND generation_token = ?
         """,
-        (project_id,),
+        (project_id, receipt["generation_token"]),
     ).fetchone()
     if (
         finalization is None

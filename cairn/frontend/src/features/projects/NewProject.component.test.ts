@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '@/api/client'
 import { onBeforeRouteLeave } from 'vue-router'
 import NewProject from './NewProject.vue'
+import TestEgressFields from '@/components/patterns/TestEgressFields.vue'
 import CreationRequestRecovery from './CreationRequestRecovery.vue'
 import type { ProjectSchedule } from '@/api/projectSchedules'
 
@@ -34,43 +35,13 @@ const mocks = vi.hoisted(() => ({
       goal_template: 'AI Agent goal\n1. prompt injection\n2. tool authorization\n3. isolation',
     },
   ],
-  workers: [
-    {
-      id: 'worker-available',
-      display_name: '可用 Worker',
-      model_id: 'model-a',
-      model_display_name: 'Claude',
-      engine: 'pi',
-      task_types: ['bootstrap', 'reason', 'explore'],
-      available: true,
-    },
-    {
-      id: 'worker-disabled',
-      display_name: '不可用 Worker',
-      model_id: 'model-b',
-      model_display_name: 'Claude',
-      task_types: ['reason'],
-      available: false,
-    },
-  ],
   libraries: [{ key: 'library-a', name: '授权资料', latest_version: 2, file_count: 3 }],
-  templates: [
-    {
-      id: 'template-a',
-      name: '默认 Worker 组',
-      tenant_worker_ids: ['worker-available'],
-      is_default: true,
-    },
-  ],
   queryState: {} as Record<string, { loading?: boolean; fetching?: boolean; error?: boolean }>,
   queryData: {} as Record<string, { value: unknown }>,
   queryFlags: {} as Record<
     string,
     { isLoading: { value: boolean }; isFetching: { value: boolean } }
   >,
-  createWorkerTemplate: vi.fn(),
-  updateWorkerTemplate: vi.fn(),
-  invalidateQueries: vi.fn(),
   createProject: vi.fn(),
   createResourceBatch: vi.fn(),
   getResourceConfig: vi.fn(),
@@ -86,16 +57,12 @@ vi.mock('@/api/client', async (importOriginal) => ({
   api: vi.fn(),
   cancelProjectResourceBatch: mocks.cancelResourceBatch,
   createProject: mocks.createProject,
-  createWorkerTemplate: mocks.createWorkerTemplate,
-  updateWorkerTemplate: mocks.updateWorkerTemplate,
   createProjectResourceBatch: mocks.createResourceBatch,
   deleteProjectResourceBatchMember: vi.fn(),
   getProjectResourceConfig: mocks.getResourceConfig,
   getProjectResourceBatch: mocks.getResourceBatch,
   importProjectResourceBatchZip: vi.fn(),
   listLibraryCatalog: vi.fn(),
-  listTenantWorkerOptions: vi.fn(),
-  listWorkerTemplates: vi.fn(),
   updateProjectResourceBatchMember: vi.fn(),
   uploadProjectResourceBatchFile: mocks.uploadResourceFile,
 }))
@@ -111,22 +78,11 @@ vi.mock('vue-router', async (importOriginal) => ({
 }))
 
 vi.mock('@tanstack/vue-query', () => ({
-  useQueryClient: () => ({
-    invalidateQueries: mocks.invalidateQueries,
-    setQueryData: (queryKey: string[], update: (current: unknown) => unknown) => {
-      const key = queryKey[0]!
-      const data = update(mocks.queryData[key]?.value)
-      mocks.queryData[key]!.value = data
-      if (key === 'worker-templates') mocks.templates = data as typeof mocks.templates
-    },
-  }),
   useQuery: ({ queryKey }: { queryKey: unknown }) => {
     const key = String((unref(queryKey) as unknown[])[0])
     const values: Record<string, unknown> = {
       'scenario-catalog': mocks.scenarios,
-      'tenant-worker-options': mocks.workers,
       'library-catalog': mocks.libraries,
-      'worker-templates': mocks.templates,
     }
     const state = mocks.queryState[key] || {}
     const data = ref(values[key])
@@ -199,40 +155,6 @@ beforeEach(() => {
   mocks.queryState = {}
   mocks.queryData = {}
   mocks.queryFlags = {}
-  mocks.workers = [
-    {
-      id: 'worker-available',
-      display_name: '可用 Worker',
-      model_id: 'model-a',
-      model_display_name: 'Claude',
-      engine: 'pi',
-      task_types: ['bootstrap', 'reason', 'explore'],
-      available: true,
-    },
-    {
-      id: 'worker-disabled',
-      display_name: '不可用 Worker',
-      model_id: 'model-b',
-      model_display_name: 'Claude',
-      task_types: ['reason'],
-      available: false,
-    },
-  ]
-  mocks.templates = [
-    {
-      id: 'template-a',
-      name: '默认 Worker 组',
-      tenant_worker_ids: ['worker-available'],
-      is_default: true,
-    },
-  ]
-  mocks.createWorkerTemplate
-    .mockReset()
-    .mockImplementation(async (input) => ({ id: 'template-created', ...input }))
-  mocks.updateWorkerTemplate
-    .mockReset()
-    .mockImplementation(async (id, input) => ({ id, name: '默认 Worker 组', ...input }))
-  mocks.invalidateQueries.mockReset().mockResolvedValue(undefined)
   mocks.createProject.mockReset().mockResolvedValue({ project: { id: 'project-created' } })
   mocks.getResourceConfig.mockReset().mockResolvedValue({
     kinds: ['note', 'script', 'file'],
@@ -289,20 +211,126 @@ afterEach(() => {
 })
 
 describe('NewProject creation boundaries', () => {
-  it('applies a late first default after text edits without replacing that text', async () => {
-    mocks.queryState = { 'worker-templates': { fetching: true } }
-    await mountPage()
-    await setFieldValue('#np-title', '正文先填写')
-    await setFieldValue('#np-origin-input', '  原始背景\n  保留格式  ')
-    await setFieldValue('#np-goal-input', '用户目标')
-    expect(buttonByText('创建并启动')?.disabled).toBe(true)
-    mocks.queryFlags['worker-templates']!.isFetching.value = false
-    await flushPromises()
-    expect(document.querySelector<HTMLInputElement>('#np-worker-worker-available')?.checked).toBe(true)
-    expect(document.querySelector<HTMLTextAreaElement>('#np-origin-input')?.value).toBe('  原始背景\n  保留格式  ')
+  it('代理设置：即时创建默认直连，代理凭据仅随原请求重试而不写恢复缓存', async () => {
+    mocks.createProject.mockRejectedValueOnce(new Error('连接断开'))
+    const wrapper = await mountPage()
+    const fields = wrapper.getComponent(TestEgressFields)
+    expect(fields.props('modelValue').mode).toBe('direct')
+    fields.vm.$emit('update:modelValue', { mode: 'socks5', host: 'proxy.example.test', port: 1080, auth_action: 'replace', username: 'sample-user', password: 'sample-password' })
+    await setFieldValue('#np-title', '出口样本')
     buttonByText('创建并启动')!.click()
     await flushPromises()
-    expect(mocks.createProject).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ origin: '  原始背景\n  保留格式  ', tenant_worker_ids: ['worker-available'] }))
+    const payload = mocks.createProject.mock.calls[0]![0]
+    expect(payload.test_egress).toEqual({ mode: 'socks5', host: 'proxy.example.test', port: 1080, auth_action: 'replace', username: 'sample-user', password: 'sample-password' })
+    expect(payload.origin + payload.goal).not.toContain('sample-password')
+    expect(sessionStorage.getItem('arena.creation-request')).not.toMatch(/sample-password|sample-user|test_egress/)
+    buttonByText('用原请求恢复提交')!.click()
+    await flushPromises()
+    expect(mocks.createProject.mock.calls[1]![0]).toEqual(payload)
+    expect(fields.props('modelValue').password).toBe('')
+  })
+
+  it('代理设置：单次计划创建携带HTTP出口，周期编辑只从公共值保留认证', async () => {
+    const wrapper = await mountPage()
+    await setFieldValue('#np-title', '单次出口')
+    wrapper.getComponent(TestEgressFields).vm.$emit('update:modelValue', { mode: 'http', host: 'proxy.example.test', port: 8080, auth_action: 'keep', username: '', password: '' })
+    await selectOption('schedule-mode', '单次定时')
+    await setFieldValue('#schedule-start', '2099-04-05T09:00')
+    vi.mocked(api).mockRejectedValue(new ApiError('受控拒绝', 422, {}))
+    buttonByText('保存单次预约')!.click()
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('POST', '/project-schedules', expect.objectContaining({ project: expect.objectContaining({ test_egress: { mode: 'http', host: 'proxy.example.test', port: 8080, auth_action: 'keep' } }) }))
+    wrapper.unmount()
+    const plan = await mountPage({ id: 'egress-plan', tenant_id: 'tenant-test', creator_id: 'user-test', status: 'active', next_run_at: null, project_id: null, last_project_id: null, generated_count: 0, block_reason: null, created_at: '2026-10-26T00:00:00Z', updated_at: '2026-10-26T00:00:00Z', last_result: null, mode: 'daily', timezone: 'Asia/Shanghai', start_at: '2099-06-01T09:00:00+08:00', local_time: '09:00', weekdays: [], end_date: null, max_runs: null, version: 7, resources: [], library_bindings: [], project: { title: '出口计划', origin: '背景', goal: '目标', scenario: 'default', authorization_expires_at: null, test_egress: { mode: 'socks5', host: 'proxy.example.test', port: 1080, auth_configured: true, revision: 3 } } } as ProjectSchedule)
+    expect(plan.getComponent(TestEgressFields).props('authConfigured')).toBe(true)
+    expect(plan.getComponent(TestEgressFields).props('modelValue').password).toBe('')
+    buttonByText('保存未来配置')!.click()
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith('PUT', '/project-schedules/egress-plan', expect.objectContaining({ project: expect.objectContaining({ test_egress: { mode: 'socks5', host: 'proxy.example.test', port: 1080, auth_action: 'keep' } }) }))
+  })
+
+  it('不查询模板或 Worker，保留正文并由服务端确定执行配置', async () => {
+    await mountPage()
+    expect(Object.keys(mocks.queryData)).not.toContain('worker-templates')
+    expect(Object.keys(mocks.queryData)).not.toContain('tenant-worker-options')
+    expect(document.querySelector('#np-worker-template')).toBeNull()
+    expect(document.body.textContent).not.toContain('执行设置')
+    await setFieldValue('#np-title', '正文先填写')
+    await setFieldValue('#np-origin-input', '  原始背景\n  保留格式  ')
+    buttonByText('创建并启动')!.click()
+    await flushPromises()
+    expect(mocks.createProject).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ origin: '  原始背景\n  保留格式  ' }))
+    expect(mocks.createProject.mock.calls[0]![0]).not.toHaveProperty('tenant_worker_ids')
+  })
+
+  it('代理设置默认收起，可独立展开且保留摘要与首错定位', async () => {
+    await mountPage()
+    const panel = document.querySelector<HTMLElement>('#np-proxy-settings')!
+    const trigger = document.querySelector<HTMLButtonElement>('#np-proxy-trigger')!
+    expect(panel.style.display).toBe('none')
+    expect(trigger.textContent).toContain('代理设置')
+    expect(trigger.textContent).toContain('直接连接')
+    trigger.click()
+    await flushPromises()
+    expect(panel.style.display).not.toBe('none')
+    expect(panel.querySelector('fieldset')?.getAttribute('aria-label')).toBe('代理设置')
+    expect(panel.querySelector('legend')).toBeNull()
+    const mode = panel.querySelector<HTMLElement>('[role="combobox"]')!
+    await selectOption(mode.id, 'HTTP 代理')
+    trigger.click()
+    await flushPromises()
+    expect(trigger.textContent).toContain('HTTP 代理')
+    await setFieldValue('#np-title', '代理校验')
+    buttonByText('创建并启动')!.click()
+    await flushPromises()
+    expect(mocks.createProject).not.toHaveBeenCalled()
+    expect(panel.style.display).not.toBe('none')
+    expect(document.body.textContent).toContain('请填写代理主机地址')
+  })
+
+  it.each(['daily', 'weekly'] as const)('旧 %s 计划期限在时间设置编辑，未改保值、清空取消且不提交 Worker IDs', async (mode) => {
+    const authorization = '2099-07-01T10:30:20+08:00'
+    const deadline = '2099-06-30T18:20:10+08:00'
+    vi.mocked(api).mockRejectedValue(new ApiError('受控拒绝', 422, {}))
+    await mountPage({
+      id: 'retained-plan', tenant_id: 'tenant-test', creator_id: 'user-test',
+      mode, timezone: 'Asia/Shanghai', start_at: '2099-06-01T09:00:00+08:00',
+      local_time: '09:00', weekdays: mode === 'weekly' ? [1, 3] : [], end_date: null, max_runs: null, version: 7,
+      status: 'active', next_run_at: '2099-06-01T09:00:00+08:00',
+      project_id: null, last_project_id: null, generated_count: 0, block_reason: null,
+      created_at: '2099-05-01T00:00:00Z', updated_at: '2099-05-01T00:00:00Z', last_result: null,
+      resources: [], library_bindings: [], project: {
+        title: '既有计划', origin: '历史背景', goal: '历史目标', scenario: 'default',
+        authorization_expires_at: authorization, explore_deadline: deadline,
+      },
+    })
+    expect(document.querySelector('#np-timing-settings #np-explore-deadline')).not.toBeNull()
+    expect(document.querySelector('#np-proxy-settings #np-explore-deadline')).toBeNull()
+    buttonByText('保存未来配置')!.click()
+    await flushPromises()
+    const first = vi.mocked(api).mock.calls.find(([method]) => method === 'PUT')![2] as { project: Record<string, unknown> }
+    expect(first.project).toMatchObject({ authorization_expires_at: authorization, explore_deadline: deadline })
+    expect(first.project).not.toHaveProperty('tenant_worker_ids')
+    await setFieldValue('#np-explore-deadline', '')
+    await setFieldValue('#np-authorization-expires-at', '')
+    buttonByText('保存未来配置')!.click()
+    await flushPromises()
+    expect(api).toHaveBeenLastCalledWith('PUT', '/project-schedules/retained-plan', expect.objectContaining({
+      project: expect.objectContaining({ authorization_expires_at: null, explore_deadline: null }), version: 7,
+    }))
+  })
+
+  it('缺少模型的明确拒绝保留草稿，并提供新页配置入口', async () => {
+    mocks.createProject.mockRejectedValueOnce(new ApiError('Worker explore (worker-explore) 不可用：model_unconfigured', 422, {}))
+    await mountPage()
+    await setFieldValue('#np-title', '等待配置')
+    await setFieldValue('#np-origin-input', '保留原始背景')
+    buttonByText('创建并启动')!.click()
+    await flushPromises()
+    expect(document.querySelector<HTMLInputElement>('#np-title')?.value).toBe('等待配置')
+    expect(document.querySelector<HTMLTextAreaElement>('#np-origin-input')?.value).toBe('保留原始背景')
+    expect(document.querySelector('a[target="_blank"]')?.textContent).toContain('前往 Worker 配置')
+    expect(document.body.textContent).not.toContain('保存结果未确认')
   })
 
   it('reports a random source failure before any request and allows retry', async () => {
@@ -366,7 +394,7 @@ describe('NewProject creation boundaries', () => {
       local_time: '09:00', weekdays: [], end_date: null, max_runs: null, version: 7,
       resources: [], library_bindings: [], project: {
         title: '既有计划', origin: '历史背景', goal: '历史目标', scenario: 'default',
-        tenant_worker_ids: ['worker-available'], targets,
+        targets,
       },
     } as unknown as ProjectSchedule)
     if (targets === null) expect(wrapper.findComponent({ name: 'ScheduleTiming' }).props('project')).not.toHaveProperty('targets')
@@ -399,7 +427,7 @@ describe('NewProject creation boundaries', () => {
 })
 
 describe('NewProject shared control migration', () => {
-  it('focuses the title, selects the default scenario, preserves touched templates, and filters unavailable Workers', async () => {
+  it('focuses the title, selects the default scenario, preserves touched scenario templates', async () => {
     await mountPage()
 
     expect(document.activeElement).toBe(document.querySelector('#np-title'))
@@ -407,18 +435,10 @@ describe('NewProject shared control migration', () => {
       'default origin\npublic environment context',
     )
     expect(document.querySelector('button[aria-pressed="true"]')?.textContent).toContain('默认场景')
-    expect(document.body.textContent).toContain('可用 Worker')
-    expect(document.body.textContent).toContain('pi · Claude')
-    expect(document.body.textContent).not.toContain('Claude Code ·')
-    expect(document.body.textContent).not.toContain('不可用 Worker')
     expect(document.querySelector('#np-targets-input')).toBeNull()
     expect(document.body.textContent).toContain('Origin（已知信息）')
     expect(document.body.textContent).toContain('Goal（目标）')
     expect(document.body.textContent).not.toContain('入口凭证')
-    expect(
-      document.querySelector<HTMLInputElement>('input[aria-label="选择 Worker 可用 Worker"]')
-        ?.checked,
-    ).toBe(true)
 
     const origin = document.querySelector<HTMLTextAreaElement>('#np-origin-input')!
     origin.value = 'user supplied origin'
@@ -467,179 +487,6 @@ describe('NewProject shared control migration', () => {
     expect(goal.value).toBe('user-defined Agent coverage')
   })
 
-  it('applies the explicit default template but never restores it after a manual change', async () => {
-    await mountPage()
-
-    const checkbox = document.querySelector<HTMLInputElement>(
-      'input[aria-label="选择 Worker 可用 Worker"]',
-    )!
-    expect(checkbox.checked).toBe(true)
-
-    document.querySelector<HTMLElement>('.worker-option-name')?.click()
-    await flushPromises()
-    expect(checkbox.checked).toBe(false)
-
-    mocks.queryData['tenant-worker-options'].value = [
-      ...mocks.workers,
-      {
-        ...mocks.workers[0],
-        id: 'worker-new',
-        display_name: '新 Worker',
-      },
-    ]
-    await flushPromises()
-
-    expect(checkbox.checked).toBe(false)
-    expect(
-      document.querySelector<HTMLInputElement>('input[aria-label="选择 Worker 新 Worker"]')
-        ?.checked,
-    ).toBe(false)
-  })
-
-  it('retains unavailable and deleted template bindings until explicitly removed', async () => {
-    mocks.templates[0]!.tenant_worker_ids = [
-      'worker-available',
-      'worker-disabled',
-      'worker-deleted',
-    ]
-    await mountPage()
-    expect(document.body.textContent).toContain('不可用 Worker')
-    expect(document.body.textContent).toContain('worker-deleted')
-    expect(document.body.textContent).toContain('Worker 已删除或不属于当前 Tenant')
-    expect(buttonByText('创建并启动')?.disabled).toBe(true)
-    expect(buttonByText('保存为默认组合')?.disabled).toBe(true)
-    expect(mocks.uiStore.showToast).not.toHaveBeenCalled()
-    await selectOption('np-worker-template', '本次自定义')
-    expect(document.body.textContent).toContain('worker-deleted')
-    mocks.queryData['worker-templates'].value = []
-    mocks.queryData['tenant-worker-options'].value = [mocks.workers[0]]
-    await flushPromises()
-    expect(document.body.textContent).toContain('worker-disabled')
-    const removeButtons = [...document.body.querySelectorAll<HTMLButtonElement>('button')].filter(
-      (button) => button.textContent?.includes('移除失效绑定'),
-    )
-    expect(removeButtons).toHaveLength(2)
-    for (const button of removeButtons) button.click()
-    await flushPromises()
-    expect(buttonByText('保存为默认组合')?.disabled).toBe(false)
-  })
-
-  it('does not select the first Worker without a default and saves a complete custom combination for reopening', async () => {
-    mocks.templates[0]!.is_default = false
-    mocks.workers.push({ ...mocks.workers[0]!, id: 'worker-extra', display_name: '额外 Worker' })
-    const wrapper = await mountPage()
-    expect(document.querySelector<HTMLInputElement>('#np-worker-worker-available')?.checked).toBe(
-      false,
-    )
-    expect(document.body.textContent).toContain('尚未设置默认组合')
-    document.querySelector<HTMLLabelElement>('label[for="np-worker-worker-available"]')!.click()
-    document.querySelector<HTMLLabelElement>('label[for="np-worker-worker-extra"]')!.click()
-    await flushPromises()
-    await selectOption('np-worker-template', '本次自定义')
-    expect(document.querySelector<HTMLInputElement>('#np-worker-worker-extra')?.checked).toBe(true)
-    buttonByText('保存为默认组合')!.click()
-    await flushPromises()
-    expect(mocks.createWorkerTemplate).toHaveBeenCalledExactlyOnceWith({
-      name: '默认 Worker 组合',
-      tenant_worker_ids: ['worker-available', 'worker-extra'],
-      is_default: true,
-    })
-    expect(mocks.updateWorkerTemplate).not.toHaveBeenCalled()
-    expect(mocks.invalidateQueries).toHaveBeenCalledWith({ queryKey: ['worker-templates'] })
-    wrapper.unmount()
-    await mountPage()
-    expect(document.querySelector<HTMLInputElement>('#np-worker-worker-available')?.checked).toBe(
-      true,
-    )
-    expect(document.querySelector<HTMLInputElement>('#np-worker-worker-extra')?.checked).toBe(true)
-  })
-
-  it('waits for both first queries and selects only the explicit default, not the first item', async () => {
-    mocks.workers.unshift({ ...mocks.workers[0]!, id: 'worker-first', display_name: '首项 Worker' })
-    mocks.templates.unshift({
-      id: 'template-first',
-      name: '首项模板',
-      tenant_worker_ids: ['worker-first'],
-      is_default: false,
-    })
-    mocks.queryState = {
-      'tenant-worker-options': { fetching: true },
-      'worker-templates': { fetching: true },
-    }
-    await mountPage()
-    expect(document.querySelector<HTMLInputElement>('#np-worker-worker-first')?.checked).toBe(false)
-    mocks.queryFlags['tenant-worker-options']!.isFetching.value = false
-    await flushPromises()
-    expect(document.querySelector<HTMLInputElement>('#np-worker-worker-available')?.checked).toBe(
-      false,
-    )
-    mocks.queryFlags['worker-templates']!.isFetching.value = false
-    await flushPromises()
-    expect(document.querySelector<HTMLInputElement>('#np-worker-worker-available')?.checked).toBe(
-      true,
-    )
-    expect(document.querySelector<HTMLInputElement>('#np-worker-worker-first')?.checked).toBe(false)
-    mocks.queryData['worker-templates'].value = [
-      { ...mocks.templates[0]!, is_default: true },
-      { ...mocks.templates[1]!, is_default: false },
-    ]
-    await flushPromises()
-    expect(document.querySelector<HTMLInputElement>('#np-worker-worker-available')?.checked).toBe(
-      true,
-    )
-    expect(document.querySelector<HTMLInputElement>('#np-worker-worker-first')?.checked).toBe(false)
-  })
-
-  it('keeps a manual draft when the initial default query finishes late', async () => {
-    mocks.queryState = { 'worker-templates': { fetching: true } }
-    await mountPage()
-    document.querySelector<HTMLLabelElement>('label[for="np-worker-worker-available"]')!.click()
-    await flushPromises()
-    mocks.queryData['worker-templates'].value = [
-      { ...mocks.templates[0]!, tenant_worker_ids: ['worker-disabled'] },
-    ]
-    mocks.queryFlags['worker-templates']!.isFetching.value = false
-    await flushPromises()
-    expect(document.querySelector<HTMLInputElement>('#np-worker-worker-available')?.checked).toBe(
-      true,
-    )
-    expect(document.body.textContent).not.toContain('移除失效绑定')
-    expect(document.querySelector('#np-worker-template')?.textContent).toContain('本次自定义')
-  })
-
-  it('updates the existing default without replacing the current complete draft during refresh', async () => {
-    mocks.workers.push({ ...mocks.workers[0]!, id: 'worker-extra', display_name: '额外 Worker' })
-    await mountPage()
-    document.querySelector<HTMLLabelElement>('label[for="np-worker-worker-extra"]')!.click()
-    await flushPromises()
-    buttonByText('保存为默认组合')!.click()
-    await flushPromises()
-    expect(mocks.updateWorkerTemplate).toHaveBeenCalledExactlyOnceWith('template-a', {
-      tenant_worker_ids: ['worker-available', 'worker-extra'],
-      is_default: true,
-    })
-    expect(mocks.createWorkerTemplate).not.toHaveBeenCalled()
-    mocks.queryData['worker-templates'].value = [
-      { ...mocks.templates[0]!, tenant_worker_ids: ['worker-extra'] },
-    ]
-    await flushPromises()
-    expect(document.querySelector<HTMLInputElement>('#np-worker-worker-available')?.checked).toBe(
-      true,
-    )
-    expect(document.querySelector<HTMLInputElement>('#np-worker-worker-extra')?.checked).toBe(true)
-  })
-
-  it('reports missing roles and blocks submitting or saving an incomplete combination', async () => {
-    mocks.workers[0]!.task_types = ['bootstrap', 'reason']
-    await mountPage()
-    expect(document.body.textContent).toContain('执行组合缺少角色：explore')
-    expect(buttonByText('保存为默认组合')?.disabled).toBe(true)
-    await setFieldValue('#np-title', 'Missing role')
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true }))
-    await flushPromises()
-    expect(mocks.createProject).not.toHaveBeenCalled()
-  })
-
   it('submits address-free Origin and Goal without targets and includes the uploaded resource batch id', async () => {
     await mountPage()
 
@@ -669,11 +516,11 @@ describe('NewProject shared control migration', () => {
 
     expect(mocks.createProject).toHaveBeenCalledOnce()
     expect(mocks.createProject).toHaveBeenCalledWith({
+      test_egress: { mode: 'direct', auth_action: 'clear' },
       title: 'Workspace title',
       origin: '已有接口说明和两个测试角色，重点关注订单审批相关功能。',
       goal: '重点检查普通用户之间的数据隔离及审批流程。',
       scenario: 'default',
-      tenant_worker_ids: ['worker-available'],
       request_id: expect.any(String),
       explore_deadline: null,
       authorization_expires_at: null,
@@ -697,10 +544,6 @@ describe('NewProject shared control migration', () => {
     expect(document.body.textContent).not.toContain('执行边界')
     expect(document.body.textContent).not.toContain('明确确认真实授权无限期有效')
     expect(document.querySelector('input[aria-label="授权无限期有效"]')).toBeNull()
-    expect(
-      document.querySelector<HTMLInputElement>('input[aria-label="选择 Worker 可用 Worker"]')
-        ?.checked,
-    ).toBe(true)
 
     await setFieldValue('#np-title', 'Unlimited authorization')
     buttonByText('创建并启动')?.click()
@@ -708,13 +551,13 @@ describe('NewProject shared control migration', () => {
 
     expect(mocks.createProject).toHaveBeenCalledOnce()
     expect(mocks.createProject).toHaveBeenCalledWith({
+      test_egress: { mode: 'direct', auth_action: 'clear' },
       title: 'Unlimited authorization',
       request_id: expect.any(String),
       explore_deadline: null,
       origin: 'default origin\npublic environment context',
       goal: 'default goal',
       scenario: 'default',
-      tenant_worker_ids: ['worker-available'],
       authorization_expires_at: null,
       library_keys: [],
     })
@@ -823,8 +666,7 @@ describe('NewProject shared control migration', () => {
     await flushPromises()
 
     const original = mocks.createProject.mock.calls[0]![0]
-    expect(original.tenant_worker_ids).toEqual(['worker-available'])
-    mocks.queryData['worker-templates'].value = [{ ...mocks.templates[0]!, tenant_worker_ids: ['worker-disabled'] }]
+    expect(original).not.toHaveProperty('tenant_worker_ids')
     await flushPromises()
     expect(original.request_id).toMatch(/^[0-9a-f-]{36}$/i)
     const references = JSON.parse(sessionStorage.getItem('arena.creation-request')!)

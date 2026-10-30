@@ -11,6 +11,7 @@ from pydantic import BaseModel
 import uvicorn
 
 from cairn import __version__
+from cairn.report_segments import REPORT_MAX_MANIFEST_BYTES
 from cairn.dispatcher.logging import configure_logging
 from cairn.dispatcher.scheduler.loop import DispatcherBootstrap, DispatcherLoop
 from cairn.server import database_admin, db
@@ -364,6 +365,8 @@ def serve(
         port=port,
         log_level=log_level.lower(),
         access_log=access_log,
+        # 报告 candidate 的 base64 身份清单可超过 h11 默认 16 KiB；正文仍由路由按 phase 限额。
+        h11_max_incomplete_event_size=4 * ((REPORT_MAX_MANIFEST_BYTES + 2) // 3) + 16 * 1024,
     )
 
 

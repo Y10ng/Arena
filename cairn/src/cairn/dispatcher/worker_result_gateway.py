@@ -11,7 +11,7 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
-from cairn.dispatcher.contracts import PhaseContractError
+from cairn.dispatcher.contracts import PhaseContractError, ReasonOutputError
 from cairn.dispatcher.worker_protocol.submission import (
     CANDIDATE_OUTCOME_CODES,
     RESULT_KINDS,
@@ -39,6 +39,7 @@ class WorkerResultFailure:
     path: str | None = None
     exit_code: int | None = None
     submission_diagnostics: dict[str, object] | None = None
+    http_status: int | None = None
 
     def details(self) -> dict[str, object]:
         details: dict[str, object] = {
@@ -49,6 +50,8 @@ class WorkerResultFailure:
             details["path"] = self.path
         if self.exit_code is not None:
             details["exit_code"] = self.exit_code
+        if self.http_status is not None:
+            details["http_status"] = self.http_status
         if self.submission_diagnostics:
             details.update(sanitize_submission_diagnostics(self.submission_diagnostics, self.phase))
         return details
@@ -114,6 +117,7 @@ def worker_failure_error_type(failure: WorkerResultFailure) -> str:
         "provider_auth": "provider_auth",
         "provider_rate_limit": "provider_rate_limit",
         "provider": "provider_error",
+        "model_output_limit": "model_output_limit",
         "session": "session_error",
         "cancelled": "cancelled",
         "timeout": "worker_timeout",
@@ -127,7 +131,8 @@ _PI_ERROR_CLASSES = {
         if code.startswith("candidate_")
     },
     "provider_auth": "provider_auth", "provider_rate_limit": "provider_rate_limit",
-    "provider_error": "provider", "unsupported_model_config": "request_contract",
+    "provider_error": "provider", "model_output_limit": "model_output_limit",
+    "unsupported_model_config": "request_contract",
     "invalid_request": "request_contract", "invalid_result_schema": "request_contract",
     "result_schema": "result_schema", "submission_conflict": "result_schema",
     "submission_missing": "submission_missing", "submission_invalid": "submission_invalid",
@@ -145,6 +150,7 @@ _REQUEST_PATHS = frozenset({
     "resume", "conclude_only", "timeout_seconds", "max_result_repairs", "result_schema",
     "model", "model.protocol", "model.auth_header", "model.model_name",
     "model.inference_endpoint", "model.base_url", "model.api_key", "model.custom_headers",
+    "model.max_output_tokens",
     "binding", "binding.slot_key", "binding.surface_key", "binding.test_family",
     "binding.verification_observation_id", "binding.review_input_digest",
     "binding.max_intents", "binding.allowed_fact_ids", "binding.allowed_intent_ids",
@@ -215,7 +221,7 @@ def decode_pi_result(
         origin = (
             "pi_submission" if code in SUBMISSION_FAILURE_CODES
             else "pi_request" if failure_class == "request_contract"
-            else "pi_sdk" if failure_class in {"provider_auth", "provider_rate_limit", "provider"}
+            else "pi_sdk" if failure_class in {"provider_auth", "provider_rate_limit", "provider", "model_output_limit"}
             else "pi_submission" if failure_class == "result_schema"
             else "pi_session" if failure_class == "session"
             else "pi_runner"
@@ -223,7 +229,11 @@ def decode_pi_result(
         # 外部异常正文不进入诊断模型，固定 code 与已声明 path 足以定位失败。
         return WorkerResultOutcome(failure=_failure(
             failure_class=failure_class, code=code, phase=phase,
-            message=f"Pi 执行失败：{code}" + (f"（{path}）" if path else ""),
+            message=(
+                "模型输出达到上限，当前段未完成"
+                if code == "model_output_limit"
+                else f"Pi 执行失败：{code}" + (f"（{path}）" if path else "")
+            ),
             payload=None, origin=origin, path=path,
             submission_diagnostics=sanitize_submission_diagnostics(error, phase),
         ))
@@ -244,7 +254,14 @@ def decode_pi_result(
                 data,
                 assessment_protocol=assessment_protocol,
             )
-        except ValidationError:
+        except ValidationError as exc:
+            # 只识别已声明的来源字段错误，不从异常正文推断重试资格。
+            if phase == "reason_execute" and all(
+                error["loc"][:2] == ("complete", "from")
+                for error in exc.errors()
+            ):
+                output_error = ReasonOutputError("reason_completion_sources_invalid")
+                return invalid(output_error.code, output_error.public_reason, "business_acceptance")
             # extra 字段名与 mapping key 也可能是业务秘密，不发布 Pydantic 原始 loc。
             return invalid("phase_shape_invalid", "Worker 结果不符合阶段数据结构：phase_shape_invalid", "result_schema")
     return validate_worker_payload(result, phase=phase, validator=validator)
@@ -288,7 +305,7 @@ def validate_worker_payload(
             payload=payload,
             failure=_failure(
                 failure_class="business_acceptance",
-                code="phase_contract_invalid",
+                code=exc.code if phase == "reason_execute" and isinstance(exc, ReasonOutputError) else "phase_contract_invalid",
                 phase=phase,
                 # 只发布权威规则显式声明的原因，不解释任意 ValueError/Pydantic 文本。
                 message="Worker 结果未通过阶段业务验收：" + (

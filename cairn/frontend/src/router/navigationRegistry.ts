@@ -6,8 +6,8 @@ export const productionRouteNames = [
   'ChangePassword',
   'Overview',
   'Findings',
+  'Traffic',
   'Reports',
-  'Provenance',
   'Projects',
   'Verifications',
   'NewVerification',
@@ -15,20 +15,19 @@ export const productionRouteNames = [
   'VerificationIntegrations',
   'VerificationConfiguration',
   'WorkspaceGraph',
+  'WorkspaceAgent',
   'WorkspaceRuns',
   'WorkspaceHints',
   'WorkspaceArtifacts',
   'WorkspaceVulnerabilities',
+  'WorkspaceTraffic',
   'Monitoring',
-  'ConsoleModels',
   'ConsoleWorkers',
   'ConsoleUsers',
-  'ConsoleDispatcher',
   'ConsoleScenarios',
   'ConsolePrompts',
   'ConsoleKnowledge',
   'ConsoleReportTemplates',
-  'ConsoleTimeout',
   'Forbidden',
   'NotFound',
 ] as const
@@ -37,7 +36,6 @@ export type ProductionRouteName = (typeof productionRouteNames)[number]
 export type NavigationIcon =
   | 'dashboard'
   | 'finding'
-  | 'provenance'
   | 'projects'
   | 'add'
   | 'graph'
@@ -46,14 +44,11 @@ export type NavigationIcon =
   | 'artifacts'
   | 'vulnerabilities'
   | 'monitoring'
-  | 'models'
   | 'workers'
   | 'users'
-  | 'dispatcher'
   | 'scenarios'
   | 'prompts'
   | 'knowledge'
-  | 'timeout'
   | 'status'
   | 'auth'
 
@@ -116,6 +111,14 @@ export const navigationRegistry = [
     },
   }),
   record({
+    routeName: 'Traffic', label: '流量', icon: 'monitoring', role: 'authenticated',
+    sidebar: { placement: 'primary', order: 22 },
+    command: {
+      kindLabel: '导航', title: '转到流量', subtitle: '查看授权项目的 HTTP 流量',
+      badge: '流量', keywords: ['traffic', 'http', '流量'],
+    },
+  }),
+  record({
     routeName: 'Reports',
     label: '报告',
     icon: 'artifacts',
@@ -127,20 +130,6 @@ export const navigationRegistry = [
       subtitle: '阅读与下载已完成的项目评估报告',
       badge: '报告',
       keywords: ['report', 'markdown', '报告'],
-    },
-  }),
-  record({
-    routeName: 'Provenance',
-    label: '溯源分析',
-    icon: 'provenance',
-    role: 'authenticated',
-    sidebar: { placement: 'primary', order: 30 },
-    command: {
-      kindLabel: '导航',
-      title: '转到溯源分析',
-      subtitle: '从成果追踪执行操作、日志、证据与独立验证',
-      badge: 'Provenance',
-      keywords: ['provenance', 'audit', 'logs', '溯源', '审计', '日志'],
     },
   }),
   record({
@@ -189,6 +178,21 @@ export const navigationRegistry = [
       kindLabel: '系统管理', title: '漏洞复测配置',
       subtitle: '配置个人复测模型、名称与启停',
       badge: '复测', keywords: ['模型', '执行', '复测', 'verification', '配置'],
+    },
+  }),
+  record({
+    routeName: 'WorkspaceAgent',
+    label: 'Agent',
+    icon: 'hints',
+    role: 'authenticated',
+    breadcrumbParent: 'workspace-project',
+    workspace: { order: 5 },
+    command: {
+      kindLabel: '当前项目',
+      title: '打开项目 Agent',
+      subtitle: '持续对话、读取项目成果与下载已有报告',
+      badge: 'Agent',
+      keywords: ['agent', '对话', '会话'],
     },
   }),
   record({
@@ -252,6 +256,14 @@ export const navigationRegistry = [
     },
   }),
   record({
+    routeName: 'WorkspaceTraffic', label: '流量', icon: 'monitoring', role: 'authenticated',
+    breadcrumbParent: 'workspace-project', workspace: { order: 35 },
+    command: {
+      kindLabel: '当前项目', title: '查看项目流量', subtitle: '阅读采集交互与关联漏洞',
+      badge: '流量', keywords: ['traffic', 'http', '流量'],
+    },
+  }),
+  record({
     routeName: 'WorkspaceArtifacts',
     label: '证据资产',
     icon: 'artifacts',
@@ -280,33 +292,18 @@ export const navigationRegistry = [
     },
   }),
   record({
-    routeName: 'ConsoleModels',
-    label: 'Models',
-    icon: 'models',
-    role: 'authenticated',
-    breadcrumbParent: 'console-root',
-    sidebar: { placement: 'system', order: 10 },
-    command: {
-      kindLabel: '系统管理',
-      title: '管理 Models',
-      subtitle: '配置当前 Tenant 的 Model API、write-only Key 与连接测试',
-      badge: 'Models',
-      keywords: ['model', 'anthropic', 'openai', '模型'],
-    },
-  }),
-  record({
     routeName: 'ConsoleWorkers',
-    label: 'Workers',
+    label: 'Worker 配置',
     icon: 'workers',
     role: 'authenticated',
     breadcrumbParent: 'console-root',
     sidebar: { placement: 'system', order: 20 },
     command: {
       kindLabel: '系统管理',
-      title: '管理 Workers',
-      subtitle: '配置当前 Tenant 的 pi Worker 与 Model 绑定',
+      title: 'Worker 配置',
+      subtitle: '管理个人模型、Worker 与运行设置',
       badge: 'Workers',
-      keywords: ['worker', 'pi', '模型'],
+      keywords: ['worker', 'model', 'pi', '模型', '运行设置'],
     },
   }),
   record({
@@ -322,21 +319,6 @@ export const navigationRegistry = [
       subtitle: '创建、禁用账户并管理密码与会话',
       badge: 'Users',
       keywords: ['user', 'account', 'session', '用户'],
-    },
-  }),
-  record({
-    routeName: 'ConsoleDispatcher',
-    label: 'Dispatcher',
-    icon: 'dispatcher',
-    role: 'super-admin',
-    breadcrumbParent: 'console-root',
-    sidebar: { placement: 'system', order: 40 },
-    command: {
-      kindLabel: '系统管理',
-      title: '查看 Dispatcher 运行态',
-      subtitle: '查看调度器健康、容量与全局运行参数',
-      badge: 'Dispatcher',
-      keywords: ['dispatcher', 'runtime', 'health'],
     },
   }),
   record({
@@ -397,21 +379,6 @@ export const navigationRegistry = [
       subtitle: '创建不可变报告模板版本并管理模板归档',
       badge: 'Report Templates',
       keywords: ['report', 'template', 'markdown', '报告模板'],
-    },
-  }),
-  record({
-    routeName: 'ConsoleTimeout',
-    label: '生命周期超时',
-    icon: 'timeout',
-    role: 'super-admin',
-    breadcrumbParent: 'console-root',
-    sidebar: { placement: 'system', order: 50 },
-    command: {
-      kindLabel: '系统管理',
-      title: '管理生命周期超时',
-      subtitle: '配置 Intent 与 Reason 阶段超时阈值',
-      badge: 'Timeout',
-      keywords: ['timeout'],
     },
   }),
   record({ routeName: 'Forbidden', label: '无权访问', icon: 'status', role: 'authenticated' }),
@@ -511,7 +478,7 @@ export function breadcrumbsFromRegistry(
       to: { name: 'WorkspaceGraph', params: { id: projectId } },
     })
   } else if (item.breadcrumbParent === 'console-root') {
-    crumbs.push({ key: 'console', text: '系统管理', to: { name: 'ConsoleModels' } })
+    crumbs.push({ key: 'console', text: '系统管理', to: { name: 'ConsoleWorkers' } })
   }
 
   if (!(routeName === 'WorkspaceGraph' && item.breadcrumbParent === 'workspace-project')) {

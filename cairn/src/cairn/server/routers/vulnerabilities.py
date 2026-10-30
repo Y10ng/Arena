@@ -4,7 +4,13 @@ worker 输出 fact 带 vulnerability 字段时由 conclude 端点自动确认入
 本 router 提供人工独立创建、列表、详情、状态流转、fact→漏洞查询。
 """
 
+from urllib.parse import quote
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
+
+from cairn.server.services.vulnerability_reports import render_vulnerability_report
+from cairn.server.services.vulnerabilities import delete_vulnerability
 
 from cairn.server.auth import (
     RequestPrincipal,
@@ -22,7 +28,6 @@ from cairn.server.models import (
     DuplicateVulnerabilityCandidatesResponse,
     VulnerabilityDetail,
     VulnerabilityListItem,
-    VulnerabilityProvenance,
     VulnerabilityVerifierTarget,
 )
 from cairn.server.services import (
@@ -30,7 +35,6 @@ from cairn.server.services import (
     build_vulnerability_chain_candidates,
     create_vulnerability,
     get_vulnerability_detail,
-    get_vulnerability_provenance,
     get_observation_verifier_target,
     get_vulnerability_for_fact,
     list_all_vulnerabilities,
@@ -146,13 +150,34 @@ def get_vulnerability_route(project_id: str, vuln_id: str, observation_id: str |
 
 
 @router.get(
-    "/projects/{project_id}/vulnerabilities/{vuln_id}/provenance",
-    response_model=VulnerabilityProvenance,
+    "/projects/{project_id}/vulnerabilities/{vuln_id}/report",
+    response_class=Response,
     dependencies=[Depends(require_tenant_project)],
 )
-def get_vulnerability_provenance_route(project_id: str, vuln_id: str):
+def export_vulnerability_report_route(
+    project_id: str, vuln_id: str,
+    template_key: str | None = None,
+    observation_id: str | None = None,
+):
     with get_conn() as conn:
-        return get_vulnerability_provenance(conn, project_id, vuln_id)
+        markdown, title = render_vulnerability_report(
+            conn, project_id, vuln_id, template_key=template_key, observation_id=observation_id,
+        )
+    return Response(markdown.encode("utf-8"), media_type="text/markdown; charset=utf-8", headers={
+        "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(title + '.md', safe='')}",
+    })
+
+
+@router.delete(
+    "/projects/{project_id}/vulnerabilities/{vuln_id}",
+    status_code=204,
+    dependencies=[Depends(require_user_tenant_project)],
+)
+def delete_vulnerability_route(project_id: str, vuln_id: str):
+    with get_conn() as conn:
+        delete_vulnerability(conn, project_id, vuln_id)
+    return Response(status_code=204)
 
 
 @router.patch(

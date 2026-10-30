@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { httpMessageSummary, httpMessageView } from './httpMessageView'
 
 const jsonTokens = (text: string) => text.match(/"(?:[^"\\]|\\.)*"|[^\s{}\[\],:]+|[{}\[\],:]/g)
@@ -32,7 +32,7 @@ describe('报文派生视图', () => {
   })
 
   it('独立 JSON 不补造 HTTP 头，非 HTTP 文本保持文本', () => {
-    expect(httpMessageView('{"x":1}')).toEqual({ language: 'json', pretty: '{\n  "x": 1\n}', reason: '', limitation: false })
+    expect(httpMessageView('{"x":1}')).toEqual({ language: 'json', pretty: '{\n  "x": 1\n}', prettyAvailable: true, reason: '', limitation: false })
     expect(httpMessageView('普通记录').language).toBe('plaintext')
     expect(httpMessageView('<script>alert(1)</script>').pretty).toBeNull()
   })
@@ -49,6 +49,26 @@ describe('报文派生视图', () => {
     ]) {
       expect(httpMessageView(raw).pretty).toBeNull()
       expect(httpMessageView(raw).reason).not.toBe('')
+    }
+  })
+
+  it('明确完整解码后才允许压缩头对应正文 Pretty，普通阅读不预先解析 JSON', () => {
+    const prefix = 'HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 35\r\n\r\n'
+    const raw = prefix + '{"value":"' + 'x'.repeat(10 * 1024 * 1024 - 12) + '"}'
+    const parse = vi.spyOn(JSON, 'parse')
+    const view = httpMessageView(raw, false, { decodeStatus: 'complete', format: false })
+    expect(view.prettyAvailable).toBe(true)
+    expect(view.pretty).toBeNull()
+    expect(parse).not.toHaveBeenCalled()
+    parse.mockRestore()
+    expect(httpMessageView(prefix + '{"x":1}', false, { decodeStatus: 'complete' }).pretty).toBe(prefix + '{\n  "x": 1\n}')
+    expect(httpMessageView(prefix + '{"x":1}').pretty).toBeNull()
+    expect(httpMessageView('HTTP/1.1 200 OK\nContent-Encoding: identity, identity\n\n{"x":1}', false, { decodeStatus: 'complete' }).prettyAvailable).toBe(true)
+    for (const decodeStatus of ['too-large', 'invalid-encoding', 'unsupported-encoding', 'non-text', 'pending']) {
+      const unavailable = httpMessageView(raw, false, { decodeStatus })
+      expect(unavailable.prettyAvailable).toBe(false)
+      expect(unavailable.limitation).toBe(true)
+      expect(unavailable.reason.includes('超过 10 MiB')).toBe(decodeStatus === 'too-large')
     }
   })
 

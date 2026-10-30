@@ -1,5 +1,5 @@
 <template>
-  <section ref="page" class="verification-theme verification-page" aria-label="漏洞复现与复测">
+  <section ref="page" class="verification-theme verification-page verification-list-page" aria-label="漏洞复现与复测">
     <header class="verification-heading">
       <h1>漏洞复现与复测</h1>
       <Button variant="secondary" @click="router.push({ name: 'VerificationConfiguration' })">漏洞复测配置</Button>
@@ -110,11 +110,8 @@ async function closeCreate() {
 async function afterDeleted() {
   const identity = authIdentity.value
   actionError.value = ''
-  const refreshed = await refetch()
+  await refetch()
   if (identity !== authIdentity.value) return
-  if (refreshed.data && offset.value >= refreshed.data.total && offset.value > 0) {
-    await router.replace({ name: 'Verifications', query: { ...verificationListQuery(route.query), offset: String(Math.max(0, Math.ceil(refreshed.data.total / limit) - 1) * limit), scroll: undefined } })
-  }
   await nextTick()
   ;(page.value?.querySelector<HTMLElement>('[data-verification-actions]') || page.value?.querySelector<HTMLElement>('[data-verification-create]'))?.focus()
 }
@@ -135,6 +132,11 @@ const { data, isLoading, isFetching, isError, error, refetch } = useQuery({
     if (Date.now() >= refreshUntil || refreshFailures >= 3) { autoPaused.value = true; return false }
     return 5000
   },
+})
+// 列表内删除、详情删除返回及手动刷新共用服务端计数校正，不保留已空的末页。
+watch([data, isFetching], ([value, fetching]) => {
+  if (!value || fetching || isError.value || offset.value === 0 || offset.value < value.total) return
+  void router.replace({ name: route.name || 'Verifications', query: { ...route.query, offset: String(Math.max(0, Math.ceil(value.total / limit) - 1) * limit), scroll: undefined } })
 })
 function refresh() { refreshUntil = Date.now() + 10 * 60_000; refreshFailures = 0; autoPaused.value = false; void refetch() }
 watch([authIdentity, filters], () => { refreshUntil = Date.now() + 10 * 60_000; refreshFailures = 0; autoPaused.value = false; actionError.value = '' })

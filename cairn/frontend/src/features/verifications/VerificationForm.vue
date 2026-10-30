@@ -64,9 +64,21 @@
             <span v-if="resourceBusy" class="verification-muted">资料操作中，请勿离开</span>
           </div>
         </div>
+        <FormField label="本次目标地址（可选）" for="new-verification-target">
+          <Input id="new-verification-target" v-model="form.target_url" placeholder="同题新实例的完整 HTTP(S) 地址；留空沿用原目标" />
+        </FormField>
         <FormField label="环境变化与补充说明（可选）" for="new-verification-origin">
           <Textarea id="new-verification-origin" v-model="form.origin" class="verification-origin" :rows="3" placeholder="修复或部署变化、必要身份与其他补充资料" />
         </FormField>
+        <details class="verification-extra-settings"><summary>代理设置</summary><div class="verification-stack">
+          <template v-if="inheritsProjectEgress">
+            <p class="verification-muted">默认在受理时继承来源项目的当前代理设置；已受理复测保持自己的设置。</p>
+            <FormField label="本轮代理设置" for="verification-egress-choice"><Select id="verification-egress-choice" :model-value="customEgress ? 'custom' : 'inherit'" :options="egressChoices" :disabled="locked || sourceLoading || platformLoading || egressLoading || Boolean(egressLoadError)" @update:model-value="changeEgressChoice" /></FormField>
+          </template>
+          <p v-if="egressLoading || platformLoading" class="verification-muted">正在读取来源项目代理设置…</p>
+          <Alert v-else-if="egressLoadError" tone="warning" title="来源代理设置尚未读取">{{ egressLoadError }}<template #actions><Button size="sm" variant="secondary" @click="loadCopiedEgress">重新读取</Button></template></Alert>
+          <TestEgressFields v-else-if="!inheritsProjectEgress || egressPublic" v-model="egress" :auth-configured="egressPublic?.auth_configured" :disabled="locked || sourceLoading || (inheritsProjectEgress && !customEgress)" :error="egressError" @update:model-value="dirty = true" />
+        </div></details>
         <details class="verification-extra-settings"><summary>外部编号与可选期限</summary><div class="verification-stack">
           <FormField label="外部漏洞编号（可选）" for="new-verification-external"><Input id="new-verification-external" v-model="form.external_id" placeholder="例如：ISSUE-123" /></FormField>
           <div class="verification-grid"><FormField label="授权到期时间（本地时间，可选）" for="new-verification-authorization"><Input id="new-verification-authorization" v-model="form.authorization" type="datetime-local" /></FormField><FormField label="执行停止时间（本地时间，可选）" for="new-verification-deadline"><Input id="new-verification-deadline" v-model="form.deadline" type="datetime-local" /></FormField></div>
@@ -83,7 +95,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { Paperclip } from '@lucide/vue'
-import { ApiError, listAllVulnerabilities } from '@/api/client'
+import { ApiError, getProjectDetail, listAllVulnerabilities } from '@/api/client'
+import type { TestEgressPublic } from '@/api/testEgress'
+import TestEgressFields from '@/components/patterns/TestEgressFields.vue'
+import { testEgressDraft, testEgressError, testEgressInput } from '@/features/projects/testEgressForm'
 import { useQuery } from '@tanstack/vue-query'
 import { vulnerabilityKeys } from '@/features/vulnerabilities/vulnerabilityQueries'
 import { vulnerabilitySeverityMeta } from '@/features/vulnerabilities/vulnerabilityMetadata'
@@ -103,8 +118,35 @@ const auth = useAuthStore()
 const authIdentity = computed(() => JSON.stringify([auth.authGeneration, auth.session?.user_id, auth.session?.tenant_id, auth.session?.role, auth.isSuperAdmin]))
 const sourceId = computed(() => props.sourceRequestId)
 const formScope = computed(() => JSON.stringify([authIdentity.value, sourceId.value, props.sourceProjectId, props.sourceVulnerabilityId, props.sourceObservationId, props.initialInput, props.fixedSource]))
-const form = reactive({ title: '', external_id: '', mode: 'retest', origin: '', reportType: 'markdown', content: '', mainMemberId: '', authorization: '', deadline: '', sourceProjectId: '', sourceVulnerabilityId: '', sourceObservationId: '' })
+const form = reactive({ title: '', external_id: '', mode: 'retest', origin: '', target_url: '', reportType: 'markdown', content: '', mainMemberId: '', authorization: '', deadline: '', sourceProjectId: '', sourceVulnerabilityId: '', sourceObservationId: '' })
 const inputKind = ref(sourceId.value ? 'copied' : props.initialInput === 'manual' ? 'manual' : 'platform')
+const egress = ref(testEgressDraft())
+const egressPublic = ref<TestEgressPublic>()
+const customEgress = ref(false)
+const egressError = ref('')
+const egressLoading = ref(false)
+const egressLoadError = ref('')
+let egressGeneration = 0
+async function loadCopiedEgress() {
+  const generation = ++egressGeneration
+  egressLoading.value = false; egressLoadError.value = ''
+  if (inputKind.value !== 'copied' || !source.value?.input_source) return
+  egressLoading.value = true
+  try {
+    const detail = await getProjectDetail(source.value.input_source.project_id)
+    if (generation !== egressGeneration) return
+    egressPublic.value = detail.project.test_egress
+    if (!customEgress.value) egress.value = testEgressDraft(egressPublic.value)
+  } catch {
+    if (generation === egressGeneration) egressLoadError.value = '无法读取来源项目当前代理设置，请重试。'
+  } finally { if (generation === egressGeneration) egressLoading.value = false }
+}
+const inheritsProjectEgress = computed(() => inputKind.value === 'platform' || (inputKind.value === 'copied' && Boolean(source.value?.input_source)))
+const egressChoices = [{ value: 'inherit', label: '继承来源项目当前代理设置' }, { value: 'custom', label: '本轮单独设置' }]
+function changeEgressChoice(value: string | number) {
+  customEgress.value = value === 'custom'; dirty.value = true
+  egress.value = testEgressDraft(egressPublic.value); egressError.value = ''
+}
 const inputOptions = computed(() => [
   ...(source.value ? [{ value: 'copied', label: '上一轮输入快照' }] : []),
   { value: 'platform', label: source.value?.input_source ? '当前平台漏洞' : '平台已有漏洞' },
@@ -142,6 +184,17 @@ function changeInputKind(value: string) {
 }
 let platformGeneration = 0
 let platformController: AbortController | null = null
+function invalidatePlatformSource() {
+  platformGeneration++; platformController?.abort()
+  platformPreview.value = null; platformLoading.value = false
+  platformError.value = '所选来源已不在可访问漏洞列表中，请重新选择来源。其他草稿和资料已保留。'
+}
+// 只比较同一筛选刷新，不能把切换严重程度后未命中当成来源删除。
+watch([vulnerabilities, sourceSeverity], ([current, severity], [previous, previousSeverity]) => {
+  if (severity !== previousSeverity || !current || !previous || inputKind.value !== 'platform') return
+  const selected = selectedVulnerabilityKey.value
+  if (selected && previous.some((item) => vulnerabilityKey(item) === selected) && !current.some((item) => vulnerabilityKey(item) === selected)) invalidatePlatformSource()
+})
 async function loadPlatformPreview() {
   const generation = ++platformGeneration
   platformController?.abort()
@@ -156,8 +209,15 @@ async function loadPlatformPreview() {
     if (generation !== platformGeneration) return
     if (preview.project_id !== projectId || preview.vulnerability_id !== vulnerabilityId || (form.sourceObservationId && preview.evidence.observation_id !== form.sourceObservationId)) throw new Error('来源响应与所选漏洞不一致，请重新读取。')
     platformPreview.value = preview
+    egressPublic.value = preview.test_egress
+    if (!customEgress.value) egress.value = testEgressDraft(preview.test_egress)
     if (!form.title) form.title = `复测 · ${preview.vulnerability.title}`
-  } catch (error) { if (generation === platformGeneration) platformError.value = errorMessage(error) }
+  } catch (error) {
+    if (generation === platformGeneration) {
+      if (error instanceof ApiError && [403, 404].includes(error.status)) invalidatePlatformSource()
+      else platformError.value = errorMessage(error)
+    }
+  }
   finally { if (generation === platformGeneration) platformLoading.value = false }
 }
 const modeOptions = Object.entries(modeLabels).map(([value, label]) => ({ value, label }))
@@ -218,7 +278,8 @@ async function loadSource() {
     source.value = detail
     form.title = detail.title
     form.external_id = detail.external_id || ''
-    // 新一轮只复用名称与资料入口，环境补充和期限由本轮选填。
+    // 再次复测保留已绑定目标，避免复制历史资料后误回退；补充说明和期限重新选填。
+    form.target_url = detail.target_url || ''
     form.origin = ''
     form.mode = 'retest'
     form.reportType = 'file'
@@ -272,11 +333,16 @@ function submit() {
       if (!form.content.trim()) throw new Error('主资料正文不能为空。')
       report = { type: form.reportType as 'markdown' | 'text', content: form.content }
     }
+    if (egressLoading.value || egressLoadError.value) throw new Error('来源项目代理设置尚未读取，请重新核对。')
+    egressError.value = !inheritsProjectEgress.value || customEgress.value ? testEgressError(egress.value) : ''
+    if (egressError.value) throw new Error(egressError.value)
     // 一旦发出就锁定原始请求快照，重试不重新读取表单或本次执行配置。
     pending.value = {
+      ...(!inheritsProjectEgress.value || customEgress.value ? { test_egress: testEgressInput(egress.value) } : {}),
       schema_version: 1, request_id: requestId, title: form.title,
       external_id: form.external_id || null, mode: form.mode as VerificationMode,
       origin: form.origin, report,
+      ...(form.target_url ? { target_url: form.target_url } : {}),
       authorization_expires_at: futureTime(form.authorization, '授权到期时间'),
       execution_deadline: futureTime(form.deadline, '执行停止时间'),
       ...(batch.value ? { resource_batch_id: batch.value.id } : {}),
@@ -296,6 +362,7 @@ async function submitPending() {
     if (generation !== formGeneration) return
     created.value = accepted
     pending.value = null
+    egress.value = testEgressDraft(accepted.test_egress)
     submissionError.value = ''
   } catch (error) {
     if (generation !== formGeneration) return
@@ -306,6 +373,7 @@ async function submitPending() {
       (error.data as { detail?: unknown } | null)?.detail === '此 request_id 对应的复测记录已删除，请使用新的请求 ID'
     const deletedSource = error instanceof ApiError && error.status === 410 &&
       (error.data as { detail?: unknown } | null)?.detail === '来源复测已删除，不能复制或作为上一轮受理，请从原漏洞新建复测'
+    if (request.report.type === 'platform_vulnerability' && error instanceof ApiError && [403, 404].includes(error.status)) invalidatePlatformSource()
     if (deletedRequest) acceptance.value = 'deleted'
     else if (deletedSource) acceptance.value = 'source_deleted'
     else if (expiredBatch) acceptance.value = 'batch_expired'
@@ -353,7 +421,7 @@ function beforeUnload(event: BeforeUnloadEvent) {
   event.returnValue = ''
 }
 window.addEventListener('beforeunload', beforeUnload)
-onBeforeUnmount(() => { formGeneration++; configGeneration++; sourceGeneration++; sourceController?.abort(); platformGeneration++; platformController?.abort(); window.removeEventListener('beforeunload', beforeUnload) })
+onBeforeUnmount(() => { egressGeneration++; formGeneration++; configGeneration++; sourceGeneration++; sourceController?.abort(); platformGeneration++; platformController?.abort(); window.removeEventListener('beforeunload', beforeUnload) })
 watch(batch, (current) => {
   if (form.mainMemberId && !current?.members.some((member) => member.id === form.mainMemberId)) form.mainMemberId = ''
 })
@@ -363,12 +431,18 @@ watch(formScope, () => {
   sourceLoading.value = false; sourceError.value = ''; submissionError.value = ''; copyError.value = ''; dirty.value = false; acceptance.value = 'rejected'
   platformPreview.value = null; platformError.value = ''; platformLoading.value = false
   readiness.value = null; configLoading.value = false; configError.value = ''
+  egressGeneration++; egress.value = testEgressDraft(); egressPublic.value = undefined; customEgress.value = false; egressError.value = ''; egressLoading.value = false; egressLoadError.value = ''
   copying.value = false; submitting.value = false; resourceBusy.value = false; materialsOpen.value = false; materialsConfirm.value = false
   editorTab.value = 'edit'; sourceSearch.value = ''; sourceSeverity.value = 'all'
   requestId = createCreationRequestId()
   inputKind.value = sourceId.value ? 'copied' : props.initialInput === 'manual' ? 'manual' : 'platform'
-  Object.assign(form, { title: '', external_id: '', mode: 'retest', origin: '', reportType: 'markdown', content: '', mainMemberId: '', authorization: '', deadline: '', sourceProjectId: props.sourceProjectId, sourceVulnerabilityId: props.sourceVulnerabilityId, sourceObservationId: props.sourceObservationId })
+  Object.assign(form, { title: '', external_id: '', mode: 'retest', origin: '', target_url: '', reportType: 'markdown', content: '', mainMemberId: '', authorization: '', deadline: '', sourceProjectId: props.sourceProjectId, sourceVulnerabilityId: props.sourceVulnerabilityId, sourceObservationId: props.sourceObservationId })
 }, { immediate: true, flush: 'sync' })
+watch([inputKind, () => form.sourceProjectId, () => form.sourceVulnerabilityId, source], () => {
+  if (pending.value || created.value) return
+  customEgress.value = false; egressPublic.value = undefined; egress.value = testEgressDraft(); egressError.value = ''
+  void loadCopiedEgress()
+})
 watch(formScope, () => { void loadSource(); void loadConfig() }, { immediate: true })
 watch([formScope, inputKind, () => form.sourceProjectId, () => form.sourceVulnerabilityId, () => form.sourceObservationId], () => { void loadPlatformPreview() }, { immediate: true })
 </script>

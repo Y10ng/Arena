@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants, createReadStream } from "node:fs";
 import { lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { AgentFailure, CANDIDATE_SPOOL_HARD_LIMITS, object, type JsonObject } from "./protocol.js";
 
 const READONLY_INPUT_ROOTS = ["/opt/cairn/readonly-inputs", "/cairn/advisory/project"];
@@ -36,6 +36,58 @@ export async function evidencePath(
   }
   return actual;
 }
+export async function readEvidence(path: string, input: { offset?: number; length?: number; match?: string }) {
+  const offset = input.offset ?? 0;
+  const length = input.length ?? 32768;
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 || length > 32768) {
+    throw new AgentFailure("artifact_invalid", "Evidence offset must be a nonnegative byte position and length must be 1..32768 bytes");
+  }
+  const match = input.match === undefined ? undefined : Buffer.from(input.match, "utf8");
+  if (match && (match.length === 0 || match.length > length || match.toString("utf8") !== input.match)) {
+    throw new AgentFailure("artifact_invalid", "Evidence match must be nonempty valid UTF-8 text within the requested length (at most 32768 bytes)");
+  }
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const total = (await file.stat()).size;
+    if (offset > total) throw new AgentFailure("artifact_invalid", "Evidence byte offset is beyond the original file");
+    if (match && total > CANDIDATE_SPOOL_HARD_LIMITS.max_artifact_bytes) {
+      throw new AgentFailure("artifact_invalid", "Exact evidence matching is limited to files within the 32 MiB byte budget; read explicit ranges instead");
+    }
+    // 匹配只按需查找这一份原件，读入量受现有 32 MiB 预算约束，回执仍只返回选中范围。
+    const buffer = Buffer.alloc(match ? total - offset : Math.min(length, total - offset));
+    let read = 0;
+    while (read < buffer.length) {
+      const { bytesRead } = await file.read(buffer, read, buffer.length - read, offset + read);
+      if (bytesRead === 0) throw new AgentFailure("artifact_unreadable", "Evidence changed or could not be read completely");
+      read += bytesRead;
+    }
+    let start = offset;
+    let text: string;
+    if (match) {
+      const found = buffer.indexOf(match);
+      if (found < 0) throw new AgentFailure("artifact_invalid", "Evidence match was not found at or after offset");
+      // 包括重叠出现；不能默认挑第一个而让选段指向另一处同文。
+      if (buffer.indexOf(match, found + 1) >= 0) {
+        throw new AgentFailure("artifact_invalid", "Evidence match is ambiguous; supply offset to restrict the search start or use a longer exact match");
+      }
+      start += found;
+      text = match.toString("utf8");
+    } else {
+      try {
+        // stream 只允许非 EOF 的尾部不完整字符留给下一块，起点、内部或 EOF 无效字节不替换也不丢弃。
+        text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer, { stream: offset + read < total });
+      } catch {
+        throw new AgentFailure("artifact_unreadable", "Evidence range is not valid UTF-8; use a valid byte boundary or match exact original text");
+      }
+      if (read > 0 && text.length === 0) {
+        throw new AgentFailure("artifact_invalid", "Evidence length is too small to read a complete UTF-8 character at this offset");
+      }
+    }
+    const count = Buffer.byteLength(text, "utf8");
+    const next = start + count;
+    return { text, byte_start: start, bytes_read: count, next_offset: next, total_bytes: total, eof: next === total, pointer: `utf8-bytes=${start}:${next}` };
+  } finally { await file.close(); }
+}
 function within(root: string, path: string): boolean {
   const rel = relative(root, path);
   return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
@@ -61,13 +113,14 @@ export class ArtifactRegistry {
     private cwd: string,
     private sessionRoot: string,
     private readonlyInputRoots = READONLY_INPUT_ROOTS,
+    private maxArtifacts: number = CANDIDATE_SPOOL_HARD_LIMITS.max_artifacts,
   ) {}
   async register(sourcePath: string, kind: string, signal?: AbortSignal): Promise<Artifact> {
     if (!ARTIFACT_KINDS.includes(kind as typeof ARTIFACT_KINDS[number])) throw new AgentFailure("artifact_invalid", "Unknown artifact kind");
     const actual = await evidencePath(this.cwd, sourcePath, this.sessionRoot, this.readonlyInputRoots);
     if ((await readonlyInputsRoots(this.cwd, this.readonlyInputRoots)).some((root) => within(root, actual))) throw new AgentFailure("artifact_invalid", "Read-only input files cannot be registered as artifacts");
-    if (this.items.length >= CANDIDATE_SPOOL_HARD_LIMITS.max_artifacts) {
-      throw new AgentFailure("artifact_invalid", "Registration capacity reached (32 content versions, including Harness output); existing versions are retained");
+    if (this.items.length >= this.maxArtifacts) {
+      throw new AgentFailure("artifact_invalid", `Registration capacity reached (${this.maxArtifacts} content versions, including Harness output); existing versions are retained`);
     }
     const remaining = CANDIDATE_SPOOL_HARD_LIMITS.max_artifact_bytes - this.items.reduce((total, item) => total + item.size_bytes, 0);
     const source = await open(actual, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -102,6 +155,10 @@ export class ArtifactRegistry {
         size += bytesRead;
       }
       await destination.sync();
+      for (const parentPath of [directory, dirname(directory), join(this.cwd, ".cairn")]) {
+        const parent = await open(parentPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+        try { await parent.sync(); } finally { await parent.close(); }
+      }
       const artifact = { handle, kind, path, source_path: actual, sha256: hash.digest("hex"), size_bytes: size };
       this.items.push(artifact);
       saved = true;

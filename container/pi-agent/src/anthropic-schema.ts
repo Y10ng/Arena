@@ -1,7 +1,7 @@
 import type { AgentSession } from "@mariozechner/pi-coding-agent";
 import type { TSchema } from "typebox";
 
-export function preserveAnthropicSubmissionSchema(agent: AgentSession["agent"], schema: TSchema): void {
+export function preserveAnthropicSubmissionSchema(agent: AgentSession["agent"], schema: TSchema, reportSegmentSchema?: TSchema): void {
   const originalOnPayload = agent.onPayload;
   agent.onPayload = async (payload, model) => {
     const outbound = await originalOnPayload?.(payload, model) ?? payload;
@@ -10,7 +10,9 @@ export function preserveAnthropicSubmissionSchema(agent: AgentSession["agent"], 
     }
     let found = false;
     const tools = outbound.tools.map((tool) => {
-      if (!tool || typeof tool !== "object" || tool.name !== "submit_result") return tool;
+      if (!tool || typeof tool !== "object") return tool;
+      if (tool.name === "save_report_segment" && reportSegmentSchema) return { ...tool, input_schema: reportSegmentSchema };
+      if (tool.name !== "submit_result") return tool;
       found = true;
       // pi-ai 的出站转换仅保留根 properties/required；这里恢复本次提交使用的完整冻结 Schema。
       return { ...tool, input_schema: schema };

@@ -236,22 +236,7 @@ test('creates an ordinary project without any group input', async ({ page }) => 
       ],
     }),
   )
-  await page.route('**/tenant-workers/options', (route) =>
-    route.fulfill({
-      json: [
-        {
-          id: 'worker-e2e',
-          display_name: 'E2E Worker',
-          model_id: 'model-e2e',
-          model_display_name: 'Claude',
-          task_types: ['reason'],
-          available: true,
-        },
-      ],
-    }),
-  )
   await page.route('**/library-catalog', (route) => route.fulfill({ json: [] }))
-  await page.route('**/worker-templates', (route) => route.fulfill({ json: [] }))
   await page.route('**/scenarios', (route) =>
     route.fulfill({ json: [{ key: 'default', label: '默认场景' }] }),
   )
@@ -268,6 +253,8 @@ test('creates an ordinary project without any group input', async ({ page }) => 
 
   await expect.poll(() => createPayload).not.toBeNull()
   expect(createPayload).not.toHaveProperty('group_id')
+  expect(createPayload).not.toHaveProperty('tenant_worker_ids')
+  expect(createPayload).toMatchObject({ test_egress: { mode: 'direct', auth_action: 'clear' } })
 })
 
 test('renders shared Select portals with opaque light and dark surfaces', async ({ page }) => {
@@ -285,30 +272,15 @@ test('renders shared Select portals with opaque light and dark surfaces', async 
       ],
     }),
   )
-  await page.route('**/tenant-workers/options', (route) =>
-    route.fulfill({
-      json: [
-        {
-          id: 'worker-e2e',
-          display_name: 'E2E Worker',
-          model_id: 'model-e2e',
-          model_display_name: 'Claude',
-          task_types: ['reason'],
-          available: true,
-        },
-      ],
-    }),
-  )
   await page.route('**/library-catalog', (route) => route.fulfill({ json: [] }))
-  await page.route('**/worker-templates', (route) => route.fulfill({ json: [] }))
   await page.route('**/scenarios', (route) =>
     route.fulfill({ json: [{ key: 'default', label: '默认场景' }] }),
   )
 
   await page.goto('/#/projects')
   await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
-  await page.locator('#np-execution-trigger').click()
-  await page.locator('#np-worker-template').click()
+  await page.locator('#np-proxy-trigger').click()
+  await page.getByLabel('连接方式', { exact: true }).click()
 
   const content = page.locator('.ui-select__content')
   await expect(content).toBeVisible()
@@ -321,8 +293,8 @@ test('renders shared Select portals with opaque light and dark surfaces', async 
     .click()
   await page.getByRole('button', { name: '切换到深色主题' }).click()
   await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
-  await page.locator('#np-execution-trigger').click()
-  await page.locator('#np-worker-template').click()
+  await page.locator('#np-proxy-trigger').click()
+  await page.getByLabel('连接方式', { exact: true }).click()
   await expect(content).toBeVisible()
   await expect(content).toHaveCSS('background-color', 'rgb(23, 25, 30)')
 })

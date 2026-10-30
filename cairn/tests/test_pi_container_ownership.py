@@ -12,9 +12,11 @@ from requests.exceptions import RequestException
 from cairn.dispatcher.config import ContainerConfig, DispatchConfig
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.runtime.container_archives import text_file_archive
+from cairn.dispatcher.runtime.container_options import ContainerRuntimeOptions
 from cairn.dispatcher.runtime.containers import (
     ContainerManager,
     ContainerOwnershipError,
+    ContainerRuntimeMismatchError,
     canonical_server_address,
     container_instance_id,
 )
@@ -208,6 +210,89 @@ def test_creation_uses_separate_owner_namespaces_and_labels(runtime):
     assert manager.build_exec_process(health, {}, ["true"]) is not None
     manager.remove_container(health)
     assert manager.inspect_state(health) is None
+
+
+@pytest.fixture
+def chat_runtime(runtime, tmp_path, monkeypatch):
+    manager, docker = runtime
+    manager.traffic_execution = SimpleNamespace(
+        root=tmp_path / "research", cleanup_project=lambda _project: True,
+    )
+    monkeypatch.setattr("cairn.dispatcher.runtime.containers.os.chown", lambda *_args: None)
+    options = ContainerRuntimeOptions.build(
+        image=manager._config.image, network_mode="none", dns=[], cap_add=[],
+        features={"project_chat": 1}, scenario_key="project-chat",
+    )
+    return manager, docker, options
+
+
+def test_chat_container_creation_reuse_and_io_keep_research_separate(chat_runtime):
+    manager, docker, options = chat_runtime
+    research = owned_container(manager, docker, state="exited")
+    name = manager.ensure_chat_running("proj_a", options)
+    chat = docker.get(name)
+    assert name == manager.chat_container_name("proj_a") != research.name
+    assert manager._owns_container(chat)
+    assert manager._get_container(chat.id) is chat
+    assert manager.inspect_state(name) == "running"
+    assert manager.project_id_from_container_name(name) == "proj_a"
+    assert manager.managed_container_names() == sorted([research.name, name])
+    mounts = docker.runs[0]["volumes"]
+    root = manager.chat_directory("proj_a")
+    assert mounts == {
+        str(root / child): {"bind": target, "mode": "rw"}
+        for child, target in (("workspace", "/home/kali/workspace"),
+                              ("control", "/home/kali/.cairn"),
+                              ("prompts", "/tmp/cairn-prompts"))
+    }
+    session = root / "control" / "session-fixture"
+    session.write_text("retained")
+    assert manager.ensure_chat_running("proj_a", options) == name
+    chat.attrs["State"]["Status"] = "exited"
+    assert manager.ensure_chat_running("proj_a", options) == name
+    assert chat.actions == ["start"]
+    assert len(docker.runs) == 1 and session.read_text() == "retained"
+    assert manager.build_exec_process(name, {}, ["true"]) is not None
+    manager.write_text_file(name, "/tmp/fixture", "fixture", owner="kali")
+    assert manager.read_file(name, "/tmp/fixture") == b"fixture"
+    manager.remove_file(name, "/tmp/fixture", allowed_root="/tmp")
+    # 停止态项目仍可聊天；研究收尾不能回收聊天挂载或 session。
+    assert manager.cleanup_stopped("proj_a")
+    assert manager.cleanup_completed("proj_a")
+    assert manager.inspect_state(name) == "running"
+    assert research.actions == [] and session.read_text() == "retained"
+
+
+@pytest.mark.parametrize(("label", "value"), [
+    ("cairn.pi.instance_id", OTHER_ID),
+    ("cairn.engine", "legacy"),
+    ("cairn.project_id", "proj_other"),
+    ("cairn.scenario_key", "default"),
+])
+def test_chat_container_rejects_conflicting_identity(chat_runtime, label, value):
+    manager, docker, options = chat_runtime
+    name = manager.chat_container_name("proj_a")
+    labels = manager._container_labels("proj_a", options)
+    labels[label] = value
+    chat = FakeContainer(docker, name, labels)
+    assert not manager._owns_container(chat)
+    with pytest.raises(ContainerOwnershipError):
+        manager.ensure_chat_running("proj_a", options)
+    with pytest.raises(ContainerOwnershipError):
+        manager.build_exec_process(name, {}, ["true"])
+    assert chat.actions == docker.runs == []
+
+
+def test_chat_container_requires_exact_name_and_runtime(chat_runtime):
+    manager, docker, options = chat_runtime
+    labels = manager._container_labels("proj_a", options)
+    for name in (manager.container_name("proj_a"), manager.chat_container_name("proj_a") + "-other"):
+        assert not manager._owns_container(FakeContainer(docker, name, labels))
+    labels["cairn.runtime_signature"] = "different"
+    chat = FakeContainer(docker, manager.chat_container_name("proj_a"), labels)
+    with pytest.raises(ContainerRuntimeMismatchError):
+        manager.ensure_chat_running("proj_a", options)
+    assert chat in docker.objects and chat.actions == docker.runs == []
 
 
 @pytest.mark.parametrize("state", ["running", "exited"])

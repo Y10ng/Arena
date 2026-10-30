@@ -6,14 +6,20 @@ from datetime import datetime
 from uuid import UUID
 
 from cairn.assessment_contracts import DepthReviewDecision, ExperimentRecord
-from cairn.evidence_contracts import EvidenceItem, EvidenceRef, EvidenceSource
-from pydantic import ConfigDict
+from cairn.evidence_contracts import (
+    EvidenceItem,
+    EvidenceRef,
+    EvidenceSource,
+    VerificationTestStep,
+    validate_verification_evidence_links,
+)
+from pydantic import ConfigDict, model_serializer
 
 from .artifacts import Artifact, FactEvidence
 from .common import *
 from .resources import CreateProjectResourceRequest, ProjectResource
 from .tasks import TaskRun
-from .tenant_workers import TenantWorker
+from .test_egress import TestEgressInput, TestEgressView
 
 
 class Fact(BaseModel):
@@ -208,8 +214,17 @@ class AssessmentQualitySnapshotView(BaseModel):
 
 class AssessmentReportFinalizationView(BaseModel):
     project_id: str
+    scope_key: str = ""
+    vulnerability_id: str | None = None
+    observation_id: str | None = None
+    accepted_artifact_id: str | None = None
+    accepted_generation_token: str | None = None
+    accepted_input_sha256: str | None = None
+    cancel_requested_at: str | None = None
+    stale: bool = False
+    source_status: Literal["available", "deleted"] = "available"
     version: int = 1
-    status: Literal["pending", "running", "ready", "failed"]
+    status: Literal["pending", "running", "ready", "failed", "cancelled"]
     attempt_count: int = 0
     claimed_by: str | None = None
     lease_expires_at: str | None = None
@@ -217,6 +232,7 @@ class AssessmentReportFinalizationView(BaseModel):
     delivery_retry_route: dict[str, Any] | None = None
     artifact_id: str | None = None
     last_error: str = ""
+    last_error_code: str | None = None
     generation_started_at: str
     generation_token: str
     claim_token: str | None = None
@@ -264,6 +280,7 @@ class AssessmentReportGenerationRequest(BaseModel):
 
 
 class AssessmentReportClaimRequest(BaseModel):
+    generation_token: str | None = Field(default=None, min_length=1, max_length=256)
     worker: str
     lease_seconds: int = Field(default=300, ge=60, le=1800)
 
@@ -316,10 +333,19 @@ class AssessmentReportWorkerFailure(BaseModel):
     message: str = Field(min_length=1, max_length=1000)
     path: str | None = Field(default=None, min_length=1, max_length=512)
     exit_code: int | None = Field(default=None, ge=-65535, le=65535)
+    http_status: int | None = Field(default=None, ge=100, le=599)
     issue: AssessmentReportFinishIssue | None = None
     submission_attempts: int | None = Field(default=None, ge=0, le=1_000_000)
     repair_rounds: int | None = Field(default=None, ge=0, le=2)
     max_repair_rounds: int | None = Field(default=None, ge=0, le=2)
+
+    @model_serializer(mode="wrap")
+    def serialize_failure(self, handler):
+        values = handler(self)
+        # 未记录 HTTP 状态的历史 exact finish 不补默认 null，保持原请求摘要。
+        if "http_status" not in self.model_fields_set:
+            values.pop("http_status", None)
+        return values
 
     @field_validator("origin", "code", "phase", "path")
     @classmethod
@@ -470,6 +496,16 @@ class AssessmentReportFinishReplayRequest(AssessmentReportFinishPayload):
 
 class AssessmentReportPacket(BaseModel):
     version: int = 2
+    scope_key: str = ""
+    vulnerability_id: str | None = None
+    observation_id: str | None = None
+    report_scope: dict[str, Any] | None = None
+    accepted_readable_findings: list[dict[str, Any]] = Field(default_factory=list)
+    artifact_contents: dict[str, dict[str, str]] = Field(default_factory=dict)
+    flow_evidence: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    flow_contents: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    http_evidence_render_sources: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    display_images: list[dict[str, Any]] = Field(default_factory=list)
     assessment_summary: dict[str, Any] = Field(default_factory=dict)
     observation_statuses: list[dict[str, Any]] = Field(default_factory=list)
     project: dict[str, Any]
@@ -501,6 +537,7 @@ class ReportCapabilityView(BaseModel):
 
 
 class ProjectMeta(BaseModel):
+    test_egress: TestEgressView = Field(default_factory=TestEgressView)
     id: str
     title: str
     status: ProjectStatus
@@ -547,10 +584,6 @@ class ProjectSummary(ProjectMeta):
     working_intent_count: int
     unclaimed_intent_count: int
     hint_count: int
-
-
-class ProjectManagementOptions(BaseModel):
-    tenant_workers: list[TenantWorker] = Field(default_factory=list)
 
 
 class ProjectLibraryBinding(BaseModel):
@@ -600,6 +633,7 @@ class CreateProjectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     request_id: UUID | None = None
+    test_egress: TestEgressInput = Field(default_factory=TestEgressInput)
     title: str
     origin: str
     goal: str
@@ -611,8 +645,6 @@ class CreateProjectRequest(BaseModel):
     resources: list[CreateProjectResourceRequest] | None = None
     resource_batch_id: str | None = None
     library_keys: list[str] = Field(default_factory=list)
-    # 新项目必须显式绑定至少一个同 Tenant 的可用 Worker ID。
-    tenant_worker_ids: list[str] = Field(min_length=1)
     explore_deadline: str | None = None
     # 创建方必须显式选择未来期限或以 null 表示无限期，不能靠字段缺失推导授权。
     authorization_expires_at: str | None
@@ -690,23 +722,6 @@ class CreateProjectRequest(BaseModel):
                 raise ValueError(f"duplicate library key: {text}")
             seen.add(text)
             cleaned.append(text)
-        return cleaned
-
-    @field_validator("tenant_worker_ids")
-    @classmethod
-    def validate_tenant_worker_ids(cls, value: list[str]) -> list[str]:
-        cleaned: list[str] = []
-        seen: set[str] = set()
-        for item in value:
-            text = str(item).strip()
-            if not text:
-                raise ValueError("worker ids must not be empty")
-            if text in seen:
-                continue
-            seen.add(text)
-            cleaned.append(text)
-        if not cleaned:
-            raise ValueError("at least one worker is required")
         return cleaned
 
 class CreateHintRequest(BaseModel):
@@ -990,6 +1005,12 @@ class ConcludeVulnerabilityInput(_ConcludeVulnerabilityMetadata):
 
     schema_version: Literal[2]
     evidence_items: list[EvidenceItem]
+    reproduction_steps: list[VerificationTestStep] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_evidence_links(self):
+        validate_verification_evidence_links(self.evidence_items, [], self.reproduction_steps)
+        return self
 
 
 class HistoricalConcludeVulnerabilityInput(_ConcludeVulnerabilityMetadata):
@@ -1168,27 +1189,6 @@ class ConcludeResponse(BaseModel):
 
 class UpdateProjectStatusRequest(BaseModel):
     status: Literal["active", "stopped"]
-
-
-class UpdateProjectWorkersRequest(BaseModel):
-    tenant_worker_ids: list[str] = Field(min_length=1)
-
-    @field_validator("tenant_worker_ids")
-    @classmethod
-    def validate_tenant_worker_ids(cls, value: list[str]) -> list[str]:
-        cleaned: list[str] = []
-        seen: set[str] = set()
-        for item in value:
-            text = str(item).strip()
-            if not text:
-                raise ValueError("worker ids must not be empty")
-            if text in seen:
-                continue
-            seen.add(text)
-            cleaned.append(text)
-        if not cleaned:
-            raise ValueError("at least one worker is required")
-        return cleaned
 
 
 class UpdateProjectTitleRequest(BaseModel):
@@ -1497,9 +1497,15 @@ class CreateVulnerabilityRequest(BaseModel):
     remediation: str = ""
     confidence: float = 0.5
     evidence_items: list[EvidenceItem] = Field(default_factory=list)
+    reproduction_steps: list[VerificationTestStep] = Field(default_factory=list)
     # 自动确认时填；人工创建留空。
     source_fact_id: str | None = None
     slot_key: str | None = None
+
+    @model_validator(mode="after")
+    def validate_evidence_links(self):
+        validate_verification_evidence_links(self.evidence_items, [], self.reproduction_steps)
+        return self
 
     @field_validator("title", "severity")
     @classmethod
@@ -1570,6 +1576,8 @@ class UpdateVulnerabilityRequest(BaseModel):
 class Vulnerability(BaseModel):
     id: str
     project_id: str
+    can_delete: bool = False
+    delete_block_reason: str | None = None
     title: str
     severity: str
     vuln_type: str = ""
@@ -1619,6 +1627,9 @@ class VulnerabilityObservation(BaseModel):
     worker: str | None = None
     slot_key: str | None = None
     evidence_items: list[EvidenceItem] = Field(default_factory=list)
+    reproduction_steps: list[VerificationTestStep] = Field(default_factory=list)
+    # 历史发现未单独记录建议，None 表示来源未知，不从 canonical 回填。
+    remediation: str | None = None
     identity: dict[str, Any] = Field(default_factory=dict)
     severity: str
     confidence: float
@@ -1726,9 +1737,21 @@ class DuplicateVulnerabilityCandidatesResponse(BaseModel):
     candidates: list[DuplicateVulnerabilityCandidate] = Field(default_factory=list)
 
 
+class VulnerabilityReadable(BaseModel):
+    vulnerability_id: str
+    observation_id: str | None
+    description_markdown: str
+    reproduction_markdown: str
+    remediation_markdown: str
+    limitations_markdown: str
+    key_evidence_markdown: str
+
+
 class VulnerabilityDetail(Vulnerability):
     """主证据只选定一次真实发现；人工及未配对历史材料另保留可读入口。"""
 
+    readable: VulnerabilityReadable | None = None
+    display_images: list[dict[str, Any]] = Field(default_factory=list)
     observation_id: str | None = None
     source: EvidenceSource = "historical"
     record_evidence_items: list[EvidenceItem] = Field(default_factory=list)
@@ -1737,30 +1760,6 @@ class VulnerabilityDetail(Vulnerability):
     run_artifacts: list[VulnerabilityEvidenceArtifact] = []
     observations: list[VulnerabilityObservation] = []
     verifications: list[VulnerabilityVerification] = Field(default_factory=list)
-
-
-class VulnerabilityProvenanceRelation(BaseModel):
-    """溯源实体间的显式关系；source 标识关系来自哪个持久化字段。"""
-
-    source_id: str
-    target_id: str
-    relation: str
-    source: str
-
-
-class VulnerabilityProvenance(BaseModel):
-    """以 Observation 为发现单位的规范化漏洞溯源集合。"""
-
-    vulnerability: Vulnerability
-    observations: list[VulnerabilityObservation] = Field(default_factory=list)
-    verifications: list[VulnerabilityVerification] = Field(default_factory=list)
-    facts: list[Fact] = Field(default_factory=list)
-    intents: list[Intent] = Field(default_factory=list)
-    task_runs: list[TaskRun] = Field(default_factory=list)
-    artifacts: list[Artifact] = Field(default_factory=list)
-    evidence: list[FactEvidence] = Field(default_factory=list)
-    relations: list[VulnerabilityProvenanceRelation] = Field(default_factory=list)
-    completeness_warnings: list[str] = Field(default_factory=list)
 
 
 class VulnerabilityListItem(Vulnerability):

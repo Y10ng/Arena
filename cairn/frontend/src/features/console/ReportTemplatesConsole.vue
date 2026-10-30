@@ -40,7 +40,7 @@
             :disabled="isBusy"
             @click="selectTemplate(template.key)"
           >
-            <strong>{{ template.name }}</strong>
+            <strong>{{ template.name }}{{ template.is_default ? ' · 系统默认' : '' }}</strong>
             <span v-if="!template.markdown_content" class="report-template-item-note"
               >待填写正文</span
             >
@@ -83,6 +83,9 @@
                 :disabled="editorLocked"
               />
             </FormField>
+            <Button variant="ghost" :disabled="isBusy" @click="syntaxOpen = true">
+              <BookOpen :size="16" aria-hidden="true" />模板语法
+            </Button>
             <details class="report-template-description">
               <summary>说明{{ draft.description ? '（已填写）' : '' }}</summary>
               <FormField v-slot="{ controlAttrs }" label="模板说明">
@@ -148,7 +151,7 @@
             <Alert v-if="draftLimitError" tone="danger">{{ draftLimitError }}</Alert>
             <div class="report-template-save-actions">
               <Button
-                v-if="!creating"
+                v-if="!creating && !currentTemplate?.is_default"
                 variant="danger"
                 :disabled="isBusy || isLoadingTemplate || Boolean(readError)"
                 @click="openDeleteTemplate"
@@ -168,6 +171,34 @@
         </template>
       </section>
     </div>
+    <Dialog
+      v-model:open="syntaxOpen"
+      title="报告模板语法"
+      description="使用有限字段和重复区控制报告排版，原件按真实引用填入。"
+      size="lg"
+    >
+      <div class="report-template-syntax">
+        <p>
+          正文决定最终标题、标签、列表、表格和原件位置。生成时使用受理冻结的模板；保存不改变历史报告或已受理任务。
+        </p>
+        <p>
+          只支持下列字段与重复区，不支持条件、表达式或脚本。已有自由文本模板需人工转换，不能把示例漏洞或
+          HTTP 当作真实事实。
+        </p>
+        <section v-for="group in syntaxGroups" :key="group.title">
+          <h2>{{ group.title }}</h2>
+          <p v-if="group.description">{{ group.description }}</p>
+          <code>{{ group.fields }}</code>
+        </section>
+        <section>
+          <h2>原件与预览</h2>
+          <p>
+            finding.key_evidence 展示已接受内容选择的关键包／节选，无需额外围栏。evidence.content 与 request／response／artifact 保留完整原件含义，仅供自定义模板显式使用；后三者独占代码围栏内一行。模板文字预览不展开项目事实。
+          </p>
+          <pre><code>{{ evidenceSyntax }}</code></pre>
+        </section>
+      </div>
+    </Dialog>
     <ConfirmAction
       :open="Boolean(templateToDelete)"
       title="删除报告模板"
@@ -184,7 +215,7 @@
 import { computed, defineAsyncComponent, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { ArrowLeft, Plus } from '@lucide/vue'
+import { ArrowLeft, BookOpen, Plus } from '@lucide/vue'
 import {
   ApiError,
   createReportTemplate,
@@ -198,6 +229,7 @@ import { ConfirmAction } from '@/components/patterns'
 import {
   Alert,
   Button,
+  Dialog,
   EmptyState,
   FormField,
   Input,
@@ -228,6 +260,40 @@ const isDeleting = computed(() => busyOperation.value === 'delete')
 const templateToDelete = ref<ReportTemplate | null>(null)
 const showEditor = ref(false)
 const editorMode = ref('edit')
+const syntaxOpen = ref(false)
+const syntaxGroups = [
+  {
+    title: '报告字段',
+    description: '',
+    fields:
+      '{{ report_title }} · {{ executive_summary }} · {{ overall_remediation }} · {{ report_boundary }} · {{ limitations }} · {{ finding_count }}',
+  },
+  {
+    title: '逐漏洞重复区',
+    description: '{{#findings}} 与 {{/findings}} 之间按冻结漏洞顺序展开。字段使用 finding. 前缀。',
+    fields:
+      'id · title · severity · status · target · verification_status · description · recorded_steps · key_evidence · impact · root_cause · remediation · regression_steps · limitations · evidence_note',
+  },
+  {
+    title: '漏洞内的步骤解释',
+    description:
+      '{{#finding.steps}} 与 {{/finding.steps}} 之间逐项展开报告解释，不代表新执行或原包关联。',
+    fields: '{{ step.number }} · {{ step.explanation }} · {{ step.evidence_status }}',
+  },
+  {
+    title: '漏洞内的已有证据',
+    description: '{{#finding.evidence}} 与 {{/finding.evidence}} 之间只展开该漏洞的已记录交互。',
+    fields:
+      '{{ evidence.id }} · {{ evidence.title }} · {{ evidence.observation_id }} · {{ evidence.source }} · {{ evidence.association }} · {{ evidence.request }} · {{ evidence.response }} · {{ evidence.artifact }} · {{ evidence.content }}',
+  },
+  {
+    title: '原件索引',
+    description: '{{#artifacts}} 与 {{/artifacts}} 之间逐项展开冻结原件目录。',
+    fields: '{{ artifact.id }} · {{ artifact.kind }} · {{ artifact.sha256 }}',
+  },
+]
+const evidenceSyntax =
+  '{{#finding.evidence}}\n**{{ evidence.title }}**\n{{ evidence.association }}\n\n请求\n```http\n{{ evidence.request }}\n```\n\n响应\n```http\n{{ evidence.response }}\n```\n{{/finding.evidence}}'
 const editorOptions = [
   { value: 'edit', label: '正文编辑' },
   { value: 'preview', label: '模板文字预览' },
@@ -237,7 +303,7 @@ let loadGeneration = 0
 let operationGeneration = 0
 let readAbort: AbortController | null = null
 const errorMessage = (error: unknown) =>
-  error instanceof Error && error.message ? error.message : '未知错误'
+  error instanceof Error && error.message ? error.message.replace(/^Value error, /, '') : '未知错误'
 const mutationError = (action: string, error: unknown) =>
   error instanceof ApiError && error.status >= 400 && error.status < 500
     ? `${action}失败：${errorMessage(error)}。输入已保留。`
@@ -326,6 +392,11 @@ const selectTemplate = (key: string) => {
 }
 const openCreateTemplate = () => {
   if (!confirmDiscard()) return
+  const defaultTemplate = templates.value.find((template) => template.is_default)
+  if (!defaultTemplate?.markdown_content || defaultTemplate.validation_error) {
+    uiStore.showToast('系统默认模板不可用，请先修正默认模板后再新建。', 'danger')
+    return
+  }
   cancelRead()
   creating.value = true
   selectedTemplateKey.value = ''
@@ -334,6 +405,8 @@ const openCreateTemplate = () => {
   editorMode.value = 'edit'
   showEditor.value = true
   acceptDraft()
+  draft.markdown_content = defaultTemplate.markdown_content
+  acceptedDraft.value = JSON.stringify(draft)
 }
 const resetDraft = () => {
   if (editorLocked.value || !confirmDiscard()) return

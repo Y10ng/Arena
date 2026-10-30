@@ -88,6 +88,7 @@ ERROR_MESSAGES = {
     "provider_auth": "模型服务认证失败",
     "provider_rate_limit": "模型服务限流，SDK 有界重试已结束",
     "provider_error": "模型服务请求失败",
+    "model_output_limit": "模型输出达到上限，当前段未完成",
     "session_error": "Pi 会话状态或归属无效",
     "transport_error": "Worker 结果通道失败",
     "protocol_error": "Worker 结果协议无效",

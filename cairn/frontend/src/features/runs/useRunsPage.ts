@@ -42,6 +42,7 @@ export const useRunsPage = () => {
   const activeDetailTab = ref('terminal')
   const autoScrollTerminal = ref(true)
   const selectedRunId = ref<string | null>(null)
+  const chatRunNotice = ref(false)
   const commandEvents = ref<TaskRunCommandEvent[]>([])
   const artifacts = ref<RunArtifact[]>([])
   const stdoutArtifactId = ref<string | null>(null)
@@ -78,6 +79,7 @@ export const useRunsPage = () => {
     data: runsData,
     error: runsError,
     isError: isRunsError,
+    isSuccess: isRunsSuccess,
     isLoading: isLoadingRuns,
     refetch: refetchRuns,
   } = useQuery<TaskRun[]>({
@@ -90,7 +92,7 @@ export const useRunsPage = () => {
     enabled: computed(() => Boolean(currentProjectId.value)),
   })
 
-  const runs = computed(() => runsData.value || [])
+  const runs = computed(() => (runsData.value || []).filter((run) => run.task_type !== 'agent_chat'))
   const runsInitialError = computed(() => isRunsError.value && runs.value.length === 0)
   const runsStaleError = computed(() => isRunsError.value && runs.value.length > 0)
 
@@ -261,8 +263,15 @@ export const useRunsPage = () => {
   })
 
   const selectRun = (id: string) => {
+    if (!runs.value.some((run) => run.id === id)) return
+    chatRunNotice.value = false
     selectedRunId.value = id
     void router.replace({ query: { ...route.query, runId: id } })
+  }
+
+  const openProjectAgent = () => {
+    const projectId = currentProjectId.value
+    if (projectId) void router.push(`/projects/${encodeURIComponent(projectId)}/agent`)
   }
 
   const scrollToBottom = () => {
@@ -461,9 +470,19 @@ export const useRunsPage = () => {
   }
 
   watch(
-    () => route.query.runId,
-    (newId) => {
+    [currentProjectId, () => route.query.runId, runsData, isRunsSuccess],
+    ([projectId, newId, data, success], previous) => {
+      if (projectId !== previous?.[0] || newId) chatRunNotice.value = false
       selectedRunId.value = typeof newId === 'string' && newId ? newId : null
+      // 只根据成功加载的实际类型处理旧聊天链接，失败或查无记录不猜测归属。
+      if (!success || !data?.some((run) => run.id === newId && run.task_type === 'agent_chat')) {
+        return
+      }
+      selectedRunId.value = null
+      chatRunNotice.value = true
+      const query = { ...route.query }
+      delete query.runId
+      void router.replace({ query })
     },
     { immediate: true },
   )
@@ -516,6 +535,7 @@ export const useRunsPage = () => {
     artifacts,
     autoScrollTerminal,
     captureTruncationMessage,
+    chatRunNotice,
     commandEvents,
     detailTabs,
     filteredRuns,
@@ -526,6 +546,7 @@ export const useRunsPage = () => {
     isLoadingRuns,
     isLoadingTerminalPreview,
     linkedIntentOutcomeText,
+    openProjectAgent,
     previewArtifact,
     previewTruncationMessage,
     refetchRuns,

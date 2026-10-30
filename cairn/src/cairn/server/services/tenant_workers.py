@@ -1,43 +1,33 @@
-"""Tenant Worker CRUD、Model 绑定与安全可用性投影。"""
+"""固定 Tenant Worker 配置、Model 绑定与安全可用性投影。"""
 
 from __future__ import annotations
 
 from contextlib import nullcontext
 import json
-import sqlite3
 from typing import Any
-from uuid import uuid4
 
 from fastapi import HTTPException
-from psycopg.errors import ForeignKeyViolation, UniqueViolation
 
 from cairn.server.auth import RequestPrincipal, write_security_audit
 from cairn.server.db import get_conn
 from cairn.server.schemas.tenant_workers import (
-    CreateTenantWorkerRequest,
     TenantWorker,
     TenantWorkerExecutionBinding,
     UpdateTenantWorkerRequest,
 )
 
 from .infra import dispatcher_executor_available
-from .model_credentials import credential_status, decrypt_active_credential
-from .model_transport import ModelTransportError, resolve_model_endpoint
+from .model_credentials import credential_status
+from .model_execution import INFERENCE_ENDPOINTS, resolve_model_execution_binding
 from .time_utils import utcnow
-
-
-_INFERENCE_ENDPOINTS = {
-    "anthropic-messages": "/v1/messages",
-    "openai-chat-completions": "/v1/chat/completions",
-    "openai-responses": "/v1/responses",
-}
 
 
 def list_tenant_workers(*, tenant_id: str) -> list[TenantWorker]:
     _require_tenant_id(tenant_id)
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM tenant_workers WHERE tenant_id = ? AND purpose = 'general' ORDER BY created_at, id",
+            "SELECT * FROM tenant_workers WHERE tenant_id = ? AND purpose = 'general' "
+            "ORDER BY CASE task_types_json::jsonb->>0 WHEN 'bootstrap' THEN 0 WHEN 'reason' THEN 1 ELSE 2 END",
             (tenant_id,),
         ).fetchall()
         return [_worker_from_row(conn, row) for row in rows]
@@ -59,52 +49,19 @@ def get_tenant_worker_row(conn: Any, worker_id: str, *, tenant_id: str, purpose:
     return row
 
 
-def create_tenant_worker(
-    body: CreateTenantWorkerRequest,
-    *,
-    principal: RequestPrincipal,
-) -> TenantWorker:
-    tenant_id = _principal_tenant(principal)
-    worker_id = f"twr_{uuid4().hex}"
-    now = utcnow()
-    with get_conn() as conn:
-        _validate_model_binding(conn, body.model_id, tenant_id=tenant_id)
-        try:
-            conn.execute(
-                """
-                INSERT INTO tenant_workers
-                    (id, tenant_id, purpose, display_name, model_id, engine, task_types_json,
-                     max_running, priority, enabled, revision, created_by, created_at, updated_at)
-                VALUES (?, ?, 'general', ?, ?, 'pi', ?, ?, ?, ?, 1, ?, ?, ?)
-                """,
-                (
-                    worker_id,
-                    tenant_id,
-                    body.display_name,
-                    body.model_id,
-                    json.dumps(body.task_types, ensure_ascii=False),
-                    body.max_running,
-                    body.priority,
-                    int(body.enabled),
-                    principal.subject_id,
-                    now,
-                    now,
-                ),
-            )
-        except (sqlite3.IntegrityError, UniqueViolation, ForeignKeyViolation) as exc:
-            raise HTTPException(409, "Worker name already exists") from exc
-        write_security_audit(
-            conn,
-            actor_type=principal.kind,
-            actor_id=principal.subject_id,
-            tenant_id=tenant_id,
-            action="worker.create",
-            resource_type="worker",
-            resource_id=worker_id,
-            outcome="success",
-            metadata={"model_id": body.model_id, "revision": 1},
-        )
-        return _worker_from_row(conn, get_tenant_worker_row(conn, worker_id, tenant_id=tenant_id))
+def resolve_general_workers(conn: Any, *, tenant_id: str) -> list[Any]:
+    """普通项目只使用所属 Tenant 的固定三类配置，不从名称或模型推测角色。"""
+    rows = conn.execute(
+        "SELECT id, task_types_json FROM tenant_workers WHERE tenant_id = ? AND purpose = 'general'",
+        (tenant_id,),
+    ).fetchall()
+    by_role = {json.loads(row["task_types_json"])[0]: row["id"] for row in rows}
+    roles = ("bootstrap", "reason", "explore")
+    if len(rows) != 3 or set(by_role) != set(roles):
+        raise HTTPException(409, "固定 Worker 配置不完整，请检查数据库迁移")
+    return validate_tenant_worker_selection(
+        conn, tenant_id=tenant_id, worker_ids=[by_role[role] for role in roles], require_all_roles=True,
+    )
 
 
 def update_tenant_worker(
@@ -118,31 +75,19 @@ def update_tenant_worker(
     with get_conn() as conn:
         row = get_tenant_worker_row(conn, worker_id, tenant_id=tenant_id)
         if row["engine"] != "pi":
-            raise HTTPException(422, "Worker is unavailable: engine_unsupported; create a new pi Worker")
-        _validate_model_binding(conn, body.model_id, tenant_id=tenant_id)
-        try:
-            cursor = conn.execute(
-                """
-                UPDATE tenant_workers
-                SET display_name = ?, model_id = ?, task_types_json = ?, max_running = ?,
-                    priority = ?, enabled = ?, revision = revision + 1, updated_at = ?
-                WHERE id = ? AND tenant_id = ? AND revision = ?
-                """,
-                (
-                    body.display_name,
-                    body.model_id,
-                    json.dumps(body.task_types, ensure_ascii=False),
-                    body.max_running,
-                    body.priority,
-                    int(body.enabled),
-                    now,
-                    worker_id,
-                    tenant_id,
-                    body.expected_revision,
-                ),
-            )
-        except (sqlite3.IntegrityError, UniqueViolation, ForeignKeyViolation) as exc:
-            raise HTTPException(409, "Worker name already exists") from exc
+            raise HTTPException(422, "Worker is unavailable: engine_unsupported")
+        if body.model_id is not None:
+            _validate_model_binding(conn, body.model_id, tenant_id=tenant_id)
+        cursor = conn.execute(
+            """
+            UPDATE tenant_workers
+            SET model_id = ?, max_running = ?, priority = ?, enabled = ?,
+                revision = revision + 1, updated_at = ?
+            WHERE id = ? AND tenant_id = ? AND revision = ?
+            """,
+            (body.model_id, body.max_running, body.priority, int(body.enabled),
+             now, worker_id, tenant_id, body.expected_revision),
+        )
         if cursor.rowcount != 1:
             raise HTTPException(409, "Worker revision conflict")
         write_security_audit(
@@ -157,37 +102,6 @@ def update_tenant_worker(
             metadata={"model_id": body.model_id, "revision": body.expected_revision + 1},
         )
         return _worker_from_row(conn, get_tenant_worker_row(conn, worker_id, tenant_id=tenant_id))
-
-
-def delete_tenant_worker(
-    worker_id: str,
-    *,
-    expected_revision: int,
-    principal: RequestPrincipal,
-) -> None:
-    tenant_id = _principal_tenant(principal)
-    with get_conn() as conn:
-        row = get_tenant_worker_row(conn, worker_id, tenant_id=tenant_id)
-        try:
-            cursor = conn.execute(
-                "DELETE FROM tenant_workers WHERE id = ? AND tenant_id = ? AND revision = ?",
-                (worker_id, tenant_id, expected_revision),
-            )
-        except (sqlite3.IntegrityError, UniqueViolation, ForeignKeyViolation) as exc:
-            raise HTTPException(409, "Worker is referenced by a project or template") from exc
-        if cursor.rowcount != 1:
-            raise HTTPException(409, "Worker revision conflict")
-        write_security_audit(
-            conn,
-            actor_type=principal.kind,
-            actor_id=principal.subject_id,
-            tenant_id=tenant_id,
-            action="worker.delete",
-            resource_type="worker",
-            resource_id=worker_id,
-            outcome="success",
-            metadata={"model_id": row["model_id"], "revision": expected_revision},
-        )
 
 
 def validate_tenant_worker_selection(
@@ -236,7 +150,7 @@ def resolve_project_worker_execution_binding(
               ON b.project_id = p.id AND b.tenant_id = p.tenant_id
             JOIN tenant_workers w
               ON w.id = b.tenant_worker_id AND w.tenant_id = b.tenant_id
-            JOIN tenant_models m
+            LEFT JOIN tenant_models m
               ON m.id = w.model_id AND m.tenant_id = w.tenant_id
             LEFT JOIN verification_requests vr ON vr.project_id = p.id
             WHERE p.id = ? AND w.id = ?
@@ -260,8 +174,6 @@ def resolve_project_worker_execution_binding(
             raise HTTPException(409, "Project is not active")
         if not bool(row["enabled"]):
             raise HTTPException(409, "Worker is disabled")
-        if not verification and int(row["revision"]) != int(row["tenant_worker_revision"]):
-            raise HTTPException(409, "Worker binding revision is stale")
         task_types = json.loads(row["task_types_json"])
         if task_type == "report":
             # Report 是完成后的执行用途，复用 reason/bootstrap 能力而不扩张 Worker 能力模型。
@@ -269,44 +181,15 @@ def resolve_project_worker_execution_binding(
                 raise HTTPException(422, "Worker does not support report generation")
         elif task_type not in task_types:
             raise HTTPException(422, "Worker does not support the task type")
-        if row["protocol"] not in _INFERENCE_ENDPOINTS:
-            raise HTTPException(422, "Worker is unavailable: model_protocol_unsupported")
-        if not bool(row["model_enabled"]) or not str(row["model_name"] or "").strip():
-            raise HTTPException(409, "Model is unavailable")
-        try:
-            inference_endpoint = resolve_model_endpoint(
-                row["base_url"],
-                row["inference_endpoint"],
-                _INFERENCE_ENDPOINTS[row["protocol"]],
-            )
-        except ModelTransportError as exc:
-            raise HTTPException(422, exc.detail) from exc
-        api_key, credential = decrypt_active_credential(
-            conn,
-            tenant_id=row["tenant_id"],
-            model_id=row["model_id"],
-        )
-        custom_headers = json.loads(row["custom_headers_json"] or "[]")
+        model = resolve_model_execution_binding(conn, tenant_id=row["tenant_id"], model_id=row["model_id"])
         return TenantWorkerExecutionBinding(
+            **model.model_dump(),
             worker_id=row["id"],
             display_name=row["display_name"],
             worker_revision=int(row["revision"]),
-            model_id=row["model_id"],
-            model_revision=int(row["model_revision"]),
-            credential_version_id=str(credential["credential_version_id"]),
-            credential_version=int(credential["version_number"]),
-            credential_fingerprint=str(credential["credential_fingerprint"]),
-            engine=row["engine"],
             task_types=task_types,
             max_running=int(row["max_running"]),
             priority=int(row["priority"]),
-            model_name=row["model_name"],
-            protocol=row["protocol"],
-            base_url=row["base_url"],
-            inference_endpoint=inference_endpoint,
-            auth_header=row["auth_header"],
-            custom_headers=custom_headers,
-            api_key=api_key,
         )
 
 
@@ -367,8 +250,6 @@ def project_worker_bindings(conn: Any, project_id: str) -> list[dict[str, object
         reason = worker.unavailable_reason
         if row["purpose"] != ("verification" if verification else "general"):
             reason = "worker_purpose_mismatch"
-        elif reason is None and not verification and int(row["tenant_worker_revision"]) != int(row["revision"]):
-            reason = "binding_stale"
         # 真实引擎和不可用原因必须跨过项目响应 Schema，不能让调度端猜默认值。
         bindings.append({
             "id": row["id"],
@@ -392,7 +273,7 @@ def _validate_model_binding(conn: Any, model_id: str, *, tenant_id: str) -> None
     ).fetchone()
     if row is None:
         raise HTTPException(404, "Model not found")
-    if row["protocol"] not in _INFERENCE_ENDPOINTS:
+    if row["protocol"] not in INFERENCE_ENDPOINTS:
         raise HTTPException(422, "Worker is unavailable: model_protocol_unsupported")
 
 
@@ -406,9 +287,11 @@ def _worker_from_row(conn: Any, row: Any) -> TenantWorker:
         reason = "engine_unsupported"
     elif not bool(row["enabled"]):
         reason = "worker_disabled"
+    elif row["model_id"] is None:
+        reason = "model_unconfigured"
     elif model is None or not bool(model["enabled"]):
         reason = "model_disabled"
-    elif model["protocol"] not in _INFERENCE_ENDPOINTS:
+    elif model["protocol"] not in INFERENCE_ENDPOINTS:
         reason = "model_protocol_unsupported"
     elif not str(model["model_name"] or "").strip():
         reason = "model_incomplete"

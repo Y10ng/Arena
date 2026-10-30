@@ -19,18 +19,14 @@ from cairn.server.models import (
     VulnerabilityDetail,
     VulnerabilityEvidenceArtifact,
     VulnerabilityIdentityInput,
-    Fact,
     VulnerabilityListItem,
     VulnerabilityObservation,
-    VulnerabilityProvenance,
-    VulnerabilityProvenanceRelation,
+    VulnerabilityReadable,
     VulnerabilitySourceFact,
 )
 
-from .artifacts import artifact_to_model, fact_evidence_to_model
 from .common import *
 from .ids import lock_verification_project_write, next_vulnerability_id
-from .projects import intent_to_model, task_run_to_model
 from .time_utils import utcnow
 from .vulnerability_identity import (
     canonicalize_vulnerability_identity,
@@ -116,6 +112,65 @@ def vulnerability_from_row(row: sqlite3.Row) -> Vulnerability:
     )
 
 
+def vulnerability_delete_block_reason(conn, project_id: str) -> str | None:
+    """业务删除依赖项目写入资格，不等待全项目物理清理或其他可恢复工作。"""
+    from .ids import get_project_or_404
+
+    project = get_project_or_404(conn, project_id)
+    if conn.execute("SELECT 1 FROM verification_requests WHERE project_id = ?", (project_id,)).fetchone():
+        return "独立复测请使用删除复测记录"
+    if project["status"] == "active":
+        if project["coverage_stop_reason"] == "user_stopped":
+            return "项目正在结束，待在途结果收口后可删除"
+        return "请先暂停或结束项目"
+    if project["status"] not in {"paused", "stopped", "completed"}:
+        return "仅已暂停、已结束或已完成的项目允许删除漏洞"
+    return None
+
+
+def _with_delete_eligibility(conn, vulnerability: Vulnerability) -> Vulnerability:
+    reason = vulnerability_delete_block_reason(conn, vulnerability.project_id)
+    return vulnerability.model_copy(update={"can_delete": reason is None, "delete_block_reason": reason})
+
+
+def delete_vulnerability(conn, project_id: str, vuln_id: str) -> None:
+    """仅删除漏洞业务行；项目锁与 conclude/派发/项目状态更新互斥，不触碰共享原件。"""
+    from .ids import get_project_or_404
+    from .project_records import require_unmanaged_project
+
+    conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
+    get_project_or_404(conn, project_id)
+    require_unmanaged_project(conn, project_id)
+    _get_vulnerability_for_update(conn, project_id, vuln_id)
+    reason = vulnerability_delete_block_reason(conn, project_id)
+    if reason is not None:
+        raise HTTPException(409, reason)
+    # 只结束目标 verifier 的逻辑义务；物理执行和清理证明保留原状，其他可恢复工作不动。
+    now = utcnow()
+    conn.execute(
+        """UPDATE assessment_attempts SET status = 'failed', ended_at = ?, outcome = '目标漏洞已删除'
+           WHERE project_id = ? AND status = 'active' AND intent_id IN (
+               SELECT id FROM intents WHERE project_id = ? AND assessment_role = 'verifier'
+                 AND target_observation_id IN (
+                     SELECT id FROM vulnerability_observations WHERE project_id = ? AND vulnerability_id = ?
+                 )
+           )""",
+        (now, project_id, project_id, project_id, vuln_id),
+    )
+    # 沿用 Intent abandoned/conclusion_reason 终止语义，保留历史身份，不制造验证结论。
+    conn.execute(
+        """UPDATE intents SET concluded_at = ?, conclusion = 'abandoned',
+                  conclusion_reason = '目标漏洞已删除', worker = NULL, last_heartbeat_at = NULL
+           WHERE project_id = ? AND assessment_role = 'verifier'
+             AND concluded_at IS NULL AND to_fact_id IS NULL
+             AND target_observation_id IN (
+                 SELECT id FROM vulnerability_observations WHERE project_id = ? AND vulnerability_id = ?
+             )""",
+        (now, project_id, project_id, vuln_id),
+    )
+    conn.execute("DELETE FROM vulnerabilities WHERE project_id = ? AND id = ?", (project_id, vuln_id))
+
+
 def get_vulnerability_or_404(conn: sqlite3.Connection, project_id: str, vuln_id: str) -> sqlite3.Row:
     row = conn.execute(
         "SELECT * FROM vulnerabilities WHERE id = ? AND project_id = ?",
@@ -141,6 +196,8 @@ def _observation_from_row(row: sqlite3.Row) -> VulnerabilityObservation:
         worker=row["worker"],
         slot_key=row["slot_key"],
         evidence_items=_evidence_items_from_row(row),
+        reproduction_steps=json.loads(row["reproduction_steps_json"]),
+        remediation=row["remediation"],
         identity=identity,
         severity=row["severity"],
         confidence=row["confidence"],
@@ -173,7 +230,7 @@ def get_vulnerability_detail(
 ) -> VulnerabilityDetail:
     """默认主证据来自最新真实 Observation；其他历史材料保留独立入口。"""
     row = get_vulnerability_or_404(conn, project_id, vuln_id)
-    detail = VulnerabilityDetail(**vulnerability_from_row(row).model_dump())
+    detail = VulnerabilityDetail(**_with_delete_eligibility(conn, vulnerability_from_row(row)).model_dump())
     detail.record_evidence_items = detail.evidence_items
     selected = read_vulnerability_evidence(conn, project_id, vuln_id, observation_id)
     detail.observation_id = selected["observation_id"]
@@ -252,419 +309,30 @@ def get_vulnerability_detail(
             for ar in run_artifact_rows
         ]
 
+    from .vulnerability_reports import build_vulnerability_readable
+    from .http_evidence_render import list_display_images
+
+    detail.display_images = list_display_images(
+        conn, project_id, selected["evidence_items"], task_run_id=run_id,
+    )
+    detail.readable = VulnerabilityReadable.model_validate(build_vulnerability_readable(conn, detail))
     return detail
 
 
-def get_vulnerability_provenance(
-    conn: sqlite3.Connection,
-    project_id: str,
-    vuln_id: str,
-) -> VulnerabilityProvenance:
-    """返回项目内 canonical 漏洞及其可追溯的发现、验证与证据关系。"""
-    vulnerability = vulnerability_from_row(
-        get_vulnerability_or_404(conn, project_id, vuln_id)
-    )
-    observation_rows = conn.execute(
-        """
-        SELECT * FROM vulnerability_observations
-        WHERE project_id = ? AND vulnerability_id = ?
-        ORDER BY observed_at, id
-        """,
-        (project_id, vuln_id),
-    ).fetchall()
-    observations = [_observation_from_row(row) for row in observation_rows]
-    verifications = list_vulnerability_verifications(conn, project_id, vuln_id)
-
-    fact_ids = {
-        value
-        for value in (
-            vulnerability.source_fact_id,
-            *(item.source_fact_id for item in observations),
-            *(item.fact_id for item in verifications),
-        )
-        if value
-    }
-    run_ids = {
-        value
-        for value in (
-            vulnerability.discovered_by_run_id,
-            *(item.task_run_id for item in observations),
-            *(item.discovery_task_run_id for item in verifications),
-            *(item.verifier_task_run_id for item in verifications),
-            *(
-                ref.verifier_run_id
-                for item in verifications
-                for ref in item.evidence
-            ),
-        )
-        if value
-    }
-    intent_ids = {item.intent_id for item in verifications}
-    observation_ids = {item.id for item in observations}
-    discovery_refs = evidence_refs([
-        *vulnerability.evidence_items,
-        *(item for observation in observations for item in observation.evidence_items),
-    ])
-    artifact_ids = {
-        ref.artifact_id
-        for ref in [*discovery_refs, *(ref for item in verifications for ref in item.evidence)]
-    }
-    run_ids.update(ref.verifier_run_id for ref in discovery_refs if ref.verifier_run_id)
-
-    fact_rows: list[sqlite3.Row] = []
-    run_rows: list[sqlite3.Row] = []
-    intent_rows: list[sqlite3.Row] = []
-    evidence_rows: list[sqlite3.Row] = []
-    while True:
-        before = (frozenset(fact_ids), frozenset(run_ids), frozenset(intent_ids))
-
-        if fact_ids:
-            placeholders = ", ".join("?" for _ in fact_ids)
-            fact_rows = conn.execute(
-                f"""
-                SELECT * FROM facts
-                WHERE project_id = ? AND id IN ({placeholders})
-                ORDER BY created_at, id
-                """,
-                (project_id, *sorted(fact_ids)),
-            ).fetchall()
-        else:
-            fact_rows = []
-        run_ids.update(row["task_run_id"] for row in fact_rows if row["task_run_id"])
-
-        if run_ids:
-            placeholders = ", ".join("?" for _ in run_ids)
-            run_rows = conn.execute(
-                f"""
-                SELECT * FROM task_runs
-                WHERE project_id = ? AND id IN ({placeholders})
-                ORDER BY COALESCE(started_at, ended_at, ''), id
-                """,
-                (project_id, *sorted(run_ids)),
-            ).fetchall()
-        else:
-            run_rows = []
-        intent_ids.update(row["intent_id"] for row in run_rows if row["intent_id"])
-
-        intent_clauses: list[str] = []
-        intent_params: list[str] = [project_id]
-        if intent_ids:
-            placeholders = ", ".join("?" for _ in intent_ids)
-            intent_clauses.append(f"id IN ({placeholders})")
-            intent_params.extend(sorted(intent_ids))
-        if fact_ids:
-            placeholders = ", ".join("?" for _ in fact_ids)
-            intent_clauses.append(f"to_fact_id IN ({placeholders})")
-            intent_params.extend(sorted(fact_ids))
-        if observation_ids:
-            placeholders = ", ".join("?" for _ in observation_ids)
-            intent_clauses.append(f"target_observation_id IN ({placeholders})")
-            intent_params.extend(sorted(observation_ids))
-        if intent_clauses:
-            intent_rows = conn.execute(
-                f"""
-                SELECT * FROM intents
-                WHERE project_id = ? AND ({' OR '.join(intent_clauses)})
-                ORDER BY created_at, id
-                """,
-                intent_params,
-            ).fetchall()
-        else:
-            intent_rows = []
-        intent_ids.update(row["id"] for row in intent_rows)
-        fact_ids.update(row["to_fact_id"] for row in intent_rows if row["to_fact_id"])
-        run_ids.update(row["task_run_id"] for row in intent_rows if row["task_run_id"])
-        if intent_ids:
-            placeholders = ", ".join("?" for _ in intent_ids)
-            source_rows = conn.execute(
-                f"""
-                SELECT fact_id FROM intent_sources
-                WHERE project_id = ? AND intent_id IN ({placeholders})
-                ORDER BY intent_id, source_order, fact_id
-                """,
-                (project_id, *sorted(intent_ids)),
-            ).fetchall()
-            fact_ids.update(row["fact_id"] for row in source_rows)
-
-        if fact_ids:
-            placeholders = ", ".join("?" for _ in fact_ids)
-            evidence_rows = conn.execute(
-                f"""
-                SELECT fe.*,
-                       CASE WHEN a.id IS NULL THEN 0 ELSE 1 END AS artifact_exists,
-                       CASE
-                           WHEN fe.verifier_run_id IS NULL THEN NULL
-                           WHEN tr.id IS NULL THEN 0
-                           ELSE 1
-                       END AS verifier_run_exists
-                FROM fact_evidence fe
-                LEFT JOIN artifacts a
-                  ON a.project_id = fe.project_id AND a.id = fe.artifact_id
-                LEFT JOIN task_runs tr
-                  ON tr.project_id = fe.project_id AND tr.id = fe.verifier_run_id
-                WHERE fe.project_id = ? AND fe.fact_id IN ({placeholders})
-                ORDER BY fe.created_at, fe.fact_id, fe.artifact_id, fe.pointer
-                """,
-                (project_id, *sorted(fact_ids)),
-            ).fetchall()
-        else:
-            evidence_rows = []
-        artifact_ids.update(row["artifact_id"] for row in evidence_rows)
-        run_ids.update(
-            row["verifier_run_id"] for row in evidence_rows if row["verifier_run_id"]
-        )
-
-        after = (frozenset(fact_ids), frozenset(run_ids), frozenset(intent_ids))
-        if after == before:
-            break
-
-    facts = [
-        Fact(
-            id=row["id"],
-            description=row["description"],
-            task_run_id=row["task_run_id"],
-            creator=row["creator"],
-            created_at=row["created_at"],
-        )
-        for row in fact_rows
-    ]
-    task_runs = [task_run_to_model(row) for row in run_rows]
-    intents = [intent_to_model(conn, row, project_id) for row in intent_rows]
-    evidence = [fact_evidence_to_model(row) for row in evidence_rows]
-
-    artifact_clauses: list[str] = []
-    artifact_params: list[str] = [project_id]
-    if artifact_ids:
-        placeholders = ", ".join("?" for _ in artifact_ids)
-        artifact_clauses.append(f"id IN ({placeholders})")
-        artifact_params.extend(sorted(artifact_ids))
-    if run_ids:
-        placeholders = ", ".join("?" for _ in run_ids)
-        artifact_clauses.append(f"task_run_id IN ({placeholders})")
-        artifact_params.extend(sorted(run_ids))
-    artifact_rows = (
-        conn.execute(
-            f"""
-            SELECT * FROM artifacts
-            WHERE project_id = ? AND ({' OR '.join(artifact_clauses)})
-            ORDER BY created_at, id
-            """,
-            artifact_params,
-        ).fetchall()
-        if artifact_clauses
-        else []
-    )
-    artifacts = [artifact_to_model(row) for row in artifact_rows]
-
-    relations: list[VulnerabilityProvenanceRelation] = []
-    relation_keys: set[tuple[str, str, str, str]] = set()
-
-    def add_relation(
-        source_id: str,
-        target_id: str | None,
-        relation: str,
-        source: str,
-    ) -> None:
-        if not target_id:
-            return
-        key = (source_id, target_id, relation, source)
-        if key in relation_keys:
-            return
-        relation_keys.add(key)
-        relations.append(
-            VulnerabilityProvenanceRelation(
-                source_id=source_id,
-                target_id=target_id,
-                relation=relation,
-                source=source,
-            )
-        )
-
-    add_relation(
-        vuln_id,
-        vulnerability.source_fact_id,
-        "sourced_from_fact",
-        "vulnerabilities.source_fact_id",
-    )
-    add_relation(
-        vuln_id,
-        vulnerability.discovered_by_run_id,
-        "discovered_by_run",
-        "vulnerabilities.discovered_by_run_id",
-    )
-    for ref in evidence_refs(vulnerability.evidence_items):
-        add_relation(vuln_id, ref.artifact_id, "supported_by_artifact", "vulnerabilities.evidence_items_json")
-    for observation in observations:
-        add_relation(
-            vuln_id,
-            observation.id,
-            "has_observation",
-            "vulnerability_observations.vulnerability_id",
-        )
-        add_relation(
-            observation.id,
-            observation.source_fact_id,
-            "sourced_from_fact",
-            "vulnerability_observations.source_fact_id",
-        )
-        add_relation(
-            observation.id,
-            observation.task_run_id,
-            "discovered_by_run",
-            "vulnerability_observations.task_run_id",
-        )
-        for ref in evidence_refs(observation.evidence_items):
-            add_relation(observation.id, ref.artifact_id, "supported_by_artifact", "vulnerability_observations.evidence_items_json")
-    for verification in verifications:
-        add_relation(
-            verification.id,
-            vuln_id,
-            "verifies_vulnerability",
-            "vulnerability_verifications.vulnerability_id",
-        )
-        add_relation(
-            verification.id,
-            verification.observation_id,
-            "verifies_observation",
-            "vulnerability_verifications.observation_id",
-        )
-        add_relation(
-            verification.id,
-            verification.intent_id,
-            "requested_by_intent",
-            "vulnerability_verifications.intent_id",
-        )
-        add_relation(
-            verification.id,
-            verification.fact_id,
-            "concluded_as_fact",
-            "vulnerability_verifications.fact_id",
-        )
-        add_relation(
-            verification.id,
-            verification.discovery_task_run_id,
-            "compares_discovery_run",
-            "vulnerability_verifications.discovery_task_run_id",
-        )
-        add_relation(
-            verification.id,
-            verification.verifier_task_run_id,
-            "performed_by_run",
-            "vulnerability_verifications.verifier_task_run_id",
-        )
-        for ref in verification.evidence:
-            add_relation(
-                verification.id,
-                ref.artifact_id,
-                "supported_by_artifact",
-                "vulnerability_verifications.evidence_json",
-            )
-            add_relation(
-                verification.id,
-                ref.verifier_run_id,
-                "evidence_verified_by_run",
-                "vulnerability_verifications.evidence_json",
-            )
-    for fact in facts:
-        add_relation(fact.id, fact.task_run_id, "produced_by_run", "facts.task_run_id")
-    for intent in intents:
-        for source_fact_id in intent.from_:
-            add_relation(
-                intent.id,
-                source_fact_id,
-                "uses_source_fact",
-                "intent_sources.fact_id",
-            )
-        add_relation(intent.id, intent.to, "concluded_as_fact", "intents.to_fact_id")
-        add_relation(
-            intent.id,
-            intent.task_run_id,
-            "executed_by_run",
-            "intents.task_run_id",
-        )
-        add_relation(
-            intent.id,
-            intent.target_observation_id,
-            "targets_observation",
-            "intents.target_observation_id",
-        )
-    for run in task_runs:
-        add_relation(run.id, run.intent_id, "executes_intent", "task_runs.intent_id")
-    for artifact in artifacts:
-        add_relation(
-            artifact.id,
-            artifact.task_run_id,
-            "produced_by_run",
-            "artifacts.task_run_id",
-        )
-    for item in evidence:
-        add_relation(
-            item.fact_id,
-            item.artifact_id,
-            "supported_by_artifact",
-            "fact_evidence.artifact_id",
-        )
-        add_relation(
-            item.fact_id,
-            item.verifier_run_id,
-            "evidence_verified_by_run",
-            "fact_evidence.verifier_run_id",
-        )
-
-    loaded_fact_ids = {item.id for item in facts}
-    loaded_intent_ids = {item.id for item in intents}
-    loaded_run_ids = {item.id for item in task_runs}
-    loaded_artifact_ids = {item.id for item in artifacts}
-    warnings: list[str] = []
-
-    def warn_missing(kind: str, owner: str, target_id: str | None, loaded: set[str]) -> None:
-        if target_id and target_id not in loaded:
-            warnings.append(f"{owner} references missing {kind} {target_id}.")
-
-    if not observations:
-        warnings.append(f"Vulnerability {vuln_id} has no discovery observations.")
-    warn_missing("fact", f"Vulnerability {vuln_id}", vulnerability.source_fact_id, loaded_fact_ids)
-    warn_missing("task run", f"Vulnerability {vuln_id}", vulnerability.discovered_by_run_id, loaded_run_ids)
-    for ref in evidence_refs(vulnerability.evidence_items):
-        warn_missing("artifact", f"Vulnerability {vuln_id}", ref.artifact_id, loaded_artifact_ids)
-    for observation in observations:
-        owner = f"Observation {observation.id}"
-        warn_missing("fact", owner, observation.source_fact_id, loaded_fact_ids)
-        warn_missing("task run", owner, observation.task_run_id, loaded_run_ids)
-        for ref in evidence_refs(observation.evidence_items):
-            warn_missing("artifact", owner, ref.artifact_id, loaded_artifact_ids)
-    for verification in verifications:
-        owner = f"Verification {verification.id}"
-        warn_missing("observation", owner, verification.observation_id, observation_ids)
-        warn_missing("intent", owner, verification.intent_id, loaded_intent_ids)
-        warn_missing("fact", owner, verification.fact_id, loaded_fact_ids)
-        warn_missing("task run", owner, verification.discovery_task_run_id, loaded_run_ids)
-        warn_missing("task run", owner, verification.verifier_task_run_id, loaded_run_ids)
-        for ref in verification.evidence:
-            warn_missing("artifact", owner, ref.artifact_id, loaded_artifact_ids)
-            warn_missing("task run", owner, ref.verifier_run_id, loaded_run_ids)
-    for item in evidence:
-        if not item.artifact_exists:
-            warnings.append(
-                f"Fact evidence {item.fact_id} references missing artifact {item.artifact_id}."
-            )
-        if item.verifier_run_exists is False:
-            warnings.append(
-                f"Fact evidence {item.fact_id} references missing task run {item.verifier_run_id}."
-            )
-
-    return VulnerabilityProvenance(
-        vulnerability=vulnerability,
-        observations=observations,
-        verifications=verifications,
-        facts=facts,
-        intents=intents,
-        task_runs=task_runs,
-        artifacts=artifacts,
-        evidence=evidence,
-        relations=relations,
-        completeness_warnings=list(dict.fromkeys(warnings)),
-    )
+def vulnerability_read_scope(
+    *, tenant_id: str | None = None, principal: RequestPrincipal | None = None,
+) -> tuple[str, tuple]:
+    """列表、统计与首页预览共享 Tenant／复测 caller 及隐藏记录边界。"""
+    clauses: list[str] = []
+    params: tuple = ()
+    if principal is not None:
+        access_clause, access_params = verification_project_access_clause(principal)
+        clauses.append(access_clause)
+        params += access_params
+    if tenant_id is not None:
+        clauses.append("p.tenant_id = ?")
+        params += (tenant_id,)
+    return " AND ".join(clauses) if clauses else "1 = 1", params
 
 
 def list_all_vulnerabilities(
@@ -676,15 +344,9 @@ def list_all_vulnerabilities(
     principal: RequestPrincipal | None = None,
 ) -> list[VulnerabilityListItem]:
     """跨项目成果列表：聚合所有项目的漏洞并附带项目标题，供主菜单"成果列表"展示。"""
-    clauses: list[str] = []
-    params: list = []
-    if principal is not None:
-        access_clause, access_params = verification_project_access_clause(principal)
-        clauses.append(access_clause)
-        params.extend(access_params)
-    if tenant_id is not None:
-        clauses.append("p.tenant_id = ?")
-        params.append(tenant_id)
+    scope, scope_params = vulnerability_read_scope(tenant_id=tenant_id, principal=principal)
+    clauses = [scope]
+    params = list(scope_params)
     if severity:
         clauses.append("v.severity = ?")
         params.append(severity)
@@ -703,8 +365,12 @@ def list_all_vulnerabilities(
         params,
     ).fetchall()
     items: list[VulnerabilityListItem] = []
+    delete_reasons = {project_id: vulnerability_delete_block_reason(conn, project_id)
+                      for project_id in {row["project_id"] for row in rows}}
     for row in rows:
         base = vulnerability_from_row(row).model_dump()
+        reason = delete_reasons[row["project_id"]]
+        base.update(can_delete=reason is None, delete_block_reason=reason)
         base["project_title"] = row["project_title"] or ""
         items.append(VulnerabilityListItem(**base))
     return items
@@ -730,7 +396,52 @@ def list_vulnerabilities(
         f"SELECT * FROM vulnerabilities WHERE {where} ORDER BY created_at DESC, id DESC",
         params,
     ).fetchall()
-    return [vulnerability_from_row(row) for row in rows]
+    reason = vulnerability_delete_block_reason(conn, project_id)
+    return [vulnerability_from_row(row).model_copy(update={
+        "can_delete": reason is None, "delete_block_reason": reason,
+    }) for row in rows]
+
+
+def validate_flow_evidence_sources(conn, project_id: str, items: list[EvidenceItem], *, task_run_id: str | None) -> bool:
+    """真实执行绑定决定当前或历史来源；模型标签不能赋予跨项目引用权限。"""
+    from .flow_evidence import resolve_flow_evidence
+
+    current = False
+    run = None
+    for item in items:
+        if item.flow_id is None:
+            continue
+        snapshot = resolve_flow_evidence(conn, project_id, item.flow_id)
+        scope = snapshot["scope"]
+        same_run = task_run_id is not None and scope["task_run_id"] == task_run_id
+        if item.source == "capture":
+            if not same_run:
+                raise HTTPException(422, "flow_evidence_current_run_required")
+            if run is None:
+                run = conn.execute(
+                    "SELECT execution_generation FROM task_runs WHERE project_id = ? AND id = ?",
+                    (project_id, task_run_id),
+                ).fetchone()
+            if run is None or scope["generation"] != run["execution_generation"]:
+                raise HTTPException(422, "flow_evidence_generation_mismatch")
+            # 缺响应的失败请求可以保留，但不能独自证明本次已经复现。
+            current = current or snapshot["record"]["response"] is not None
+        elif item.source != "historical" or same_run:
+            raise HTTPException(422, "flow_evidence_source_mismatch")
+    return current
+
+
+def has_current_evidence(conn, project_id: str, task_run_id: str | None, items: list[EvidenceItem]) -> bool:
+    """本轮复现至少有本轮可读流量响应或本轮原件，历史输入不充当新实验。"""
+    current_flow = validate_flow_evidence_sources(conn, project_id, items, task_run_id=task_run_id)
+    for ref in evidence_refs(item for item in items if item.source != "historical"):
+        row = conn.execute(
+            "SELECT task_run_id FROM artifacts WHERE project_id = ? AND id = ?",
+            (project_id, ref.artifact_id),
+        ).fetchone()
+        if row is not None and task_run_id is not None and row["task_run_id"] == task_run_id:
+            return True
+    return current_flow
 
 
 def _validate_evidence_items(
@@ -746,22 +457,32 @@ def _validate_evidence_items(
     if len(ids) != len(set(ids)):
         raise HTTPException(422, "evidence_item_id_must_be_unique")
     if discovery and any(
-        item.source == "historical"
+        (item.source == "historical" and item.flow_id is None)
         or any(value is not None for value in (item.request_text, item.response_text, item.text))
         for item in items
     ):
         raise HTTPException(422, "new_discovery_requires_artifact_evidence")
     # 原样保留的既有条目不是新输入；原件已缺失时仍须保留其真实历史引用。
-    refs = evidence_refs(item for item in items if item not in (preserved_items or []))
+    submitted_items = [item for item in items if item not in (preserved_items or [])]
+    validate_flow_evidence_sources(conn, project_id, submitted_items, task_run_id=task_run_id)
+    from .http_evidence_render import is_optional_http_image
+
+    refs = evidence_refs(submitted_items)
     for ref in refs:
         row = conn.execute(
-            "SELECT task_run_id FROM artifacts WHERE project_id = ? AND id = ?",
+            "SELECT * FROM artifacts WHERE project_id = ? AND id = ?",
             (project_id, ref.artifact_id),
         ).fetchone()
         if row is None:
             raise HTTPException(422, f"Artifact {ref.artifact_id} not found in project")
+        if is_optional_http_image(row):
+            raise HTTPException(422, "derived_image_is_not_original_evidence")
         if discovery and (task_run_id is None or row["task_run_id"] != task_run_id):
             raise HTTPException(422, "discovery_evidence_current_run_required")
+
+    from .vulnerability_reports import validate_evidence_excerpts
+
+    validate_evidence_excerpts(conn, project_id, submitted_items)
 
 
 def _insert_discovery_observation(
@@ -781,15 +502,17 @@ def _insert_discovery_observation(
         INSERT INTO vulnerability_observations (
             id, project_id, vulnerability_id, source_fact_id,
             task_run_id, worker, slot_key, identity_json,
-            severity, confidence, evidence_items_json, observed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            severity, confidence, evidence_items_json,
+            reproduction_steps_json, remediation, observed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             observation_id, project_id, vulnerability_id, body.source_fact_id,
             task_run_id, worker, body.slot_key, identity_json,
             body.severity, body.confidence,
             dump_json([item.model_dump(exclude_none=True) for item in body.evidence_items]),
-            observed_at,
+            dump_json([step.model_dump() for step in body.reproduction_steps]),
+            body.remediation, observed_at,
         ),
     )
     return observation_id
@@ -813,6 +536,8 @@ def create_vulnerability(
         if fact_row is None:
             raise HTTPException(422, f"Fact {body.source_fact_id} not found in project")
     discovery = body.source_fact_id is not None
+    if not discovery and body.reproduction_steps:
+        raise HTTPException(422, "reproduction_steps_require_discovery_observation")
     _validate_evidence_items(
         conn, project_id, body.evidence_items,
         discovery=discovery, task_run_id=discovered_by_run_id,
@@ -833,7 +558,7 @@ def create_vulnerability(
         """,
         (
             vid, project_id, body.title, body.severity, body.vuln_type, body.target,
-            body.confidence, body.source_fact_id, body.remediation,
+            body.confidence, body.source_fact_id, "" if discovery else body.remediation,
             dump_json([] if discovery else [item.model_dump(exclude_none=True) for item in body.evidence_items]),
             discovered_by_run_id, discovered_by_worker, body.slot_key, now, now,
         ),
@@ -910,11 +635,11 @@ def register_discovered_vulnerability(
         """
         INSERT INTO vulnerabilities (
             id, project_id, title, severity, vuln_type, target,
-            confidence, status, source_fact_id, remediation,
+            confidence, status, source_fact_id,
             discovered_by_run_id, discovered_by_worker, slot_key,
             fingerprint, identity_json, created_at, updated_at
         ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?, ?, ?
         )
         ON CONFLICT (project_id, fingerprint)
             WHERE fingerprint IS NOT NULL
@@ -930,7 +655,6 @@ def register_discovered_vulnerability(
             body.target,
             body.confidence,
             body.source_fact_id,
-            body.remediation,
             discovered_by_run_id,
             discovered_by_worker,
             body.slot_key,
@@ -968,8 +692,6 @@ def register_discovered_vulnerability(
             confidence = ?,
             vuln_type = CASE WHEN vuln_type = '' THEN ? ELSE vuln_type END,
             target = CASE WHEN target = '' THEN ? ELSE target END,
-            remediation = CASE
-                WHEN remediation = '' THEN ? ELSE remediation END,
             updated_at = ?
         WHERE id = ? AND project_id = ?
         """,
@@ -978,7 +700,6 @@ def register_discovered_vulnerability(
             confidence,
             body.vuln_type,
             body.target,
-            body.remediation,
             now,
             vulnerability_id,
             project_id,
@@ -1078,6 +799,33 @@ def confirm_vulnerability_for_slot(
     return int(cur.rowcount)
 
 
+def vulnerability_counts(
+    conn,
+    *,
+    tenant_id: str | None = None,
+    principal: RequestPrincipal | None = None,
+) -> dict[str, object]:
+    """只聚合计数，不装配正文、删除资格或执行诊断。"""
+    scope, params = vulnerability_read_scope(tenant_id=tenant_id, principal=principal)
+    total = 0
+    by_severity: dict[str, int] = {}
+    by_status: dict[str, int] = {}
+    for row in conn.execute(
+        f"""
+        SELECT v.severity, v.status, COUNT(*) AS c
+        FROM vulnerabilities v JOIN projects p ON p.id = v.project_id
+        WHERE {scope}
+        GROUP BY v.severity, v.status
+        """,
+        params,
+    ).fetchall():
+        count = int(row["c"])
+        total += count
+        by_severity[row["severity"]] = by_severity.get(row["severity"], 0) + count
+        by_status[row["status"]] = by_status.get(row["status"], 0) + count
+    return {"total": total, "by_severity": by_severity, "by_status": by_status}
+
+
 def vulnerabilities_summary(
     conn: sqlite3.Connection,
     *,
@@ -1085,40 +833,10 @@ def vulnerabilities_summary(
     principal: RequestPrincipal | None = None,
 ) -> dict[str, object]:
     """按显式 Tenant 聚合漏洞；省略 Tenant 仅供超级管理员全局视图。"""
-    tenant_join = "JOIN projects p ON p.id = v.project_id" if tenant_id is not None or principal is not None else ""
-    clauses = ["p.tenant_id = ?"] if tenant_id is not None else []
-    params = (tenant_id,) if tenant_id is not None else ()
-    if principal is not None:
-        access_clause, access_params = verification_project_access_clause(principal)
-        clauses.append(access_clause)
-        params += access_params
-    tenant_where = "WHERE " + " AND ".join(clauses) if clauses else ""
-    total = conn.execute(
-        f"SELECT COUNT(*) AS c FROM vulnerabilities v {tenant_join} {tenant_where}",
-        params,
-    ).fetchone()["c"]
-    by_severity: dict[str, int] = {}
-    for row in conn.execute(
-        f"""
-        SELECT v.severity, COUNT(*) AS c
-        FROM vulnerabilities v {tenant_join} {tenant_where}
-        GROUP BY v.severity
-        """,
-        params,
-    ).fetchall():
-        by_severity[row["severity"]] = int(row["c"])
-    by_status: dict[str, int] = {}
-    for row in conn.execute(
-        f"""
-        SELECT v.status, COUNT(*) AS c
-        FROM vulnerabilities v {tenant_join} {tenant_where}
-        GROUP BY v.status
-        """,
-        params,
-    ).fetchall():
-        by_status[row["status"]] = int(row["c"])
+    counts = vulnerability_counts(conn, tenant_id=tenant_id, principal=principal)
+    scope, params = vulnerability_read_scope(tenant_id=tenant_id, principal=principal)
     # 项目标题、ID 与计数必须使用相同的 Tenant／复测 caller 过滤。
-    project_where = tenant_where
+    project_where = f"WHERE {scope}"
     per_project: list[dict[str, object]] = []
     for row in conn.execute(
         f"""
@@ -1130,9 +848,4 @@ def vulnerabilities_summary(
         params,
     ).fetchall():
         per_project.append({"project_id": row["project_id"], "title": row["title"], "count": int(row["c"])})
-    return {
-        "total": int(total),
-        "by_severity": by_severity,
-        "by_status": by_status,
-        "per_project": per_project,
-    }
+    return {**counts, "per_project": per_project}

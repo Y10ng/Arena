@@ -7,11 +7,8 @@ import asyncio
 import base64
 import json
 import os
-import sqlite3
-from threading import Barrier
 from uuid import uuid4
 
-from psycopg.errors import UniqueViolation
 
 from fastapi import HTTPException
 import pytest
@@ -23,41 +20,30 @@ from cairn.project_authorization_contract import (
 from cairn.server import db
 from cairn.server.schemas.libraries import LibraryFileWrite
 from cairn.server.schemas.project_schedules import CreateScheduleRequest, ScheduleActionRequest, ScheduleTiming, UpdateScheduleRequest
-from cairn.server.schemas.projects import CreateProjectRequest, UpdateProjectStatusRequest, UpdateProjectWorkersRequest
-from cairn.server.schemas.tenant_workers import CreateTenantWorkerRequest
-from cairn.server.schemas.worker_templates import CreateWorkerTemplateRequest, UpdateWorkerTemplateRequest
-from cairn.server.services import worker_templates as templates_service
+from cairn.server.schemas.projects import CreateProjectRequest, UpdateProjectStatusRequest
 from cairn.server.services import model_credentials
 from cairn.server.services.creation_requests import create_project_request, query_creation_request
 from cairn.server.services.libraries import archive_library, create_library, create_library_version
 from cairn.server.services.project_authorization import authorization_scope_projection, project_authorization_block_reason
-from cairn.server.services.project_records import delete_project_record, get_project_detail, project_lifecycle_action, update_project_status_record, update_project_workers_record
+from cairn.server.services.project_records import delete_project_record, get_project_detail, project_lifecycle_action, update_project_status_record
 from cairn.server.services.project_resources import create_project_resource_batch, upload_project_resource_batch_file, project_resource_root, read_project_resource_content, cleanup_expired_project_resource_batches
 from cairn.server.services.project_schedules import create_schedule, consume_due_schedules, get_schedule, schedule_action, schedule_history, update_schedule
 from cairn.server.services.schedule_times import next_times, timestamp
 from cairn.server.services import tenant_workers as worker_service
-from test_project_library_bindings import _principal, _worker
+from test_project_creation_workers import _principal, _worker
 from test_postgres_bootstrap import postgres_instance, empty_postgres_url
 
 NOW = datetime(2030, 1, 1, 9, 0, tzinfo=timezone.utc)
 START = NOW + timedelta(hours=1)
 
 
-@pytest.fixture(params=["sqlite", "postgres"])
+@pytest.fixture
 def schedule_env(request, tmp_path, monkeypatch):
+    if os.environ.get("CAIRN_TEST_POSTGRES_BOOTSTRAP") != "1":
+        pytest.skip("需显式启用本地一次性 PostgreSQL，绝不使用业务库")
     db._reset_for_tests()
-    with monkeypatch.context() as patch:
-        if request.param.endswith("-v48"):
-            # 仅在隔离实例初始化期间截断注册表，恢复后再走真实 configure 升级。
-            for registry in ("SQLITE_MIGRATIONS", "POSTGRES_MIGRATIONS"):
-                patch.setattr(db, registry, tuple(item for item in getattr(db, registry) if item.version <= 48))
-        if request.param.removesuffix("-v48") == "postgres":
-            if os.environ.get("CAIRN_TEST_POSTGRES_BOOTSTRAP") != "1":
-                pytest.skip("需显式启用本地一次性 PostgreSQL，绝不使用业务库")
-            url = request.getfixturevalue("empty_postgres_url")
-            db.configure(database_url=url, artifact_path=tmp_path / "artifacts")
-        else:
-            db.configure(tmp_path / "schedules.db")
+    url = request.getfixturevalue("empty_postgres_url")
+    db.configure(database_url=url, artifact_path=tmp_path / "artifacts")
     keyring = tmp_path / "keyring.json"
     keyring.write_text(json.dumps({"active_version": "test-v1", "keys": {"test-v1": base64.b64encode(b"p" * 32).decode()}}))
     keyring.chmod(0o600)
@@ -66,8 +52,8 @@ def schedule_env(request, tmp_path, monkeypatch):
     monkeypatch.setenv("CAIRN_ADVISORY_LIBRARY_ROOT", str(tmp_path / "libraries"))
     monkeypatch.setattr(worker_service, "dispatcher_executor_available", lambda conn: True)
     principal = _principal("schedule-user")
-    worker = _worker(principal)
-    project = CreateProjectRequest(title="隔离计划", origin="背景 https://background.example.test 不等于授权", goal="验证计划事务", scenario="goal-driven-v1", tenant_worker_ids=[worker.id], authorization_expires_at=None, targets=[{"type": "domain", "value": "authorized.example.test"}])
+    _worker(principal, "计划模型")
+    project = CreateProjectRequest(title="隔离计划", origin="背景 https://background.example.test 不等于授权", goal="验证计划事务", scenario="goal-driven-v1", authorization_expires_at=None, targets=[{"type": "domain", "value": "authorized.example.test"}])
     yield principal, project
     db._reset_for_tests()
 
@@ -129,10 +115,7 @@ def test_once_retime_cancel_delete_and_restart_recovery(schedule_env):
     # 配置重读即重启恢复，消费者不依赖浏览器、线程计时器或进程内领取状态。
     config = db._config
     db._reset_for_tests()
-    if config.backend == "sqlite":
-        db.configure(config.sqlite_path)
-    else:
-        db.configure(database_url=config.database_url, artifact_path=config.artifact_path)
+    db.configure(database_url=config.database_url, artifact_path=config.artifact_path)
     assert consume_due_schedules(now=new_start + timedelta(minutes=2))["processed"] == 1
     saved = get_schedule(schedule["id"], principal)
     assert saved["last_result"]["reason"] == "延迟 120 秒启动"
@@ -477,201 +460,75 @@ def test_timezone_preview_dst_and_end_boundary():
         ScheduleTiming(mode="once", timezone="America/New_York", start_at="2030-03-10T02:30:00-05:00")
 
 
-def test_default_templates_tenant_concurrency_uniqueness_and_rollback(schedule_env, monkeypatch):
+@pytest.mark.parametrize("mode", ["immediate", "once", "daily", "weekly"])
+def test_fixed_workers_configuration_edits_preserve_creation_identity(schedule_env, mode):
     principal, project = schedule_env
-    foreign = _principal("default-foreign")
-    foreign_worker = _worker(foreign)
-    foreign_default = templates_service.create_worker_template(
-        CreateWorkerTemplateRequest(name="其他 Tenant 默认", tenant_worker_ids=[foreign_worker.id], is_default=True),
-        tenant_id=foreign.tenant_id, actor_id=foreign.subject_id,
+    workers = worker_service.list_tenant_workers(tenant_id=principal.tenant_id)
+    worker_ids = [worker.id for worker in workers]
+    assert [worker.task_types for worker in workers] == [["bootstrap"], ["reason"], ["explore"]]
+    body = project.model_copy(update={"request_id": uuid4()}) if mode == "immediate" else _body(
+        project, mode, **({"weekdays": [1]} if mode == "weekly" else {}),
     )
-    barrier = Barrier(2)
 
-    def create_default(index):
-        barrier.wait(timeout=10)
-        return templates_service.create_worker_template(
-            CreateWorkerTemplateRequest(name=f"并发默认 {index}", tenant_worker_ids=project.tenant_worker_ids, is_default=True),
-            tenant_id=principal.tenant_id, actor_id=principal.subject_id,
-        )
-
-    # 尚无默认行的首次并发保存也必须串行成功，不能只依靠唯一索引拒绝一方。
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        templates = list(pool.map(create_default, range(2)))
-    assert len(templates_service.list_worker_templates(tenant_id=principal.tenant_id)) == 2
-    assert sum(item.is_default for item in templates_service.list_worker_templates(tenant_id=principal.tenant_id)) == 1
-
-    def switch_default(template):
-        barrier.wait(timeout=10)
-        return templates_service.update_worker_template(
-            template.id, UpdateWorkerTemplateRequest(is_default=True), tenant_id=principal.tenant_id,
-        )
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        assert all(item.is_default for item in pool.map(switch_default, templates))
-    saved = templates_service.list_worker_templates(tenant_id=principal.tenant_id)
-    current = next(item for item in saved if item.is_default)
-    other = next(item for item in saved if not item.is_default)
-    assert sum(item.is_default for item in saved) == 1
-    assert templates_service.list_worker_templates(tenant_id=foreign.tenant_id) == [foreign_default]
-    with pytest.raises(HTTPException) as hidden:
-        templates_service.update_worker_template(foreign_default.id, UpdateWorkerTemplateRequest(is_default=True), tenant_id=principal.tenant_id)
-    assert hidden.value.status_code == 404
-
-    # 绕开服务也不能保存同 Tenant 的两个默认；失败事务不能留下半次切换。
-    with pytest.raises((sqlite3.IntegrityError, UniqueViolation)):
-        with db.get_conn() as conn:
-            conn.execute("UPDATE worker_templates SET is_default=1 WHERE id=?", (other.id,))
-    before = [item.model_dump() for item in templates_service.list_worker_templates(tenant_id=principal.tenant_id)]
-    replace = templates_service._replace_template_workers
-
-    def fail_after_binding(*args, **kwargs):
-        replace(*args, **kwargs)
-        raise HTTPException(422, "模拟模板绑定写入后失败")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(templates_service, "_replace_template_workers", fail_after_binding)
-        with pytest.raises(HTTPException, match="模拟模板绑定写入后失败"):
-            templates_service.create_worker_template(
-                CreateWorkerTemplateRequest(name="必须回滚", tenant_worker_ids=project.tenant_worker_ids, is_default=True),
-                tenant_id=principal.tenant_id, actor_id=principal.subject_id,
-            )
-        assert [item.model_dump() for item in templates_service.list_worker_templates(tenant_id=principal.tenant_id)] == before
-        with pytest.raises(HTTPException, match="模拟模板绑定写入后失败"):
-            templates_service.update_worker_template(
-                other.id, UpdateWorkerTemplateRequest(name="不可留下的新名称", tenant_worker_ids=project.tenant_worker_ids, is_default=True),
-                tenant_id=principal.tenant_id,
-            )
-    assert [item.model_dump() for item in templates_service.list_worker_templates(tenant_id=principal.tenant_id)] == before
-    assert templates_service.list_worker_templates(tenant_id=foreign.tenant_id) == [foreign_default]
-    assert not templates_service.update_worker_template(current.id, UpdateWorkerTemplateRequest(is_default=False), tenant_id=principal.tenant_id).is_default
-    assert not any(item.is_default for item in templates_service.list_worker_templates(tenant_id=principal.tenant_id))
-    templates_service.update_worker_template(other.id, UpdateWorkerTemplateRequest(is_default=True), tenant_id=principal.tenant_id)
-    templates_service.delete_worker_template(other.id, tenant_id=principal.tenant_id)
-    assert not any(item.is_default for item in templates_service.list_worker_templates(tenant_id=principal.tenant_id))
-
-
-def test_creation_role_union_and_default_changes_preserve_old_bindings(schedule_env):
-    principal, project = schedule_env
-    with db.get_conn() as conn:
-        model_id = conn.execute("SELECT model_id FROM tenant_workers WHERE id=?", (project.tenant_worker_ids[0],)).fetchone()["model_id"]
-    roles = ("bootstrap", "reason", "explore")
-    partial = {
-        missing: worker_service.create_tenant_worker(
-            CreateTenantWorkerRequest(display_name=f"缺少 {missing}", model_id=model_id, task_types=[role for role in roles if role != missing]),
-            principal=principal,
-        ) for missing in roles
-    }
-    same_roles = [partial["explore"]] + [
-        worker_service.create_tenant_worker(
-            CreateTenantWorkerRequest(display_name=f"重复角色 {index}", model_id=model_id, task_types=["bootstrap", "reason"]), principal=principal,
-        ) for index in range(2)
-    ]
-    selections = [([worker.id], missing) for missing, worker in partial.items()]
-    selections.append(([worker.id for worker in same_roles], "explore"))
-    ordinary = templates_service.create_worker_template(
-        CreateWorkerTemplateRequest(name="普通不完整组合", tenant_worker_ids=[partial["explore"].id]),
-        tenant_id=principal.tenant_id, actor_id=principal.subject_id,
-    )
-    assert not ordinary.is_default
-    ordinary = templates_service.update_worker_template(
-        ordinary.id, UpdateWorkerTemplateRequest(tenant_worker_ids=[partial["reason"].id]), tenant_id=principal.tenant_id,
-    )
-    default = templates_service.create_worker_template(
-        CreateWorkerTemplateRequest(name="单 Worker 三角色", tenant_worker_ids=project.tenant_worker_ids, is_default=True),
-        tenant_id=principal.tenant_id, actor_id=principal.subject_id,
-    )
-    with pytest.raises(HTTPException) as rejected_default:
-        templates_service.create_worker_template(
-            CreateWorkerTemplateRequest(name="数量不能替代角色", tenant_worker_ids=[worker.id for worker in same_roles], is_default=True),
-            tenant_id=principal.tenant_id, actor_id=principal.subject_id,
-        )
-    assert rejected_default.value.status_code == 422 and "explore" in rejected_default.value.detail
-    with pytest.raises(HTTPException) as rejected_promotion:
-        templates_service.update_worker_template(ordinary.id, UpdateWorkerTemplateRequest(is_default=True), tenant_id=principal.tenant_id)
-    assert rejected_promotion.value.status_code == 422 and "reason" in rejected_promotion.value.detail
-    assert next(item for item in templates_service.list_worker_templates(tenant_id=principal.tenant_id) if item.is_default).id == default.id
-
-    def create(mode, worker_ids):
-        request = project.model_copy(update={"tenant_worker_ids": worker_ids, "request_id": uuid4() if mode == "immediate" else None})
+    def create():
         if mode == "immediate":
-            return create_project_request(request, tenant_id=principal.tenant_id, user_id=principal.subject_id)
-        return create_schedule(_body(request, mode, **({"weekdays": [1]} if mode == "weekly" else {})), principal, now=NOW)
+            return create_project_request(body, tenant_id=principal.tenant_id, user_id=principal.subject_id)
+        return create_schedule(body, principal, now=NOW)
 
-    for mode in ("immediate", "once", "daily", "weekly"):
-        for worker_ids, missing in selections:
-            with pytest.raises(HTTPException) as rejected:
-                create(mode, worker_ids)
-            assert rejected.value.status_code == 422 and missing in rejected.value.detail
+    saved = create()
+    initial_project_id = saved.project.id if mode == "immediate" else saved["project_id"]
     with db.get_conn() as conn:
-        for table in ("projects", "project_schedules", "creation_requests", "project_tenant_workers"):
-            assert conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"] == 0
+        before_requests = [dict(row) for row in conn.execute("SELECT * FROM creation_requests").fetchall()]
+        before_bindings = [dict(row) for row in conn.execute("SELECT * FROM project_tenant_workers ORDER BY project_id, position").fetchall()]
+        if mode in {"daily", "weekly"}:
+            stored = conn.execute("SELECT project_json FROM project_schedules WHERE id=?", (saved["id"],)).fetchone()
+            assert "tenant_worker_ids" not in json.loads(stored["project_json"])
 
-    union = [partial["bootstrap"].id, partial["explore"].id]
-    for worker_ids in (project.tenant_worker_ids, union):
-        for mode in ("immediate", "once", "daily", "weekly"):
-            result = create(mode, worker_ids)
-            if mode == "immediate":
-                assert [item.id for item in result.project.tenant_workers] == worker_ids
-            elif mode == "once":
-                assert [item.id for item in get_project_detail(result["project_id"]).project.tenant_workers] == worker_ids
-            else:
-                with db.get_conn() as conn:
-                    stored = conn.execute("SELECT project_json FROM project_schedules WHERE id=?", (result["id"],)).fetchone()
-                assert json.loads(stored["project_json"])["tenant_worker_ids"] == worker_ids
-    historical = create("immediate", project.tenant_worker_ids)
-    rebound = update_project_workers_record(historical.project.id, UpdateProjectWorkersRequest(tenant_worker_ids=[partial["reason"].id]), tenant_id=principal.tenant_id)
-    assert [item.id for item in rebound.tenant_workers] == [partial["reason"].id]
+    from cairn.server.schemas.tenant_workers import UpdateTenantWorkerRequest
 
-    def stored_bindings():
-        with db.get_conn() as conn:
-            return (
-                [dict(row) for row in conn.execute("SELECT * FROM project_tenant_workers ORDER BY project_id, position").fetchall()],
-                [dict(row) for row in conn.execute("SELECT * FROM project_schedules ORDER BY id").fetchall()],
-            )
+    def configure(worker, *, enabled):
+        return worker_service.update_tenant_worker(
+            worker.id,
+            UpdateTenantWorkerRequest(
+                model_id=worker.model_id,
+                max_running=worker.max_running + 1, priority=worker.priority,
+                enabled=enabled, expected_revision=worker.revision,
+            ), principal=principal,
+        )
 
-    before = stored_bindings()
-    replacement = templates_service.create_worker_template(
-        CreateWorkerTemplateRequest(name="双 Worker 角色并集", tenant_worker_ids=union, is_default=True),
-        tenant_id=principal.tenant_id, actor_id=principal.subject_id,
+    # 已成功请求的重发不重新校验配置，也不重写摘要或已有绑定来源。
+    disabled = configure(workers[0], enabled=False)
+    replay = create()
+    assert (replay.project.id if mode == "immediate" else replay["id"]) == (saved.project.id if mode == "immediate" else saved["id"])
+    with db.get_conn() as conn:
+        assert [dict(row) for row in conn.execute("SELECT * FROM creation_requests").fetchall()] == before_requests
+        assert [dict(row) for row in conn.execute("SELECT * FROM project_tenant_workers ORDER BY project_id, position").fetchall()] == before_bindings
+    current_worker = configure(disabled, enabled=True)
+    if mode == "immediate":
+        assert [worker.id for worker in replay.project.tenant_workers] == worker_ids
+        return
+
+    changes = {"project": project, "local_time": "10:00"} if mode != "once" else {}
+    if mode == "weekly":
+        changes["weekdays"] = [1]
+    saved = update_schedule(
+        saved["id"], UpdateScheduleRequest(
+            mode=mode, timezone="UTC", start_at=START.isoformat(),
+            version=saved["version"], **changes,
+        ), principal, now=NOW,
     )
-    assert replacement.is_default and stored_bindings() == before
-    templates_service.update_worker_template(replacement.id, UpdateWorkerTemplateRequest(tenant_worker_ids=project.tenant_worker_ids), tenant_id=principal.tenant_id)
-    templates_service.update_worker_template(default.id, UpdateWorkerTemplateRequest(is_default=True), tenant_id=principal.tenant_id)
-    assert stored_bindings() == before
-
-
-@pytest.mark.parametrize("schedule_env", ["sqlite-v48", "postgres-v48"], indirect=True)
-def test_default_false_v49_migrates_existing_templates_without_rebinding(schedule_env):
-    principal, project = schedule_env
+    if mode == "once":
+        assert get_project_detail(initial_project_id).project.status == "pending"
+    assert consume_due_schedules(now=START)["errors"] == 0
+    saved = get_schedule(saved["id"], principal)
+    assert saved["generated_count"] == 1
+    generated = get_project_detail(saved["last_project_id"])
+    assert generated.project.status == "active"
+    assert [worker.id for worker in generated.project.tenant_workers] == worker_ids
     with db.get_conn() as conn:
-        assert conn.execute("SELECT MAX(version) AS version FROM schema_migrations").fetchone()["version"] == 48
-        for template_id in ("wtm_history_one", "wtm_history_two"):
-            conn.execute(
-                "INSERT INTO worker_templates(id,name,owner,worker_names_json,created_at,tenant_id) VALUES(?,?,?,?,?,?)",
-                (template_id, "历史模板", principal.subject_id, '["historical-worker"]', NOW.isoformat(), principal.tenant_id),
-            )
-            conn.execute(
-                "INSERT INTO worker_template_tenant_workers(template_id,tenant_id,tenant_worker_id,position,created_at) VALUES(?,?,?,0,?)",
-                (template_id, principal.tenant_id, project.tenant_worker_ids[0], NOW.isoformat()),
-            )
-        before_templates = [dict(row) for row in conn.execute("SELECT * FROM worker_templates ORDER BY id").fetchall()]
-        before_bindings = [dict(row) for row in conn.execute("SELECT * FROM worker_template_tenant_workers ORDER BY template_id, position").fetchall()]
-        assert all("is_default" not in row for row in before_templates)
-    config = db._config
-    db._reset_for_tests()
-    if config.backend == "sqlite":
-        db.configure(config.sqlite_path)
-    else:
-        db.configure(database_url=config.database_url, artifact_path=config.artifact_path)
-    with db.get_conn() as conn:
-        assert [dict(row) for row in conn.execute("SELECT * FROM worker_templates ORDER BY id").fetchall()] == [dict(row, is_default=0) for row in before_templates]
-        assert [dict(row) for row in conn.execute("SELECT * FROM worker_template_tenant_workers ORDER BY template_id, position").fetchall()] == before_bindings
-        registry = db.SQLITE_MIGRATIONS if config.backend == "sqlite" else db.POSTGRES_MIGRATIONS
-        migration = next(item for item in registry if item.version == 49)
-        assert dict(conn.execute("SELECT name,checksum FROM schema_migrations WHERE version=49").fetchone()) == {"name": migration.name, "checksum": migration.checksum}
-    assert all(not item.is_default for item in templates_service.list_worker_templates(tenant_id=principal.tenant_id))
-    fresh = templates_service.create_worker_template(
-        CreateWorkerTemplateRequest(name="升级后的普通模板", tenant_worker_ids=project.tenant_worker_ids),
-        tenant_id=principal.tenant_id, actor_id=principal.subject_id,
-    )
-    assert not fresh.is_default
+        binding = conn.execute(
+            "SELECT tenant_worker_revision FROM project_tenant_workers WHERE project_id=? AND tenant_worker_id=?",
+            (generated.project.id, current_worker.id),
+        ).fetchone()
+    # 单次保留保存时来源，周期实例绑定触发时的当前配置；两者均不被旧 revision 阻塞。
+    assert binding["tenant_worker_revision"] == (workers[0].revision if mode == "once" else current_worker.revision)

@@ -9,7 +9,7 @@ import re
 from typing import BinaryIO, Iterator
 
 from cairn.evidence_contracts import EvidenceItem, WorkerEvidenceItem
-from cairn.server.schemas.candidates import CANDIDATE_MAX_ARTIFACTS, CANDIDATE_MAX_ARTIFACT_BYTES
+from cairn.server.schemas.candidates import candidate_artifact_limit, CANDIDATE_MAX_ARTIFACT_BYTES
 
 from .common_base import *
 from .process_runner import worker_process_failure
@@ -353,7 +353,7 @@ def record_declared_artifacts(
     if task_run_id is None or not artifacts:
         return ProcessArtifactRecord(refs=[])
 
-    if len(artifacts) > CANDIDATE_MAX_ARTIFACTS or sum(artifact.size_bytes for artifact in artifacts) > CANDIDATE_MAX_ARTIFACT_BYTES:
+    if len(artifacts) > candidate_artifact_limit(phase) or sum(artifact.size_bytes for artifact in artifacts) > CANDIDATE_MAX_ARTIFACT_BYTES:
         return ProcessArtifactRecord(refs=[], collect_failed=True)
     refs: list[EvidenceRef] = []
     artifact_ids_by_handle: dict[str, str] = {}

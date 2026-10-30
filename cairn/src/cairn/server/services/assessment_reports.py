@@ -83,25 +83,100 @@ def _rows(
     return values
 
 
-def _report_discovery_rows(conn: sqlite3.Connection, project_id: str, *, observations: bool = False) -> list[dict[str, Any]]:
+def _report_discovery_rows(conn: sqlite3.Connection, project_id: str, *, observations: bool = False,
+                           vulnerability_id: str | None = None, observation_id: str | None = None) -> list[dict[str, Any]]:
     """正常报告仅投影迁移后的证据，旧列仍留在数据库作为原文存档。"""
     from .vulnerabilities import read_vulnerability_evidence
 
     table = "vulnerability_observations" if observations else "vulnerabilities"
     order = "observed_at, id" if observations else "created_at, id"
-    rows = _rows(conn, f"SELECT * FROM {table} WHERE project_id = ? ORDER BY {order}", (project_id,), json_columns=("identity_json",))
+    where = "project_id = ?"
+    params: list[object] = [project_id]
+    if vulnerability_id is not None:
+        where += " AND " + ("vulnerability_id" if observations else "id") + " = ?"
+        params.append(vulnerability_id)
+    if observations and observation_id is not None:
+        where += " AND id = ?"
+        params.append(observation_id)
+    rows = _rows(conn, f"SELECT * FROM {table} WHERE {where} ORDER BY {order}", tuple(params), json_columns=("identity_json",))
     for item in rows:
         item["evidence_items"] = json.loads(item.pop("evidence_items_json"))
         for column in ("packet_artifact_id", "repro_request", "repro_response"):
             item.pop(column)
-        if not observations:
+        if observations:
+            item["reproduction_steps"] = json.loads(item.pop("reproduction_steps_json"))
+        else:
             item["record_evidence_items"] = item["evidence_items"]
+            item["record_repro_steps"] = item["repro_steps"]
+            item["record_remediation"] = item["remediation"]
             item.update(read_vulnerability_evidence(conn, project_id, item["id"]))
+            if item["observation_id"] is not None:
+                selected = conn.execute(
+                    "SELECT reproduction_steps_json, remediation, source_fact_id FROM vulnerability_observations WHERE project_id = ? AND id = ?",
+                    (project_id, item["observation_id"]),
+                ).fetchone()
+                item["reproduction_steps"] = json.loads(selected["reproduction_steps_json"])
+                item["remediation"] = selected["remediation"]
+                item["source_fact_id"] = selected["source_fact_id"]
+                item["repro_steps"] = ""
+            else:
+                item["reproduction_steps"] = []
     return rows
 
 
-def _finalization_view(row: sqlite3.Row) -> AssessmentReportFinalizationView:
+def _report_scope_key(vulnerability_id: str | None, observation_id: str | None) -> str:
+    if vulnerability_id is None:
+        if observation_id is not None:
+            raise HTTPException(422, "assessment_report_vulnerability_id_required")
+        return ""
+    identity = json.dumps([vulnerability_id, observation_id], ensure_ascii=False, separators=(",", ":"))
+    return "vulnerability:" + sha256(identity.encode("utf-8")).hexdigest()
+
+
+def _resolve_report_scope(conn, project_id, vulnerability_id, observation_id):
+    if vulnerability_id is None:
+        return _report_scope_key(None, observation_id), None
+    from .vulnerabilities import read_vulnerability_evidence
+
+    selected = read_vulnerability_evidence(conn, project_id, vulnerability_id, observation_id)
+    observation_id = selected["observation_id"]
+    return _report_scope_key(vulnerability_id, observation_id), observation_id
+
+
+def _finalization_row(conn, project_id, *, scope_key="", generation_token=None):
+    if generation_token is not None:
+        return conn.execute(
+            "SELECT * FROM assessment_report_finalizations WHERE project_id = ? AND generation_token = ?",
+            (project_id, generation_token),
+        ).fetchone()
+    return conn.execute(
+        "SELECT * FROM assessment_report_finalizations WHERE project_id = ? AND scope_key = ?",
+        (project_id, scope_key),
+    ).fetchone()
+
+
+def _scope_input_sha256(packet: dict[str, Any]) -> str:
+    # 只比较该次发现的输入；项目运行状态、报告请求本身和无关任务不使成果失效。
+    material = {key: packet.get(key) for key in (
+        "vulnerability_id", "observation_id", "vulnerabilities", "observations",
+        "facts", "verifications", "evidence_links", "artifact_contents", "flow_evidence", "flow_contents",
+    )}
+    for key in ("vulnerabilities", "observations", "facts", "verifications", "evidence_links"):
+        material[key] = [
+            {name: value for name, value in row.items() if name not in {"created_at", "updated_at", "observed_at"}}
+            for row in packet.get(key, [])
+        ]
+    material["artifacts"] = [
+        {key: row.get(key) for key in ("id", "project_id", "sha256", "size", "kind")}
+        for row in packet.get("artifacts", [])
+    ]
+    return sha256(_canonical_json(material).encode("utf-8")).hexdigest()
+
+
+def _finalization_view(conn, row: sqlite3.Row) -> AssessmentReportFinalizationView:
     values = _row_dict(row)
+    run = _report_task_run(conn, row) if row["status"] in {"failed", "cancelled"} else None
+    values["last_error_code"] = run["error_type"] if run is not None else None
     # digest 是内部 fencing material，不进入通用读取模型。
     values.pop("claim_sha256", None)
     values["template_compatibility_profiles"] = _json_value(values.pop("template_profiles_json"), [])
@@ -128,6 +203,10 @@ def _report_task_run(conn: sqlite3.Connection, finalization: sqlite3.Row) -> sql
 def _require_report_execution_generation(project, task_run) -> None:
     if task_run is None:
         raise HTTPException(409, "assessment_report_claim_mismatch")
+    context = _json_value(task_run["runtime_context_json"], {})
+    if context.get("report_claim", {}).get("scope_key"):
+        # 单条只读交付由自己的 generation fencing，不借用研究项目暂停代次。
+        return
     if task_run["execution_generation"] != project["execution_generation"] or task_run["pause_requested"]:
         raise HTTPException(409, "execution_generation_mismatch")
 
@@ -267,7 +346,7 @@ def _expected_report_metadata(
     plan = parse_report_execution_plan(finalization["report_execution_plan_json"])
     return {
         "source": "report_task",
-        "format": "markdown",
+        "format": "json" if finalization["scope_key"] else "markdown",
         "report_generation_token": finalization["generation_token"],
         "report_template_key": finalization["template_key"],
         "packet_version": plan.packet_version,
@@ -304,9 +383,10 @@ def _validate_report_artifact(
         artifact_id,
         error_code=error_code,
     )
+    suffix = "vulnerability-readable-report.json" if finalization["scope_key"] else _REPORT_ARTIFACT_SUFFIX
     expected_uri = (
         f"artifact://projects/{finalization['project_id']}/runs/{task_run['id']}/"
-        f"{artifact_id}-{_REPORT_ARTIFACT_SUFFIX}"
+        f"{artifact_id}-{suffix}"
     )
     metadata = _json_value(artifact["metadata_json"], {})
     expected_metadata = _expected_report_metadata(
@@ -336,6 +416,22 @@ def _validate_report_artifact(
         raise HTTPException(409, error_code) from exc
     if not markdown.strip():
         raise HTTPException(409, error_code)
+    if finalization["scope_key"]:
+        from cairn.report_readable import readable_finding_context, validate_report_readable
+        from .verification_requests import _validate_public_text
+        try:
+            packet = json.loads(finalization["frozen_packet_json"])
+            data = validate_report_readable(markdown, packet)
+            _validate_public_text(data.model_dump(mode="json"))
+            for finding in data.findings:
+                _validate_public_text(readable_finding_context(finding, packet))
+        except HTTPException as exc:
+            if exc.detail == "verification_sensitive_result_rejected":
+                # 原文保持不变，拒绝的成果沿既有 artifact fallback 收尾，不永久挂在 outbox。
+                raise HTTPException(409, error_code) from exc
+            raise
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HTTPException(409, error_code) from exc
     return artifact
 
 
@@ -478,6 +574,8 @@ def _validate_snapshot_artifact(
         }
     ):
         raise HTTPException(409, error_code)
+    if finalization["scope_key"] and snapshot["report_packet"] != json.loads(finalization["frozen_packet_json"]):
+        raise HTTPException(409, error_code)
     return artifact
 
 
@@ -487,6 +585,26 @@ def _finish_receipt_view(row: sqlite3.Row) -> AssessmentReportFinishReceiptView:
     except (TypeError, json.JSONDecodeError) as exc:
         raise HTTPException(500, "assessment_report_finish_receipt_invalid") from exc
     return AssessmentReportFinishReceiptView.model_validate(payload)
+
+
+def get_assessment_report_finish_receipt(
+    project_id: str, task_run_id: str, *, principal,
+) -> AssessmentReportFinishReceiptView:
+    """恢复只读取已有终局，不以重新拼接的请求改写历史失败。"""
+    from .audit_task_runs import authenticated_execution_owner
+
+    dispatcher_id = authenticated_execution_owner(principal)
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM assessment_report_finish_receipts WHERE project_id = ? AND task_run_id = ?",
+            (project_id, task_run_id),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "assessment_report_finish_receipt_not_found")
+        material = json.loads(row["request_json"])
+        if material.get("authenticated_dispatcher_id") != dispatcher_id:
+            raise HTTPException(403, "execution_owner_mismatch")
+        return _finish_receipt_view(row)
 
 
 def ensure_assessment_report_finalization(
@@ -502,10 +620,10 @@ def ensure_assessment_report_finalization(
     conn.execute(
         """
         INSERT INTO assessment_report_finalizations (
-            project_id, version, status, attempt_count, last_error,
+            project_id, scope_key, version, status, attempt_count, last_error,
             generation_started_at, generation_token, created_at, updated_at
-        ) VALUES (?, ?, 'pending', 0, '', ?, ?, ?, ?)
-        ON CONFLICT(project_id) DO UPDATE SET
+        ) VALUES (?, '', ?, 'pending', 0, '', ?, ?, ?, ?)
+        ON CONFLICT(project_id, scope_key) DO UPDATE SET
             version = excluded.version,
             status = 'pending',
             attempt_count = 0,
@@ -523,11 +641,8 @@ def ensure_assessment_report_finalization(
         """,
         (project_id, _REPORT_VERSION, now, generation_token, now, now),
     )
-    row = conn.execute(
-        "SELECT * FROM assessment_report_finalizations WHERE project_id = ?",
-        (project_id,),
-    ).fetchone()
-    return _finalization_view(row)
+    row = _finalization_row(conn, project_id)
+    return _finalization_view(conn, row)
 
 
 def _lock_report_project(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
@@ -545,7 +660,7 @@ def _stopped_project_has_active_assessment_runs(
             """
             SELECT 1 FROM task_runs
             WHERE project_id = ?
-              AND task_type != 'report'
+              AND task_type NOT IN ('report', 'agent_chat')
               AND status IN ('queued', 'running')
             LIMIT 1
             """,
@@ -582,8 +697,11 @@ def _require_report_request_eligibility(
 def _require_report_claim_eligibility(
     conn: sqlite3.Connection,
     project: sqlite3.Row,
+    finalization=None,
 ) -> None:
     require_execution_contract(project)
+    if finalization is not None and finalization["scope_key"]:
+        return
     from .project_records import project_pause_unconfirmed
 
     status = str(project["status"])
@@ -610,7 +728,7 @@ def request_assessment_report_generation(
     template_key: str,
     requested_by: str,
 ) -> AssessmentReportFinalizationView:
-    """冻结模板并创建一次显式报告生成请求，历史报告 Artifact 保持不变。"""
+    """仅受理项目总报告，冻结模板与执行配置，不改变项目状态或已有成果。"""
     project = _lock_report_project(conn, project_id)
     require_execution_contract(project)
     report_policy = report_policy_from_project_row(project)
@@ -618,22 +736,14 @@ def request_assessment_report_generation(
         raise HTTPException(409, "assessment_report_not_supported")
     _require_report_request_eligibility(conn, project)
 
-    current = conn.execute(
-        "SELECT * FROM assessment_report_finalizations WHERE project_id = ?",
-        (project_id,),
-    ).fetchone()
+    current = _finalization_row(conn, project_id)
     now = utcnow()
-    if current is not None and str(current["status"]) == "running":
-        lease_expires_at = current["lease_expires_at"]
-        if lease_expires_at is None or str(lease_expires_at) > now:
-            raise HTTPException(409, "assessment_report_generation_running")
-    if current is not None and str(current["status"]) == "pending":
-        if (
-            current["template_key"] == template_key
-            and current["requested_at"] is not None
-        ):
-            # 已接受请求完全依赖冻结快照；幂等重试不重新读取实时模板或 Prompt。
-            return _finalization_view(current).model_copy(update={"claim_token": None})
+    if current is not None and current["status"] in {"pending", "running"}:
+        if current["cancel_requested_at"]:
+            raise HTTPException(409, "assessment_report_cancellation_pending")
+        if current["template_key"] == template_key and current["requested_at"] is not None:
+            # 重复点击复用正在执行的一代，不因 lease 超时重新计费。
+            return _finalization_view(conn, current).model_copy(update={"claim_token": None})
         raise HTTPException(409, "assessment_report_generation_pending")
 
     template = require_report_template_profile(
@@ -660,7 +770,7 @@ def request_assessment_report_generation(
             report_execution_plan_sha256, report_prompt_digest_sha256,
             report_prompt_markdown, created_at, updated_at
         ) VALUES (?, ?, 'pending', 0, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(project_id) DO UPDATE SET
+        ON CONFLICT(project_id, scope_key) DO UPDATE SET
             version = excluded.version,
             status = 'pending',
             attempt_count = 0,
@@ -669,7 +779,8 @@ def request_assessment_report_generation(
             claim_sha256 = NULL,
             lease_expires_at = NULL,
             next_attempt_at = NULL,
-            artifact_id = NULL,
+            frozen_packet_json = excluded.frozen_packet_json,
+            cancel_requested_at = NULL,
             last_error = '',
             generation_started_at = excluded.generation_started_at,
             generation_token = excluded.generation_token,
@@ -711,30 +822,133 @@ def request_assessment_report_generation(
             now,
         ),
     )
-    row = conn.execute(
-        "SELECT * FROM assessment_report_finalizations WHERE project_id = ?",
-        (project_id,),
-    ).fetchone()
-    return _finalization_view(row).model_copy(update={"claim_token": None})
+    row = _finalization_row(conn, project_id)
+    return _finalization_view(conn, row).model_copy(update={"claim_token": None})
+
+
+def _read_report_finalization_row(conn, project_id, vulnerability_id=None, observation_id=None, generation_token=None):
+    """归档读取使用已保存的 scope；来源实删后不再解析不存在的 Observation。"""
+    if generation_token is not None:
+        return _finalization_row(conn, project_id, generation_token=generation_token)
+    if vulnerability_id is not None and conn.execute(
+        "SELECT 1 FROM vulnerabilities WHERE project_id = ? AND id = ?", (project_id, vulnerability_id),
+    ).fetchone() is None:
+        if observation_id is not None:
+            return _finalization_row(conn, project_id, scope_key=_report_scope_key(vulnerability_id, observation_id))
+        return conn.execute(
+            """SELECT * FROM assessment_report_finalizations
+               WHERE project_id = ? AND vulnerability_id = ?
+               ORDER BY requested_at DESC, scope_key LIMIT 1""",
+            (project_id, vulnerability_id),
+        ).fetchone()
+    scope_key, _ = _resolve_report_scope(conn, project_id, vulnerability_id, observation_id)
+    return _finalization_row(conn, project_id, scope_key=scope_key)
+
+
+def _report_source_status(conn, row) -> str:
+    if row["vulnerability_id"] and conn.execute(
+        "SELECT 1 FROM vulnerabilities WHERE project_id = ? AND id = ?",
+        (row["project_id"], row["vulnerability_id"]),
+    ).fetchone() is None:
+        return "deleted"
+    return "available"
 
 
 def get_assessment_report_finalization(
     conn: sqlite3.Connection,
     project_id: str,
+    *,
+    vulnerability_id: str | None = None,
+    observation_id: str | None = None,
+    generation_token: str | None = None,
 ) -> AssessmentReportFinalizationView:
     from .assessment_attempts import delivery_retry_routes
 
     project = get_project_or_404(conn, project_id)
-    row = conn.execute(
-        "SELECT * FROM assessment_report_finalizations WHERE project_id = ?",
-        (project_id,),
-    ).fetchone()
+    row = _read_report_finalization_row(conn, project_id, vulnerability_id, observation_id, generation_token)
     if row is None:
         raise HTTPException(404, "assessment_report_finalization_not_found")
+    run = _report_task_run(conn, row)
     routes = delivery_retry_routes(conn, project)
-    route = next((value for value in routes.values() if value["task_type"] == "report"), None)
-    # 常规状态读取不暴露当前 lease 的 fencing token，路由只消费持久资格的派生值。
-    return _finalization_view(row).model_copy(update={"claim_token": None, "delivery_retry_route": route})
+    route = routes.get(run["id"]) if run is not None else None
+    source_status = _report_source_status(conn, row)
+    stale = source_status == "deleted"
+    if not stale and row["scope_key"] and row["accepted_input_sha256"]:
+        packet = _build_scoped_report_packet(conn, project_id, row["vulnerability_id"], row["observation_id"])
+        stale = _scope_input_sha256(packet.model_dump(mode="json")) != row["accepted_input_sha256"]
+    return _finalization_view(conn, row).model_copy(update={
+        "claim_token": None, "delivery_retry_route": route, "stale": stale, "source_status": source_status,
+    })
+
+
+def list_assessment_report_finalizations(conn, project_id: str) -> list[AssessmentReportFinalizationView]:
+    get_project_or_404(conn, project_id)
+    rows = conn.execute(
+        "SELECT * FROM assessment_report_finalizations WHERE project_id = ? AND requested_at IS NOT NULL ORDER BY requested_at, scope_key",
+        (project_id,),
+    ).fetchall()
+    return [get_assessment_report_finalization(conn, project_id, generation_token=row["generation_token"]) for row in rows]
+
+
+def cancel_assessment_report_generation(conn, project_id, *, vulnerability_id=None, observation_id=None):
+    _lock_report_project(conn, project_id)
+    scope_key, _ = _resolve_report_scope(conn, project_id, vulnerability_id, observation_id)
+    row = _finalization_row(conn, project_id, scope_key=scope_key)
+    if row is None:
+        raise HTTPException(404, "assessment_report_finalization_not_found")
+    if row["status"] in {"pending", "running"}:
+        now = utcnow()
+        # running 保留 lease，直到持有者终止实际进程并提交 finish；不伪装已经取消。
+        conn.execute(
+            """UPDATE assessment_report_finalizations
+               SET cancel_requested_at = COALESCE(cancel_requested_at, ?),
+                   status = CASE WHEN status = 'pending' THEN 'cancelled' ELSE status END,
+                   next_attempt_at = NULL, updated_at = ?
+               WHERE project_id = ? AND scope_key = ?""",
+            (now, now, project_id, scope_key),
+        )
+    return get_assessment_report_finalization(conn, project_id, generation_token=row["generation_token"])
+
+
+def get_accepted_readable_report(conn, project_id, vulnerability_id, observation_id=None):
+    get_project_or_404(conn, project_id)
+    row = _read_report_finalization_row(conn, project_id, vulnerability_id, observation_id)
+    if row is None or not row["accepted_artifact_id"]:
+        return None
+    receipt = conn.execute(
+        """SELECT * FROM assessment_report_finish_receipts
+           WHERE project_id = ? AND generation_token = ? AND artifact_id = ?""",
+        (project_id, row["accepted_generation_token"], row["accepted_artifact_id"]),
+    ).fetchone()
+    if receipt is None:
+        raise HTTPException(409, "assessment_report_accepted_receipt_missing")
+    error = "assessment_report_accepted_artifact_invalid"
+    snapshot = _artifact_row(conn, project_id, receipt["input_snapshot_artifact_id"], error_code=error)
+    artifact = _artifact_row(conn, project_id, row["accepted_artifact_id"], error_code=error)
+    if (snapshot["sha256"] != receipt["input_snapshot_sha256"]
+            or artifact["sha256"] != receipt["artifact_sha256"]
+            or artifact["task_run_id"] != receipt["task_run_id"]):
+        raise HTTPException(409, error)
+    try:
+        packet = json.loads(_artifact_content_bytes(snapshot, error_code=error))["report_packet"]
+        from cairn.report_readable import validate_report_readable
+        data = validate_report_readable(_artifact_content_bytes(artifact, error_code=error), packet)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(409, error) from exc
+    if (packet.get("project", {}).get("id") != project_id or packet.get("vulnerability_id") != row["vulnerability_id"]
+            or packet.get("observation_id") != row["observation_id"]
+            or _scope_input_sha256(packet) != row["accepted_input_sha256"]):
+        raise HTTPException(409, error)
+    source_status = _report_source_status(conn, row)
+    stale = source_status == "deleted"
+    if not stale:
+        current = _build_scoped_report_packet(conn, project_id, vulnerability_id, row["observation_id"])
+        stale = _scope_input_sha256(current.model_dump(mode="json")) != row["accepted_input_sha256"]
+    return {
+        "artifact_id": row["accepted_artifact_id"], "generation_token": row["accepted_generation_token"],
+        "input_sha256": row["accepted_input_sha256"], "source_status": source_status,
+        "stale": stale, "data": data.model_dump(mode="json"), "report_packet": packet,
+    }
 
 
 def _timestamp_after(now: str, seconds: int) -> str:
@@ -855,6 +1069,7 @@ def claim_assessment_report_finalization(
     worker: str,
     *,
     lease_seconds: int = 300,
+    generation_token: str | None = None,
     principal,
 ) -> AssessmentReportClaimView | AssessmentReportFinishReceiptView:
     """原子 claim 已显式请求的报告；过期 running lease 可由重启后的 Dispatcher 接管。"""
@@ -867,13 +1082,12 @@ def claim_assessment_report_finalization(
     claim_sha256 = sha256(claim_token.encode("utf-8")).hexdigest()
     with get_conn() as conn:
         project = _lock_report_project(conn, project_id)
-        _require_report_claim_eligibility(conn, project)
-        current = conn.execute(
-            "SELECT * FROM assessment_report_finalizations WHERE project_id = ?",
-            (project_id,),
-        ).fetchone()
+        current = _finalization_row(conn, project_id, generation_token=generation_token)
         if current is None:
             raise HTTPException(404, "assessment_report_finalization_not_found")
+        _require_report_claim_eligibility(conn, project, current)
+        if current["status"] in {"ready", "cancelled"}:
+            raise HTTPException(409, f"assessment_report_not_claimable:{current['status']}")
         from .assessment_attempts import (
             _is_delivery_execution,
             execution_retry_eligibility,
@@ -890,6 +1104,32 @@ def claim_assessment_report_finalization(
         ):
             # lease 只证明逻辑超时；物理执行未知时不能终结旧 run 或并行重派模型。
             raise HTTPException(409, "assessment_report_execution_unresolved")
+        if current["cancel_requested_at"]:
+            if not expired or old_run is None:
+                raise HTTPException(409, "assessment_report_cancellation_pending")
+            # 重启后只在原执行已获物理终止证明时封口，绝不为完成取消再启动模型。
+            context = _json_value(old_run["runtime_context_json"], {})
+            terminal = old_run["status"] in {"failed", "timed_out", "cancelled"}
+            result = AssessmentReportTaskRunResult(
+                status=old_run["status"] if terminal else "cancelled",
+                exit_code=old_run["exit_code"],
+                error_type=old_run["error_type"] if terminal else "cancelled",
+                error_message=(old_run["error_message"] or "") if terminal else "report_cancelled",
+            )
+            body = AssessmentReportFinishPayload(
+                protocol=_REPORT_FINISH_PROTOCOL, worker=str(old_run["worker_name"]),
+                generation_token=str(current["generation_token"]), task_run_id=str(old_run["id"]),
+                status="failed", task_run_result=result,
+            )
+            material = _finish_request_material(
+                project_id, str(context["dispatcher_id"]), body,
+                claim_sha256=str(current["claim_sha256"]),
+            )
+            return _persist_report_finish(
+                conn, current, old_run, body, request_material=material,
+                request_sha256=sha256(_canonical_json(material).encode("utf-8")).hexdigest(),
+                now=now, disposition="recovered",
+            )
         try:
             # 过期 Artifact 恢复也会读取冻结计划；必须先把损坏归为永久失败，不能冒泡成 500。
             _validate_frozen_execution(current)
@@ -909,9 +1149,9 @@ def claim_assessment_report_finalization(
                 SET status = 'failed', claimed_by = NULL, claim_token = NULL,
                     claim_sha256 = NULL, lease_expires_at = NULL,
                     next_attempt_at = NULL, last_error = ?, updated_at = ?
-                WHERE project_id = ?
+                WHERE project_id = ? AND generation_token = ?
                 """,
-                (detail, now, project_id),
+                (detail, now, project_id, current["generation_token"]),
             )
             # 永久冻结配置错误必须先落库；随后抛出的稳定错误不能回滚该状态。
             conn.commit()
@@ -944,9 +1184,16 @@ def claim_assessment_report_finalization(
                     SET status = 'failed', claimed_by = NULL, claim_token = NULL,
                         claim_sha256 = NULL, lease_expires_at = NULL,
                         next_attempt_at = ?, last_error = ?, updated_at = ?
-                    WHERE project_id = ?
+                    WHERE project_id = ? AND generation_token = ?
                     """,
-                    (eligibility.get("retry_at"), reason, now, project_id),
+                    (eligibility.get("retry_at"), reason, now, project_id, current["generation_token"]),
+                )
+                conn.commit()
+            elif current["status"] == "failed" and eligibility["reason"] != "execution_retry_cooldown" and current["next_attempt_at"] is not None:
+                # 永久拒绝或额度耗尽时撤销旧计划，不覆盖真实执行留下的失败原因。
+                conn.execute(
+                    "UPDATE assessment_report_finalizations SET next_attempt_at = NULL, updated_at = ? WHERE project_id = ? AND generation_token = ?",
+                    (now, project_id, current["generation_token"]),
                 )
                 conn.commit()
             raise HTTPException(409, eligibility["reason"])
@@ -982,7 +1229,8 @@ def claim_assessment_report_finalization(
                 input_snapshot_sha256 = ?,
                 last_error = '',
                 updated_at = ?
-            WHERE project_id = ?
+            WHERE project_id = ? AND generation_token = ?
+              AND cancel_requested_at IS NULL
               AND requested_at IS NOT NULL
               AND template_key IS NOT NULL
               AND template_profiles_json IS NOT NULL
@@ -1005,30 +1253,20 @@ def claim_assessment_report_finalization(
                 preserved_snapshot_sha256,
                 now,
                 project_id,
+                current["generation_token"],
                 now,
                 now,
             ),
         )
         if cursor.rowcount != 1:
-            row = conn.execute(
-                "SELECT status FROM assessment_report_finalizations WHERE project_id = ?",
-                (project_id,),
-            ).fetchone()
+            row = _finalization_row(conn, project_id, generation_token=current["generation_token"])
             if row is None:
                 raise HTTPException(404, "assessment_report_finalization_not_found")
             raise HTTPException(409, f"assessment_report_not_claimable:{row['status']}")
-        row = conn.execute(
-            "SELECT * FROM assessment_report_finalizations WHERE project_id = ?",
-            (project_id,),
-        ).fetchone()
+        row = _finalization_row(conn, project_id, generation_token=current["generation_token"])
         from .audit_task_runs import insert_task_run_record
 
-        # 接管过期尝试时同步封口旧 run，避免重启后遗留永久 running 的报告审计。
-        for old_run in conn.execute(
-            "SELECT * FROM task_runs WHERE project_id = ? AND task_type = 'report' AND status IN ('queued', 'running')",
-            (project_id,),
-        ).fetchall():
-            _finish_report_task_run(conn, old_run, status="timed_out", now=now, error="report_claim_expired")
+        # 过期执行已在上面按同代身份封口，不触碰其他漏洞或整体报告的 TaskRun。
         plan = parse_report_execution_plan(row["report_execution_plan_json"])
         task_run = insert_task_run_record(
             conn,
@@ -1040,6 +1278,9 @@ def claim_assessment_report_finalization(
                 prompt_group=plan.report_prompt_group,
                 runtime_context={
                     "report_claim": {
+                        "scope_key": row["scope_key"],
+                        "vulnerability_id": row["vulnerability_id"],
+                        "observation_id": row["observation_id"],
                         "generation_token": row["generation_token"],
                         "attempt_count": row["attempt_count"],
                         "claim_sha256": claim_sha256,
@@ -1088,7 +1329,6 @@ def bind_assessment_report_input_snapshot(
     now = utcnow()
     with get_conn() as conn:
         project = _lock_report_project(conn, project_id)
-        _require_report_claim_eligibility(conn, project)
         finalization = conn.execute(
             """
             SELECT *
@@ -1101,6 +1341,9 @@ def bind_assessment_report_input_snapshot(
         ).fetchone()
         if finalization is None:
             raise HTTPException(409, "assessment_report_claim_mismatch")
+        _require_report_claim_eligibility(conn, project, finalization)
+        if finalization["cancel_requested_at"]:
+            raise HTTPException(409, "assessment_report_cancellation_pending")
         task_run = _report_task_run(conn, finalization)
         _require_report_execution_generation(project, task_run)
         assert task_run is not None
@@ -1122,7 +1365,7 @@ def bind_assessment_report_input_snapshot(
                     409,
                     "assessment_report_snapshot_receipt_conflict",
                 )
-            return _finalization_view(finalization).model_copy(
+            return _finalization_view(conn, finalization).model_copy(
                 update={"claim_token": None}
             )
         _validate_snapshot_artifact(
@@ -1152,11 +1395,8 @@ def bind_assessment_report_input_snapshot(
         )
         if cursor.rowcount != 1:
             raise HTTPException(409, "assessment_report_claim_mismatch")
-        row = conn.execute(
-            "SELECT * FROM assessment_report_finalizations WHERE project_id = ?",
-            (project_id,),
-        ).fetchone()
-        return _finalization_view(row).model_copy(update={"claim_token": None})
+        row = _finalization_row(conn, project_id, generation_token=finalization["generation_token"])
+        return _finalization_view(conn, row).model_copy(update={"claim_token": None})
 
 
 def _terminalize_report_task_run(
@@ -1271,32 +1511,55 @@ def _persist_report_finish(
         last_error = ""
         completed_at = now
     else:
+        from .assessment_attempts import execution_retry_eligibility
+
+        eligibility = execution_retry_eligibility(
+            conn,
+            get_project_or_404(conn, current["project_id"]),
+            "report",
+            report_generation_token=current["generation_token"],
+            now=now,
+            ignore_cooldown=True,
+        )
         retry_seconds = min(
             _MAX_RETRY_SECONDS,
             30 * (2 ** max(0, int(current["attempt_count"] or 1) - 1)),
         )
-        next_attempt_at = _timestamp_after(now, retry_seconds)
-        artifact_id = None
+        next_attempt_at = _timestamp_after(now, retry_seconds) if eligibility["allowed"] else None
+        artifact_id = current["accepted_artifact_id"] or current["artifact_id"]
         last_error = body.task_run_result.error_message
-        completed_at = None
+        completed_at = current["completed_at"]
+    status = "cancelled" if current["cancel_requested_at"] or body.task_run_result.status == "cancelled" else body.status
+    if status == "cancelled":
+        next_attempt_at = None
+    accepted_artifact_id = body.artifact_id if body.status == "ready" else current["accepted_artifact_id"]
+    accepted_generation_token = body.generation_token if body.status == "ready" else current["accepted_generation_token"]
+    accepted_input_sha256 = current["accepted_input_sha256"]
+    if body.status == "ready":
+        accepted_input_sha256 = (_scope_input_sha256(json.loads(current["frozen_packet_json"]))
+                                 if current["scope_key"] else body.input_snapshot_sha256)
     cursor = conn.execute(
         """
         UPDATE assessment_report_finalizations
         SET status = ?, claimed_by = NULL, claim_token = NULL,
             claim_sha256 = NULL, lease_expires_at = NULL,
             next_attempt_at = ?, artifact_id = ?,
-            last_error = ?, updated_at = ?, completed_at = ?
+            last_error = ?, updated_at = ?, completed_at = ?,
+            accepted_artifact_id = ?, accepted_generation_token = ?, accepted_input_sha256 = ?
         WHERE project_id = ? AND status = 'running'
           AND generation_token = ? AND attempt_count = ?
           AND claimed_by = ? AND claim_sha256 = ?
         """,
         (
-            body.status,
+            status,
             next_attempt_at,
             artifact_id,
             last_error,
             now,
             completed_at,
+            accepted_artifact_id,
+            accepted_generation_token,
+            accepted_input_sha256,
             current["project_id"],
             body.generation_token,
             current["attempt_count"],
@@ -1306,12 +1569,10 @@ def _persist_report_finish(
     )
     if cursor.rowcount != 1:
         raise HTTPException(409, "assessment_report_claim_mismatch")
-    finalization = conn.execute(
-        "SELECT * FROM assessment_report_finalizations WHERE project_id = ?",
-        (current["project_id"],),
-    ).fetchone()
-    response_values = _finalization_view(finalization).model_dump()
-    # receipt 描述被接受的 immutable 请求；finalization 可保留此前绑定的快照供后续重试。
+    finalization = _finalization_row(conn, current["project_id"], generation_token=body.generation_token)
+    response_values = _finalization_view(conn, finalization).model_dump()
+    # receipt 描述 immutable 请求；取消及上次成功内容由可变 finalization 独立表达。
+    response_values["status"] = body.status
     response_values["artifact_id"] = body.artifact_id
     response_values["input_snapshot_artifact_id"] = body.input_snapshot_artifact_id
     response_values["input_snapshot_sha256"] = body.input_snapshot_sha256
@@ -1384,18 +1645,12 @@ def _finish_assessment_report_finalization(
                     "assessment_report_finish_receipt_conflict",
                 )
             return _finish_receipt_view(receipt)
-        _require_report_claim_eligibility(conn, project)
-        project_status = str(project["status"])
-        if project_status == "active":
-            raise HTTPException(409, "assessment_report_project_active")
-        if project_status not in {"completed", "stopped"}:
-            raise HTTPException(409, "assessment_report_project_status_invalid")
-        current = conn.execute(
-            "SELECT * FROM assessment_report_finalizations WHERE project_id = ?",
-            (project_id,),
-        ).fetchone()
+        current = _finalization_row(conn, project_id, generation_token=body.generation_token)
         if current is None:
             raise HTTPException(404, "assessment_report_finalization_not_found")
+        _require_report_claim_eligibility(conn, project, current)
+        if current["cancel_requested_at"] and body.status == "ready":
+            raise HTTPException(409, "assessment_report_cancellation_pending")
         task_run = conn.execute(
             "SELECT * FROM task_runs WHERE project_id = ? AND id = ?",
             (project_id, body.task_run_id),
@@ -1601,18 +1856,149 @@ def _goal_driven_report_coverage(
     return coverage
 
 
+def _report_artifact_contents(conn, project_id: str, observations: list[dict], *,
+                              source_checks: dict | None = None) -> dict[str, dict[str, str]]:
+    """冻结允许交付的同一份原件字节；仅保存引用原件的文本投影，不生成新证据。"""
+    from .verification_requests import _artifact_deliverable, _binary_content, _validate_public_text
+
+    contents: dict[str, dict[str, str]] = {}
+    for observation in observations:
+        for item in observation["evidence_items"]:
+            _validate_public_text({key: item[key] for key in ("request_text", "response_text", "text") if item.get(key) is not None})
+            for side in ("request", "response", "artifact"):
+                ref = item.get(side)
+                if ref is None or ref["artifact_id"] in contents:
+                    continue
+                artifact_id = ref["artifact_id"]
+                artifact = conn.execute(
+                    "SELECT * FROM artifacts WHERE project_id = ? AND id = ?",
+                    (project_id, artifact_id),
+                ).fetchone()
+                if artifact is None:
+                    contents[artifact_id] = {"unavailable": "本项目原件缺失，无法内嵌；保留历史引用，不从其他来源补包。"}
+                    continue
+                try:
+                    content = _artifact_content_bytes(artifact, error_code="assessment_report_evidence_unreadable")
+                except HTTPException:
+                    contents[artifact_id] = {"unavailable": "原件不可读取或摘要不符，未内嵌；请查看受控证据原件。"}
+                    continue
+                if not _artifact_deliverable(conn, artifact, content=content, source_checks=source_checks):
+                    contents[artifact_id] = {"unavailable": "原件超出允许交付边界，未内嵌；权威原件未改写。"}
+                    continue
+                if _binary_content(content):
+                    contents[artifact_id] = {"unavailable": "二进制原件不能作为文本报文内嵌；请查看受控原件。"}
+                    continue
+                try:
+                    text = content.decode("utf-8")
+                except UnicodeDecodeError:
+                    contents[artifact_id] = {"unavailable": "非 UTF-8 原件未做有损解码；请查看受控原件。"}
+                    continue
+                contents[artifact_id] = {"text": text}
+    return contents
+
+
+def _report_display_materials(conn, project_id: str, sources: list[dict], *,
+                              source_checks: dict | None = None) -> dict:
+    """冻结准出的渲染输入及可选图片身份，不把图片纳入必需原件集合。"""
+    from .http_evidence_render import freeze_render_sources, list_display_images
+
+    items = [item for source in sources for item in source.get("evidence_items", [])]
+    images = []
+    for source in sources:
+        for image in list_display_images(conn, project_id, source.get("evidence_items", []),
+                                         task_run_id=source.get("task_run_id")):
+            artifact = conn.execute("SELECT sha256 FROM artifacts WHERE project_id = ? AND id = ?",
+                                    (project_id, image["artifact_id"])).fetchone()
+            images.append({**image, "sha256": artifact["sha256"],
+                           "observation_id": source.get("id"),
+                           "vulnerability_id": source.get("vulnerability_id")})
+    return {"http_evidence_render_sources": freeze_render_sources(conn, project_id, items, source_checks=source_checks),
+            "display_images": images}
+
+
+def _build_scoped_report_packet(conn, project_id, vulnerability_id, observation_id):
+    from .vulnerabilities import read_vulnerability_evidence
+
+    selected = read_vulnerability_evidence(conn, project_id, vulnerability_id, observation_id)
+    observation_id = selected["observation_id"]
+    vulnerabilities = _report_discovery_rows(conn, project_id, vulnerability_id=vulnerability_id)
+    if not vulnerabilities:
+        raise HTTPException(404, "vulnerability_not_found")
+    vulnerabilities[0].update(selected)
+    observations = _report_discovery_rows(
+        conn, project_id, observations=True, vulnerability_id=vulnerability_id, observation_id=observation_id,
+    ) if observation_id else []
+    finding = vulnerabilities[0]
+    source_fact_id = observations[0].get("source_fact_id") if observations else finding.get("source_fact_id")
+    # 只冻结这一发现及其显式关联材料；不给整理模型混入其他 Observation。
+    facts = _rows(conn, "SELECT * FROM facts WHERE project_id = ? AND id = ?", (project_id, source_fact_id), json_columns=("assessment_record_json",)) if source_fact_id else []
+    links = _rows(conn, "SELECT * FROM fact_evidence WHERE project_id = ? AND fact_id = ? ORDER BY artifact_id, pointer", (project_id, source_fact_id)) if source_fact_id else []
+    sources = [{"evidence_items": selected["evidence_items"]}, {"evidence_items": finding["record_evidence_items"]}]
+    refs = {item[side]["artifact_id"] for source in sources for item in source["evidence_items"]
+            for side in ("request", "response", "artifact") if item.get(side)}
+    from .flow_evidence import freeze_report_flows
+
+    flow_evidence, flow_contents = freeze_report_flows(conn, project_id, sources)
+    refs.update(projection["body_artifact_id"] for flow in flow_evidence.values()
+                for projection in flow["projections"].values() if projection is not None)
+    refs.update(link["artifact_id"] for link in links)
+    artifacts = []
+    for artifact_id in sorted(refs):
+        artifacts.extend(_rows(conn, "SELECT * FROM artifacts WHERE project_id = ? AND id = ?", (project_id, artifact_id), json_columns=("metadata_json",)))
+    project = get_project_or_404(conn, project_id)
+    verifications = _rows(conn, "SELECT * FROM vulnerability_verifications WHERE project_id = ? AND observation_id = ? ORDER BY created_at, id", (project_id, observation_id), json_columns=("evidence_json",)) if observation_id else []
+    return AssessmentReportPacket(
+        **_report_display_materials(conn, project_id, observations),
+        scope_key=_report_scope_key(vulnerability_id, observation_id),
+        vulnerability_id=vulnerability_id, observation_id=observation_id,
+        report_scope={"vulnerability_id": vulnerability_id, "observation_id": observation_id},
+        project={"id": project_id, "title": project["title"]},
+        policy=asdict(policy_from_project_row(project)),
+        report_policy=asdict(report_policy_from_project_row(project)),
+        vulnerabilities=vulnerabilities, observations=observations, facts=facts,
+        flow_evidence=flow_evidence, flow_contents=flow_contents,
+        verifications=verifications, evidence_links=links, artifacts=artifacts,
+        artifact_contents=_report_artifact_contents(conn, project_id, [*sources, {
+            # Fact 附件仅供查阅上下文/反证，不混入该次发现的交互或默认正文。
+            "evidence_items": [{"artifact": {"artifact_id": link["artifact_id"]}} for link in links],
+        }]),
+    )
+
+
+def prepare_assessment_report_packet(conn, project_id: str, *, generation_token: str | None = None) -> str | None:
+    """短事务收口停止态；材料读取另用一致性快照，不占用项目写锁。"""
+    project = _lock_report_project(conn, project_id)
+    finalization = _finalization_row(conn, project_id, generation_token=generation_token)
+    if generation_token is not None and finalization is None:
+        raise HTTPException(404, "assessment_report_finalization_not_found")
+    if finalization is not None and finalization["scope_key"]:
+        return str(finalization["generation_token"])
+    if assessment_has_running_work(conn, project_id):
+        raise HTTPException(409, "assessment_report_tasks_not_quiescent")
+    if project["status"] == "stopped" and policy_from_project_row(project).phased:
+        stop_assessment(conn, project_id, row_value(project, "coverage_stop_reason") or "user_stopped")
+    return str(finalization["generation_token"]) if finalization is not None else None
+
+
 def build_assessment_report_packet(
     conn: sqlite3.Connection,
     project_id: str,
+    *,
+    generation_token: str | None = None,
 ) -> AssessmentReportPacket:
-    """一次性聚合报告所需权威数据，避免 Dispatcher 逐端点拼接丢失 Observation。"""
-    project_row = _lock_report_project(conn, project_id)
+    """在调用方的只读一致性快照内冻结材料；代次在绑定和接受时再次核对。"""
+    project_row = get_project_or_404(conn, project_id)
+    if generation_token is not None:
+        row = _finalization_row(conn, project_id, generation_token=generation_token)
+        if row is None:
+            raise HTTPException(404, "assessment_report_finalization_not_found")
+        if row["scope_key"]:
+            return AssessmentReportPacket.model_validate_json(row["frozen_packet_json"])
     if assessment_has_running_work(conn, project_id):
         raise HTTPException(409, "assessment_report_tasks_not_quiescent")
-    if project_row["status"] == "stopped" and policy_from_project_row(project_row).phased:
-        stop_assessment(conn, project_id, row_value(project_row, "coverage_stop_reason") or "user_stopped")
-        project_row = get_project_or_404(conn, project_id)
-    project = _row_dict(project_row)
+    # 出口仅供传输层消费，公开报告输入不携带配置或密文信封。
+    project = _row_dict({key: value for key, value in dict(project_row).items()
+                         if key not in {"test_egress_json", "test_egress_auth"}})
     if policy_from_project_row(project_row).goal_driven:
         project.pop("explore_budget", None)
     project["assessment_progress"] = _json_value(project.pop("assessment_progress_json", None), {})
@@ -1641,13 +2027,16 @@ def build_assessment_report_packet(
         for cell in cells:
             disposition = "tested" if cell["result"] in {"finding", "tested_no_finding"} else "blocked" if cell["result"] == "temporarily_blocked" else "untested"
             coverage[disposition].append({"slot_key": cell["slot_key"], "result": cell["result"], "reason": cell["skip_reason"], "fact_id": cell["resulting_fact_id"]})
+    execution = assessment_execution_view(conn, project_row)
+    execution["current_tasks"] = [task for task in execution["current_tasks"]
+                                  if task["task_type"] not in {"agent_chat", "report"}]
     summary = {
-        "execution": assessment_execution_view(conn, project_row),
+        "execution": execution,
         "project_status": project_row["status"],
         "stop_reason": row_value(project_row, "coverage_stop_reason"),
         "coverage": coverage,
         "selected_deep": _rows(conn, "SELECT id, slot_key, strategy_key, depth_review_fact_id, to_fact_id, conclusion, conclusion_reason FROM intents WHERE project_id = ? AND depth_review_fact_id IS NOT NULL ORDER BY id", (project_id,)),
-        "calls_by_task_type": _rows(conn, "SELECT task_type, COUNT(*) AS execution_count FROM task_runs WHERE project_id = ? GROUP BY task_type ORDER BY task_type", (project_id,)),
+        "calls_by_task_type": _rows(conn, "SELECT task_type, COUNT(*) AS execution_count FROM task_runs WHERE project_id = ? AND task_type NOT IN ('agent_chat', 'report') GROUP BY task_type ORDER BY task_type", (project_id,)),
     }
     project["scenario_snapshot"] = _json_value(
         project.pop("scenario_snapshot_json", None),
@@ -1660,7 +2049,21 @@ def build_assessment_report_packet(
         item.model_dump()
         for item in build_vulnerability_chain_candidates(conn, project_id)
     ]
-    return AssessmentReportPacket(
+    observations = _report_discovery_rows(conn, project_id, observations=True)
+    vulnerabilities = _report_discovery_rows(conn, project_id)
+    record_sources = [{"vulnerability_id": item["id"], "evidence_items": item["record_evidence_items"]} for item in vulnerabilities]
+    from .flow_evidence import freeze_report_flows
+
+    source_checks: dict = {}
+    flow_evidence, flow_contents = freeze_report_flows(
+        conn, project_id, [*observations, *record_sources], source_checks=source_checks,
+    )
+    packet = AssessmentReportPacket(
+        **_report_display_materials(conn, project_id, [*observations, *record_sources], source_checks=source_checks),
+        flow_evidence=flow_evidence, flow_contents=flow_contents,
+        artifact_contents=_report_artifact_contents(
+            conn, project_id, [*observations, *record_sources], source_checks=source_checks,
+        ),
         assessment_summary=summary,
         observation_statuses=observation_statuses,
         project=project,
@@ -1705,8 +2108,8 @@ def build_assessment_report_packet(
             json_columns=("target_ids_json", "evidence_json"),
         ),
         quality_snapshot=asdict(quality) if quality is not None else None,
-        vulnerabilities=_report_discovery_rows(conn, project_id),
-        observations=_report_discovery_rows(conn, project_id, observations=True),
+        vulnerabilities=vulnerabilities,
+        observations=observations,
         verifications=_rows(
             conn,
             "SELECT * FROM vulnerability_verifications WHERE project_id = ? ORDER BY created_at, id",
@@ -1718,12 +2121,6 @@ def build_assessment_report_packet(
             "SELECT * FROM fact_evidence WHERE project_id = ? ORDER BY fact_id, artifact_id, pointer",
             (project_id,),
         ),
-        artifacts=_rows(
-            conn,
-            "SELECT * FROM artifacts WHERE project_id = ? ORDER BY created_at, id",
-            (project_id,),
-            json_columns=("metadata_json",),
-        ),
         chain_candidates=chains,
         assessment_attempts=_rows(
             conn,
@@ -1732,8 +2129,27 @@ def build_assessment_report_packet(
         ),
         task_runs=_rows(
             conn,
-            "SELECT * FROM task_runs WHERE project_id = ? ORDER BY started_at, id",
+            "SELECT * FROM task_runs WHERE project_id = ? AND task_type NOT IN ('agent_chat', 'report') ORDER BY started_at, id",
             (project_id,),
             json_columns=("runtime_context_json",),
         ),
     )
+    # 研究事实及其显式证据是报告输入；下载副本、聊天记录和执行日志不因同属项目而混入。
+    refs = {link["artifact_id"] for link in packet.evidence_links}
+    for source in [*observations, *record_sources]:
+        for item in source["evidence_items"]:
+            refs.update(item[side]["artifact_id"] for side in ("request", "response", "artifact") if item.get(side))
+    for records in (packet.verifications, packet.surface_manifest, packet.coverage_scope_dispositions):
+        for record in records:
+            refs.update(ref["artifact_id"] for ref in record["evidence"])
+    for fact in packet.facts:
+        refs.update(ref["artifact_id"] for ref in fact["assessment_record"].get("evidence_refs", []))
+    refs.update(projection["body_artifact_id"] for flow in flow_evidence.values()
+                for projection in flow["projections"].values() if projection is not None)
+    refs.update(image["artifact_id"] for image in packet.display_images)
+    if refs:
+        packet.artifacts = _rows(
+            conn, "SELECT * FROM artifacts WHERE project_id = ? AND id = ANY(?) ORDER BY created_at, id",
+            (project_id, sorted(refs)), json_columns=("metadata_json",),
+        )
+    return packet

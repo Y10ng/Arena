@@ -3,32 +3,7 @@ from __future__ import annotations
 import pytest
 
 from cairn.dispatcher.tasks.report import _report_completeness_error
-from cairn.dispatcher.worker_protocol.submission import REPORT_FACT_REFS
-
-
-def complete_report(*ids: str) -> dict[str, object]:
-    return {
-        "schema_version": 2,
-        "layout": [
-            *({"type": "fact", "ref": ref} for ref in REPORT_FACT_REFS),
-            *({"type": "fact", "ref": f"finding:{value}"} for value in ids),
-        ],
-        "executive_summary": "仅解释冻结证据，建议修复权限边界。",
-        "findings": [
-            {
-                "vulnerability_id": vulnerability_id,
-                "impact": "已有证据支持的业务影响。",
-                "root_cause": "黑盒推断，未验证源码。",
-                "repro_steps": "依据冻结证据包说明前提与已有操作。",
-                "remediation": "建议在服务端检查对象授权。",
-                "regression_steps": "修复后使用不同身份和正常对照验证。",
-                "limitations": "回归方案尚未执行。",
-            }
-            for vulnerability_id in ids
-        ],
-        "limitations": "报告不是新增测试证据。",
-        "artifacts": [],
-    }
+from test_report_frozen_rendering import _data as complete_report
 
 
 def test_report_completeness_accepts_all_authoritative_vulnerabilities() -> None:

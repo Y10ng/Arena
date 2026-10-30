@@ -27,7 +27,7 @@ from cairn.server.services.project_records import list_project_summaries
 from cairn.server.services.verification_purge import remove_owned_directory
 from cairn.server.services.vulnerabilities import create_vulnerability
 from test_assessment_migration_v34 import database, private_postgres
-from test_external_verification_evidence import execution, _new_execution, _submission, _upload
+from test_external_verification_evidence import execution, verification_database, _new_execution, _submission, _upload
 from test_external_verification_receipts import _confirm_stopped
 
 

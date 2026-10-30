@@ -12,6 +12,11 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 import pytest
+import psycopg
+from psycopg import sql
+from urllib.parse import quote
+
+from test_assessment_migration_v34 import private_postgres
 
 from cairn.server import db
 from cairn.server.auth import RequestPrincipal, create_user_with_personal_tenant
@@ -35,10 +40,22 @@ from cairn.server.services.vulnerabilities import create_vulnerability
 
 
 @pytest.fixture
-def execution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def verification_database(private_postgres):
+    name = "verification_" + uuid4().hex
+    with psycopg.connect(**private_postgres, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(sql.Identifier(name)))
+        try:
+            yield f"postgresql://synthetic@localhost/{name}?host={quote(private_postgres['host'], safe='')}"
+        finally:
+            db._reset_for_tests()
+            admin.execute(sql.SQL("DROP DATABASE {}").format(sql.Identifier(name)))
+
+
+@pytest.fixture
+def execution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verification_database):
     db._reset_for_tests()
     monkeypatch.setenv("CAIRN_PROJECT_RESOURCE_ROOT", str(tmp_path / "resources"))
-    db.configure(tmp_path / "verification.db", artifact_path=tmp_path / "artifacts")
+    db.configure(database_url=verification_database, artifact_path=tmp_path / "artifacts")
     keyring = tmp_path / "keyring.json"
     keyring.write_text(json.dumps({"active_version": "test", "keys": {"test": base64.b64encode(b"v" * 32).decode()}}))
     keyring.chmod(0o600)
@@ -96,12 +113,98 @@ def _submission(detail, claim, artifacts):
     return VerificationResultSubmission(
         project_id=detail["project_id"], task_run_id=claim["task_run"]["id"],
         execution_generation=claim["execution_generation"], claim_token=claim["claim_token"],
-        result={"schema_version": 3, "outcome": "confirmed", "summary": "合成目标响应包含 /root/ 与 /home/，不是平台秘密。",
+        result={"schema_version": 4, "outcome": "confirmed", "summary": "合成目标响应包含 /root/ 与 /home/，不是平台秘密。",
+                "remediation": "仅合成观察，缺少真实根因证据，不能给出针对性修复建议。",
                 "tested_scope": "仅本地合成材料", "key_evidence": [], "test_steps": [],
                 "limitations": ["不代表真实任务验收"],
                 "evidence_items": [{"id": artifact.id, "kind": "artifact", "source": "capture",
                                     "artifact": {"artifact_id": artifact.id}} for artifact in artifacts]},
     )
+
+
+def test_v4_rejects_optional_display_image_as_evidence_and_sensitive_remediation(execution):
+    user, machine, _model, _worker, detail, claim = execution
+    image = _upload(detail, claim, "screenshot", "optional.png", b"synthetic optional image")
+    # 模拟服务已发布的派生标记；普通上传不能自行声明保留 metadata。
+    with db.get_conn() as conn:
+        conn.execute("UPDATE artifacts SET metadata_json = ? WHERE project_id = ? AND id = ?",
+                     (json.dumps({"http_evidence_render": {"version": 1, "renderer": "http-evidence-png-v1", "optional": True}}),
+                      detail["project_id"], image.id))
+    with pytest.raises(HTTPException) as rejected:
+        submit_verification_result(detail["id"], _submission(detail, claim, [image]), machine)
+    assert rejected.value.detail == "verification_display_image_not_evidence"
+    artifact = _upload(detail, claim, "log", "observed.log", b"synthetic observation")
+    leaking = _submission(detail, claim, [artifact])
+    leaking.result.remediation = "Authorization: Bearer synthetic-target-credential"
+    with pytest.raises(HTTPException) as sensitive:
+        submit_verification_result(detail["id"], leaking, machine)
+    assert sensitive.value.detail == "verification_sensitive_result_rejected"
+    with db.get_conn() as conn:
+        row = conn.execute("SELECT result_json, terminal_digest FROM verification_requests WHERE id = ?", (detail["id"],)).fetchone()
+        assert row["result_json"] is None and row["terminal_digest"] is None
+
+
+def test_optional_http_image_missing_preserves_report_but_original_integrity_is_required(execution):
+    import struct
+    import zlib
+
+    from cairn.server.services.http_evidence_render import prepare_render_input, publish_rendered_image
+    from cairn.server.services.verification_requests import verification_report
+
+    user, machine, _model, _worker, detail, claim = execution
+    original = _upload(detail, claim, "raw_output", "response.http", b"HTTP/1.1 403 Forbidden\r\n\r\nsynthetic denial")
+    with db.get_conn() as conn:
+        render_input = prepare_render_input(conn, detail["project_id"], {
+            "kind": "artifact", "artifact_id": original.id, "sha256": original.sha256, "side": "response",
+        }, task_run_id=claim["task_run"]["id"])
+
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 1440, 1000, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress((b"\x00" + b"\xff" * (1440 * 3)) * 1000)) + chunk(b"IEND", b""))
+    image = asyncio.run(publish_rendered_image(detail["project_id"], claim["task_run"]["id"], render_input,
+                                             page=1, page_count=1, truncated=False, content=png))
+    payload = _submission(detail, claim, [original]).model_dump()
+    payload["result"]["evidence_items"] = [{"id": "exchange", "kind": "http", "source": "capture",
+                                            "response": {"artifact_id": original.id}}]
+    submission = VerificationResultSubmission.model_validate(payload)
+    accepted = submit_verification_result(detail["id"], submission, machine)
+    assert [item["id"] for item in accepted["artifacts"]] == [original.id]
+    assert accepted["display_images"][0]["artifact_id"] == image.id
+    assert accepted["display_images"][0]["evidence_item_id"] == "exchange"
+    assert f"arena-image:{image.id}" in verification_report(detail["id"], user)
+    image_file = verification_artifact(detail["id"], image.id, user)
+    assert image_file.disk_path.read_bytes() == png
+    other = RequestPrincipal(kind="integration", subject_id="another-caller", tenant_id=user.tenant_id)
+    with pytest.raises(HTTPException) as forbidden:
+        verification_artifact(detail["id"], image.id, other)
+    assert forbidden.value.status_code == 404
+    with db.get_conn() as conn:
+        before = dict(conn.execute("SELECT result_json, terminal_digest, accepted_at FROM verification_requests WHERE id = ?",
+                                   (detail["id"],)).fetchone())
+    image_file.disk_path.unlink()
+    missing = get_verification_request(detail["id"], user)
+    assert "unavailable_reason" in missing["display_images"][0]
+    assert missing["result"] == accepted["result"]
+    report = verification_report(detail["id"], user)
+    assert "可选数据包图片不可用" in report and "synthetic denial" in report
+    assert f"arena-image:{image.id}" not in report
+    with pytest.raises(HTTPException) as unavailable:
+        verification_artifact(detail["id"], image.id, user)
+    assert unavailable.value.status_code == 404
+    assert verification_artifact(detail["id"], original.id, user).disk_path.read_bytes().endswith(b"synthetic denial")
+    with db.get_conn() as conn:
+        after = dict(conn.execute("SELECT result_json, terminal_digest, accepted_at FROM verification_requests WHERE id = ?",
+                                  (detail["id"],)).fetchone())
+    assert after == before
+    verification_artifact(detail["id"], original.id, user).disk_path.write_bytes(b"changed original")
+    with pytest.raises(HTTPException) as changed:
+        get_verification_request(detail["id"], user)
+    assert changed.value.status_code == 409
+    with pytest.raises(HTTPException) as changed_download:
+        verification_artifact(detail["id"], original.id, user)
+    assert changed_download.value.status_code == 409
 
 
 def test_mixed_evidence_is_accepted_unchanged_and_historical_logs_are_input(execution):
@@ -181,6 +284,84 @@ def test_internal_sources_renamed_copies_and_real_secrets_are_not_deliverable(ex
     with pytest.raises(HTTPException) as result_secret:
         submit_verification_result(detail["id"], leaking_result, machine)
     assert result_secret.value.detail == "verification_sensitive_result_rejected"
+
+
+def test_same_content_source_checks_deduplicate_without_caching_delivery(execution, monkeypatch):
+    from cairn.server.services import verification_requests as service
+
+    _, _, _, _, detail, claim = execution
+    content = b"synthetic duplicate evidence"
+    artifact = _upload(detail, claim, "log", "source.log", content)
+    with db.get_conn() as conn:
+        conn.execute(
+            "INSERT INTO artifacts (id, project_id, task_run_id, kind, category, uri, sha256, size, created_at, metadata_json) "
+            "SELECT 'duplicate-' || n, project_id, task_run_id, kind, category, uri, sha256, size, created_at, "
+            "(metadata_json::jsonb || jsonb_build_object('runtime_context', n))::text "
+            "FROM artifacts CROSS JOIN generate_series(1, 256) n WHERE project_id = ? AND id = ?",
+            (detail["project_id"], artifact.id),
+        )
+        row = dict(conn.execute("SELECT * FROM artifacts WHERE project_id = ? AND id = ?",
+                                (detail["project_id"], artifact.id)).fetchone())
+        parsed, queries = [], []
+        original_check, execute = service.artifact_is_internal_file, conn.execute
+
+        def check(original):
+            parsed.append(json.loads(original["metadata_json"]))
+            return original_check(original)
+
+        def count_query(query, params=None):
+            if "SELECT DISTINCT json_build_object" in query:
+                queries.append(query)
+            return execute(query, params)
+
+        monkeypatch.setattr(service, "artifact_is_internal_file", check)
+        monkeypatch.setattr(conn, "execute", count_query)
+        checks = {}
+        for _ in range(3):
+            assert service._artifact_deliverable(conn, row, content=content, source_checks=checks)
+        assert len(queries) == len(parsed) == 1
+        assert set(parsed[0]) == {"source_path", "registered_path"}
+        # 相同摘要只复用来源，不跳过当前 Artifact 身份、原字节、公开边界或执行凭据。
+        assert not service._artifact_deliverable(conn, {**row, "metadata_json": '{"stream":"stderr"}'},
+                                                 content=content, source_checks=checks)
+        assert not service._artifact_deliverable(conn, row, content=b"synthetic-platform-model-secret", source_checks=checks)
+        target_auth = b"Authorization: Bearer synthetic-target-credential"
+        assert service._artifact_allowed(conn, row, public=False, content=target_auth, source_checks=checks)
+        assert not service._artifact_deliverable(conn, row, content=target_auth, source_checks=checks)
+        assert not service._artifact_deliverable(conn, {**row, "task_run_id": "missing-run"},
+                                                 content=content, source_checks=checks)
+        assert len(queries) == len(parsed) == 1
+        # Prompt 来源仍同时核对摘要和长度，来源复用不跳过新的审计检查。
+        payload = {"prompt_hash": artifact.sha256, "prompt_bytes": len(content) + 1}
+        conn.execute("INSERT INTO agent_events (id, project_id, task_run_id, ts, kind, payload_json) "
+                     "VALUES ('synthetic-prompt', ?, ?, ?, 'prompt_rendered', ?)",
+                     (detail["project_id"], claim["task_run"]["id"], utcnow(), json.dumps(payload)))
+        assert service._artifact_deliverable(conn, row, content=content, source_checks=checks)
+        payload["prompt_bytes"] = len(content)
+        conn.execute("UPDATE agent_events SET payload_json = ? WHERE project_id = ? AND id = 'synthetic-prompt'",
+                     (json.dumps(payload), detail["project_id"]))
+        assert not service._artifact_deliverable(conn, row, content=content, source_checks=checks)
+
+
+@pytest.mark.parametrize("source_key", ["source_path", "registered_path"])
+def test_same_content_internal_copy_is_rechecked_in_new_read(execution, source_key):
+    from cairn.server.services.verification_requests import _artifact_deliverable
+
+    _, _, _, _, detail, claim = execution
+    content = b"synthetic internal copy"
+    artifact = _upload(detail, claim, "log", "copy.log", content)
+    _upload(detail, claim, "raw_output", "stream.log", content, metadata={"stream": "stderr"})
+    with db.get_conn() as conn:
+        row = conn.execute("SELECT * FROM artifacts WHERE project_id = ? AND id = ?",
+                           (detail["project_id"], artifact.id)).fetchone()
+        assert _artifact_deliverable(conn, row, content=content, source_checks={})
+    # 不沿用上一次读取的否定判断；保留路径规范化和 registered_path 的内部来源保护。
+    _upload(detail, claim, "file", "internal.log", content, metadata={
+        source_key: "/home/kali//workspace/./.cairn/pi/session/log",
+    })
+    with db.get_conn() as conn:
+        assert not _artifact_deliverable(conn, row, content=content, source_checks={})
+        assert not _artifact_deliverable(conn, row, content=content)
 
 
 def test_bound_session_copies_are_rejected_but_target_session_logs_are_deliverable(execution):
@@ -273,7 +454,8 @@ try {
       if (!results.at(-1).content.startsWith('{')) throw new Error(JSON.stringify(results));
       const artifact = JSON.parse(results.at(-1).content);
       return { tools: [{ name: 'submit_result', args: { accepted: true, data: {
-        schema_version: 3, outcome: 'confirmed', summary: '合成观察', tested_scope: '本地合成文件',
+        schema_version: 4, outcome: 'confirmed', summary: '合成观察', tested_scope: '本地合成文件',
+        remediation: '仅合成材料，未验证真实根因。',
         key_evidence: [{ reason: '合成原件记录观察结果', evidence_item_ids: ['observed'] }],
         test_steps: [{ action: '登记本地合成原件', observation: '原件登记成功', evidence_item_ids: ['observed'] }],
         limitations: ['不代表真实任务验收'], evidence_items: [{ id: 'observed', kind: 'artifact', source: 'capture',
@@ -504,7 +686,7 @@ def test_platform_source_selects_one_observation_and_preserves_project_context(e
         assert {item["artifact_id"] for item in snapshot["artifacts"]} == {response.id, blocked.id}
         assert any(item["code"] == "source_artifact_not_deliverable" for item in snapshot["missing_materials"])
         assert len(snapshot["observations"]) == 2 and snapshot["verifications"][0]["id"] == "old-check"
-        assert "provenance" in snapshot["history_path"]
+        assert snapshot["history_path"] == f"/projects/{project_id}/vulnerabilities/{vulnerability.id}"
         assert not {"packet_artifact_id", "repro_request", "repro_response"}.intersection(snapshot["vulnerability"])
         context = snapshot["project_context"]
         assert context["origin"]["description"] == origin and context["goal"]["description"] == goal

@@ -5,10 +5,10 @@
     :description="
       schedule
         ? '仅影响尚未生成的项目，已生成项目及其资料不变。'
-        : '描述背景与目标，准备资料并选择执行资源。'
+        : '描述背景与目标，准备项目资料。'
     "
     size="lg"
-    :dismissible="!isSubmitting && !resourceBusy && !isCancelling && !isSavingDefault"
+    :dismissible="!isSubmitting && !resourceBusy && !isCancelling"
     :close-on-outside="false"
     @update:open="requestClose"
     @open-auto-focus="focusTitle"
@@ -242,113 +242,36 @@
         </details>
 
         <section
-          v-show="settingsPanel === 'execution'"
-          id="np-execution-settings"
+          v-show="settingsPanel === 'proxy'"
+          id="np-proxy-settings"
           class="settings-panel"
-          aria-label="执行设置"
+          aria-label="代理设置"
         >
           <div class="settings-panel-heading">
-            <h3>执行设置</h3>
+            <h3>代理设置</h3>
             <Button size="sm" variant="ghost" @click="closeSettings">完成设置</Button>
           </div>
-          <div class="advanced-settings-content">
-            <Alert v-if="workerSelectionIssue" tone="warning" title="执行组合需要处理">
-              {{ workerSelectionIssue }}
-            </Alert>
-            <Alert v-if="defaultSaveError" tone="danger" title="默认组合保存未完成">
-              {{ defaultSaveError }}
-              <template #actions>
-                <Button size="sm" variant="secondary" @click="refetchWorkerTemplates()">刷新模板核对</Button>
-              </template>
-            </Alert>
-            <Alert v-if="defaultSaveMessage" tone="success" title="默认组合已保存">
-              {{ defaultSaveMessage }}
-            </Alert>
-            <div v-if="!workersLoading && !workersError && invalidSelectedWorkers.length" class="selected-libraries">
-              <div v-for="item in invalidSelectedWorkers" :key="item.id" class="selected-library">
-                <span>{{ item.name }} · {{ item.reason }}</span>
-                <Button size="sm" variant="ghost" @click="setWorkerSelection(item.id, false)">移除失效绑定</Button>
-              </div>
-            </div>
-            <FormField
-              id="np-workers"
-              class="api-config-group validation-anchor"
-              label="Workers"
-              required
-            >
-              <div v-if="workersLoading" class="worker-loading" aria-label="正在加载 Worker">
-                <Skeleton v-for="i in 2" :key="i" class="worker-skeleton" />
-              </div>
-              <ErrorState
-                v-else-if="workersError"
-                title="Worker 加载失败"
-                description="无法确认当前 Tenant 的可用 Worker。"
-                @retry="refetchWorkers()"
-              />
-              <EmptyState v-else-if="workers.length === 0" title="暂无可用 Worker">
-                <template #description>
-                  <template v-if="allWorkers.length === 0">
-                    当前 Tenant 尚未创建 Worker。请前往
-                    <router-link to="/console/workers">Workers</router-link> 新增配置。
-                  </template>
-                  <template v-else>
-                    现有 Worker 配置尚未就绪。请前往
-                    <router-link to="/console/workers">Workers</router-link> 查看 Model、Key
-                    或启用状态。
-                  </template>
-                </template>
-              </EmptyState>
-              <template v-else>
-                <FormField label="Worker 模板" for="np-worker-template">
-                  <Skeleton v-if="workerTemplatesLoading" class="select-skeleton" />
-                  <ErrorState
-                    v-else-if="workerTemplatesError"
-                    title="Worker 模板加载失败"
-                    description="仍可手动选择 Worker。"
-                    @retry="refetchWorkerTemplates()"
-                  />
-                  <Select
-                    v-else
-                    id="np-worker-template"
-                    v-model="selectedTemplateId"
-                    :options="workerTemplateOptions"
-                    @update:model-value="applyWorkerTemplate"
-                  />
-                </FormField>
-                <div class="template-row">
-                  <Button size="sm" variant="secondary" :disabled="!defaultWorkerTemplate || workerTemplatesError || workerTemplatesFetching" @click="restoreDefaultWorkers">恢复默认组合</Button>
-                  <Button size="sm" variant="secondary" :loading="isSavingDefault" :disabled="!canSaveDefault" @click="saveDefaultWorkers">保存为默认组合</Button>
-                </div>
-                <p class="section-desc">默认只用于以后新建，不改变已保存的项目、计划或当前草稿。并发可在 Workers 设置；三个专职 Worker 建议从 1／1／3 起步，单项目总上限建议为 4。</p>
-                <div class="worker-options">
-                  <div
-                    v-for="worker in workers"
-                    :key="worker.id"
-                    class="worker-option"
-                    :class="{
-                      selected: form.tenant_worker_ids.includes(worker.id),
-                      disabled: isSubmitting,
-                    }"
-                  >
-                    <Checkbox
-                      :id="`np-worker-${worker.id}`"
-                      :model-value="form.tenant_worker_ids.includes(worker.id)"
-                      :disabled="isSubmitting"
-                      :aria-label="`选择 Worker ${worker.display_name}`"
-                      @update:model-value="setWorkerSelection(worker.id, $event)"
-                    />
-                    <label class="worker-option-content" :for="`np-worker-${worker.id}`">
-                      <span class="worker-option-name">{{ worker.display_name }}</span>
-                      <span class="worker-option-meta"
-                        >{{ worker.engine }} · {{ workerLabel(worker) }}</span
-                      >
-                      <span class="worker-option-tasks">{{ worker.task_types.join('/') }}</span>
-                    </label>
-                  </div>
-                </div>
-              </template>
-            </FormField>
-
+          <TestEgressFields v-model="egress" :auth-configured="schedule?.project?.test_egress?.auth_configured" :disabled="formDisabled" :error="egressError" @update:model-value="userEdited = true" />
+        </section>
+        <section
+          v-show="settingsPanel === 'timing'"
+          id="np-timing-settings"
+          class="settings-panel"
+          aria-label="时间设置"
+        >
+          <div class="settings-panel-heading">
+            <h3>时间设置</h3>
+            <Button size="sm" variant="ghost" @click="closeSettings">完成设置</Button>
+          </div>
+          <ScheduleTiming
+            ref="scheduleTiming"
+            v-model="scheduleDraft"
+            :show-mode="false"
+            :locked-mode="Boolean(schedule)"
+            :editing="Boolean(schedule)"
+            :boundary-hint="boundaryHint"
+            :project="previewProject"
+          />
             <div v-if="schedule?.project" class="advanced-subsection">
               <div class="section-title-row compact-title-row">
                 <div>
@@ -356,7 +279,7 @@
                   <p class="section-desc">未修改时保留原期限；清空输入才明确取消，仅影响未来项目。日期按浏览器本地时区显示。</p>
                 </div>
               </div>
-              <div class="execution-settings-grid">
+              <div class="deadline-settings-grid">
                 <FormField
                   label="执行停止时间"
                   for="np-explore-deadline"
@@ -383,27 +306,6 @@
                 </FormField>
               </div>
             </div>
-          </div>
-        </section>
-        <section
-          v-show="settingsPanel === 'timing'"
-          id="np-timing-settings"
-          class="settings-panel"
-          aria-label="时间设置"
-        >
-          <div class="settings-panel-heading">
-            <h3>时间设置</h3>
-            <Button size="sm" variant="ghost" @click="closeSettings">完成设置</Button>
-          </div>
-          <ScheduleTiming
-            ref="scheduleTiming"
-            v-model="scheduleDraft"
-            :show-mode="false"
-            :locked-mode="Boolean(schedule)"
-            :editing="Boolean(schedule)"
-            :boundary-hint="boundaryHint"
-            :project="previewProject"
-          />
         </section>
       </div>
     </fieldset>
@@ -415,18 +317,18 @@
           v-if="!createdProjectId && !createdScheduleId && !creationDeleted"
         >
           <Button
-            id="np-execution-trigger"
-            class="execution-trigger"
+            id="np-proxy-trigger"
+            class="proxy-trigger"
             variant="ghost"
             :disabled="formDisabled"
-            :aria-expanded="settingsPanel === 'execution'"
-            aria-controls="np-execution-settings"
-            @click="toggleSettings('execution')"
+            :aria-expanded="settingsPanel === 'proxy'"
+            aria-controls="np-proxy-settings"
+            @click="toggleSettings('proxy')"
           >
             <template #icon><SlidersHorizontal :size="16" /></template>
             <span class="setting-summary"
-              ><span>{{ workerSummary }}</span
-              ><span class="summary-hint">{{ executionSummary }}</span></span
+              ><span>代理设置</span
+              ><span class="summary-hint">{{ proxySummary }}</span></span
             >
           </Button>
           <div class="start-settings">
@@ -469,13 +371,14 @@
                 : '保存计划后由后台在计划时刻处理，不会立即启动研究。')
           }}
         </p>
-        <Alert v-if="formError && !creationUnknown" tone="danger" title="请检查当前操作">{{
-          formError
-        }}</Alert>
+        <Alert v-if="formError && !creationUnknown" tone="danger" title="请检查当前操作">
+          {{ formError }}
+          <router-link v-if="workerConfigurationError" to="/console/workers" target="_blank" rel="noopener">前往 Worker 配置</router-link>
+        </Alert>
         <div class="creation-footer-actions">
           <Button
             variant="secondary"
-            :disabled="isSubmitting || resourceBusy || isCancelling || isSavingDefault"
+            :disabled="isSubmitting || resourceBusy || isCancelling"
             @click="requestClose(false)"
             >取消</Button
           >
@@ -539,25 +442,19 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { useQuery, useQueryClient } from '@tanstack/vue-query'
+import { useQuery } from '@tanstack/vue-query'
 import { isNavigationFailure, onBeforeRouteLeave, useRouter } from 'vue-router'
 import {
   api,
   ApiError,
   createProject,
-  createWorkerTemplate,
-  updateWorkerTemplate,
   listLibraryCatalog,
-  listTenantWorkerOptions,
-  listWorkerTemplates,
 } from '@/api/client'
 import type {
   AdvisoryLibrary,
   CreateProjectRequest,
   ProjectResourceBatch,
   ScenarioCatalogEntry,
-  TenantWorker,
-  WorkerTemplate,
 } from '@/api/types'
 import { useUIStore } from '@/stores/ui'
 import { ConfirmAction, ErrorState } from '@/components/patterns'
@@ -573,11 +470,12 @@ import {
   Select,
   Skeleton,
   Textarea,
-  type SelectOption,
 } from '@/components/ui'
 import ProjectResourceBatchUploader from './ProjectResourceBatchUploader.vue'
 import { applyScenarioTemplates, type ScenarioTemplateState } from './newProjectScenarioTemplates'
 import ScheduleTiming from './ScheduleTiming.vue'
+import TestEgressFields from '@/components/patterns/TestEgressFields.vue'
+import { testEgressDraft, testEgressError, testEgressInput } from './testEgressForm'
 import {
   draftFromSchedule,
   newScheduleDraft,
@@ -613,16 +511,13 @@ const emit = defineEmits<{
 }>()
 const router = useRouter()
 const uiStore = useUIStore()
-const queryClient = useQueryClient()
-const isSavingDefault = ref(false)
-const defaultSaveError = ref('')
-const defaultSaveMessage = ref('')
 
 const userEdited = ref(false)
 const isCancelling = ref(false)
 const discardOpen = ref(false)
 const cleanupError = ref('')
 const formError = ref('')
+const workerConfigurationError = ref(false)
 const creationUnknown = ref(false)
 const creationDeleted = ref(false)
 const createdProjectId = ref<string | null>(null)
@@ -642,12 +537,12 @@ const form = reactive({
   origin: '',
   goal: '',
   scenario: '',
-  tenant_worker_ids: [] as string[],
   library_keys: [] as string[],
   explore_deadline: '',
   authorization_expires_at: '',
 })
-const workersInitialized = ref(Boolean(props.schedule))
+const egress = ref(testEgressDraft(props.schedule?.project?.test_egress))
+const egressError = ref('')
 const scheduleDraft = ref(props.schedule ? draftFromSchedule(props.schedule) : newScheduleDraft())
 const retainedResourceIds = ref(props.schedule?.resources.map((resource) => resource.id) || [])
 const refreshLibraryKeys = ref<string[]>([])
@@ -670,10 +565,9 @@ const scenarioExpanded = ref(true)
 const scheduleTiming = ref<InstanceType<typeof ScheduleTiming> | null>(null)
 const materialsDetails = ref<HTMLDetailsElement | null>(null)
 const resourceSummary = ref('本地文件 0')
-const settingsPanel = ref<'execution' | 'timing' | null>(null)
+const settingsPanel = ref<'proxy' | 'timing' | null>(null)
 const formDisabled = computed(
   () =>
-    isSavingDefault.value ||
     isSubmitting.value ||
     isCancelling.value ||
     creationUnknown.value ||
@@ -682,17 +576,7 @@ const formDisabled = computed(
 const modeOptions = computed(() =>
   scheduleModeOptions(scheduleDraft.value.mode, Boolean(props.schedule)),
 )
-const executionSummary = computed(
-  () =>
-    [
-      props.schedule?.project && form.explore_deadline ? `停止 ${form.explore_deadline.replace('T', ' ')}` : '',
-      props.schedule?.project && form.authorization_expires_at
-        ? `授权到期 ${form.authorization_expires_at.replace('T', ' ')}`
-        : '',
-    ]
-      .filter(Boolean)
-      .join(' · ') || '执行设置 · 未设时间边界',
-)
+const proxySummary = computed(() => ({ direct: '直接连接', http: 'HTTP 代理', socks5: 'SOCKS5 代理' })[egress.value.mode])
 const timingSummary = computed(() => {
   const draft = scheduleDraft.value
   const start = draft.startLocal.replace('T', ' ')
@@ -706,7 +590,7 @@ const timingSummary = computed(() => {
       : '每天'
   return `${days} ${draft.localTime || '未设置时刻'} · ${start ? `起始 ${start}` : '未设置起始边界'}${draft.endDate ? ` · 结束 ${draft.endDate}` : ''}${draft.maxRuns ? ` · 最多 ${draft.maxRuns} 次` : ''}`
 })
-async function showSettings(panel: 'execution' | 'timing', anchor?: string) {
+async function showSettings(panel: 'proxy' | 'timing', anchor?: string) {
   settingsPanel.value = panel
   await nextTick()
   document.getElementById(anchor || `np-${panel}-settings`)?.scrollIntoView({ block: 'start' })
@@ -716,7 +600,7 @@ function closeSettings() {
   settingsPanel.value = null
   if (panel) document.getElementById(`np-${panel}-trigger`)?.focus()
 }
-function toggleSettings(panel: 'execution' | 'timing') {
+function toggleSettings(panel: 'proxy' | 'timing') {
   if (settingsPanel.value === panel) closeSettings()
   else void showSettings(panel)
 }
@@ -751,7 +635,6 @@ if (props.schedule?.project) {
     origin: project.origin,
     goal: project.goal,
     scenario: project.scenario,
-    tenant_worker_ids: [...project.tenant_worker_ids],
     library_keys: props.schedule.library_bindings.map((binding) => binding.library_key),
     explore_deadline: inputLocalTime(project.explore_deadline),
     authorization_expires_at: inputLocalTime(project.authorization_expires_at),
@@ -806,20 +689,6 @@ const selectedScenario = computed(() =>
 const selectedScenarioExists = computed(() => Boolean(selectedScenario.value))
 
 const {
-  data: workersData,
-  isLoading: workersLoading,
-  isFetching: workersFetching,
-  isError: workersError,
-  refetch: refetchWorkers,
-} = useQuery<TenantWorker[]>({
-  queryKey: ['tenant-worker-options'],
-  queryFn: listTenantWorkerOptions,
-})
-const allWorkers = computed(() => workersData.value || [])
-const workers = computed(() => allWorkers.value.filter((worker) => worker.available))
-
-
-const {
   data: libraryCatalogData,
   isLoading: libraryCatalogLoading,
   isError: libraryCatalogError,
@@ -830,107 +699,23 @@ const {
 })
 const libraryCatalog = computed(() => libraryCatalogData.value || [])
 
-const {
-  data: workerTemplatesData,
-  isLoading: workerTemplatesLoading,
-  isFetching: workerTemplatesFetching,
-  isError: workerTemplatesError,
-  refetch: refetchWorkerTemplates,
-} = useQuery<WorkerTemplate[]>({
-  queryKey: ['worker-templates'],
-  queryFn: listWorkerTemplates,
-})
-const workerTemplates = computed(() => workerTemplatesData.value || [])
-const workerTemplateOptions = computed<SelectOption[]>(() => [
-  { value: '__none__', label: '本次自定义' },
-  ...workerTemplates.value.map((template) => ({
-    value: template.id,
-    label: `${template.name}${template.is_default ? ' · 默认' : ''} (${template.tenant_worker_ids.length})`,
-  })),
-])
-const selectedTemplateId = ref('__none__')
-
 const filteredLibraries = computed(() =>
   libraryCatalog.value.filter((library) =>
     `${library.name} ${library.key}`.toLowerCase().includes(librarySearch.value.toLowerCase()),
   ),
 )
-const defaultWorkerTemplate = computed(() => workerTemplates.value.find((item) => item.is_default))
-const invalidSelectedWorkers = computed(() =>
-  form.tenant_worker_ids.flatMap((id) => {
-    const worker = allWorkers.value.find((item) => item.id === id)
-    return worker?.available ? [] : [{
-      id,
-      name: worker?.display_name || id,
-      reason: worker?.unavailable_reason || (worker ? '配置不可用，请检查启用状态、Model 或 Key' : 'Worker 已删除或不属于当前 Tenant'),
-    }]
-  }),
-)
-const missingWorkerRoles = computed(() => {
-  const roles = new Set(workers.value
-    .filter((worker) => form.tenant_worker_ids.includes(worker.id))
-    .flatMap((worker) => worker.task_types))
-  return (['bootstrap', 'reason', 'explore'] as const).filter((role) => !roles.has(role))
-})
-const workerSelectionIssue = computed(() => {
-  if (workersLoading.value) return ''
-  if (workersError.value) return 'Worker 查询失败，请重试加载后确认配置。'
-  if (!workersInitialized.value && (workersFetching.value || workerTemplatesFetching.value)) return ''
-  if (selectedTemplateId.value !== '__none__' && !workerTemplatesLoading.value) {
-    if (workerTemplatesError.value) return '无法确认所选模板，请刷新模板核对，或明确选择本次自定义。'
-    if (!workerTemplates.value.some((item) => item.id === selectedTemplateId.value))
-      return '所选 Worker 模板已删除；原成员仍保留，请恢复默认或明确选择本次自定义。'
-  }
-  if (invalidSelectedWorkers.value.length)
-    return invalidSelectedWorkers.value.map((item) => `${item.name}：${item.reason}`).join('；')
-  if (!form.tenant_worker_ids.length) {
-    if (workerTemplatesLoading.value) return ''
-    if (workerTemplatesError.value) return '默认组合查询失败，请重试加载模板，或选择本次自定义。'
-    return defaultWorkerTemplate.value
-      ? '尚未选择 Worker，请主动恢复默认组合或选择本次自定义。'
-      : '尚未设置默认组合，请选择 Worker 后保存为默认组合，或仅用于本次。'
-  }
-  if (missingWorkerRoles.value.length) return `执行组合缺少角色：${missingWorkerRoles.value.join('、')}。请补充支持这些角色的 Worker。`
-  return ''
-})
-const executionNeedsAttention = computed(() => Boolean(workerSelectionIssue.value))
-const workerSummary = computed(() => {
-  if (workersLoading.value || (!workersInitialized.value && (workersFetching.value || workerTemplatesFetching.value)))
-    return '正在加载执行组合'
-  if (workerSelectionIssue.value) return workerSelectionIssue.value
-  const template = workerTemplates.value.find((item) => item.id === selectedTemplateId.value)
-  const names = form.tenant_worker_ids.map((id) => allWorkers.value.find((item) => item.id === id)?.display_name || id)
-  return `${template?.is_default ? '默认组合' : '本次组合'} · ${names.join('、')}`
-})
-const canSaveDefault = computed(
-  () =>
-    !formDisabled.value &&
-    !workersError.value &&
-    !workersFetching.value &&
-    !workerTemplatesFetching.value &&
-    !workerTemplatesError.value &&
-    form.tenant_worker_ids.length > 0 &&
-    invalidSelectedWorkers.value.length === 0 &&
-    missingWorkerRoles.value.length === 0,
-)
-
 const submitBlockReason = computed(() => {
   if (creationDeleted.value) return '原请求已保存但项目已删除，不能用此请求重新创建。'
   if (resourceBusy.value) return '资料操作尚未完成，请稍候。'
   if (resourcePending.value) return '仍有未完成或结果未确认的资料，请处理或明确移除后再创建。'
-  if (scenariosLoading.value || workersLoading.value)
+  if (scenariosLoading.value)
     return '正在加载创建所需配置。'
   if (scenariosError.value || !selectedScenarioExists.value)
     return '请选择可用场景，或重试加载场景目录。'
-  if (!workersInitialized.value && (workersFetching.value || workerTemplatesFetching.value || workerTemplatesLoading.value))
-    return '正在加载默认执行组合。'
-  if (workerSelectionIssue.value) return workerSelectionIssue.value
-  if (!form.tenant_worker_ids.length) return '请展开执行设置，配置本次 Worker。'
   return ''
 })
 const canSubmitProject = computed(
   () =>
-    !isSavingDefault.value &&
     !isSubmitting.value &&
     !isCancelling.value &&
     !creationUnknown.value &&
@@ -981,86 +766,6 @@ watch(
   { immediate: true },
 )
 
-watch(
-  [workersFetching, workerTemplatesFetching, workersLoading, workerTemplatesLoading, workersError, workerTemplatesError, workerTemplates, allWorkers, formDisabled],
-  () => {
-    if (workersInitialized.value || formDisabled.value || workersLoading.value || workerTemplatesLoading.value ||
-        workersFetching.value || workerTemplatesFetching.value || workersError.value || workerTemplatesError.value) return
-    // 手动资源选择和旧计划已标记初始化；正文编辑不阻止首次默认应用，刷新不覆盖选择。
-    workersInitialized.value = true
-    const template = defaultWorkerTemplate.value
-    if (!template) return
-    selectedTemplateId.value = template.id
-    form.tenant_worker_ids = [...template.tenant_worker_ids]
-  },
-  { immediate: true },
-)
-
-// 查询加载标志与默认选择可能先后更新，等本轮状态稳定后再显露真正缺资源的错误。
-watch(
-  executionNeedsAttention,
-  async (needsAttention) => {
-    if (!needsAttention || formDisabled.value || !props.open) return
-    await nextTick()
-    if (executionNeedsAttention.value && !formDisabled.value && props.open) void showSettings('execution')
-  },
-  { immediate: true, flush: 'post' },
-)
-
-const setWorkerSelection = (workerId: string, selected: boolean) => {
-  userEdited.value = true
-  workersInitialized.value = true
-  selectedTemplateId.value = '__none__'
-  defaultSaveMessage.value = ''
-  const index = form.tenant_worker_ids.indexOf(workerId)
-  if (selected && index < 0) form.tenant_worker_ids.push(workerId)
-  if (!selected && index >= 0) form.tenant_worker_ids.splice(index, 1)
-}
-
-const workerLabel = (worker: TenantWorker) => worker.model_display_name || worker.model_id
-
-const applyWorkerTemplate = () => {
-  userEdited.value = true
-  workersInitialized.value = true
-  defaultSaveMessage.value = ''
-  if (selectedTemplateId.value === '__none__') return
-  const template = workerTemplates.value.find((item) => item.id === selectedTemplateId.value)
-  if (template) form.tenant_worker_ids = [...template.tenant_worker_ids]
-}
-function restoreDefaultWorkers() {
-  if (!defaultWorkerTemplate.value || formDisabled.value || workerTemplatesError.value) return
-  selectedTemplateId.value = defaultWorkerTemplate.value.id
-  applyWorkerTemplate()
-}
-async function saveDefaultWorkers() {
-  if (!canSaveDefault.value) return
-  isSavingDefault.value = true
-  defaultSaveError.value = ''
-  defaultSaveMessage.value = ''
-  // 选定模板则设其为默认；手工组合复用已有默认，没有默认时才创建模板。
-  const template = workerTemplates.value.find((item) => item.id === selectedTemplateId.value) || defaultWorkerTemplate.value
-  const input = { tenant_worker_ids: [...form.tenant_worker_ids], is_default: true }
-  try {
-    const saved = template
-      ? await updateWorkerTemplate(template.id, input)
-      : await createWorkerTemplate({ ...input, name: '默认 Worker 组合' })
-    queryClient.setQueryData<WorkerTemplate[]>(['worker-templates'], (current = []) => [
-      ...current.filter((item) => item.id !== saved.id).map((item) => ({ ...item, is_default: false })),
-      saved,
-    ])
-    selectedTemplateId.value = saved.id
-    workersInitialized.value = true
-    defaultSaveMessage.value = '以后新建自动采用此组合；已有项目和计划不变。'
-    await queryClient.invalidateQueries({ queryKey: ['worker-templates'] })
-  } catch (error) {
-    defaultSaveError.value = error instanceof Error ? error.message : '未收到可确认的保存结果'
-    if (!(error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408))
-      defaultSaveError.value += '。结果未确认，请刷新模板核对后再决定是否保存，不要盲目重复创建。'
-  } finally {
-    isSavingDefault.value = false
-  }
-}
-
 const toggleLibrary = (key: string) => {
   userEdited.value = true
   const index = form.library_keys.indexOf(key)
@@ -1091,8 +796,7 @@ const previewProject = computed<CreateProjectRequest | undefined>(() => {
     !form.title.trim() ||
     !form.origin.trim() ||
     !form.goal.trim() ||
-    !form.scenario ||
-    !form.tenant_worker_ids.length
+    !form.scenario
   )
     return undefined
   let deadlines
@@ -1108,7 +812,6 @@ const previewProject = computed<CreateProjectRequest | undefined>(() => {
     origin: form.origin,
     goal: form.goal,
     scenario: form.scenario,
-    tenant_worker_ids: [...form.tenant_worker_ids],
     ...(props.schedule?.project?.targets != null
       ? { targets: props.schedule.project.targets.map((target) => ({ ...target })) }
       : {}),
@@ -1156,15 +859,19 @@ const validateForm = (): { valid: boolean; firstErrorAnchor: string | null } => 
     ? validateFutureDate(form.authorization_expires_at, '授权到期时间') : ''
   if (validationErrors.exploreDeadline || validationErrors.authorizationExpiresAt) {
     valid = false
-    firstErrorAnchor = firstErrorAnchor || 'np-execution-settings'
+    firstErrorAnchor = firstErrorAnchor || 'np-timing-settings'
   }
 
+  egressError.value = testEgressError(egress.value)
+  if (egressError.value) {
+    valid = false
+    firstErrorAnchor = firstErrorAnchor || 'np-proxy-settings'
+  }
   return { valid, firstErrorAnchor }
 }
 
 const submitProject = async () => {
   if (
-    isSavingDefault.value ||
     isSubmitting.value ||
     isCancelling.value ||
     creationUnknown.value ||
@@ -1177,6 +884,7 @@ const submitProject = async () => {
   )
     return
   formError.value = ''
+  workerConfigurationError.value = false
   if (resourcePending.value) {
     formError.value = '仍有未完成的资料，请补传、核对或明确移除后再创建。'
     if (materialsDetails.value) {
@@ -1192,19 +900,6 @@ const submitProject = async () => {
     )
     return
   }
-  if (workersLoading.value || workersError.value) {
-    uiStore.showToast(
-      workersLoading.value ? 'Worker 列表仍在加载，请稍后重试' : '无法确认可用 Worker，请重试加载',
-      'danger',
-    )
-    return
-  }
-  if (workerSelectionIssue.value || !form.tenant_worker_ids.length ||
-      (!workersInitialized.value && (workersFetching.value || workerTemplatesFetching.value))) {
-    formError.value = workerSelectionIssue.value || '请等待默认查询完成，或明确选择本次 Worker。'
-    await showSettings('execution', 'np-workers')
-    return
-  }
   if (resourceBusy.value) {
     uiStore.showToast('辅助资料仍在上传，请稍后重试', 'danger')
     return
@@ -1217,7 +912,7 @@ const submitProject = async () => {
       uiStore.showToast('请检查表单必填项和时间安排', 'danger')
       // 只展开首个错误所在区域，最终滚动在同一处完成，避免后续时间错误抢走正文定位。
       const anchor = firstErrorAnchor || 'np-timing-settings'
-      if (anchor === 'np-execution-settings') settingsPanel.value = 'execution'
+      if (anchor === 'np-proxy-settings') settingsPanel.value = 'proxy'
       else if (anchor === 'np-timing-settings') settingsPanel.value = 'timing'
       await nextTick()
       document.getElementById(anchor)?.scrollIntoView({ block: 'start' })
@@ -1234,11 +929,11 @@ const submitProject = async () => {
     // 旧计划原显式 targets（包括空数组）随原输入保留，新建不补数组或重解释来源。
     const payload: CreateProjectRequest = {
       ...retainedInput,
+      test_egress: testEgressInput(egress.value),
       title: form.title.trim(),
       origin: form.origin,
       goal: form.goal,
       scenario: form.scenario,
-      tenant_worker_ids: [...form.tenant_worker_ids],
       ...effectiveDeadlines(),
       ...(resourceBatch.value ? { resource_batch_id: resourceBatch.value.id } : {}),
       library_keys: [...form.library_keys],
@@ -1300,6 +995,7 @@ async function sendPendingSubmission() {
       const definiteRejection =
         error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408
       formError.value = error instanceof Error ? error.message : '未收到可确认的保存结果'
+      workerConfigurationError.value = definiteRejection && formError.value.includes('Worker')
       if (definiteRejection && !creationUnknown.value) {
         if (submission.operation !== 'update') {
           const cache = forgetCreationRequest(submission.payload.request_id)
@@ -1310,6 +1006,8 @@ async function sendPendingSubmission() {
       return
     }
     creationUnknown.value = false
+    pendingSubmission.value = null
+    egress.value = { ...egress.value, username: '', password: '', auth_action: 'keep' }
     resourceBatch.value = null
     if (submission.operation !== 'update') {
       const cache = forgetCreationRequest(submission.payload.request_id)
@@ -1350,8 +1048,9 @@ async function queryCreationResult() {
       resourceBatch.value = null
       const cache = forgetCreationRequest(result.request_id)
       if (cache.warning) cacheWarning.value = cache.warning
-      if (creationDeleted.value) pendingSubmission.value = null
-      else await enterCreatedProject()
+      pendingSubmission.value = null
+      egress.value = { ...egress.value, username: '', password: '', auth_action: 'keep' }
+      if (!creationDeleted.value) await enterCreatedProject()
     } else recoveryMessage.value = '尚未查到已提交结果，不代表请求失败；可用原请求恢复提交。'
   } catch (error) {
     recoveryMessage.value = error instanceof Error ? error.message : '查询失败，请稍后重试'
@@ -1376,7 +1075,7 @@ const enterCreatedProject = async () => {
 }
 
 const requestClose = (open: boolean) => {
-  if (open || resourceBusy.value || isSubmitting.value || isCancelling.value || isSavingDefault.value) return
+  if (open || resourceBusy.value || isSubmitting.value || isCancelling.value) return
   if (createdProjectId.value || createdScheduleId.value || creationDeleted.value) {
     emit('discarded')
   } else if (creationUnknown.value) {
@@ -1391,7 +1090,6 @@ const requestClose = (open: boolean) => {
 const discardProject = async () => {
   if (
     resourceBusy.value ||
-    isSavingDefault.value ||
     isSubmitting.value ||
     isCancelling.value ||
     creationUnknown.value ||
@@ -1429,7 +1127,6 @@ onBeforeRouteLeave(() => {
   if (creationUnknown.value && !isSubmitting.value && !resourceBusy.value && !isCancelling.value)
     return true
   if (
-    isSavingDefault.value ||
     resourceBusy.value ||
     isSubmitting.value ||
     isCancelling.value ||
@@ -1439,7 +1136,7 @@ onBeforeRouteLeave(() => {
     resourcePending.value
   ) {
     emit('update:open', true)
-    if (!creationUnknown.value && !resourceBusy.value && !isSubmitting.value && !isCancelling.value && !isSavingDefault.value)
+    if (!creationUnknown.value && !resourceBusy.value && !isSubmitting.value && !isCancelling.value)
       discardOpen.value = true
     return false
   }
@@ -1451,8 +1148,7 @@ const handleBeforeUnload = (event: BeforeUnloadEvent) => {
     !createdProjectId.value &&
     !createdScheduleId.value &&
     !creationDeleted.value &&
-    (isSavingDefault.value ||
-      isSubmitting.value ||
+    (isSubmitting.value ||
       resourceBusy.value ||
       isCancelling.value ||
       (!creationUnknown.value &&
@@ -1586,7 +1282,7 @@ onUnmounted(() => {
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: var(--space-3);
 }
-.execution-trigger,
+.proxy-trigger,
 .timing-trigger {
   justify-content: flex-start;
   text-align: left;
@@ -1598,7 +1294,7 @@ onUnmounted(() => {
   white-space: normal;
   overflow-wrap: anywhere;
 }
-.execution-trigger .setting-summary > span:first-child {
+.proxy-trigger .setting-summary > span:first-child {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1717,130 +1413,10 @@ onUnmounted(() => {
   color: var(--danger);
 }
 
-.api-config-group {
-  margin-top: var(--space-5);
-}
-
-.worker-options {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 12px;
-}
-
-.worker-option {
-  position: relative;
-  display: flex;
-  align-items: flex-start;
-  gap: var(--space-2);
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-surface);
-  color: var(--text);
-  cursor: pointer;
-  transition:
-    border-color var(--dur-fast),
-    background var(--dur-fast);
-}
-
-.worker-option:hover {
-  border-color: var(--border-strong);
-}
-
-.worker-option.selected {
-  border-color: var(--accent);
-  background: var(--accent-dim);
-}
-
-.worker-option :deep(.ui-checkbox) {
-  position: relative;
-  z-index: 1;
-}
-
-.worker-option.disabled,
-.worker-option.disabled .worker-option-content {
-  cursor: not-allowed;
-}
-
-.worker-option.disabled {
-  opacity: 0.7;
-}
-
-.worker-option-content {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  gap: 2px;
-  cursor: pointer;
-}
-
-.worker-option-content::before {
-  position: absolute;
-  inset: 0;
-  content: '';
-}
-
-.worker-option-name {
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.worker-option-meta {
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.worker-option-tasks {
-  color: var(--text-faint);
-  font-size: 10px;
-}
-
-.worker-loading,
-.library-loading {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-2);
-}
-
-.worker-skeleton,
-.library-skeleton,
-.select-skeleton {
-  min-height: var(--control-height-lg);
-}
-
-.template-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin: 12px 0;
-}
-
-.template-label {
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.template-select {
-  padding: 4px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-surface);
-  color: var(--text);
-  font-size: 12px;
-}
-
 .summary-hint {
   color: var(--text-faint);
   font-size: 11px;
   font-weight: 400;
-}
-
-.advanced-settings-content {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
-  padding: 0 var(--space-3) var(--space-3);
 }
 
 .advanced-subsection {
@@ -1852,7 +1428,7 @@ onUnmounted(() => {
   margin-bottom: var(--space-3);
 }
 
-.execution-settings-grid {
+.deadline-settings-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
@@ -1968,7 +1544,7 @@ onUnmounted(() => {
     padding: var(--space-4);
   }
 
-  .execution-settings-grid,
+  .deadline-settings-grid,
   .library-options {
     grid-template-columns: 1fr;
   }

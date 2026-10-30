@@ -6,17 +6,14 @@ import GraphPage from '@/features/graph/GraphPage.vue'
 import RunsPage from '@/features/runs/RunsPage.vue'
 import HintsPage from '@/features/hints/HintsPage.vue'
 import ArtifactsPage from '@/features/artifacts/ArtifactsPage.vue'
-import ProvenancePage from '@/features/provenance/ProvenancePage.vue'
 import { useAuthStore } from '@/stores/auth'
 import { resolveAuthNavigation } from './authNavigation'
 
 // 系统管理模块：作为 FrontLayout 子路由在右侧主区域渲染，不再跳转独立 Console 布局
 const ScenariosConsole = () => import('@/features/console/ScenariosConsole.vue')
-const WorkersConsole = () => import('@/features/console/WorkersConsole.vue')
 const PromptGroupsConsole = () => import('@/features/console/PromptGroupsConsole.vue')
 const KnowledgeConsole = () => import('@/features/console/KnowledgeConsole.vue')
 const ReportTemplatesConsole = () => import('@/features/console/ReportTemplatesConsole.vue')
-const TimeoutConsole = () => import('@/features/console/TimeoutConsole.vue')
 
 const routes = [
   {
@@ -41,11 +38,15 @@ const routes = [
         component: () => import('@/features/findings/FindingsPage.vue'),
       },
       {
+        path: 'traffic',
+        name: 'Traffic',
+        component: () => import('@/features/traffic/TrafficWorkbench.vue'),
+      },
+      {
         path: 'reports',
         name: 'Reports',
         component: () => import('@/features/findings/ReportManagement.vue'),
       },
-      { path: 'provenance', name: 'Provenance', component: ProvenancePage },
       { path: 'projects', name: 'Projects', component: Projects },
       {
         path: 'verifications',
@@ -72,9 +73,19 @@ const routes = [
         component: ProjectWorkspace,
         children: [
           { path: '', name: 'WorkspaceGraph', component: GraphPage },
+          {
+            path: 'agent',
+            name: 'WorkspaceAgent',
+            component: () => import('@/features/projects/ProjectAgent.vue'),
+          },
           { path: 'runs', name: 'WorkspaceRuns', component: RunsPage },
           { path: 'hints', name: 'WorkspaceHints', component: HintsPage },
           { path: 'artifacts', name: 'WorkspaceArtifacts', component: ArtifactsPage },
+          {
+            path: 'traffic',
+            name: 'WorkspaceTraffic',
+            component: () => import('@/features/traffic/TrafficWorkbench.vue'),
+          },
           {
             path: 'vulnerabilities',
             name: 'WorkspaceVulnerabilities',
@@ -91,12 +102,7 @@ const routes = [
       {
         path: 'console',
         children: [
-          { path: '', redirect: '/console/models' },
-          {
-            path: 'models',
-            name: 'ConsoleModels',
-            component: () => import('@/features/models/TenantModelsPage.vue'),
-          },
+          { path: '', redirect: '/console/workers' },
           {
             path: 'workers',
             name: 'ConsoleWorkers',
@@ -116,12 +122,6 @@ const routes = [
             path: 'users',
             name: 'ConsoleUsers',
             component: () => import('@/features/settings/UsersSettingsPage.vue'),
-            meta: { superAdmin: true },
-          },
-          {
-            path: 'dispatcher',
-            name: 'ConsoleDispatcher',
-            component: WorkersConsole,
             meta: { superAdmin: true },
           },
           {
@@ -146,12 +146,6 @@ const routes = [
             path: 'report-templates',
             name: 'ConsoleReportTemplates',
             component: ReportTemplatesConsole,
-            meta: { superAdmin: true },
-          },
-          {
-            path: 'timeout',
-            name: 'ConsoleTimeout',
-            component: TimeoutConsole,
             meta: { superAdmin: true },
           },
         ],

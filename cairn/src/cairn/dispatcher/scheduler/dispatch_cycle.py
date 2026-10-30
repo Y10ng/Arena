@@ -61,11 +61,13 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
     def _dispatch_available(self, summaries: list[ProjectSummary]) -> None:
         self._begin_project_decisions(summaries)
         ordinary = [summary for summary in summaries if summary.verification_request_id is None]
+        self._dispatch_agent_turns()
+        self._dispatch_completed_reports(ordinary)
         self._dispatch_ordinary_available(ordinary)
         self._dispatch_available_verifications(summaries)
 
     def _ordinary_task_count(self) -> int:
-        return sum(task.task_type != "external_verify" for task in self.futures.values())
+        return sum(task.task_type not in {"external_verify", "agent_chat"} for task in self.futures.values())
 
     def _dispatch_available_verifications(self, summaries: list[ProjectSummary]) -> None:
         # 普通任务仍独占原 max_workers；复测仅用 hard_cap 中额外容量，每个 Dispatcher 最多一条。
@@ -135,50 +137,55 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
         self._dispatch_completed_reports(summaries)
 
     def _dispatch_completed_reports(self, summaries: list[ProjectSummary]) -> None:
-        for summary in self._ordered_projects(
-            [item for item in summaries if item.status in {"completed", "stopped"}]
-        ):
+        for summary in self._ordered_projects(summaries):
             if self._ordinary_task_count() >= self.config.runtime.max_workers:
                 return
             if summary.verification_request_id is not None:
                 continue
-            project_tasks = [
-                task for task in self.futures.values() if task.project_id == summary.id
-            ]
+            project_tasks = [task for task in self.futures.values()
+                             if task.project_id == summary.id and task.task_type != "agent_chat"]
+            if len(project_tasks) >= self.config.runtime.max_project_workers:
+                continue
+            # 同项目报告顺序执行，仍可和普通探索并存；状态和 lease 始终按各自代次隔离。
             if any(task.task_type == "report" for task in project_tasks):
                 continue
-            if summary.status == "stopped":
-                # 已取消但尚未 reap 的评估 future 仍可能写回，必须先等待其退出。
-                if any(task.task_type != "report" for task in project_tasks):
-                    continue
-                container_name = self.container_manager.container_name(summary.id)
-                if container_name in self._cleanup_pending:
-                    continue
-            state = self.client.get_assessment_report_finalization(summary.id)
-            if state.ok and isinstance(state.data, dict):
-                # 未显式请求或 legacy pending/failed 不进入报告调度。
-                if not state.data.get("requested_at"):
-                    continue
-                status = state.data.get("status")
-                if status == "ready":
-                    continue
-                if status == "running" and not _timestamp_is_due(
-                    state.data.get("lease_expires_at")
-                ):
-                    continue
-                # 交付链由同一 Server route 决定退避，并在选择前留下明确的阻断观测。
-                if state.data.get("delivery_retry_route") is None and not _report_retry_is_due(state.data):
-                    continue
-            else:
-                # 404 表示项目尚未请求报告，其他读失败也留待下轮重试。
+            states = self.client.list_assessment_report_finalizations(summary.id)
+            if not states.ok or not isinstance(states.data, list):
                 continue
-            self._try_dispatch_completed_report(summary.id)
+            for state in states.data:
+                if not state.get("requested_at"):
+                    continue
+                if state.get("cancel_requested_at"):
+                    if state.get("status") == "running" and _timestamp_is_due(state.get("lease_expires_at")):
+                        # 无本地 future 时只请求 Server 核验旧执行的物理证明并封口，不启动执行器。
+                        self.client.claim_assessment_report_finalization(
+                            summary.id, state.get("claimed_by") or "report",
+                            generation_token=state["generation_token"],
+                        )
+                    continue
+                if state.get("status") in {"ready", "cancelled"}:
+                    continue
+                if not state.get("scope_key"):
+                    if summary.status not in {"completed", "stopped"}:
+                        continue
+                    if summary.status == "stopped" and any(task.task_type not in {"report", "agent_chat"} for task in project_tasks):
+                        continue
+                if state.get("status") == "running" and not _timestamp_is_due(state.get("lease_expires_at")):
+                    continue
+                if state.get("delivery_retry_route") is None and not _report_retry_is_due(state):
+                    continue
+                if self._try_dispatch_completed_report(summary.id, report_state=state):
+                    break
 
-    def _try_dispatch_completed_report(self, project_id: str) -> bool:
+    def _try_dispatch_completed_report(self, project_id: str, *, report_state: dict | None = None) -> bool:
+        if self.container_manager.container_name(project_id) in self._cleanup_pending:
+            self._observe_decision(project_id, "cleanup_pending", task_type="report")
+            return False
         if self._candidate_project_blocked(project_id):
             self._observe_decision(project_id, "cleanup_pending", task_type="report")
             return False
-        if self.report_finish_outbox.has_project(project_id):
+        if (self.report_finish_outbox.has_generation(project_id, report_state["generation_token"])
+                if report_state is not None else self.report_finish_outbox.has_project(project_id)):
             # 未决 immutable finish 只能继续交付，不能重新进入模型执行。
             self._observe_decision(project_id, "delivery_pending", task_type="report")
             self._log_changed(
@@ -192,7 +199,14 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
         if not self._execution_supported(project):
             return False
         try:
-            export_yaml = self.client.export_project(project_id)
+            if report_state is not None and report_state.get("scope_key"):
+                import yaml
+                packet = self.client.get_assessment_report_packet(project_id, generation_token=report_state["generation_token"])
+                if not packet.ok or not isinstance(packet.data, dict):
+                    return False
+                export_yaml = yaml.safe_dump({"facts": packet.data["facts"], "intents": packet.data["intents"]}, allow_unicode=True)
+            else:
+                export_yaml = self.client.export_project(project_id)
         except requests.RequestException:
             self._observe_decision(project_id, "admission_failed", task_type="report")
             return False
@@ -207,18 +221,20 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
             return False
         scenario = self._scenario_for_project(project)
         container_runtime = self._container_runtime_options(scenario, project_id)
-        try:
-            state = self.client.get_assessment_report_finalization(project_id)
-        except requests.RequestException:
-            self._observe_decision(project_id, "admission_failed", task_type="report")
-            return False
-        if not state.ok or not isinstance(state.data, dict):
-            self._observe_decision(project_id, "admission_failed", task_type="report")
-            return False
+        if report_state is None:
+            try:
+                state = self.client.get_assessment_report_finalization(project_id)
+            except requests.RequestException:
+                self._observe_decision(project_id, "admission_failed", task_type="report")
+                return False
+            if not state.ok or not isinstance(state.data, dict):
+                self._observe_decision(project_id, "admission_failed", task_type="report")
+                return False
+            report_state = state.data
         route = self._delivery_route_workers(
             project,
             "report",
-            report_state=state.data,
+            report_state=report_state,
         )
         if route is None:
             return False
@@ -248,6 +264,7 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
         if materialized is None:
             return False
         worker, _binding_provenance, binding_circuit_key = materialized
+        cancellation = TaskCancellation(generation=project.project.execution_generation)
         try:
             future = self.executor.submit(
                 run_post_completion_report,
@@ -261,6 +278,8 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
                 knowledge=scenario.knowledge,
                 container_runtime=container_runtime,
                 durable_request=True,
+                generation_token=report_state["generation_token"],
+                cancellation=cancellation,
                 finish_outbox=self.report_finish_outbox,
                 candidate_outbox=self.candidate_capture_outbox,
             )
@@ -276,10 +295,13 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
             "report",
             worker.name,
             worker.type,
-            TaskCancellation(),
+            cancellation,
             container_runtime,
             task_run_id=None,
             binding_circuit_key=binding_circuit_key,
+            execution_generation=project.project.execution_generation,
+            report_generation_token=report_state["generation_token"],
+            report_scope_key=report_state["scope_key"],
         )
         # stopped 项目可能已完成上一轮容器清理；报告重新使用容器后需允许后续再次回收。
         self._inactive_cleanup_done.pop(project_id, None)
@@ -510,7 +532,8 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
         return self._dispatch_bootstrap(project, intent)
 
     def _project_running_task_count(self, project_id: str) -> int:
-        return sum(1 for task in self.futures.values() if task.project_id == project_id)
+        return sum(1 for task in self.futures.values()
+                   if task.project_id == project_id and task.task_type != "agent_chat")
 
     def _project_running_task_summary(self, project_id: str) -> list[str]:
         summary: list[str] = []

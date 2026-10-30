@@ -9,21 +9,14 @@ import type {
   CreateProjectResourceRequest,
   CreateProjectHintRequest,
   CreateTargetRequest,
-  CreateWorkerTemplateRequest,
-  DispatcherConfigDocument,
-  DispatcherConnectivityAccepted,
-  DispatcherConnectivityTest,
-  DispatcherControlCollection,
-  DispatcherCredentialStatus,
-  DispatcherManagedWorkerUpdate,
-  DispatcherModel,
-  DispatcherProvider,
-  DispatcherProviderUpdate,
-  DispatcherWorkerConfig,
-  DispatcherYamlDocument,
   EvidenceRef,
   EvidenceItem,
   EvidenceSource,
+  TrafficFlowDetail,
+  TrafficProjection,
+  TrafficPreview,
+  TrafficBodyPreview,
+  TrafficSide,
   FactEvidence,
   InfrastructureCapability,
   InfrastructureImage,
@@ -54,15 +47,12 @@ import type {
   DiscoverTenantModelRequest,
   TestTenantModelRequest,
   ProjectDetail,
-  ProjectManagementOptions,
   ProjectResource,
   ProjectResourceBatch,
   ProjectResourceBatchMember,
   ProjectResourceConfig,
   ProjectResourceImportResponse,
   ProjectResourceKind,
-  ProjectSummary,
-  ProjectWorkerOption,
   ReportTemplate,
   ReportTemplateCatalogEntry,
   ReportInventoryFilters,
@@ -74,14 +64,10 @@ import type {
   TenantModel,
   TenantWorker,
   CreateTenantModelRequest,
-  CreateTenantWorkerRequest,
   UpdateTenantModelRequest,
   UpdateTenantWorkerRequest,
   UpdateProjectResourceBatchMemberRequest,
-  UpdateProjectWorkersRequest,
   UpdateTargetRequest,
-  UpdateWorkerTemplateRequest,
-  WorkerTemplate,
 } from './types'
 
 export class ApiError<T = unknown> extends Error {
@@ -244,9 +230,13 @@ async function apiRequest<T>(
   return data as T
 }
 
-export async function fetchText(path: string, signal?: AbortSignal): Promise<string> {
+export async function fetchText(
+  path: string,
+  signal?: AbortSignal,
+  cache?: RequestCache,
+): Promise<string> {
   const requestGeneration = authGenerationProvider?.() ?? 0
-  const response = await fetch(path, { credentials: 'same-origin', ...(signal ? { signal } : {}) })
+  const response = await fetch(path, { credentials: 'same-origin', signal, cache })
   const text = await response.text()
   if (!response.ok) {
     if (response.status === 401) unauthorizedHandler?.(requestGeneration)
@@ -260,6 +250,16 @@ export async function fetchText(path: string, signal?: AbortSignal): Promise<str
     throw new ApiError(detail || `HTTP ${response.status}`, response.status, text)
   }
   return text
+}
+
+export async function fetchBlob(path: string, signal?: AbortSignal): Promise<Blob> {
+  const requestGeneration = authGenerationProvider?.() ?? 0
+  const response = await fetch(path, { credentials: 'same-origin', signal, cache: 'no-store' })
+  if (!response.ok) {
+    if (response.status === 401) unauthorizedHandler?.(requestGeneration)
+    throw new ApiError(`图片读取失败（HTTP ${response.status}）`, response.status, null)
+  }
+  return response.blob()
 }
 
 const encodePathPart = (value: string) => encodeURIComponent(value)
@@ -411,100 +411,14 @@ const tenantWorkerPath = (workerId?: string) =>
   `/tenant-workers${workerId ? `/${encodePathPart(workerId)}` : ''}`
 
 export const listTenantWorkers = () => api<TenantWorker[]>('GET', tenantWorkerPath())
-export const listTenantWorkerOptions = () =>
-  api<TenantWorker[]>('GET', `${tenantWorkerPath()}/options`)
-export const createTenantWorker = (body: CreateTenantWorkerRequest) =>
-  api<TenantWorker>('POST', tenantWorkerPath(), body)
 export const updateTenantWorker = (workerId: string, body: UpdateTenantWorkerRequest) =>
   api<TenantWorker>('PUT', tenantWorkerPath(workerId), body)
-export const deleteTenantWorker = (workerId: string, expectedRevision: number) =>
-  api<void>('DELETE', tenantWorkerPath(workerId), { expected_revision: expectedRevision })
-
 export const listInfrastructureWorkers = () => api<InfrastructureWorker[]>('GET', '/workers')
-export const listProjectWorkerOptions = () =>
-  api<ProjectWorkerOption[]>('GET', '/project-worker-options')
 
 export const listInfrastructureImages = () => api<InfrastructureImage[]>('GET', '/images')
 
 export const listInfrastructureCapabilities = () =>
   api<InfrastructureCapability[]>('GET', '/capabilities')
-
-export const readDispatcherYaml = () => api<DispatcherYamlDocument>('GET', '/dispatcher/yaml')
-
-export const updateDispatcherYaml = (content: string, revision?: string) =>
-  api<DispatcherYamlDocument>('PUT', '/dispatcher/yaml', { content, revision })
-
-export const readDispatcherConfig = () => api<DispatcherConfigDocument>('GET', '/dispatcher/config')
-
-export const updateDispatcherConfig = (config: Record<string, unknown>, revision?: string) => {
-  return api<DispatcherConfigDocument>('PUT', '/dispatcher/config', { config, revision })
-}
-
-const controlPath = (kind: 'providers' | 'models' | 'workers', id?: string) =>
-  `/dispatcher/${kind}${id ? `/${encodePathPart(id)}` : ''}`
-
-export const listDispatcherProviders = () =>
-  api<DispatcherControlCollection<DispatcherProvider>>('GET', controlPath('providers'))
-export const saveDispatcherProvider = (
-  provider: DispatcherProviderUpdate,
-  revision: string,
-  currentId?: string,
-) =>
-  api<DispatcherConfigDocument>(currentId ? 'PUT' : 'POST', controlPath('providers', currentId), {
-    revision,
-    item: provider,
-  })
-export const deleteDispatcherProvider = (id: string, revision: string) =>
-  api<DispatcherConfigDocument>('DELETE', controlPath('providers', id), { revision })
-export const setDispatcherProviderCredential = (id: string, credential: string, revision: string) =>
-  api<DispatcherCredentialStatus>('PUT', `${controlPath('providers', id)}/credential`, {
-    revision,
-    credential,
-  })
-export const deleteDispatcherProviderCredential = (id: string, revision: string) =>
-  api<DispatcherCredentialStatus>('DELETE', `${controlPath('providers', id)}/credential`, {
-    revision,
-  })
-
-export const listDispatcherModels = () =>
-  api<DispatcherControlCollection<DispatcherModel>>('GET', controlPath('models'))
-export const saveDispatcherModel = (model: DispatcherModel, revision: string, currentId?: string) =>
-  api<DispatcherConfigDocument>(currentId ? 'PUT' : 'POST', controlPath('models', currentId), {
-    revision,
-    item: model,
-  })
-export const deleteDispatcherModel = (id: string, revision: string) =>
-  api<DispatcherConfigDocument>('DELETE', controlPath('models', id), { revision })
-
-export const listDispatcherWorkers = () =>
-  api<DispatcherControlCollection<DispatcherWorkerConfig>>('GET', controlPath('workers'))
-export const saveDispatcherWorker = (
-  worker: DispatcherManagedWorkerUpdate,
-  revision: string,
-  currentId?: string,
-) =>
-  api<DispatcherConfigDocument>(currentId ? 'PUT' : 'POST', controlPath('workers', currentId), {
-    revision,
-    item: worker,
-  })
-export const deleteDispatcherWorker = (id: string, revision: string) =>
-  api<DispatcherConfigDocument>('DELETE', controlPath('workers', id), { revision })
-
-export const startConnectivityTest = (
-  targetType: 'providers' | 'models' | 'workers',
-  id: string,
-  timeoutSeconds = 10,
-) =>
-  api<DispatcherConnectivityAccepted>('POST', `${controlPath(targetType, id)}/connectivity-tests`, {
-    timeout_seconds: timeoutSeconds,
-  })
-export const getConnectivityTest = (testId: string) =>
-  api<DispatcherConnectivityTest>('GET', `/dispatcher/connectivity-tests/${encodePathPart(testId)}`)
-export const pollConnectivityTest = (pollUrl: string) => {
-  if (!pollUrl.startsWith('/dispatcher/connectivity-tests/'))
-    throw new Error('Invalid connectivity poll URL')
-  return api<DispatcherConnectivityTest>('GET', pollUrl)
-}
 
 export const createPromptGroup = (key: string, cloneFrom?: string | null) => {
   return api<PromptGroup>('POST', '/prompt-groups', {
@@ -556,15 +470,6 @@ export const repairPromptGroup = (key: string, cloneFrom?: string | null) => {
 export const restorePromptGroup = (key: string) => {
   return api<PromptGroup>('POST', `/prompt-groups/${encodePathPart(key)}/restore`)
 }
-
-export const updateProjectWorkers = (projectId: string, body: UpdateProjectWorkersRequest) =>
-  api<ProjectSummary>('PUT', `/projects/${encodeURIComponent(projectId)}/workers`, body)
-
-export const getProjectManagementOptions = (projectId: string) =>
-  api<ProjectManagementOptions>(
-    'GET',
-    `/projects/${encodeURIComponent(projectId)}/management-options`,
-  )
 
 export const createProject = (body: CreateProjectRequest) =>
   api<ProjectDetail>('POST', '/projects', body)
@@ -723,11 +628,45 @@ export const updateReportTemplate = (key: string, body: UpdateReportTemplateRequ
 export const deleteReportTemplate = (key: string) =>
   api<void>('DELETE', `/report-templates/${encodePathPart(key)}`)
 
+export interface VulnerabilityReportScope {
+  vulnerability_id: string
+  observation_id?: string
+}
+
+export interface VulnerabilityReadable {
+  vulnerability_id: string
+  observation_id: string | null
+  description_markdown: string
+  reproduction_markdown: string
+  remediation_markdown: string
+  limitations_markdown: string
+  key_evidence_markdown: string
+}
+
+export interface AcceptedVulnerabilityReport {
+  artifact_id: string
+  generation_token: string
+  input_sha256: string
+  stale: boolean
+  source_status: 'available' | 'deleted'
+  readable: VulnerabilityReadable
+}
+
+const assessmentReportPath = (projectId: string, suffix = '', scope?: VulnerabilityReportScope) => {
+  const params = new URLSearchParams()
+  if (scope) {
+    params.set('vulnerability_id', scope.vulnerability_id)
+    if (scope.observation_id) params.set('observation_id', scope.observation_id)
+  }
+  const query = params.toString()
+  return `/projects/${encodeURIComponent(projectId)}/assessment-report-finalization${suffix}${query ? `?${query}` : ''}`
+}
+
 export const getAssessmentReportFinalization = async (projectId: string, signal?: AbortSignal) => {
   try {
     return await api<AssessmentReportFinalization>(
       'GET',
-      `/projects/${encodeURIComponent(projectId)}/assessment-report-finalization`,
+      assessmentReportPath(projectId),
       undefined,
       signal,
     )
@@ -755,21 +694,35 @@ export const requestAssessmentReportFinalization = (
 ) =>
   api<AssessmentReportFinalization>(
     'POST',
-    `/projects/${encodeURIComponent(projectId)}/assessment-report-finalization/request`,
+    assessmentReportPath(projectId, '/request'),
     body,
   )
 
-// Worker 模板同样由认证会话隔离；只保存稳定 Tenant Worker ID，不保存 Model credential。
-export const listWorkerTemplates = () => api<WorkerTemplate[]>('GET', '/worker-templates')
-
-export const createWorkerTemplate = (body: CreateWorkerTemplateRequest) =>
-  api<WorkerTemplate>('POST', '/worker-templates', body)
-
-export const updateWorkerTemplate = (id: string, body: UpdateWorkerTemplateRequest) =>
-  api<WorkerTemplate>('PUT', `/worker-templates/${encodeURIComponent(id)}`, body)
-
-export const deleteWorkerTemplate = (id: string) =>
-  api<void>('DELETE', `/worker-templates/${encodeURIComponent(id)}`)
+export const getAcceptedVulnerabilityReport = async (
+  projectId: string,
+  scope: VulnerabilityReportScope,
+  signal?: AbortSignal,
+) => {
+  try {
+    return await api<AcceptedVulnerabilityReport>(
+      'GET',
+      assessmentReportPath(projectId, '/accepted', scope),
+      undefined,
+      signal,
+    )
+  } catch (error) {
+    if (
+      error instanceof ApiError &&
+      error.status === 404 &&
+      typeof error.data === 'object' &&
+      error.data !== null &&
+      'detail' in error.data &&
+      error.data.detail === 'assessment_report_accepted_not_found'
+    )
+      return null
+    throw error
+  }
+}
 
 // 漏洞管理（所有场景通用）：列表/详情/创建/状态流转/fact 关联查询。
 export interface Vulnerability {
@@ -781,6 +734,8 @@ export interface Vulnerability {
   target: string
   confidence: number
   status: 'new' | 'confirmed' | 'dismissed' | 'remediated'
+  can_delete: boolean
+  delete_block_reason: string | null
   source_fact_id: string | null
   remediation: string
   evidence_items: EvidenceItem[]
@@ -820,6 +775,8 @@ export interface VulnerabilityObservation {
   severity: string
   confidence: number
   evidence_items: EvidenceItem[]
+  reproduction_steps: import('./verificationRequests').VerificationTestStep[]
+  remediation: string | null
   observed_at: string
 }
 
@@ -842,7 +799,9 @@ export interface VulnerabilityVerification {
 
 // 详情：聚合来源 fact、发现记录、独立验证与产出 run 证据，供完整审阅。
 export interface VulnerabilityDetail extends Vulnerability {
+  display_images?: import('@/features/reports/reportImages').ReportDisplayImage[]
   observation_id: string | null
+  readable: VulnerabilityReadable
   source: EvidenceSource
   record_evidence_items: EvidenceItem[]
   source_fact: VulnerabilitySourceFact | null
@@ -969,6 +928,9 @@ export const getDuplicateVulnerabilityCandidates = (
     signal,
   )
 
+export const deleteVulnerability = (projectId: string, vulnId: string) =>
+  api<void>('DELETE', `/projects/${encodeURIComponent(projectId)}/vulnerabilities/${encodeURIComponent(vulnId)}`)
+
 export const createVulnerability = (projectId: string, body: CreateVulnerabilityRequest) =>
   api<Vulnerability>('POST', `/projects/${encodeURIComponent(projectId)}/vulnerabilities`, body)
 
@@ -1072,6 +1034,37 @@ export interface ArtifactPreview {
 
 const artifactPath = (projectId: string, artifactId?: string) =>
   `/projects/${encodeURIComponent(projectId)}/artifacts${artifactId ? `/${encodeURIComponent(artifactId)}` : ''}`
+
+export { getTrafficReadable } from './traffic'
+
+const trafficFlowPath = (projectId: string, flowId: string) =>
+  `/projects/${encodeURIComponent(projectId)}/traffic/${encodeURIComponent(flowId)}`
+
+export const getTrafficFlow = (projectId: string, flowId: string, signal?: AbortSignal) =>
+  api<TrafficFlowDetail>('GET', trafficFlowPath(projectId, flowId), undefined, signal)
+
+export const getTrafficProjection = (
+  projectId: string,
+  flowId: string,
+  side: TrafficSide,
+  offset = 0,
+  limit = 65536,
+  signal?: AbortSignal,
+) => api<TrafficProjection>(
+  'GET',
+  `${trafficFlowPath(projectId, flowId)}/projection/${side}?${new URLSearchParams({ offset: String(offset), limit: String(limit) })}`,
+  undefined,
+  signal,
+)
+
+export const getTrafficPreview = (projectId: string, flowId: string, side: TrafficSide, offset = 0, signal?: AbortSignal) =>
+  api<TrafficPreview>('GET', `${trafficFlowPath(projectId, flowId)}/preview/${side}?${new URLSearchParams({ offset: String(offset), limit: '65536' })}`, undefined, signal)
+
+export const getTrafficBodyPreview = (projectId: string, flowId: string, side: TrafficSide, offset = 0, signal?: AbortSignal) =>
+  api<TrafficBodyPreview>('GET', `${trafficFlowPath(projectId, flowId)}/bodies/${side}?${new URLSearchParams({ preview: 'true', offset: String(offset), limit: '4096' })}`, undefined, signal)
+
+export const trafficBodyUrl = (projectId: string, flowId: string, side: TrafficSide) =>
+  `${trafficFlowPath(projectId, flowId)}/bodies/${side}`
 
 export const listProjectArtifacts = (projectId: string) =>
   api<ProjectArtifact[]>('GET', artifactPath(projectId))

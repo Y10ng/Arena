@@ -7,14 +7,14 @@ from hashlib import sha256
 import json
 from typing import Any, Mapping
 
+from cairn.report_readable import REPORT_DATA_SCHEMA_VERSION
 from cairn.dispatcher.prompt_resources import DEFAULT_PROMPT_GROUP, validate_report_prompt_resources
 from cairn.dispatcher.prompting import load_prompt
 from .assessment_policy import execution_rejection_reason
 
 REPORT_POLICY_VERSION = 1
 REPORT_PACKET_VERSION = 2
-REPORT_OUTPUT_CONTRACT_VERSION = 3
-REPORT_DATA_SCHEMA_VERSION = 2
+REPORT_OUTPUT_CONTRACT_VERSION = 4
 REPORT_COMPLETENESS_RULE_VERSION = 1
 REPORT_TEMPLATE_PROFILE = "assessment-report-packet-v1"
 DEFAULT_REPORT_PROMPT_GROUP = DEFAULT_PROMPT_GROUP
@@ -46,6 +46,7 @@ class ReportExecutionPlan:
     report_prompt_digest_sha256: str
     packet_version: int
     output_contract_version: int
+    report_data_schema_version: int
     completeness_rule_version: int
     template_profile: str
     execution_profile_id: str
@@ -150,6 +151,7 @@ def freeze_report_execution_plan(
         report_prompt_digest_sha256=prompt_digest,
         packet_version=policy.packet_version,
         output_contract_version=policy.output_contract_version,
+        report_data_schema_version=REPORT_DATA_SCHEMA_VERSION,
         completeness_rule_version=policy.completeness_rule_version,
         template_profile=policy.template_profile,
         execution_profile_id=policy.execution_profile_id,
@@ -169,6 +171,7 @@ def parse_report_execution_plan(value: str) -> ReportExecutionPlan:
         or loaded.get("execution_engine") != "pi"
         or loaded.get("packet_version") != REPORT_PACKET_VERSION
         or loaded.get("output_contract_version") != REPORT_OUTPUT_CONTRACT_VERSION
+        or loaded.get("report_data_schema_version") != REPORT_DATA_SCHEMA_VERSION
     ):
         raise ValueError("report_execution_contract_unsupported")
     return ReportExecutionPlan(**loaded)

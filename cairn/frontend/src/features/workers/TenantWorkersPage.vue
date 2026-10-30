@@ -1,227 +1,200 @@
 <template>
   <article class="console-page configuration-page tenant-workers-page">
-    <div class="section-header section-header--actions">
-      <Button variant="secondary" size="sm" :disabled="saving" @click="startCreate">
-        新增 Worker
-      </Button>
+    <div class="section-header">
+      <h2>Worker 配置</h2>
+      <Button v-if="activeTab === 'workers'" @click="modelsPanel?.startCreate()">新增模型</Button>
     </div>
-
-    <ErrorState
-      v-if="workersLoadError"
-      title="Worker 加载失败"
-      :description="errorText(workersLoadError)"
-      @retry="refetchWorkers"
-    />
-    <ErrorState
-      v-if="modelsLoadError"
-      title="Model 加载失败"
-      :description="errorText(modelsLoadError)"
-      @retry="modelsQuery.refetch()"
-    />
-    <Alert v-else-if="!modelsQuery.isPending.value && !models.length" tone="warning">
-      请先在 <router-link to="/console/models">Models</router-link> 页面新增 Model、选择模型名并配置
-      API Key。pi 支持 Anthropic Messages、OpenAI Chat Completions 和 OpenAI Responses。
-    </Alert>
-    <Alert v-if="revisionConflict" tone="warning">
-      Worker 已被其他请求更新，已加载最新 revision；当前草稿已保留，请确认后重试。
-    </Alert>
-
-    <MasterDetail configuration>
-      <template #master>
-        <Card class="console-card configuration-panel configuration-list worker-master">
-          <div class="list-header">
-            <strong>Tenant Workers</strong><span class="text-faint">{{ workers.length }} 个</span>
-          </div>
-          <template v-if="workersQuery.isPending.value">
-            <Skeleton
-              v-for="index in 3"
-              :key="index"
-              :decorative="index !== 1"
-              label="正在加载 Worker"
-            />
-          </template>
-          <button
-            v-for="worker in workers"
-            :key="worker.id"
-            class="worker-card"
-            :class="{ active: selectedId === worker.id && !creating }"
-            type="button"
-            :disabled="saving"
-            @click="selectWorker(worker.id)"
-          >
-            <strong class="worker-name" :title="worker.display_name">{{
-              worker.display_name
-            }}</strong>
-            <span
-              class="worker-model text-faint"
-              :title="worker.model_display_name || worker.model_id"
-              >{{ worker.model_display_name || worker.model_id }}</span
-            >
-            <span class="worker-meta">
-              <Badge size="sm">{{ worker.engine }}</Badge>
-              <StatusBadge
-                :status="worker.available && worker.executor_available ? 'healthy' : 'unhealthy'"
-                size="sm"
-              >
-                {{ tenantWorkerStatusLabel(worker) }}
-              </StatusBadge>
-            </span>
-          </button>
-          <EmptyState
-            v-if="!workersQuery.isPending.value && !workers.length"
-            title="暂无 Worker"
-            description="请新增当前 Tenant 的 pi Worker。"
-          />
-        </Card>
-      </template>
-
-      <template #detail>
-        <Card
-          v-if="creating || currentWorker"
-          class="console-card configuration-panel worker-detail"
+    <component
+      :is="authStore.isSuperAdmin ? Tabs : 'div'"
+      v-bind="
+        authStore.isSuperAdmin
+          ? { modelValue: activeTab, options: tabs, activationMode: 'manual', unmountOnHide: false }
+          : {}
+      "
+      @update:model-value="changeTab"
+    >
+      <template #[panelSlot]="panel">
+        <section
+          v-if="!authStore.isSuperAdmin || panel.option.value === 'workers'"
+          class="worker-model-content"
         >
-          <div class="editor-title-row">
-            <div>
-              <h2>{{ creating ? '新增 Worker' : 'Worker 详情' }}</h2>
-              <p class="mono text-faint">{{ currentWorker?.id || '保存后生成 ID' }}</p>
-            </div>
-            <Button
-              v-if="currentWorker && !creating"
-              variant="danger"
-              size="sm"
-              :disabled="saving"
-              @click="requestWorkerRemoval"
+          <h3>普通 Worker</h3>
+          <ErrorState
+            v-if="workersLoadError"
+            title="Worker 加载失败"
+            :description="errorText(workersLoadError)"
+            @retry="workersQuery.refetch()"
+          />
+          <ErrorState
+            v-if="modelsLoadError"
+            title="模型加载失败"
+            :description="errorText(modelsLoadError)"
+            @retry="modelsQuery.refetch()"
+          />
+          <Alert v-else-if="!modelsQuery.isPending.value && !models.length" tone="warning">
+            尚未配置模型。<Button variant="ghost" size="sm" @click="modelsPanel?.startCreate()"
+              >新增模型</Button
             >
-              删除
-            </Button>
-          </div>
-          <Alert v-if="legacyWorker" tone="warning">
-            历史引擎 {{ currentWorker?.engine }} 不受支持，不能执行或转换；请新建 pi Worker。
           </Alert>
-          <form class="managed-form" @submit.prevent="saveWorker">
-            <FormField v-slot="{ controlAttrs }" class="form-group" label="名称" required>
-              <Input
-                v-bind="controlAttrs"
-                :model-value="draft.display_name"
-                @update:model-value="updateDisplayName"
-              />
-            </FormField>
-            <label class="form-group">
-              <span class="form-label">Model</span>
-              <Select
-                v-model="draft.model_id"
-                class="mono"
-                :options="modelOptions"
-                placeholder="请选择 Model"
-                aria-label="Worker Model"
-                required
-              />
-            </label>
-            <div class="form-grid">
-              <label class="form-group">
-                <span class="form-label">执行引擎</span>
-                <Input :model-value="creating ? 'pi' : currentWorker?.engine || ''" disabled />
-              </label>
-              <label class="form-group toggle-field">
-                <span class="form-label">状态</span>
-                <Checkbox v-model="draft.enabled" label="启用" />
-              </label>
-              <label class="form-group">
-                <span class="form-label">最大并发</span>
-                <Input
-                  :model-value="draft.max_running"
-                  type="number"
-                  :min="TENANT_WORKER_MAX_RUNNING.min"
-                  :max="TENANT_WORKER_MAX_RUNNING.max"
-                  step="1"
-                  required
-                  @update:model-value="updateMaxRunning"
-                />
-              </label>
-              <label class="form-group">
-                <span class="form-label">优先级</span>
-                <Input
-                  :model-value="draft.priority"
-                  type="number"
-                  :min="TENANT_WORKER_PRIORITY.min"
-                  :max="TENANT_WORKER_PRIORITY.max"
-                  step="1"
-                  required
-                  @update:model-value="updatePriority"
-                />
-              </label>
-            </div>
-            <fieldset class="form-group">
-              <legend class="form-label">任务类型</legend>
-              <Checkbox
-                v-for="task in taskTypes"
-                :key="task"
-                class="task-check"
-                :model-value="draft.task_types.includes(task)"
-                :label="task"
-                @update:model-value="(checked) => updateTaskType(task, checked)"
-              />
-            </fieldset>
-            <footer class="editor-footer">
-              <Button variant="secondary" @click="resetDraft">取消修改</Button>
-              <Button type="submit" :loading="saving" :disabled="!canSave">
-                {{ saving ? '保存中...' : '保存 Worker' }}
-              </Button>
-            </footer>
-          </form>
-        </Card>
-        <EmptyState
-          v-else
-          class="console-card empty-detail"
-          title="选择或新增 Worker"
-          description="Worker 配置按当前登录用户的个人 Tenant 隔离。"
+          <Skeleton v-if="workersQuery.isPending.value" label="正在加载 Worker" />
+          <div v-else-if="workers.length" class="worker-table-container">
+            <table class="worker-table">
+              <thead>
+                <tr>
+                  <th scope="col">类型</th>
+                  <th scope="col">模型</th>
+                  <th scope="col">并发</th>
+                  <th scope="col">状态</th>
+                  <th scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="worker in workers" :key="worker.id">
+                  <th scope="row">
+                    {{ roleLabels[worker.task_types[0]!]
+                    }}<span class="worker-role-id">{{ worker.task_types[0] }}</span>
+                  </th>
+                  <td>
+                    <Select
+                      :model-value="drafts[worker.id]!.model_id ?? '__unconfigured__'"
+                      :options="modelOptions"
+                      :aria-label="`${worker.task_types[0]} 模型`"
+                      :disabled="
+                        savingId === worker.id ||
+                        modelsQuery.isPending.value ||
+                        Boolean(modelsLoadError)
+                      "
+                      @update:model-value="
+                        drafts[worker.id]!.model_id =
+                          $event === '__unconfigured__' ? null : String($event)
+                      "
+                    />
+                  </td>
+                  <td>
+                    <Input
+                      :model-value="drafts[worker.id]!.max_running"
+                      type="number"
+                      :min="TENANT_WORKER_MAX_RUNNING.min"
+                      :max="TENANT_WORKER_MAX_RUNNING.max"
+                      step="1"
+                      :aria-label="`${worker.task_types[0]} 并发`"
+                      :disabled="savingId === worker.id"
+                      @update:model-value="
+                        drafts[worker.id]!.max_running =
+                          $event === null ? Number.NaN : Number($event)
+                      "
+                    />
+                  </td>
+                  <td>
+                    <StatusBadge
+                      :status="
+                        worker.available && worker.executor_available ? 'healthy' : 'unhealthy'
+                      "
+                      size="sm"
+                      >{{ tenantWorkerStatusLabel(worker) }}</StatusBadge
+                    >
+                  </td>
+                  <td>
+                    <div class="worker-actions">
+                      <Button
+                        size="sm"
+                        :aria-label="`保存 ${worker.task_types[0]}`"
+                        :loading="savingId === worker.id"
+                        :disabled="
+                          Boolean(savingId) || !tenantWorkerDraftIsValid(drafts[worker.id]!)
+                        "
+                        @click="saveWorker(worker)"
+                        >保存</Button
+                      >
+                      <details class="worker-advanced">
+                        <summary>高级设置</summary>
+                        <Checkbox
+                          v-model="drafts[worker.id]!.enabled"
+                          label="启用"
+                          :aria-label="`${worker.task_types[0]} 启用`"
+                          :disabled="savingId === worker.id"
+                        />
+                        <label class="form-group"
+                          ><span class="form-label">优先级</span
+                          ><Input
+                            :model-value="drafts[worker.id]!.priority"
+                            type="number"
+                            :min="TENANT_WORKER_PRIORITY.min"
+                            :max="TENANT_WORKER_PRIORITY.max"
+                            step="1"
+                            :aria-label="`${worker.task_types[0]} 优先级`"
+                            :disabled="savingId === worker.id"
+                            @update:model-value="
+                              drafts[worker.id]!.priority =
+                                $event === null ? Number.NaN : Number($event)
+                            "
+                        /></label>
+                      </details>
+                    </div>
+                    <p v-if="conflicts[worker.id]" class="worker-feedback" role="alert">
+                      配置已被更新，草稿已保留。请核对后再次保存；刷新失败时不能重试覆盖。
+                    </p>
+                    <p v-if="errors[worker.id]" class="worker-feedback" role="alert">
+                      {{ errors[worker.id] }}
+                    </p>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <Alert v-else-if="!workersLoadError" tone="warning"
+            >未读取到固定 Worker 配置，请刷新或联系管理员检查初始化。</Alert
+          >
+          <p class="section-desc">
+            并发为该 Worker
+            跨项目的上限。保存影响后续新执行，降低并发不会停止在途执行；保存不代表模型连接已验证。
+          </p>
+          <div ref="modelsSection" id="worker-models"><TenantModelsPanel ref="modelsPanel" /></div>
+        </section>
+        <RuntimeSettingsPanel
+          v-if="authStore.isSuperAdmin && panel.option.value === 'runtime' && runtimeVisited"
+          ref="runtimePanel"
         />
       </template>
-    </MasterDetail>
-
+    </component>
     <ConfirmAction
-      :open="removeOpen"
-      title="删除 Worker"
-      :description="removeDescription"
-      confirm-label="确认删除"
-      tone="danger"
-      :loading="saving"
-      @update:open="handleRemoveOpenChange"
-      @confirm="removeWorker"
+      :open="leaveConfirmation"
+      title="放弃未保存的配置？"
+      description="离开后将丢弃尚未保存的 Worker 或运行设置，已保存的配置不受影响。"
+      confirm-label="放弃修改"
+      @confirm="resolveLeave(true)"
+      @update:open="!$event && resolveLeave(false)"
     />
   </article>
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import {
-  createTenantWorker,
-  deleteTenantWorker,
   isRevisionConflict,
   listTenantModels,
   listTenantWorkers,
   updateTenantWorker,
 } from '@/api/client'
-import type { TenantWorkerTaskType } from '@/api/types'
-import { ConfirmAction, ErrorState, MasterDetail } from '@/components/patterns'
+import type { TenantWorker, UpdateTenantWorkerRequest } from '@/api/types'
+import { ConfirmAction, ErrorState } from '@/components/patterns'
 import {
   Alert,
-  Badge,
   Button,
-  Card,
   Checkbox,
-  EmptyState,
-  FormField,
   Input,
   Select,
   Skeleton,
   StatusBadge,
+  Tabs,
 } from '@/components/ui'
+import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
+import TenantModelsPanel from '@/features/models/TenantModelsPanel.vue'
+import RuntimeSettingsPanel from './RuntimeSettingsPanel.vue'
 import {
-  defaultTenantWorkerDraft,
-  selectAfterWorkerListChange,
   TENANT_WORKER_MAX_RUNNING,
   TENANT_WORKER_PRIORITY,
   tenantWorkerDraft,
@@ -231,193 +204,139 @@ import {
 import '@/design-system/configuration-workspace.css'
 import './tenantWorkersPage.css'
 
+const authStore = useAuthStore()
 const uiStore = useUIStore()
+const route = useRoute()
 const queryClient = useQueryClient()
-const taskTypes: TenantWorkerTaskType[] = ['reason', 'bootstrap', 'explore']
-const selectedId = ref('')
-const creating = ref(false)
-const saving = ref(false)
-const removeOpen = ref(false)
-const revisionConflict = ref(false)
-const draftRevision = ref<number | null>(null)
-const draft = reactive(defaultTenantWorkerDraft())
+const activeTab = ref('workers')
+const runtimeVisited = ref(false)
+// 普通用户直接展示同一份内容，不创建管理员页签或挂载运行设置。
+const panelSlot = computed(() => (authStore.isSuperAdmin ? 'panel' : 'default'))
+const tabs = [
+  { value: 'workers', label: 'Worker 与模型' },
+  { value: 'runtime', label: '运行设置' },
+]
+const modelsPanel = ref<InstanceType<typeof TenantModelsPanel> | null>(null)
+const runtimePanel = ref<InstanceType<typeof RuntimeSettingsPanel> | null>(null)
+const modelsSection = ref<HTMLElement | null>(null)
+const savingId = ref('')
+const drafts = reactive<Record<string, UpdateTenantWorkerRequest>>({})
+const baselines = reactive<Record<string, string>>({})
+const errors = reactive<Record<string, string>>({})
+const conflicts = reactive<Record<string, boolean>>({})
 const workersQuery = useQuery({ queryKey: ['tenant-workers'], queryFn: listTenantWorkers })
 const modelsQuery = useQuery({ queryKey: ['tenant-models'], queryFn: listTenantModels })
-const workers = computed(() => workersQuery.data.value || [])
+const roles = ['bootstrap', 'reason', 'explore']
+const roleLabels: Record<string, string> = { bootstrap: '初始化', reason: '决策', explore: '探索' }
+const workers = computed(() =>
+  [...(workersQuery.data.value || [])].sort(
+    (a, b) => roles.indexOf(a.task_types[0]!) - roles.indexOf(b.task_types[0]!),
+  ),
+)
 const workersLoadError = computed(() => workersQuery.error.value)
 const modelsLoadError = computed(() => modelsQuery.error.value)
 const models = computed(() => modelsQuery.data.value || [])
-const modelOptions = computed(() =>
-  models.value.map((model) => ({
+const modelOptions = computed(() => [
+  { value: '__unconfigured__', label: '未配置模型' },
+  ...models.value.map((model) => ({
     value: model.id,
-    label: `${model.display_name} · ${model.model_name || '未选择 Provider Model ID'} · ${model.base_url}`,
+    label: `${model.display_name} · ${model.model_name || '未选择模型'}`,
   })),
+])
+const workerDirty = computed(() =>
+  Object.entries(drafts).some(([id, draft]) => JSON.stringify(draft) !== baselines[id]),
 )
-const currentWorker = computed(
-  () => workers.value.find((worker) => worker.id === selectedId.value) || null,
-)
-const removeDescription = computed(() =>
-  currentWorker.value
-    ? `删除 Worker「${currentWorker.value.display_name}」？该操作无法撤销。`
-    : '删除当前 Worker？该操作无法撤销。',
-)
-const legacyWorker = computed(() => !creating.value && currentWorker.value?.engine !== 'pi')
-const canSave = computed(() => !legacyWorker.value && tenantWorkerDraftIsValid(draft))
-
 watch(
   workers,
-  (value) => {
-    if (creating.value || revisionConflict.value) return
-    const nextId = selectAfterWorkerListChange(value, selectedId.value)
-    if (nextId !== selectedId.value) {
-      selectedId.value = nextId
-      loadDraft()
-    }
+  (items) => {
+    // 后台刷新不覆盖其他行尚未保存的输入或编辑版本。
+    for (const worker of items)
+      if (!drafts[worker.id]) {
+        drafts[worker.id] = tenantWorkerDraft(worker)
+        baselines[worker.id] = JSON.stringify(drafts[worker.id])
+      }
   },
   { immediate: true },
 )
-
-function loadDraft() {
-  if (!currentWorker.value) return
-  Object.assign(draft, tenantWorkerDraft(currentWorker.value))
-  draftRevision.value = currentWorker.value.revision
-}
-
-function resetDraft() {
-  revisionConflict.value = false
-  if (creating.value) Object.assign(draft, defaultTenantWorkerDraft(models.value[0]?.id || ''))
-  else loadDraft()
-}
-
-function updateDisplayName(value: string | number | null) {
-  draft.display_name = String(value ?? '').trim()
-}
-
-function updateMaxRunning(value: string | number | null) {
-  if (typeof value === 'number') draft.max_running = value
-}
-
-function updatePriority(value: string | number | null) {
-  if (typeof value === 'number') draft.priority = value
-}
-
-function updateTaskType(task: TenantWorkerTaskType, checked: boolean) {
-  if (checked) {
-    if (!draft.task_types.includes(task)) draft.task_types.push(task)
-    return
-  }
-  draft.task_types = draft.task_types.filter((value) => value !== task)
-}
-
-function selectWorker(id: string) {
-  if (saving.value) return
-  selectedId.value = id
-  creating.value = false
-  revisionConflict.value = false
-  loadDraft()
-}
-
-function startCreate() {
-  if (saving.value) return
-  creating.value = true
-  selectedId.value = ''
-  draftRevision.value = null
-  revisionConflict.value = false
-  Object.assign(draft, defaultTenantWorkerDraft(models.value[0]?.id || ''))
-}
-
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error)
 }
-
-async function refetchWorkers() {
-  const result = await workersQuery.refetch()
-  if (result.error) throw result.error
-}
-
-async function refreshDependentWorkerQueries() {
-  await Promise.all([
-    queryClient.invalidateQueries({ queryKey: ['tenant-worker-options'] }),
-    queryClient.invalidateQueries({ queryKey: ['worker-templates'] }),
-    queryClient.invalidateQueries({ queryKey: ['projects'] }),
-  ])
-}
-
-async function handleMutationError(error: unknown) {
-  if (isRevisionConflict(error)) {
-    revisionConflict.value = true
-    // 仅刷新服务端 revision，不覆盖用户尚未保存的草稿。
-    try {
-      await refetchWorkers()
-    } catch {
-      /* 保留原始冲突提示。 */
-    }
-  }
-  uiStore.showToast(errorText(error), 'danger')
-}
-
-async function saveWorker() {
-  if (!canSave.value) return
-  saving.value = true
-  revisionConflict.value = false
+async function saveWorker(worker: TenantWorker) {
+  const draft = drafts[worker.id]!
+  if (savingId.value || !tenantWorkerDraftIsValid(draft)) return
+  savingId.value = worker.id
+  errors[worker.id] = ''
   try {
-    const body = {
-      display_name: draft.display_name,
-      model_id: draft.model_id,
-      task_types: [...draft.task_types],
-      max_running: draft.max_running,
-      priority: draft.priority,
-      enabled: draft.enabled,
+    // 冲突后重新读取权威版本，保留输入；用户再次保存才确认覆盖。
+    if (conflicts[worker.id]) {
+      const result = await workersQuery.refetch()
+      if (result.error) throw result.error
+      const latest = result.data?.find((item) => item.id === worker.id)
+      if (!latest) throw new Error('未读取到当前 Worker，请刷新后重试')
+      draft.expected_revision = latest.revision
     }
-    const saved = creating.value
-      ? await createTenantWorker(body)
-      : await updateTenantWorker(currentWorker.value!.id, {
-          ...body,
-          expected_revision: draftRevision.value!,
-        })
-    creating.value = false
-    selectedId.value = saved.id
-    Object.assign(draft, tenantWorkerDraft(saved))
-    draftRevision.value = saved.revision
-    await refetchWorkers()
-    await refreshDependentWorkerQueries()
-    uiStore.showToast('Worker 已保存', 'success')
-  } catch (error) {
-    await handleMutationError(error)
-  } finally {
-    saving.value = false
-  }
-}
-
-function requestWorkerRemoval() {
-  if (!currentWorker.value || saving.value) return
-  removeOpen.value = true
-}
-
-function handleRemoveOpenChange(open: boolean) {
-  if (!open && saving.value) return
-  removeOpen.value = open
-}
-
-async function removeWorker() {
-  if (!currentWorker.value || saving.value) return
-  saving.value = true
-  revisionConflict.value = false
-  try {
-    await deleteTenantWorker(
-      currentWorker.value.id,
-      draftRevision.value || currentWorker.value.revision,
+    const saved = await updateTenantWorker(worker.id, { ...draft })
+    drafts[worker.id] = tenantWorkerDraft(saved)
+    baselines[worker.id] = JSON.stringify(drafts[worker.id])
+    conflicts[worker.id] = false
+    queryClient.setQueryData<TenantWorker[]>(['tenant-workers'], (current = []) =>
+      current.map((item) => (item.id === saved.id ? saved : item)),
     )
-    await refetchWorkers()
-    await refreshDependentWorkerQueries()
-    selectedId.value = selectAfterWorkerListChange(workers.value, '')
-    if (selectedId.value) loadDraft()
-    uiStore.showToast('Worker 已删除', 'info')
+    uiStore.showToast('Worker 配置已保存', 'success')
   } catch (error) {
-    await handleMutationError(error)
+    conflicts[worker.id] = conflicts[worker.id] || isRevisionConflict(error)
+    errors[worker.id] = errorText(error)
   } finally {
-    saving.value = false
-    removeOpen.value = false
+    savingId.value = ''
   }
 }
+async function changeTab(tab: string) {
+  if (tab === activeTab.value || (tab === 'runtime' && !authStore.isSuperAdmin)) return
+  if (modelsPanel.value && !(await modelsPanel.value.requestLeave())) return
+  if (tab === 'runtime') runtimeVisited.value = true
+  activeTab.value = tab
+}
+watch(
+  () => route.query.section,
+  async (section) => {
+    if (section !== 'models') return
+    await changeTab('workers')
+    await nextTick()
+    modelsSection.value?.scrollIntoView({ block: 'start' })
+  },
+  { immediate: true },
+)
+const leaveConfirmation = ref(false)
+let leaveResolver: ((leave: boolean) => void) | null = null
+function resolveLeave(leave: boolean) {
+  leaveConfirmation.value = false
+  leaveResolver?.(leave)
+  leaveResolver = null
+}
+onBeforeRouteLeave(async () => {
+  if (savingId.value || runtimePanel.value?.saving) return false
+  if (modelsPanel.value && !(await modelsPanel.value.requestLeave())) return false
+  if (!workerDirty.value && !runtimePanel.value?.dirty) return true
+  if (leaveResolver) return false
+  leaveConfirmation.value = true
+  return new Promise<boolean>((resolve) => {
+    leaveResolver = resolve
+  })
+})
+function beforeUnload(event: BeforeUnloadEvent) {
+  if (
+    workerDirty.value ||
+    savingId.value ||
+    modelsPanel.value?.dirty ||
+    modelsPanel.value?.busy ||
+    runtimePanel.value?.dirty ||
+    runtimePanel.value?.saving
+  )
+    event.preventDefault()
+}
+onMounted(() => window.addEventListener('beforeunload', beforeUnload))
+onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', beforeUnload)
+  resolveLeave(false)
+})
 </script>

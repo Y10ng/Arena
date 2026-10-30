@@ -10,12 +10,6 @@ def next_project_id(conn: sqlite3.Connection) -> str:
     return f"proj_{row['value']:03d}"
 
 
-def next_worker_template_id(conn: sqlite3.Connection) -> str:
-    conn.execute("UPDATE counters SET value = value + 1 WHERE name = 'worker_template'")
-    row = conn.execute("SELECT value FROM counters WHERE name = 'worker_template'").fetchone()
-    return f"wt_{row['value']:03d}"
-
-
 def _next_scoped_id(
     conn: sqlite3.Connection, kind: str, prefix: str, project_id: str
 ) -> str:

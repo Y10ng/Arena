@@ -189,7 +189,7 @@ def resume_continuation(client, container_manager, project_id, generation, conta
 
 def register_delivery(
     client, container_manager, container_name, project, task_run_id, worker,
-    *, phase, session, timeout_seconds, binding=None, inputs=None,
+    *, phase, session, timeout_seconds, binding=None, inputs=None, deadline_at=None,
 ):
     """首次模型调用前由 owner 幂等登记；快照不含 prompt、凭据或业务原文。"""
     metadata = container_manager.runtime_metadata(container_name)
@@ -201,6 +201,8 @@ def register_delivery(
     ):
         raise DeliveryUnavailable
     deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
+    if deadline_at is not None:
+        deadline = min(deadline, datetime.fromisoformat(deadline_at.replace("Z", "+00:00")))
     project_deadline = getattr(project.project, "explore_deadline", None)
     authorization_expires_at = getattr(
         project.project,

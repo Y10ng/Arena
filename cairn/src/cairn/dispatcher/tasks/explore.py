@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from cairn.dispatcher.runtime.traffic_execution import session_root_for_project
+
 from dataclasses import replace
 import logging
 import time
@@ -368,6 +370,9 @@ def run_explore_task(
             frozen_observation_id = request_binding.get("verification_observation_id")
             if isinstance(frozen_observation_id, str):
                 verifier_observation_id = frozen_observation_id
+        task_execution = None if delivery_context is not None else container_manager.prepare_task_execution(
+            project.project, task_run_id, cancellation, container_runtime,
+        )
         execution_timeout = remaining_delivery_seconds(frozen_delivery)
         execute = driver.build_execute(
             worker, prompt, session, phase=execute_phase,
@@ -383,6 +388,8 @@ def run_explore_task(
             conclude_only=delivery_context is not None,
             continuation=continuation_context,
             enable_checkpoints=checkpoint_staging,
+            session_root=session_root_for_project(project.project),
+            task_execution=task_execution,
         )
         session = execute.session
         # SDK 在原会话中提交和有界修正，不再由 Dispatcher 重跑探索。
@@ -835,6 +842,7 @@ def run_explore_task(
         conclude_or_release_on_failure(client, project.project.id, intent.id, worker.name, "explore task crashed", task_run_id=task_run_id, enabled=failure_conclusion_enabled, structured=structured_assessment, slot_key=getattr(intent, "slot_key", None))
         return "container_failed"
     finally:
+        container_manager.stop_task_execution(project.project.id, task_run_id)
         # 所有终态和异常路径都由任务所有者确定性回收进程输出文件。
         if execute_result is not None:
             execute_result.cleanup()

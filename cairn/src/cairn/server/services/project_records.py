@@ -7,7 +7,9 @@ import json
 import shutil
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
+
+from cairn.server.schemas.test_egress import TestEgressInput
 
 from cairn.assessment_contracts import GOAL_DRIVEN_PROTOCOL
 from cairn.server.db import PostgresConnection, artifact_root, get_conn, schedule_transaction
@@ -22,7 +24,6 @@ from cairn.server.models import (
     Target,
     UpdateProjectStatusRequest,
     UpdateProjectTitleRequest,
-    UpdateProjectWorkersRequest,
 )
 
 from .assessment_quality_snapshot import build_assessment_quality_snapshot
@@ -61,7 +62,7 @@ from .project_resources import (
     list_project_resource_records,
 )
 from .scenarios import get_scenario_or_404, resolve_scenario_key
-from .tenant_workers import project_worker_bindings, validate_tenant_worker_selection
+from .tenant_workers import project_worker_bindings, resolve_general_workers, validate_tenant_worker_selection
 from .targets import (
     build_targets,
     normalize_target_value,
@@ -149,6 +150,7 @@ def list_project_summaries(tenant_id: str | None = None, *, include_verification
                 assessment_protocol=str(row_value(row, "assessment_protocol") or ""),
                 assessment_progress=parse_scenario_snapshot(row_value(row, "assessment_progress_json")) or None,
                 assessment_execution=(meta := project_meta_from_row(conn, row)).assessment_execution,
+                test_egress=meta.test_egress,
                 schedule_id=meta.schedule_id,
                 verification_request_id=meta.verification_request_id,
                 verification_attempts_started=int(row_value(row, "verification_attempts_started") or 0),
@@ -193,7 +195,15 @@ class _VerificationProjectRequest(CreateProjectRequest):
 
     scenario: Literal["goal-driven-v1"] = "goal-driven-v1"
     tenant_worker_ids: list[str] = Field(min_length=1, max_length=1)
-    goal: str = "根据来源背景与所提供资料验证漏洞主张，保留实际观察、证据与限制，遵守来源已明确的范围和排除项，不开展无关探索。"
+    goal: str = "根据来源背景与所提供资料验证漏洞主张，保留实际观察、证据与限制。Origin 明确 target_url 时仅在该本次目标验证，历史地址不是回退目标；否则遵守原来源范围和排除项。不开展无关探索。"
+
+    @field_validator("tenant_worker_ids")
+    @classmethod
+    def validate_tenant_worker_ids(cls, value: list[str]) -> list[str]:
+        worker_id = value[0].strip()
+        if not worker_id:
+            raise ValueError("worker ids must not be empty")
+        return [worker_id]
 
 def create_verification_project_record(
     conn,
@@ -206,8 +216,10 @@ def create_verification_project_record(
     actor_type: str,
     execution_deadline: str | None,
     authorization_expires_at: str | None,
+    test_egress: TestEgressInput | None = None,
 ) -> ProjectDetail:
     body = _VerificationProjectRequest(
+        test_egress=test_egress or TestEgressInput(),
         title=title, origin=origin, tenant_worker_ids=[tenant_worker_id],
         explore_deadline=execution_deadline, authorization_expires_at=authorization_expires_at,
     )
@@ -215,7 +227,7 @@ def create_verification_project_record(
         raise ValueError("tenant_id is required")
     return _create_project_record(
         conn, body, tenant_id=tenant_id, creator=creator, initial_status="pending",
-        library_revisions=None, require_all_roles=False, actor_type=actor_type, worker_purpose="verification",
+        library_revisions=None, actor_type=actor_type,
     )
 
 
@@ -227,18 +239,17 @@ def create_project_record(
     creator: str = "system",
     initial_status: str = "active",
     library_revisions: list | None = None,
-    require_all_roles: bool = True,
     actor_type: str = "user",
 ) -> ProjectDetail:
     """普通项目与计划使用同租户的普通用途 Worker。"""
     if not tenant_id:
         raise ValueError("tenant_id is required")
-    if initial_status not in {"active", "pending"}:
+    if initial_status not in {"active", "pending", "paused"}:
         raise ValueError("invalid initial project status")
     if conn is not None:
-        return _create_project_record(conn, body, tenant_id=tenant_id, creator=creator, initial_status=initial_status, library_revisions=library_revisions, require_all_roles=require_all_roles, actor_type=actor_type)
+        return _create_project_record(conn, body, tenant_id=tenant_id, creator=creator, initial_status=initial_status, library_revisions=library_revisions, actor_type=actor_type)
     with get_conn() as owned_conn:
-        return _create_project_record(owned_conn, body, tenant_id=tenant_id, creator=creator, initial_status=initial_status, library_revisions=library_revisions, require_all_roles=require_all_roles, actor_type=actor_type)
+        return _create_project_record(owned_conn, body, tenant_id=tenant_id, creator=creator, initial_status=initial_status, library_revisions=library_revisions, actor_type=actor_type)
 
 
 def _create_project_record(
@@ -249,9 +260,7 @@ def _create_project_record(
     creator: str,
     initial_status: str,
     library_revisions: list | None,
-    require_all_roles: bool,
     actor_type: str,
-    worker_purpose: str = "general",
 ) -> ProjectDetail:
     now = utcnow()
     scenario_key = resolve_scenario_key(conn, body.scenario)
@@ -270,13 +279,13 @@ def _create_project_record(
         created_at=now,
         explore_deadline=body.explore_deadline,
     )
-    selected_workers = validate_tenant_worker_selection(
-        conn,
-        tenant_id=tenant_id,
-        worker_ids=body.tenant_worker_ids,
-        require_all_roles=require_all_roles,
-        purpose=worker_purpose,
-    )
+    if isinstance(body, _VerificationProjectRequest):
+        selected_workers = validate_tenant_worker_selection(
+            conn, tenant_id=tenant_id, worker_ids=body.tenant_worker_ids,
+            require_all_roles=False, purpose="verification",
+        )
+    else:
+        selected_workers = resolve_general_workers(conn, tenant_id=tenant_id)
     for library_key in body.library_keys:
         get_library(conn, library_key)
     if library_revisions is None:
@@ -307,6 +316,9 @@ def _create_project_record(
             tenant_id,
         ),
     )
+    from .test_egress import save_project_egress
+
+    save_project_egress(conn, pid, body.test_egress)
     if policy.phased:
         conn.execute(
             "UPDATE projects SET assessment_progress_json = ? WHERE id = ?",
@@ -488,42 +500,6 @@ def update_project_title_record(project_id: str, body: UpdateProjectTitleRequest
         return project_meta_from_row(conn, updated)
 
 
-def update_project_workers_record(
-    project_id: str,
-    body: UpdateProjectWorkersRequest,
-    *,
-    tenant_id: str,
-) -> ProjectMeta:
-    """显式重绑项目 Worker，并刷新绑定 revision 快照。"""
-    with get_conn() as conn:
-        row = get_project_or_404(conn, project_id, tenant_id=tenant_id)
-        require_unmanaged_project(conn, project_id)
-        selected_workers = validate_tenant_worker_selection(
-            conn,
-            tenant_id=tenant_id,
-            worker_ids=body.tenant_worker_ids,
-        )
-        now = utcnow()
-        conn.execute(
-            "DELETE FROM project_tenant_workers WHERE project_id = ?",
-            (project_id,),
-        )
-        for position, worker in enumerate(selected_workers):
-            conn.execute(
-                """
-                INSERT INTO project_tenant_workers
-                    (project_id, tenant_id, tenant_worker_id,
-                     tenant_worker_revision, position, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (project_id, tenant_id, worker["id"], worker["revision"], position, now),
-            )
-        return ProjectMeta.model_validate({
-            **project_meta_from_row(conn, row).model_dump(),
-            "tenant_workers": project_worker_bindings(conn, project_id),
-        })
-
-
 def project_pause_unconfirmed(conn, project_id: str) -> bool:
     """结束评估也不能绕过已要求暂停的进程和资源终止确认。"""
     for run in conn.execute("SELECT * FROM task_runs WHERE project_id = ? AND pause_requested = 1", (project_id,)):
@@ -653,7 +629,7 @@ def project_lifecycle_actions(conn, project) -> dict[str, dict]:
         contract_reason = str(exc.detail)
     policy = policy_from_project_row(project)
     progress = parse_scenario_snapshot(row_value(project, "assessment_progress_json"))
-    frozen = conn.execute("SELECT status FROM assessment_report_finalizations WHERE project_id = ?", (project["id"],)).fetchone()
+    frozen = conn.execute("SELECT status FROM assessment_report_finalizations WHERE project_id = ? AND scope_key = ''", (project["id"],)).fetchone()
     finalizing = progress.get("phase") == "finalizing"
     terminal_reason = contract_reason or ("assessment_new_project_required" if status == "stopped" or progress.get("phase") == "completed" else None)
     if frozen and (not finalizing or frozen["status"] == "ready") and terminal_reason is None:
@@ -712,7 +688,10 @@ def project_lifecycle_action(project_id: str, action: str, *, legacy: bool = Fal
             draining_intents = set()
             draining_reason = False
             for run in conn.execute("SELECT * FROM task_runs WHERE project_id = ?", (project_id,)).fetchall():
-                lifecycle = parse_scenario_snapshot(run["runtime_context_json"]).get("execution_lifecycle", {})
+                context = parse_scenario_snapshot(run["runtime_context_json"])
+                if run["task_type"] == "report" and context.get("report_claim", {}).get("scope_key"):
+                    continue
+                lifecycle = context.get("execution_lifecycle", {})
                 confirmed = isinstance(lifecycle, dict) and type(lifecycle.get("generation")) is int and lifecycle["generation"] == run["execution_generation"] and lifecycle.get("termination_confirmed") is True and lifecycle.get("cleanup_confirmed") is True
                 if run["status"] in {"queued", "running"} or not confirmed:
                     conn.execute("UPDATE task_runs SET pause_requested = 1, pause_interrupted = CASE WHEN status IN ('queued', 'running') THEN 1 ELSE pause_interrupted END WHERE project_id = ? AND id = ?", (project_id, run["id"]))
@@ -755,7 +734,10 @@ def project_lifecycle_action(project_id: str, action: str, *, legacy: bool = Fal
             draining_intents = set()
             draining_reason = False
             for run in conn.execute("SELECT * FROM task_runs WHERE project_id = ?", (project_id,)).fetchall():
-                lifecycle = parse_scenario_snapshot(run["runtime_context_json"]).get("execution_lifecycle", {})
+                context = parse_scenario_snapshot(run["runtime_context_json"])
+                if run["task_type"] == "report" and context.get("report_claim", {}).get("scope_key"):
+                    continue
+                lifecycle = context.get("execution_lifecycle", {})
                 confirmed = isinstance(lifecycle, dict) and type(lifecycle.get("generation")) is int and lifecycle["generation"] == run["execution_generation"] and lifecycle.get("termination_confirmed") is True and lifecycle.get("cleanup_confirmed") is True
                 if run["status"] in {"queued", "running"} or not confirmed:
                     conn.execute("UPDATE task_runs SET pause_requested = 1, pause_interrupted = CASE WHEN status IN ('queued', 'running') THEN 1 ELSE pause_interrupted END WHERE project_id = ? AND id = ?", (project_id, run["id"]))

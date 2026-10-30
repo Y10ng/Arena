@@ -47,6 +47,9 @@ const template = (
   markdown: string | null = '# 安全评估报告',
 ): ReportTemplate => ({
   key,
+  is_default: false,
+  supports_single_vulnerability: true,
+  validation_error: null,
   name: key === 'security-report' ? '安全评估报告' : '另一模板',
   description: '默认模板',
   markdown_content: markdown,
@@ -129,6 +132,18 @@ afterEach(() => {
 })
 
 describe('ReportTemplatesConsole current CRUD', () => {
+  it('copies the actual default body for a new draft and keeps the default undeletable', async () => {
+    templates = [template('aaa-first', '# 不是默认'), { ...template('system-default', '# 当前数据库默认\n\n三段正文'), is_default: true }]
+    const { wrapper } = await mountConsole()
+    await button(wrapper, '新建').trigger('click')
+    expect((editor(wrapper).element as HTMLTextAreaElement).value).toBe('# 当前数据库默认\n\n三段正文')
+    await button(wrapper, '返回模板列表').trigger('click')
+    const defaultButton = wrapper.findAll('button').find((item) => item.text().includes('系统默认'))!
+    await defaultButton.trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('button').some((item) => item.text() === '删除模板')).toBe(false)
+  })
+
   it('safely previews and saves the current name, description and exact Markdown together', async () => {
     const { wrapper } = await mountConsole()
     expect(mocks.getReportTemplate).toHaveBeenCalledWith('security-report', expect.any(AbortSignal))
@@ -158,6 +173,7 @@ describe('ReportTemplatesConsole current CRUD', () => {
   })
 
   it('creates a complete template in one request without asking the user for a key', async () => {
+    templates[0]!.is_default = true
     const { wrapper } = await mountConsole()
     await button(wrapper, '新建').trigger('click')
     await nameInput(wrapper).setValue('新模板')
@@ -241,6 +257,7 @@ describe('ReportTemplatesConsole current CRUD', () => {
   })
 
   it('rejects a late old read after starting a new template', async () => {
+    templates[0]!.is_default = true
     const reading = deferred<ReportTemplate>()
     mocks.getReportTemplate.mockReturnValueOnce(reading.promise)
     const { wrapper } = await mountConsole()

@@ -18,22 +18,19 @@ import {
   updateReportTemplate,
   createTenantModel,
   createVulnerability,
-  createTenantWorker,
-  createWorkerTemplate,
   deactivateProjectResource,
   deleteTenantModel,
-  deleteTenantWorker,
   discoverTenantModelDraft,
   fetchArtifactPreview,
   fetchArtifactTailPreview,
   fetchVulnerabilityPacket,
   getAssessmentReportFinalization,
+  getAcceptedVulnerabilityReport,
   getDuplicateVulnerabilityCandidates,
   getProjectDetail,
   getProjectResourceBatch,
   getProjectResourceConfig,
   getVulnerability,
-  getProjectManagementOptions,
   getProjectMonitoringSummary,
   getProjectInjectionPayload,
   getReportTemplate,
@@ -57,7 +54,7 @@ import {
   listReportTemplates,
   listPromptFiles,
   listPromptGroups,
-  listTenantWorkerOptions,
+  listTenantWorkers,
   listVulnerabilities,
   importProjectResourceBatchZip,
   readKnowledgeFile,
@@ -67,17 +64,13 @@ import {
   requestAssessmentReportFinalization,
   resetAdminUserPassword,
   revokeAdminUserSessions,
-  saveDispatcherProvider,
   setCsrfToken,
-  setDispatcherProviderCredential,
   setUnauthorizedHandler,
-  startConnectivityTest,
   tenantMonitoringQueryKey,
   testTenantModelDraft,
   updateAdminUserStatus,
   updateProjectResourceBatchMember,
   updateProjectTarget,
-  updateProjectWorkers,
   uploadProjectResourceBatchFile,
   updateVulnerability,
   updateTenantModel,
@@ -606,73 +599,17 @@ describe('Tenant Models client', () => {
 describe('Tenant Workers client', () => {
   afterEach(() => vi.unstubAllGlobals())
 
-  it('uses tenant-scoped CRUD and option endpoints with revisions', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: 'w/1', revision: 2 }))
+  it('reads fixed workers and updates nullable model with an expected revision', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: 'w/1', revision: 3 }))
     vi.stubGlobal('fetch', fetchMock)
-    const body = {
-      display_name: 'Worker One',
-      model_id: 'm1',
-      task_types: ['reason', 'explore'] as const,
-      max_running: 2,
-      priority: 50,
-      enabled: true,
-    }
-
-    await listTenantWorkerOptions()
-    await getProjectManagementOptions('foreign/项目')
-    await createTenantWorker({ ...body, task_types: [...body.task_types] })
-    await updateTenantWorker('w/1', {
-      ...body,
-      task_types: [...body.task_types],
-      expected_revision: 2,
-    })
-    await deleteTenantWorker('w/1', 3)
-
-    expect(fetchMock.mock.calls[0]?.[0]).toBe('/tenant-workers/options')
+    const body = { model_id: null, max_running: 3, priority: 50, enabled: false, expected_revision: 2 }
+    await listTenantWorkers()
+    await updateTenantWorker('w/1', body)
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/tenant-workers')
     expect(fetchMock.mock.calls[0]?.[1]?.method).toBe('GET')
-    expect(fetchMock.mock.calls[1]?.[0]).toBe(
-      '/projects/foreign%2F%E9%A1%B9%E7%9B%AE/management-options',
-    )
-    expect(fetchMock.mock.calls[2]?.[0]).toBe('/tenant-workers')
-    expect(fetchMock.mock.calls[3]?.[0]).toBe('/tenant-workers/w%2F1')
-    expect(fetchMock.mock.calls[3]?.[1]?.body).toBe(
-      JSON.stringify({
-        ...body,
-        task_types: [...body.task_types],
-        expected_revision: 2,
-      }),
-    )
-    expect(fetchMock.mock.calls[4]?.[1]?.body).toBe(JSON.stringify({ expected_revision: 3 }))
-  })
-
-  it('updates project bindings by stable Tenant Worker ID', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: 'p1' }))
-    vi.stubGlobal('fetch', fetchMock)
-
-    await updateProjectWorkers('p/1', { tenant_worker_ids: ['w1', 'w2'] })
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/projects/p%2F1/workers',
-      expect.objectContaining({
-        method: 'PUT',
-        body: JSON.stringify({ tenant_worker_ids: ['w1', 'w2'] }),
-      }),
-    )
-  })
-
-  it('sends template bindings by stable Tenant Worker ID', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ id: 'tpl1' }))
-    vi.stubGlobal('fetch', fetchMock)
-
-    await createWorkerTemplate({ name: 'Default', tenant_worker_ids: ['w1', 'w2'] })
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/worker-templates',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({ name: 'Default', tenant_worker_ids: ['w1', 'w2'] }),
-      }),
-    )
+    expect(fetchMock.mock.calls[1]?.[0]).toBe('/tenant-workers/w%2F1')
+    expect(fetchMock.mock.calls[1]?.[1]?.method).toBe('PUT')
+    expect(fetchMock.mock.calls[1]?.[1]?.body).toBe(JSON.stringify(body))
   })
 })
 
@@ -997,71 +934,8 @@ describe('artifact client', () => {
   })
 })
 
-describe('dispatcher control client', () => {
+describe('project resources client', () => {
   afterEach(() => vi.unstubAllGlobals())
-
-  it('sends revision with provider mutations without exposing credentials', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(jsonResponse({ revision: 'r2', config: {}, content: '', path: '' }))
-    vi.stubGlobal('fetch', fetchMock)
-    await saveDispatcherProvider(
-      {
-        id: 'anthropic-main',
-        base_url: 'https://api.anthropic.com',
-        provider_api: 'anthropic-messages',
-      },
-      'r1',
-    )
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/dispatcher/providers',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({
-          revision: 'r1',
-          item: {
-            id: 'anthropic-main',
-            base_url: 'https://api.anthropic.com',
-            provider_api: 'anthropic-messages',
-          },
-        }),
-      }),
-    )
-  })
-
-  it('uses the write-only credential endpoint for key rotation', async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(jsonResponse({ provider_id: 'p1', configured: true, revision: 'r2' }))
-    vi.stubGlobal('fetch', fetchMock)
-    await setDispatcherProviderCredential('p1', 'new-secret', 'r1')
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/dispatcher/providers/p1/credential',
-      expect.objectContaining({
-        method: 'PUT',
-        body: JSON.stringify({ revision: 'r1', credential: 'new-secret' }),
-      }),
-    )
-  })
-
-  it('starts an async connectivity diagnostic', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      jsonResponse({
-        test_id: 'ct_1',
-        status: 'queued',
-        poll_url: '/dispatcher/connectivity-tests/ct_1',
-      }),
-    )
-    vi.stubGlobal('fetch', fetchMock)
-    await startConnectivityTest('workers', 'w1', 12)
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/dispatcher/workers/w1/connectivity-tests',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({ timeout_seconds: 12 }),
-      }),
-    )
-  })
 
   it('reads project coverage resources using encoded project ids', async () => {
     const fetchMock = vi
@@ -1318,7 +1192,6 @@ describe('dispatcher control client', () => {
       origin: 'origin',
       goal: 'goal',
       scenario: 'default-copy-v2',
-      tenant_worker_ids: ['w1'],
       authorization_expires_at: null,
       resources: [{ kind: 'script' as const, path: 'auth/login.py', content }],
     }
@@ -1385,6 +1258,36 @@ describe('dispatcher control client', () => {
     )
   })
 
+  it('保留带编码来源的历史单漏洞只读访问，总报告读取和生成不携带单漏洞scope', async () => {
+    const result = { status: 'ready', accepted_artifact_id: 'previous-result' }
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(result))
+    vi.stubGlobal('fetch', fetchMock)
+    const scope = { vulnerability_id: 'v / one', observation_id: 'obs / one' }
+    const signal = new AbortController().signal
+    await getAcceptedVulnerabilityReport('project / one', scope, signal)
+    await getAssessmentReportFinalization('project / one', signal)
+    await requestAssessmentReportFinalization('project / one', { template_key: 'selected-template' })
+    expect(fetchMock.mock.calls.map(([url, options]) => [url, options.method])).toEqual([
+      ['/projects/project%20%2F%20one/assessment-report-finalization/accepted?vulnerability_id=v+%2F+one&observation_id=obs+%2F+one', 'GET'],
+      ['/projects/project%20%2F%20one/assessment-report-finalization', 'GET'],
+      ['/projects/project%20%2F%20one/assessment-report-finalization/request', 'POST'],
+    ])
+    expect(fetchMock.mock.calls[0]?.[1].signal).toBe(signal)
+    expect(fetchMock.mock.calls[1]?.[1].signal).toBe(signal)
+    expect(fetchMock.mock.calls[2]?.[1].body).toBe(JSON.stringify({ template_key: 'selected-template' }))
+  })
+
+  it('only treats the exact missing accepted report as not yet prepared', async () => {
+    const response = (detail: string) => ({
+      status: 404, ok: false, headers: new Headers({ 'content-type': 'application/json' }),
+      json: async () => ({ detail }), text: async () => '',
+    } as Response)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(response('assessment_report_accepted_not_found')).mockResolvedValueOnce(response('Observation not found')))
+    const scope = { vulnerability_id: 'v', observation_id: 'obs' }
+    await expect(getAcceptedVulnerabilityReport('p', scope)).resolves.toBeNull()
+    await expect(getAcceptedVulnerabilityReport('p', scope)).rejects.toMatchObject({ status: 404, data: { detail: 'Observation not found' } })
+  })
+
   it('treats a missing assessment report finalization as not started', async () => {
     vi.stubGlobal(
       'fetch',
@@ -1441,7 +1344,7 @@ describe('dispatcher control client', () => {
     } as Response)
     vi.stubGlobal('fetch', fetchMock)
 
-    await expect(startConnectivityTest('workers', 'w1')).rejects.toMatchObject({
+    await expect(requestAssessmentReportFinalization('project-a', { template_key: 'test-template' })).rejects.toMatchObject({
       status: 401,
     } satisfies Partial<ApiError>)
     expect(fetchMock).toHaveBeenCalledTimes(1)

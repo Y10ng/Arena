@@ -31,6 +31,11 @@ class ContainerRuntimeOptions:
     advisory_manifest: dict[str, object] | None
     runtime_signature: str
 
+    @property
+    def traffic_execution_enabled(self) -> bool:
+        version = self.features.get("http_traffic_execution_version")
+        return type(version) is int and version == 1
+
     @classmethod
     def build(
         cls,

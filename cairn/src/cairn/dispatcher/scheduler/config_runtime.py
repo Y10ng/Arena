@@ -121,6 +121,12 @@ class ConfigRuntimeMixin:
                 self.container_manager = ContainerManager(config.container, instance_id=instance_id)
         else:
             self.container_manager.update_config(config.container)
+        if self.container_manager is not None:
+            self.container_manager.configure_traffic_execution(
+                self.client,
+                root=self._candidate_outbox_parent / f"dispatcher-traffic-v1-{instance_id}",
+                dispatcher_id=self.dispatcher_id,
+            )
         configure_browser_sessions = getattr(self.container_manager, "configure_browser_sessions", None)
         if callable(configure_browser_sessions):
             configure_browser_sessions(config.runtime.playwright_session_policy)

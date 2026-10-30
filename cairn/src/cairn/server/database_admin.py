@@ -33,7 +33,6 @@ APPLICATION_TABLES = (
     "worker_templates",
     "projects",
     "project_tenant_workers",
-    "worker_template_tenant_workers",
     "scoped_counters",
     "facts",
     "intents",

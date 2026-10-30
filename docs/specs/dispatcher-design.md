@@ -1,6 +1,225 @@
 # Dispatcher
 
-> 当前轮次（2026-10-15）：按 [漏洞发现、关键证据与独立复测重设方案](vulnerability-evidence-retest-redesign.md) 实施，以下当前合同按工作区源码核对；本次实施与验证事实集中记录于该方案第11节，不在本文重复一份记录。代码合同不表示已部署或真实 pi 任务已验收。下方 `proj_044` 等章节保留各轮历史，不据旧 driver、示例或 [原复测方案](vulnerability-retest-design.md) 第12节历史提示词接续任务。
+> **当前交付（2026-10-27，已实施及加载，待用户验收）：**见下节“配置入口收敛与保存纠偏”及其实施记录。Worker／模型／执行时限集中到 Worker 配置，独立 Dispatcher 与生命周期超时页面已退场，真实租约机制保留。UI 详见项目创建方案 11.14，验证及完整加载见重设方案 15.26.6。下方源码／现场证据中的“本轮未测试”等表述属于前序分析会话，不代表后续实施状态。
+
+## 2026-10-27 配置入口收敛与保存纠偏（已实施及加载，待用户验收）
+
+### 用户问题、源码与现场证据
+
+用户报告在 Dispatcher 页面修改后保存报错，希望将日常运行参数移入 Worker 配置，不再维护独立菜单。**已确认有一个足以导致正常配置保存失败的字段丢失路径，但未取得用户当次请求／响应，不能把它冒称为已动态复现的唯一原因。**
+
+| 证据 | 结论 |
+| --- | --- |
+| `cairn/frontend/src/composables/useDispatcherFormConfig.ts:176–187,308–349,373–382` | 读取配置后经过 normalizeConfig；normalizeProfile 重新构造画像，只保留 id／image_ref／network_policy／cap_add／isolation／completed_action，丢掉 mem_limit／memswap_limit／pids_limit；保存时提交整个归一化配置。即使用户只改 max_workers，也会携带损坏后的画像。 |
+| `cairn/src/cairn/dispatcher/config.py:222–272` | restricted 画像要求上述三个资源字段，且 memswap_limit 必须等于 mem_limit。不是可以静默忽略的装饰字段。 |
+| `cairn/src/cairn/server/services/dispatcher_config_store.py:207–218,368–395` | 服务端写入前 DispatchConfig.load 校验完整配置；校验失败返回 422，正文仅 `Invalid dispatch.yaml: ValidationError` 类别，没有字段位置。原文件不替换，避免写入坏配置，但用户无法定位表单丢字段。 |
+| 本轮只读 `runtime/dispatch.yaml` 的允许字段 | restricted 确含 mem_limit=1536m、memswap_limit=1536m、pids_limit=256；runtime 当前 max_workers=8、max_running_projects=3、max_project_workers=4、interval=3。未输出模型、凭据、env、请求正文或全部 YAML。 |
+| 本轮读取部署 PID JSON，再核对 `/proc/<pid>/stat` start time、cwd 和 YAML 参数 | Server／Dispatcher PID 记录分别为 1158822／1026821，实际进程存在且 start time 匹配，cwd 均为本仓库；Dispatcher 参数引用 runtime/dispatch.yaml。只证明当时实例与配置归属，不证明服务已加载全部未提交源码。 |
+| `cairn/src/cairn/dispatcher/scheduler/config_runtime.py:48–95` | 保存文件后仍可能热加载失败；max_workers 大于启动 hard_cap 会拒绝加载，旧有效配置继续运行。保存成功不等于生效。 |
+
+本轮只提取当前 Server 日志中配置路径的请求状态，未提取到可确认用户当次报错的记录；没有提交配置、动态运行校验器或调用 API。除上述丢字段路径外，revision conflict、具体非法数值、权限或加载失败不能未经现场证据排除。
+
+### 最小完整修复：定向字段写回，而非重建整个 YAML
+
+1. Worker 页管理员“运行设置”只读写实际展示的 runtime／tasks 参数；唯一权威仍是原 dispatch.yaml，不新增配置表、第二文件、全局副本或 Tenant timeout 覆盖。管理 API 继续使用现有 require_super_admin，前端隐藏不是鉴权，不扩大到普通管理员／其他租户。个人 Worker／Model 继续用本人原 API。
+2. 推荐一个局部 **GET／PATCH `/dispatcher/runtime-settings`** 读写投影：响应只含允许编辑的 runtime／tasks 字段、revision 及必要的加载状态；PATCH 只接收显式字段和必填 revision，不接受 images／execution_profiles／models／workers／env／凭据。它不是第二套存储，直接复用现有 DispatcherConfigStore.mutate 的锁内读当前完整配置、revision 比较、目标字段更新、完整校验与原子替换。只有这一处写入实现，不复制 store／事务框架。最终命名服从当前路由风格并同步协议。
+3. 未编辑的画像、内存／swap／pids、容器网络／DNS、其他运行字段及配置凭据在服务端原值保留，不由前端 normalize／默认值覆盖；语义保真，不承诺 YAML 排版原样。删除旧表单专用的丢字段 normalizer 和全量提交路径，不能仅删 restricted 校验、补硬编码资源值或让浏览器重建未知字段。
+4. 字段校验失败返回可理解的字段位置和非敏感原因，例如单项目并发不可超过总并发；只挑选允许输出的位置／原因，不序列化 Pydantic 原始 input、ctx 或完整异常以泄漏秘密。不放宽真实资源约束，不捕获异常后假成功。revision conflict 保留草稿，由用户核对，不自动重试覆盖。
+5. 基本正整数与 max_project_workers≤max_workers 必须校验。已知当前 hard_cap 时，超过上限给可操作说明，不能把保存值当生效值；无有效上报不伪造 hard_cap 或假装就绪，也不能因此阻止个人模型／Worker 编辑。无需为这次局部界面重写热加载机制、自动扩容线程池或新增保存后自动重启服务的行为。
+6. 生效状态从既有有效心跳的 loaded config hash／config_sha256、错误与有效期得出，不增持久状态。需要读这部分时复用纯读取投影，不调用 `monitoring/summary.py:25–40` 的维护型 summary：即便 profile=dispatcher 也先执行 expire_workers／expire_reason_leases。不得把配置页面的查询变成项目维护动作；也不借此重写整个监控服务。
+7. 不对前端公开原始 YAML／凭据来显示高级感。旧独立页面与失去调用方的前端逻辑退场；既有后端全量配置／运维接口不是本轮按关键词批量删除目标，保留真实调用方和鉴权，运行服务继续使用 dispatch.yaml。
+
+### 超时并非一回事：保留租约，移走无意义菜单
+
+- **执行时限仍有用。** `tasks/bootstrap.py:108`、`reason.py:90`、`explore.py:285` 读取 tasks 对应 timeout；`tasks/delivery.py:190–239` 首次执行冻结 deadline，同时受已有项目停止期限／授权到期约束。同次执行续交付用原剩余时限，不能在配置保存后重新获得完整预算。普通三类超时放 Worker 配置的“运行设置”，不把它说成每个个人 Worker 已有独立 timeout。
+- `conclude_timeout` 是既有收尾阶段限制，执行中按剩余预算收敛，不能显示成“执行时限＋额外保证的收尾时长”。报告有自己的 tasks.report.timeout；保留其消费者，不新增第四类普通 Worker，也不改变专用复测的时限合同。
+- **“生命周期超时”实际是心跳失联租约阈值，不是项目活多久。** `routers/settings.py:12–35` 读取／保存单行 settings；`services/projects.py:733–820` 的 expire_workers／expire_reason_leases 使用 intent_timeout／reason_timeout 释放失联归属，后者还标记相应执行 heartbeat_lost；`scheduler/config_runtime.py:162–180` 校验租约阈值大于调度间隔。用户没配置不等于未使用，自动默认也会参与运行。
+- 当前 TimeoutConsole 将 reason_timeout 说明为“reason 最长运行时间预算”（`frontend/src/features/console/TimeoutConsole.vue:30–45`），与真实消费者语义不符。**移除独立菜单、页面、专用 composable 和无用前端类型，不把两个字段复制到普通执行时限表单，也不另建高级“生命周期”页。保留现有 settings 值、Server 租约回收和 Dispatcher GET /settings 契约，不清表、不重置默认值、不删除失联保护。**本轮无需数据库迁移。
+- 调度间隔仍可在运行设置高级区编辑；必须与当前真实租约阈值校验，冲突提示具体原因，不改写租约来让保存通过。普通用户无需理解或手动调整这套内部租约。
+- 容量是当前 Dispatcher 调度语义，不是集群全局保证。`scheduler/dispatch_cycle.py:68–87,138–149` 将普通任务／报告计入 max_workers，复测只使用 hard_cap 中的额外槽；不能为统一 UI 把这些不同容量合成一个可写数或保证总并发提高后复测容量不变。
+
+### 直接验证与交付要求
+
+使用非敏感配置副本验证一次运行参数的定向修改：restricted 三个资源字段及其他未修改字段／凭据保持语义原值；非法字段与 revision conflict 不替换文件、错误不含秘密。再核对保存与加载状态的区分、任务当次冻结时限不被重置。优先一个定向用例／最短实际链路，不对真实配置反复写入来演示，不默认运行测试套餐或真实模型。
+
+UI 验收见项目创建方案 11.14；完整本轮提示词见重设方案 15.26。前序分析会话未改业务、未测试、未部署；下列为后续实施记录，不重做下面 proj_058 等历史任务，不重下未变化 Worker 工具层。
+
+### 本轮实施、验证与加载（2026-10-27，未提交）
+
+- 新增 `schemas/dispatcher_runtime_settings.py`、`services/dispatcher_runtime_settings.py`，在原 `infra.py` 超级管理员鉴权下提供 GET/PATCH `/dispatcher/runtime-settings`。响应仅为 runtime／tasks 窄投影、revision、load_status；PATCH 禁止未知字段与显式 null，复用 `DispatcherConfigStore.mutate` 锁内完整读、revision 比较、目标更新、完整验证和原子替换。未编辑字段及秘密保留语义原值。
+- 正整数、单项目容量≤总容量、有效心跳提供的 hard_cap，以及当前 settings 两项租约必须大于 interval 均保留服务端约束。校验错误只返回白名单字段位置，不输出 ValidationError 的 input／ctx／原始异常。前端仅提交编辑基线的差异；409 或网络结果未知必须重读核对，不自动覆盖／重试。
+- load_status 只读 Dispatcher 心跳、配置归属路径和 hash，区分 loaded／pending／failed／unknown；未知时不捏造 hard_cap。配置页侧栏也停用维护型 monitoring summary，明确显示“未查询”。旧配置页面、normalizer、生命周期页面和无调用方前端封装已删除，后端有效运维 API、settings 租约值与回收消费者保留；当次冻结执行期限相关代码未修改。
+- `PYTHONPATH=cairn/src pytest cairn/tests/test_dispatcher_runtime_settings.py -q` 初次 **4 项通过**，后增 HTTP 权限用例单独 **1 项通过**。配置副本与严格只读 DB 替身验证字段保真、非法值／冲突不替换、安全报错、心跳状态及普通用户 403；没有使用真实 dispatch.yaml 保存作演示。Worker／runtime 组件 **8 项通过**，正式 `build:server`（含类型检查）最终通过。
+- 空闲预检后执行现有 `deploy/stop.sh`／`deploy/start.sh`，实际 Server／Dispatcher 已加载；浏览器运行设置 GET 200 且显示 loaded。该结果证明现存配置被读取，不证明本轮已实际修改配置并观察热加载。未重建 Worker 镜像、未变更真实容量／时限／租约、未启动或恢复项目。完整预检、测试分次说明与未覆盖项见 **15.26.6**。
+
+> 上轮入口（2026-10-26）：见下方 `proj_058` 章节的“文案小修与实际部署交付”。有限输出恢复及诊断文案已由实际 Server／Dispatcher 重载；本轮单个隔离用例通过，实际 runtime API 已返回新文案。未恢复真实项目、未调用真实模型或目标，真实重试效果仍未验收。2026-10-15 的证据／复测合同与实施记录仍见 [漏洞发现、关键证据与独立复测重设方案](vulnerability-evidence-retest-redesign.md) 第11节；下方合同、`proj_044` 等章节保留各轮范围与历史，不据旧 driver、示例或历史提示词接续其他任务。
+
+## proj_058：Reason 完成来源契约不一致导致一次失败后停滞（2026-10-26；已部署，真实任务未验收）
+
+**记录分层：** 下方分析、实施与只读复核各小节保留各自会话的时间边界；其中“未部署”和旧运行状态不是最新快照。最新实例、项目状态与验证证据见“文案小修与实际部署交付”，不将隔离验证或服务加载等同于真实成果验收。
+
+### 本轮目标与调查边界
+
+用户报告 `proj_058` 运行失败一次后一直不动，担心其他项目低概率触发。用户建议补上自动再次尝试，并担心增加严格契约引入新问题；同时明确这些是建议，不能顺着质疑刻意调整结论。**本轮目标是降低局部输出失败演变为长期停滞的概率，同时不增加重复执行、错误接受或无效循环。** 重试不保证成功，校验也不是越多越好。分别判断失败来源、再次尝试是否可能改变结果、实际写入需要哪些最低约束，再决定最小改动；既不预设必须加严 Schema，也不把“不能改任何契约”作为限制。不扩成全平台恢复器或研究引擎重写。
+
+本轮按 `docs/analysis-design-handoff.md` 只读查证源码、实际 PostgreSQL、日志、登记原件和容器元信息，仅更新本方案。该流程文档所指 `goal-driven-execution-design.md` 仍不存在，继续维护本文件，不新建平行方案。没有运行测试、导入应用执行初始化、构建、启停、容器 exec、项目动作、目标访问或模型调用。未使用用户凭据执行登录或其他业务操作。
+
+### 实际证据：首个阻断与后续停滞是两个环节
+
+实例定位于实际入口 `8001`，Server PID `2387033`、Dispatcher PID `22853`，cwd 均为本仓库；Server 进程数据库为 `127.0.0.1:55433/cairn_isolated`，不是另一个 `55432` 实例。使用 psycopg 连接的 `default_transaction_read_only=on` 和显式 `BEGIN READ ONLY` 查询，未调用可能推进租约的项目 GET。以下业务时间为 **UTC**，Dispatcher 文本日志为 UTC−04:00；PID、容器身份和端口只用于本轮定位，实施前重新核对。
+
+| 对象 | 已确认事实 | 解释边界 |
+| --- | --- | --- |
+| `proj_058`，14:09:23Z 快照 | `active`、generation 0，无 Reason owner；9 Fact、7 Intent 全部 completed、3条漏洞记录，12 TaskRun（10 succeeded、1 failed、1 cancelled），没有 queued/running；无项目探索截止或授权到期 | 有已接受成果，不是整个项目从一开始就没运行；漏洞数量与 Intent 完成不证明 Goal 已达成 |
+| 初始 Bootstrap | `tr001` 06:58:11Z cancelled，日志曾记录 `traffic_capture_stalled`；`tr002` 07:18:39Z succeeded，后续多条 Reason／Explore 正常完成 | 这次早期取消已经有后续成功执行，不能与末次停滞混为一因；本轮不追溯流量采集超时 |
+| 最后 Reason `tr012` | 07:51:52Z 开始、07:52:26Z failed；进程 exit 0，但 `worker_failure.origin=dispatcher_validation`、`error_type=business_acceptance`、`code=phase_contract_invalid`，固定错误 `invalid complete payload` | 本地候选成功不等于业务接受；不是 provider 超时或重试次数耗尽 |
+| 唯一候选 `cnd_6a2303033e9c4439b3790d1db39fc0d2` | 原始结构为 `accepted=true`，`data` 含 rationale 与 complete；complete 只有 description、evidence_refs，**没有 from**。07:52:19Z 回执为 `locally_validated / artifact_status=validated / binding_status=injected` | injected 不代表补入完成来源，也不是 Server complete ACK；不复制候选正文 |
+| Worker 原件 | `a698-reason_execute-pi-events.jsonl:7,9` 记录 submission_validated，session_end succeeded、submission_attempts=1、repair_rounds=0；`a699` 外层结果 status=succeeded | 本地已认为有效，因此没有进入同执行结构修正；不是模型已经修正两次仍失败 |
+| Dispatcher 首拒绝 | `runtime/logs/dispatcher.log:80–86`，03:52:20 本地时间记录上述契约失败，随后释放 Reason；数据库 `agent_events/ev898` 为 validation_result，status=invalid | 失败在 Dispatcher Reason 语义校验，尚未进入完成 API；不是 Server 判断“仍有开放任务”后拒绝 |
+| 后续调度 | 14:09:21Z Dispatcher 心跳仍 idle，running_task_count=0、active_project_count=1；14:09:20.534460Z 项目决定为 `execution_retry_blocked / task_type=reason / generation=0`，无 retry_at；此时仍只有12条 Run | 距最后失败已超过6小时，当前不是等待一个尚未到期的自动退避，也不是调度器退出 |
+| 清理与归属 | `tr012` candidate_recovery=stopped、physical_proof_version=2、container_spool_recovered=true；termination_confirmed=true，但 cleanup_confirmed=false。项目容器 `3010b3ff1ae3…` 仍 running，镜像 ID `sha256:f586880ced3e4ff4311f4c08805321fe78e4ce616907994b54c516999bc359d8` | 旧日志的 candidate recovery 暂缓不能解释当前明确的 retry_blocked；也不能把 stopped／进程结束写成资源已全部清理，后续正常暂停仍需实际 drain |
+
+两个 Worker evidence 引用分别为同项目已登记的 `a668`（tr008，raw_output）与 `a574`（tr005，log），`artifact_handle=null`、`pointer=""`。当前引用模型和完成绑定代码允许这种 ID／null／空 pointer 形状；**这不是本次 `invalid complete payload` 的来源**。本轮没有评估这两份材料的内容是否足以支撑完成主张，不将“登记存在”写成“目标已经完成”。
+
+在本次实际数据库中，以 `task_runs.error_message LIKE '%invalid complete payload%'` 查询，只查到 `proj_058/tr012`。因此可确认**共享路径使其他项目也有同样的触发可能**，不能声称已经查出多个同因项目，或给出发生概率。一次模型恰好省略可选字段会触发确定性矛盾，“偶发”不等于线程／时序随机死锁。
+
+### 分析会话的源码判断与设计纠正（修复前）
+
+1. **首因：同一个 Reason complete 在上下游不是同一份结构约束。** `dispatcher/worker_protocol/submission.py:97–100` 的 `CompleteResult.from_` 使用 `default_factory=list`，生产 Schema 只要求 description，既允许缺少 from，也允许 `from: []`。`:529–534` 对已有 from 的元素绑定 allowed_fact_ids，但没有要求该字段出现或非空。`validate_phase_data` 的 `:350–367` 不会将缺省值写回原候选；`worker_result_gateway.py:245–260` 也继续把原结果交给语义校验。`dispatcher/contracts.py:1130–1137` 却要求 complete 中必须有 from；本案 complete 已为对象且有 description，缺少 from 正好命中 `invalid complete payload`。这是实际候选、实际拒绝与当前实现相吻合的直接链。
+2. **不能只补一个空数组。** `tasks/reason_writes.py:310–317` 使用 `data["from"]` 发出 complete；`server/schemas/projects.py:1173–1178` 要求 from 至少一项。`server/services/project_completion.py:406–424` 验证同项目真实 Fact、禁止 goal 作来源，并写入 completion Intent 的来源关系。from 是完成判断使用哪些已有事实的表达，不是 evidence_refs 的重复清单。静默补 `[]` 会把失败推迟到 API；自动选 origin、全部 Fact 或根据 Artifact 猜 Fact 又会伪造模型未声明的判断依据。
+3. **放大因素：确定性结构错误发生得太晚，被持久化为不自动重试的业务失败。** `assessment_attempts.py:819–841,864–925` 不将 business_acceptance 放入普通重试集合；`:518–535,582–594` 的新输入重决策只适用于 Server 已写入 completion_rejection 的受控动态拒绝。本案没有该字段，也没有进入完成 API。`:416–475` 将阻断投影为路由，`scheduler/task_lifecycle.py:19–51` 消费后记录 execution_retry_blocked；`project_reason.py:53–61` 的 claim 仍重复确认权威准入。不能只在 Dispatcher 跳过门禁或把所有 business_acceptance 加入重试。
+4. **现有同执行修正不等于 Dispatcher 拒绝后的重试。** `container/pi-agent/src/runner.ts:207–236,642–657` 使用请求内生产 Schema；本地无效且仍有原额度／期限时才走修正。本案本地已经通过，因此应查清下游失败后如何再次生成，而不能用新增本地拒绝条件替代这条恢复路径。此前“必须先让缺失／空 from 在本地被拒绝”的实施要求撤回。
+5. **共享类型说明了扩大校验改动的回归风险，而不是扩大范围的理由。** `CompleteResult` 还用于 `BootstrapData/BootstrapConcludeData`（`submission.py:156–189`）；`:478–483` 隐藏 Bootstrap 的 from，goal-driven Bootstrap 连 complete 也不对模型暴露，因为初始事实身份由 Harness 处理。本轮不预设必须修改共享类型或增加必填条件，不让 Bootstrap 猜尚不存在的 Fact ID，也不建立第二套完成策略。
+6. **部署证据的限制。** 当前源码仍保留该矛盾，历史原件证明当次缺少 from 仍本地通过；但本轮没有取得 tr012 完整冻结请求 Schema，也未证明运行中的各 Python 模块逐字节等于当前工作区。control-prompts 中残留的一个 pi-request 实属 tr001，不能拿它冒充 tr012。无需把这一缺口变成重新调用真实模型的理由，实施用当前生产 Schema 贯通本地合成路径即可。
+
+上述 Python 路径均以 `cairn/src/cairn/` 为根，行号为本轮导航线索。`proj_044` 历史修复的“complete + 空 intents 合法”与本案不同，应保留，不能改回空动作冲突；此前它的定向验证不证明 from 的缺失／空值边界也被覆盖。
+
+### 重试与契约的独立判断（分析交接记录；查证结论见实施小节）
+
+本案没有再次尝试的直接原因不变：Worker 已认为候选有效，没有触发本地修正；Dispatcher 随后把拒绝记成 business_acceptance，Server 按类别阻断后续 Reason。这不是次数耗尽，也不是已经证明下一次生成必败。
+
+判断应分开进行：
+
+- **重复传输与重新生成不是一回事。** 同一个缺少 from 的结果再次送给相同校验会再次失败；重新生成则可能改变结果，所以具有恢复价值，但不保证成功。带具体错误反馈比无信息地重复更有针对性，是否提升实际成功率仍需证据。
+- **结果拒绝与任务不可恢复不是一回事。** 这次结果不能接受，不足以推出项目不应再尝试。对于本案在完成写入之前暴露的输出问题，建议优先打通现有机制中的有限反馈／重新生成路径；保留既有防重复接受及停止边界，不借机放开所有业务失败。
+- **必要的写入语义与附加格式限制不是一回事。** 当前完成服务使用 from 建立事实来源关系，不能在没有替代设计时删掉它或伪造来源；但这个用途不证明应增加更多必填字段、枚举或完成门槛。上下游对既有要求不一致仍是平台缺陷，不能因用户担心严格性就否认。若最小修复需要让上游表达已有的下游要求，应说明具体收益、阶段兼容性与回归面，而不是把“更严格”当目标。
+
+**尚待核实：** Dispatcher 拒绝怎样反馈到原会话、已固定候选是否阻止新提交、原链修正与新 Reason 的准确边界，以及 route／claim／admission 如何一致消费恢复资格。没有这些证据，不能声称仅改 error_type 就能贯通，也不能预定必须原 session 或必须 fresh。当前合理方向是有限重试并消除已证实的接口矛盾，具体接缝仍待查证，不通过堆叠新门禁替代恢复。
+
+### 实施范围纠正（分析交接时的范围）
+
+此前“只修 Schema、禁止调整失败分类”的提示词，以及随后把“Reason from 必填非空”列为独立强制目标的双目标提示词，均不再作为完整执行版本。也不采用相反的“任何契约都不能改”。后续提示词须基于上述独立判断及恢复路径的实际查证。
+
+- 优先解决本案缺失的再次尝试：传递必要拒绝信息，复用已有事实与材料，允许产生新的结果；不原样重放无效候选，不重做已完成探索，不保证项目最终完成。
+- 只保留与本问题直接相关、能说明必要性的接口修复。不要扩展字段、收紧无关格式或全仓整顿协议；如改动共享模型，验证 Bootstrap 来源所有权与既有合法 Reason 行为，不增加新完成标准。
+- 复用既有重试次数、退避、接受防重及执行边界，明确耗尽后的终点；不另造通用恢复器，不无限重试，也不以换 Run/session 绕过限制。无法确认是否已接受时先核实，不冒险重复执行。
+- 不改写历史 generation、项目／运行状态、completion_rejection、候选原文、已接受 Fact／Intent／漏洞／证据与费用记录。不扩展 UI／报告／流量采集／工具权限／模型配置；不授权操作现有项目或调用模型。
+
+### 最直接验证与交付边界
+
+**分析会话未执行验证。** 实施应使用既有 runner／假 provider 与实际生产消费者的隔离接缝，使用合成非敏感材料、无外部目标或付费模型。验收重心是重试行为及其边界，而不是增加了多少校验：
+
+1. 首次出现本案同类的下游结果拒绝后，确实自动发起有错误反馈的再次生成；不能用只覆盖本地校验修正的测试冒充该链已贯通。
+2. 下一次结果有效时可正常接受且不重复写入；下一次仍无效时按有限策略继续或停止，保留真实失败，不强行完成。用确定性的假 provider 验证两条分支，不把测试成功当真实模型成功率。
+3. 已接受／接受状态未决时不得误重试；持续失败能达到停止点，计数不因换 Run 或重启而绕过。按实际改动验证必要邻接行为：合法 Bootstrap、complete 搭配空 intents 等不回归；现有真实完成条件仍由 Server 判断。
+
+可参考 `cairn/tests/test_pi_submission_receipts.py` 的 `_run_reason_submission_fixture`／完成用例，以及 `test_pi_result_protocol.py` 的模型和导出接缝；**其中复用的旧 `test_goal_driven_completion.py` 仍有 SQLite fixture，不能直接把历史通过记录当作当前可用验证。** 数据库相关只使用现行 PostgreSQL 路径和已有可用隔离接缝，必要时仅调整本轮用到的 fixture；不补 SQLite 兼容、不跑双后端、不顺手迁移全套旧测试。不在用户业务库写测试数据，不新增依赖或验收平台。
+
+**实际部署与 `proj_058`：**
+
+- 改完结构契约不会自动解除已经落库的 `tr012 business_acceptance`；当前原交付 deadline `08:11:52.941395Z` 也已过。不得把它改成成功、补写 from／completion_rejection、删除 Run 或延长旧期限。本轮不自动重放旧 complete，也不能保证项目随后必然完成。
+- 修复生效后，该历史项目优先复用现有正常“暂停 → 真实清理完成 → 恢复”路径，在新代次读取已有 Fact 再作 Reason，不要求新建项目或重新完成全部探索。`project_records.py:695–730` 的暂停递增 generation，恢复准入仍检查实际 drain／授权／Dispatcher；本案 cleanup_confirmed=false，所以**尚不能宣称恢复条件已经全部满足**。这条路径只说明产品能力与限制，不授权当前或实施会话替用户操作；新 Reason 可能产生模型费用，由用户决定。
+- **本次实施授权止于代码与隔离验证，不部署。** 以后经另行授权交付时，使用实际 Server／Dispatcher，不切到默认数据库，不以隔离副本 ready 代替。动态 result_schema 来自宿主 adapter；如果只改 Python Schema 和导出快照，不能仅因静态 JSON 变化就强制重建 Worker。仅实际容器执行代码／指引有变更且需要生效时才构建对应镜像，复用未变工具层；同名 tag 更新不等于现存容器已更新。
+- **部署前重新核对活动项目、计划与在途执行。** 本案仍 active；即使没有运行任务，解除门禁或重载 Dispatcher 也可能自动派发模型／目标动作。若交付涉及中断或启动业务，先说明具体影响并取得许可；不擅自 pause/resume、删除／替换容器、重跑、扩大目标或调用付费模型。受此阻断时准确报告未部署，不能以仓库默认部署规则覆盖本轮边界。
+- 实施后在本节记录代码实现、定向验证、实际部署、真实任务验收四种状态，给出原项目的当前恢复限制；不 commit、不 push，不自动开始下一轮。
+
+**本轮分析交付声明：** 分支 `feat/update-worker-cache`；仅增量修改本文件，保留工作区全部既有业务改动。只读证据支持上述首因与当前阻断，未运行测试／构建／启停／项目动作，未创建提交。剩余事项为实施、有限本地验证、获准后的实际生效及用户决定是否继续原项目；真实 Goal／漏洞技术效果不在本轮验收结论内。
+
+### 本轮实施与隔离验证（2026-10-26；不含部署）
+
+**恢复选择及实际接缝。** 同一次 `runRequest` 固定候选后不能替换它；另一次合法 resume 会创建新的调用内候选状态，因此不是“原 session 永远只能重放旧 JSON”。但既有 `delivery_retry` 是保留原 session、绑定、Schema／模型摘要及期限的只读交付，没有 Dispatcher 拒绝反馈进入会话的现成闭环。本轮选择复用普通 **fresh Reason**：新 TaskRun／session，从既有 Fact、Intent 和证据构造当前决策输入，不重新 Bootstrap、不由调度器重派已完成探索。它不是原候选或完成请求的重传，也不是新一代项目。
+
+- `dispatcher/contracts.py` 为两个明确的写入前输出问题定义固定 code：`reason_completion_sources_invalid`（complete 来源缺失、空或结构不合规），`reason_decision_empty`（空队列却没有有效决策）。`worker_result_gateway.py` 只将对应 Reason 语义错误，以及仅定位到 `complete.from` 的 Pydantic 错误，归为这两个 code；保留 `business_acceptance` 与 `origin=dispatcher_validation`，不解析异常正文猜重试资格。
+- `tasks/reason.py` 的真实后置校验仍在完成／Intent API 之前。失败由 scheduler `_reap_futures` 随 TaskRun 终态持久化。`server/services/assessment_attempts.py` 根据 task_type、status、error_type、origin、phase 和精确 code 识别恢复；同一 `execution_retry_eligibility` 继续用于 route、claim、admission。不是在调度器绕过 Server 白名单。
+- Server 派生 `reason_output_retry`，包含最后一次拒绝的来源 Run、固定诊断及首次该类失败的绝对 deadline；`audit_task_runs.py` 将其列入 Server-owned 字段，禁止客户端 create/update 伪造。`scheduler/task_lifecycle.py` 原样传到 admission_context，`tasks/reason.py` 在最终 prompt 追加具体错误和纠正要求。没有要求自定义 Prompt 必须新增占位符。
+- 新调用仍消费原持久失败链，不使用 `reason_decision_boundary` 切链，不新建恢复计数器。默认最多两次重试（首次加重试，最多三次失败执行），沿用 5／10 秒退避；重建 Dispatcher 内存、换 Run／session 都不增加额度。普通受控完成拒绝后“权威业务输入发生变化”的既有新决策规则不被改写。
+- 新链不得有接受 metadata、该 Run 已写入 Fact、缺 outcome 的候选或未确认终止的执行；暂停请求、原 deadline、项目截止和授权边界仍阻断。`TaskCancellation` 的 termination 与 cleanup 不等价：本路径要求原进程终止，保留既有候选 fence，不要求为一次 fresh Reason 销毁项目容器。注册时 `tasks/delivery.py` 把新 deadline clamp 到原绝对值，Server 再独立拒绝延长；启动前仍重算剩余时间。
+- 非白名单业务拒绝、旧 `phase_contract_invalid`、错误 origin、已接受或状态未决不会自动放开。进入既有只读 delivery／continuation 链时继续服从原限制，本轮不把它转为无约束 fresh。持续失败的终点是 `execution_retry_exhausted` 或期限／安全门禁阻断，不是把项目或失败 Run 强改为成功。
+
+**必要契约调整。** `worker_protocol/submission.py` 新增 Reason 专用 `ReasonCompleteResult`，仅将既有下游要求“至少一个真实非 goal 来源 Fact”表达为必填非空，并继续绑定 allowed_fact_ids。共享 `CompleteResult` 不变：Bootstrap 仍不让模型提供由系统管理的来源，goal-driven Bootstrap 仍隐藏 complete。合法 complete 配合 intents 缺省／null／[] 保持合法；不补空数组、不自动猜来源、不删除来源关系。同步权威导出 `container/pi-agent/contracts/submission-v1.json`。这一调整避免已知结构矛盾，但**不是恢复验收的替代**。
+
+**定向验证及替身边界。** 新增 `cairn/tests/test_reason_output_retry.py`，使用已有 fixture 启动一次性 Unix-socket PostgreSQL、随机 schema、当前完整迁移；不读取应用 DSN、不写业务库。真实执行 `_dispatch_reason → claim/admission → run_reason_task → Gateway → writer → Server → reap/finish → 下一轮 dispatch`。仅替换 Worker 选择／容器运输、假 provider、时钟与同步 executor；Node 子进程、SDK、候选原字节／摘要、candidate_store、HTTP 服务和数据库规则真实执行。候选入库复用既有 helper 直接调用服务，而非 Docker ProcessRunner／HTTP spool 运输，不能据此声称 Docker、traffic scope 或完整崩溃回收已验收。
+
+为精确重现“本地成功、下游缺 from 拒绝”，首轮在测试的 Schema 构造边界模拟历史宽松契约，且持久 delivery、请求、spool 与 provider Schema 摘要保持一致；不替换 validator、Gateway、writer 或顶层 Reason。第二轮切回当前生产契约。持续失败用例一直模拟该宽松生产者。**这不代表新 Schema 仍允许缺 from，也不冒充 tr012 的完整冻结 Schema。**
+
+最终通过的断言包括：
+
+1. 第一轮只有一次假 provider 生成，候选 `locally_validated`，实际 Dispatcher 拒绝且尚无完成写入；退避时不调用 provider，退避后自动产生第二次调用，prompt 带具体原因，新 session／Run 沿原 deadline。
+2. 三种空 intents 形状均能由第二次合法输出到达真实完成接受；只写一个完成 Intent，历史失败和缺 from 的候选原文不变；完成后不重复执行。
+3. 每次重建调度器内存，连续三次后置拒绝后仍耗尽，无第四次模型调用。
+4. 接受标记、已写 Fact、未决候选、终止未知、暂停请求、原期限、授权到期、旧 code／错误 origin 均不放开；route／claim／admission 门禁一致，直接 admission 也不能绕过。禁止复用旧 session、伪造恢复上下文或延长 deadline。
+5. 当前生产 Node Schema 对 missing／empty from 在本地有限修正，并允许合法 complete + intents 缺省／null／[]；Bootstrap 来源所有权、非空动作冲突及权威导出一致性不回归。空队列无决策才产生新 code，非空队列 noop 仍合法。
+
+实际最终命令：
+
+```bash
+CAIRN_TEST_LOCAL_PG=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 cairn/.venv/bin/python -I -c 'import sys; sys.path.append("/usr/lib/python3/dist-packages"); import pytest; raise SystemExit(pytest.main(sys.argv[1:]))' -q \
+  cairn/tests/test_reason_output_retry.py \
+  cairn/tests/test_pi_result_protocol.py::test_reason_completion_rejects_nonempty_actions_in_python_and_dispatcher \
+  cairn/tests/test_pi_result_protocol.py::test_every_executable_phase_schema_and_export_are_current
+npm --prefix container/pi-agent run build
+PYTHON_BIN="$PWD/cairn/.venv/bin/python" node --test --test-name-pattern='production Bootstrap submission hides|Reason completion sources repair' container/pi-agent/tests/contracts.test.mjs
+```
+
+结果：Python **20 passed**（恢复文件16、邻接节点4），有 Starlette TestClient timeout 弃用警告；TypeScript 本地测试构建通过；Node 定向 **2 passed**。未跑全套、未新增依赖。初次验证曾因测试的历史 Schema 未同步 Server 构造、outcome 字段名误用、直接 admission 缺 generation 失败；一次未决候选注入试图删除合成 outcome，被数据库不可变规则拒绝，已改为追加合成未决候选，不关闭触发器、不改生产不可变规则。最终均已重跑通过。
+
+**交付状态与剩余边界。** 分支 `feat/update-worker-cache`；本轮增量修改8个 Python 生产文件、1份生成合同、2份测试及本原方案，保留既有报告／流量／前端等工作区改动。未 commit、push、迁移业务库、启停服务、构建／替换运行镜像、操作真实项目或调用真实模型／目标。仅本地 Node 测试构建不等于部署。未来加载新策略可能让符合新 code 的 active 项目自动发起调用，部署须另行获准；旧 `tr012` 不重新分类、不补来源、不延长期限。本次不确认 `proj_058` 当前可恢复，更不声称已恢复或 completed。跨真实 Docker 的物理恢复、混合 delivery/continuation 故障组合和真实模型重试成功率未做本轮验收；旧冻结 Schema 摘要与新代码不符时仍明确拒绝 resume，不改写历史摘要来绕过。
+
+### 实施后只读复核（2026-10-26；仍未部署）
+
+本分析会话核对本轮相关 diff、生产者／消费者及测试实现，没有运行测试、构建、启停服务或操作真实项目。上述 Python 20 passed、Node 2 passed 与构建结果是实施会话记录，本轮未独立复跑，不作为真实运行验收。
+
+- **主线实现与本轮方向相符。** 普通 fresh Reason 的写入前来源错误／空决策有精确分类，经 Server 资格裁决派生错误反馈，再由 scheduler admission_context 传入下一次 Reason prompt；不是单纯增加白名单或只修本地 Schema。计数沿持久失败链，原绝对 deadline 被 Dispatcher 和 Server 同时限制。测试使用真实调度提交、Gateway、写回和隔离 PostgreSQL 服务接缝，候选捕获／容器运输等替身边界已在实施记录说明。生产调度只在 Reason 成功时更新 checkpoint，失败不会自行消掉原触发条件。
+- **局部契约调整有具体依据。** Reason 专用来源模型表达既有完成服务要求，共享 Bootstrap 模型未被强改；未见本轮新增无关完成门槛。不能将此前其他任务的报告／流量／前端 diff 算入本轮范围。
+- **确认的诊断遗漏，非执行主链阻断。** `server/services/project_runtime_diagnostics.py:129,441–456` 仍按粗类别 business_acceptance 返回“本代不再自动重试”。新 code 仍属于该类别，所以符合自动恢复条件的失败，其 runtime API 的 last_error 也会给出这句错误断言；即使后续成功，最近失败记录仍可能保留该文字。当前调度状态另由资格裁决投影，不能据此声称整个界面都显示阻断。建议仅将该错误说明改为不推断重试政策的事实描述，例如“执行结果未通过业务验收，请查看失败原因和当前调度状态”，由已有 scheduling／recovery 表达能否重试；不要再复制一套错误白名单到诊断层。定向核对该 API 输出即可，不扩展 UI 或恢复机制。
+- **范围限制得到源码确认，不误报为本轮新故障。** `assessment_attempts.py:976–988` 的 continuation／delivery_chain 分支先于新输出分类；已启动的暂停续作，或 submission_missing／invalid 后进入 delivery_retry 再出现上述输出错误，仍会阻断，不能套用普通 fresh 的成功测试。`derive_delivery_retry_context:816–855` 也保持原模式。实施记录已明确不转换这两类链，本轮没有证据要求顺带改造；对外只能宣称普通 fresh Reason 的窄范围输出恢复，不能称所有失败都能自动重试。
+
+**后续建议：** 核心实现未发现本次定向静态核查可确认的部署阻断；诊断文字应作一次小范围纠正，可纳入后续获准的交付轮，不为此重做恢复设计或扩大验证矩阵。当前未部署，旧 tr012 不自动升级错误分类，真实 Docker 运输／恢复与真实模型效果仍未验收。部署仍需另行授权并核对活动项目影响，不能将本复核视为启动真实任务的许可。
+
+### 文案小修与实际部署交付（2026-10-26 UTC）
+
+**本轮增量与源码核对。** 编辑前确认 `feat/update-worker-cache` 和全部既有修改。核对精确输出 code、Server 资格裁决、admission_context、Reason 反馈与原 deadline、Reason 专用 Schema，仍与上述实施记录一致；没有重做恢复设计。唯一生产代码改动为 `project_runtime_diagnostics.py` 中 `ERRORS["business_acceptance"]` 改成“执行结果未通过业务验收，请查看失败原因和当前调度状态”。`_last_error` 继续消费该映射；资格由原 scheduling／recovery 表达，不复制白名单，不调整次数、期限、接受防重、continuation／delivery_retry 或前端流程。其余该文件的既有 diff 不属于本轮。
+
+**本次实际验证。** 在已有 `test_reason_output_retry.py::test_dispatcher_rejection_generates_again_and_accepts_once` 增补 runtime v2 消费者断言，只执行 `empty` 一个参数实例：真实下游拒绝仍为 business_acceptance，last_error 为新事实描述；调度仍投影原 `execution_retry_cooldown` 与相同 retry_at，读取诊断前后资格不变；原用例继续验证退避后再次生成、只接受一次。复用原私有 Unix-socket PostgreSQL 和假 provider，不写实际业务库。
+
+```bash
+CAIRN_TEST_LOCAL_PG=1 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 cairn/.venv/bin/python -I -c 'import sys; sys.path.append("/usr/lib/python3/dist-packages"); import pytest; raise SystemExit(pytest.main(sys.argv[1:]))' -q \
+  'cairn/tests/test_reason_output_retry.py::test_dispatcher_rejection_generates_again_and_accepts_once[empty]'
+```
+
+结果 **1 passed in 11.27s**，32 条既有 Starlette TestClient timeout 弃用警告。未重跑此前 Python 20／Node 2、完整恢复测试、全套测试或前端构建。部署前用 `py_compile.compile(..., doraise=True)` 编译有限重试的8个 Python 模块及诊断模块，共9个通过；这是现有 editable 安装的宿主加载准备，不是另建 wheel／安装依赖或 Worker 构建。
+
+**实际部署范围与操作许可。** 只读进程环境确认实际入口 `http://127.0.0.1:8001`，静态目录 `runtime/static`，数据库为 loopback `55433/cairn_isolated`，不能因名称含 isolated 就当测试库。业务核对使用 psycopg `default_transaction_read_only=on` 和显式只读事务；未调用可能推进租约的项目详情 GET。旧 Server PID `2387033`（11:00:38Z）、Dispatcher PID `22853`（01:59:10Z），均由当前仓库 editable 源码运行，早于14:52–14:56Z的有限重试实现；本轮文案也尚未加载。
+
+- 15:50–15:52Z：`proj_058` 仍 active／generation0，最后失败为旧 `tr012/phase_contract_invalid`，没有新白名单 code；queued/running、未结数据库候选、未删除的待结复测及待生成报告均0，唯一 once 计划 completed／next_run_at为空。Dispatcher idle／running0；本地已登记 scope 均确认终止，candidate outbox 只有1份 rejection 记录、无待投递条目，report outbox为空。旧失败仍阻断，不能把 idle 当作任意重载许可。
+- 当时项目 Worker `3010b3ff1ae3` 与空闲流量网关 `01b4f58e1846` 仍在运行，后者及两个项目网络属于正常关闭可能清理的资源。先说明这些对象及当前共享合同会一并加载，用户明确选择“允许正常重载”；不包括暂停／恢复／重跑项目、主动模型／目标调用或替换项目 Worker。
+- 部署不是只加载一行文案。Server／Dispatcher 会加载当前工作树及其共享报告／证据合同；未提交范围还含报告分段与作用域、流量采集与读取、漏洞删除和归档保护、单漏洞逐步骤导出等既有工作。多数相关源码早于旧进程启动，前端及 Server 的近期阅读／删除功能已有前轮交付记录；Dispatcher 启动后更新的共享模板／报告及证据类型也随本次进程加载。没有旧进程全模块的逐字节快照，不能将所有未提交 diff 宣称为本次首次部署，也没有摘取、回退或重组他人修改。
+
+**必要组件更新与生效证据。** 重载前再次核对运行 env 与原 Server 的数据库、静态目录完全一致；在途任务、待触发计划、待报告／复测、新白名单失败及启动时待清理的过期资源批次均0。使用 `deploy/common.sh` 现有进程身份／生命周期锁校验，先向 Dispatcher、再向 Server 发 SIGTERM 并等待退出；未使用脚本的 SIGKILL 超时兜底。随后执行 `bash deploy/start.sh --host 0.0.0.0 --port 8001`，实际退出0。
+
+| 组件 | 本次结果与核查 |
+| --- | --- |
+| Server | 新 PID `3890858`，16:00:40Z 启动，`proc_start_time=5145517`；cwd为本仓库、editable入口仍为 `cairn/src`，原数据库身份未变。正常登录后只读 `GET /projects/proj_058/runtime?schema_version=2` 返回200，`last_error.code=business_acceptance`、Run为tr012，message已为新文案，直接证明实际消费者已加载修正。 |
+| Dispatcher | 新 PID `3891024`，16:00:44Z 启动，`proc_start_time=5145960`；同仓库／原配置，在有限恢复相关源码及编译完成后新建进程。16:03:17Z 心跳 idle、running0／active0，startup_check ready；本地配置无 enabled worker，启动日志明确跳过该自检，不能冒称执行过 Worker 自检或真实重试。 |
+| 前端 | 未构建或替换，本轮无前端改动。实际首页与 `runtime/static/index.html` 字节相同，入口仍为 `index-91utJ5oN.js`；入口引用的JS／CSS经HTTP取回与实际目录摘要相符。`/`、`/health` 均200，`deploy/status.sh` 为 running／ownership=tracked／ready。 |
+| PostgreSQL | 保留原容器和实际库；schema重载前后均69，无本轮新迁移。重载前后在只读事务中对 TaskRun、候选身份／摘要、outcome、项目状态／代次／授权边界、Fact和Intent计算集合摘要，全部相同；未通过改库修复旧失败。 |
+| Worker及流量镜像 | 未重建、未改tag、未重新下载工具。重载前只读复制现存Worker构建内容到内存比对：14个JS与既有本地dist全部一致，AGENTS.md也一致；Worker镜像仍 `sha256:f586880ced3e4ff4311f4c08805321fe78e4ce616907994b54c516999bc359d8`。本轮Python动态Schema／静态导出差异不要求重建Worker；没有主动替换项目容器。 |
+
+**必须区分的项目状态变化与一次验证失败。** 第一次上线检查错误沿用15:50Z的 active／generation0 断言，实际API已返回新文案，但该状态断言失败。随后只读核对确认，容器暂停登记在 **15:56:34Z** 已是 stopped／pause_generation1，旧调度器在15:56:36–37Z已写正常清理观测，均早于本次 **16:00:40Z** 的服务重载。本轮没有发送 pause/resume/finish 或其他项目动作；变化的调用者未在本轮确认，不推断为本次部署所致，也不冒称用户已经明确执行了暂停。重载前后集合摘要相同，最终容器列表仅剩两个原PostgreSQL容器；不把此前项目资源消失算成本轮替换容器的成果。
+
+以最新状态重新核对实际API后通过：`proj_058` 为 paused／generation1、scheduling=null、recovery.route=resume，last_error为新文案；仍只有12个TaskRun、在途0。`tr012` 仍 failed／business_acceptance／phase_contract_invalid，原 deadline `2026-10-26T08:11:52.941395+00:00` 未变。界面的恢复路由不是本轮已恢复或已调用模型的证据。
+
+**交付与停止。** 无剩余部署阻塞；源码、单个隔离验证、实际宿主加载和API文案检查已完成。仅增量修改诊断文案、既有恢复测试的消费者断言及本章节；保留其他会话修改，不commit／push。未创建真实测试项目、未恢复proj_058、未访问真实目标或调用真实模型。真实Docker候选运输／物理恢复、混合delivery／continuation组合及真实模型的有限重试成功率仍未验收，由用户另行决定是否恢复真实项目；本轮不继续扩展策略。
 
 ## 当前合同：共享证据、Finding v2 与独立复测结果 v2
 

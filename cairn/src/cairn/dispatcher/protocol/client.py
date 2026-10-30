@@ -43,6 +43,7 @@ class ApiResult:
     status_code: int
     data: Any | None = None
     text: str = ""
+    error_code: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -107,6 +108,17 @@ class CairnClient:
         response = self._session().get(self._url(f"/projects/{project_id}"), timeout=self._timeout)
         response.raise_for_status()
         return ProjectDetail.model_validate(response.json())
+
+    def pending_agent_turns(self) -> ApiResult:
+        return self._request_json("GET", "/agent-turns/pending")
+
+    def claim_agent_turn(self, project_id: str, conversation_id: str, task_run: dict[str, Any]) -> ApiResult:
+        return self._request_json("POST", f"/projects/{project_id}/agent-conversations/{conversation_id}/claim", json={"task_run": task_run})
+
+    def agent_turn_action(self, project_id: str, conversation_id: str, message_id: int | str, action: str, body: dict[str, Any]) -> ApiResult:
+        if action not in {"tools", "finish", "heartbeat"}:
+            raise ValueError("invalid agent turn action")
+        return self._request_json("POST", f"/projects/{project_id}/agent-conversations/{conversation_id}/turns/{message_id}/{action}", json=body)
 
     def get_verification_input(self, request_id: str) -> ApiResult:
         return self._request_json("GET", f"/api/v1/verification-requests/{request_id}/input")
@@ -276,6 +288,15 @@ class CairnClient:
         )
         response.raise_for_status()
         return TenantWorkerExecutionBinding.model_validate(response.json())
+
+    def resolve_task_test_egress(self, project_id: str, task_run_id: str) -> dict[str, Any]:
+        """每个新 scope 单独读取；私有认证不写日志或公开运行上下文。"""
+        response = self._session().post(
+            self._url(f"/projects/{project_id}/task-runs/{task_run_id}/test-egress"),
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
+        return response.json()
 
     def list_task_runs(self, project_id: str) -> ApiResult:
         try:
@@ -713,17 +734,25 @@ class CairnClient:
             },
         )
 
-    def get_assessment_report_packet(self, project_id: str) -> ApiResult:
+    def get_assessment_report_packet(self, project_id: str, *, generation_token: str | None = None) -> ApiResult:
         return self._request_json(
             "GET",
-            f"/projects/{project_id}/assessment-report-packet",
+            f"/projects/{project_id}/assessment-report-packet" + (f"?generation_token={quote(generation_token, safe='')}" if generation_token is not None else ""),
         )
 
-    def get_assessment_report_finalization(self, project_id: str) -> ApiResult:
+    def get_assessment_report_finalization(self, project_id: str, *, generation_token: str | None = None) -> ApiResult:
         return self._request_json(
             "GET",
-            f"/projects/{project_id}/assessment-report-finalization",
+            f"/projects/{project_id}/assessment-report-finalization" + (f"?generation_token={quote(generation_token, safe='')}" if generation_token is not None else ""),
         )
+
+    def get_assessment_report_finish_receipt(self, project_id: str, task_run_id: str) -> ApiResult:
+        return self._request_json(
+            "GET", f"/projects/{project_id}/assessment-report-finalization/finish-receipts/{task_run_id}",
+        )
+
+    def list_assessment_report_finalizations(self, project_id: str) -> ApiResult:
+        return self._request_json("GET", f"/projects/{project_id}/assessment-report-finalizations")
 
     def claim_assessment_report_finalization(
         self,
@@ -731,11 +760,12 @@ class CairnClient:
         worker: str,
         *,
         lease_seconds: int = 300,
+        generation_token: str | None = None,
     ) -> ApiResult:
         return self._request_json(
             "POST",
             f"/projects/{project_id}/assessment-report-finalization/claim",
-            json={"worker": worker, "lease_seconds": lease_seconds},
+            json={"worker": worker, "lease_seconds": lease_seconds, **({"generation_token": generation_token} if generation_token is not None else {})},
         )
 
     def bind_assessment_report_input_snapshot(
@@ -1039,6 +1069,95 @@ class CairnClient:
             json={"operations": operations},
         )
 
+    def prepare_http_evidence_image(self, project_id: str, body: dict[str, Any]) -> ApiResult:
+        return self._request_json("POST", f"/projects/{quote(project_id, safe='')}/traffic/http-evidence/prepare", json=body)
+
+    def publish_http_evidence_image(self, project_id: str, body: dict[str, Any]) -> ApiResult:
+        return self._request_json("POST", f"/projects/{quote(project_id, safe='')}/traffic/http-evidence/publish", json=body)
+
+    def list_http_flows(self, project_id: str, *, task_run_id: str | None, **filters: Any) -> ApiResult:
+        return self._request_json(
+            "GET", f"/projects/{quote(project_id, safe='')}/traffic",
+            params={**filters, **({"task_run_id": task_run_id} if task_run_id is not None else {})},
+        )
+
+    def read_http_flow(self, project_id: str, flow_id: str) -> ApiResult:
+        return self._request_json(
+            "GET", f"/projects/{quote(project_id, safe='')}/traffic/{quote(flow_id, safe='')}",
+        )
+
+    def read_http_flow_projection(
+        self, project_id: str, flow_id: str, side: str, *, offset: int, limit: int,
+    ) -> ApiResult:
+        if side not in {"request", "response"}:
+            raise ValueError("traffic_side_invalid")
+        return self._request_json(
+            "GET", f"/projects/{quote(project_id, safe='')}/traffic/{quote(flow_id, safe='')}/projection/{side}",
+            params={"offset": offset, "limit": limit},
+        )
+
+    def read_http_flow_body_preview(
+        self, project_id: str, flow_id: str, side: str, *, offset: int, limit: int,
+    ) -> ApiResult:
+        if side not in {"request", "response"}:
+            raise ValueError("traffic_side_invalid")
+        return self._request_json(
+            "GET", f"/projects/{quote(project_id, safe='')}/traffic/{quote(flow_id, safe='')}/bodies/{side}",
+            params={"preview": "true", "offset": offset, "limit": limit},
+        )
+
+    def register_traffic_scope(self, project_id: str, binding: dict[str, Any]) -> ApiResult:
+        return self._request_json("POST", f"/projects/{project_id}/traffic/scopes", json=binding)
+
+    def sync_traffic_flow(self, project_id: str, scope_id: str, record: dict[str, Any]) -> ApiResult:
+        return self._request_json(
+            "PUT", f"/projects/{project_id}/traffic/scopes/{scope_id}/flows/{record['id']}", json=record,
+        )
+
+    def sync_traffic_batch(self, project_id: str, scope_id: str, items: list[dict[str, Any]]) -> ApiResult:
+        return self._request_json(
+            "POST", f"/projects/{project_id}/traffic/scopes/{scope_id}/batch", json={"items": items},
+        )
+
+    def update_traffic_scope_status(self, project_id: str, scope_id: str, status: dict[str, Any]) -> ApiResult:
+        return self._request_json("PUT", f"/projects/{project_id}/traffic/scopes/{scope_id}/status", json=status)
+
+    def list_traffic_scope_status(self, project_id: str, *, cursor: str = "", limit: int = 100) -> ApiResult:
+        return self._request_json(
+            "GET", f"/projects/{project_id}/traffic/scopes/status?cursor={quote(cursor, safe='')}&limit={limit}",
+        )
+
+    def seal_traffic_body(
+        self, project_id: str, scope_id: str, flow_id: str, side: str, *,
+        revision: int, size: int, sha256: str,
+    ) -> ApiResult:
+        return self._request_json(
+            "POST", f"/projects/{project_id}/traffic/scopes/{scope_id}/flows/{flow_id}/bodies/{side}/seal",
+            json={"revision": revision, "size": size, "sha256": sha256},
+        )
+
+    def sync_traffic_body(
+        self, project_id: str, scope_id: str, flow_id: str, side: str, *,
+        offset: int, size: int, sha256: str, content,
+    ) -> ApiResult:
+        path = f"/projects/{project_id}/traffic/scopes/{scope_id}/flows/{flow_id}/bodies/{side}"
+        try:
+            response = self._session().put(
+                self._url(path), params={"offset": offset, "size": size, "sha256": sha256},
+                data=content, headers={"Content-Type": "application/octet-stream", "Content-Length": str(size)},
+                timeout=self._timeout,
+            )
+        except requests.RequestException:
+            # 原件内容与传输异常正文不进入日志；没有回执时保留 spool，按相同身份重传。
+            return ApiResult(status_code=0, error_code="transport_error")
+        data = None
+        if response.headers.get("content-type", "").startswith("application/json"):
+            try:
+                data = response.json()
+            except ValueError:
+                return ApiResult(status_code=response.status_code, error_code="invalid_receipt")
+        return ApiResult(status_code=response.status_code, data=data)
+
     def list_artifacts(
         self,
         project_id: str,
@@ -1192,6 +1311,7 @@ class CairnClient:
         method: str,
         path: str,
         json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
     ) -> ApiResult:
         try:
             response = self._session().request(
@@ -1199,11 +1319,18 @@ class CairnClient:
                 self._url(path),
                 json=json,
                 timeout=self._timeout,
+                **({"params": params} if params is not None else {}),
             )
         except requests.RequestException as exc:
-            # 写回失败要被 task common 记录为 protocol_write，而不是直接吞掉异常。
-            LOG.warning("request failed method=%s path=%s error=%s", method, path, exc)
-            return ApiResult(status_code=0, text=str(exc))
+            # 保留连接、读取与其他传输故障的区别，不记录可能带认证信息的异常正文。
+            if isinstance(exc, requests.ConnectTimeout):
+                error_code = "connect_timeout"
+            elif isinstance(exc, requests.ReadTimeout):
+                error_code = "read_timeout"
+            else:
+                error_code = "transport_error"
+            LOG.warning("request failed method=%s path=%s code=%s", method, path, error_code)
+            return ApiResult(status_code=0, text=error_code, error_code=error_code)
         data: Any | None = None
         if response.headers.get("content-type", "").startswith("application/json"):
             try:

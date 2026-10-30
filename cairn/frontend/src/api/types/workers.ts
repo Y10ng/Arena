@@ -3,7 +3,7 @@ export type TenantWorkerTaskType = 'reason' | 'bootstrap' | 'explore'
 export interface TenantWorker {
   id: string
   display_name: string
-  model_id: string
+  model_id: string | null
   model_display_name: string
   model_name: string
   // 历史引擎按真实值展示，不代表可执行。
@@ -20,16 +20,10 @@ export interface TenantWorker {
   updated_at: string
 }
 
-export interface CreateTenantWorkerRequest {
-  engine?: 'pi'
-  display_name: string
-  model_id: string
-  task_types: TenantWorkerTaskType[]
+export interface UpdateTenantWorkerRequest {
+  model_id: string | null
   max_running: number
   priority: number
   enabled: boolean
-}
-
-export interface UpdateTenantWorkerRequest extends CreateTenantWorkerRequest {
   expected_revision: number
 }

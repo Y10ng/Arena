@@ -96,6 +96,7 @@ def frozen_execution_features(scenario: Scenario) -> dict[str, Any]:
     features.update(
         execution_contract_version=1,
         execution_engine="pi",
+        http_traffic_execution_version=1,
         assessment_protocol=GOAL_DRIVEN_PROTOCOL,
         assessment_contract_version=2,
         vulnerability_fingerprint_version=1,

@@ -585,7 +585,10 @@ def project_meta_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> Project
         (row["id"], row["id"]),
     ).fetchone()
     verification = conn.execute("SELECT id FROM verification_requests WHERE project_id = ?", (row["id"],)).fetchone()
+    from .test_egress import public_project_egress
+
     return ProjectMeta(
+        test_egress=public_project_egress(row),
         verification_request_id=verification["id"] if verification is not None else None,
         schedule_id=schedule["schedule_id"] if schedule is not None else None,
         assessment_execution=assessment_execution_view(conn, row),

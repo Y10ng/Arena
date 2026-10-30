@@ -135,13 +135,13 @@ describe('frontend component migration inventory', () => {
     expect(record?.migrationStatus).toBe('migrating')
     expect(record?.verification).toEqual(['component'])
     expect(record?.notes).toContain(
-      'Login、ChangePassword、ConsoleTimeout 与 Overview 已迁移 Button；TenantWorkers 已迁移 Model Select；TenantModels 已迁移 protocol、auth header 与 discovery Select；WorkspaceVulnerabilities 创建弹窗已迁移 Button、FormField、Input、Select 与 Textarea，confidence 因 Cairn Input 的 nullable numeric 契约暂保留原生 number input；Findings 已迁移带可见标签的严重度/状态 Select 与 refresh Button；WorkspaceArtifacts 已迁移带可见标签的 kind Select、刷新、预览、Run 与复制操作；Traffic 已迁移全局项目 FormField/Select、刷新及 Run/evidence/复制 Button，工作区模式继续隐藏项目选择器；WorkspaceHints 已迁移 Button、FormField、Select 与 Textarea，保留项目级/Fact/Intent 锚点、Intent 优先和 Ctrl/Cmd+Enter 合同；其余清单页面控件仍待迁移。',
+      'Login、ChangePassword、Overview 已迁移 Button；TenantWorkers 已迁移 Model Select；TenantModels 已迁移 protocol、auth header 与 discovery Select；WorkspaceVulnerabilities 创建弹窗已迁移 Button、FormField、Input、Select 与 Textarea，confidence 因 Cairn Input 的 nullable numeric 契约暂保留原生 number input；Findings 已迁移带可见标签的严重度/状态 Select 与 refresh Button；WorkspaceArtifacts 已迁移带可见标签的 kind Select、刷新、预览、Run 与复制操作；Traffic 已迁移全局项目 FormField/Select、刷新及 Run/evidence/复制 Button，工作区模式继续隐藏项目选择器；WorkspaceHints 已迁移 Button、FormField、Select 与 Textarea，保留项目级/Fact/Intent 锚点、Intent 优先和 Ctrl/Cmd+Enter 合同；其余清单页面控件仍待迁移。',
     )
     expect(record?.notes).toContain(
       'ScenariosConsole 已迁移 Button、Input、Textarea、FormField、Select、Checkbox、Alert、Spinner 与 EmptyState；场景侧栏保留领域专用选择按钮，并保持完整列表 PUT normalization、preflight、dirty draft ownership、pending 防重复与 query invalidation 合同。',
     )
     expect(record?.notes).toContain(
-      'WorkersConsole 已迁移 Button、IconButton、Input、Select、FormField、Checkbox、Alert 与 Spinner；保留表单/YAML Tabs、dirty confirmation、表单序列化、只读状态与保存禁用合同。',
+      '独立 Dispatcher 页面已退场；Worker 配置的运行设置采用窄字段读写。',
     )
     expect(record?.notes).toContain(
       'KnowledgeConsole 与 PromptGroupsConsole 已迁移外层 Button、IconButton、Input、Select 与 FormField，保留资料库/目录/文件及模板组领域选择按钮、隐藏 file input、路由 focus、dirty confirmation 与异步 selection ownership；WorkerTemplatesPanel 已迁移语义行选择、Button 与 IconButton。',
@@ -178,13 +178,13 @@ describe('frontend component migration inventory', () => {
     )
 
     expect(cardRecord?.notes).toContain(
-      'ConsoleTimeout 已迁移 Card，Overview 已迁移 Card、Badge 与 StatusBadge；Findings 成果中心已迁移 KPI、漏洞表格与报告审阅 Card，并使用漏洞严重度/可信度/状态领域 Badge，避免扩大全局 status 语义；Traffic 已迁移 Runs/evidence Card、Run 生命周期 StatusBadge 与 Bash 退出码领域 Badge，退出码不复用 HTTP status 语义；WorkspaceHints 已迁移创建 Card 与 creator/anchor 领域 Badge，保留原始 creator 和 Intent 优先展示；其余清单页面仍待迁移。',
+      'Overview 已迁移 Card、Badge 与 StatusBadge；Findings 成果中心已迁移 KPI、漏洞表格与报告审阅 Card，并使用漏洞严重度/可信度/状态领域 Badge，避免扩大全局 status 语义；Traffic 已迁移 Runs/evidence Card、Run 生命周期 StatusBadge 与 Bash 退出码领域 Badge，退出码不复用 HTTP status 语义；WorkspaceHints 已迁移创建 Card 与 creator/anchor 领域 Badge，保留原始 creator 和 Intent 优先展示；其余清单页面仍待迁移。',
     )
     expect(asyncRecord?.notes).toContain(
-      'Skeleton 与 ErrorState 已完成组件验证；Login、ChangePassword 已迁移内联认证错误 Alert，ConsoleTimeout 已迁移加载 Spinner 与错误 Alert，Overview 已迁移加载 Alert/Spinner 与空态 EmptyState；Findings 已迁移 Skeleton、EmptyState、ErrorState/retry，并在后台刷新或失败时保留 stale rows；WorkspaceArtifacts 已区分列表初次/stale 状态、项目/筛选空态与 preview retry，并为项目访问、head/tail preview、截图错误和过期 Toast 增加 identity guard；Traffic 已区分 Projects/Runs/Traffic 三层初次、空态、stale error 与刷新状态，并为 project/run/evidence reconcile 和 clipboard Toast 增加 identity guard；WorkspaceHints 已迁移 EmptyState，并通过 pending token、project visit generation、POST response merge 和 stale Toast/reload 抑制隔离跨项目 mutation；其余异步状态仍待迁移。',
+      'Skeleton 与 ErrorState 已完成组件验证；Login、ChangePassword 已迁移内联认证错误 Alert，Overview 已迁移加载 Alert/Spinner 与空态 EmptyState；Findings 已迁移 Skeleton、EmptyState、ErrorState/retry，并在后台刷新或失败时保留 stale rows；WorkspaceArtifacts 已区分列表初次/stale 状态、项目/筛选空态与 preview retry，并为项目访问、head/tail preview、截图错误和过期 Toast 增加 identity guard；Traffic 已区分 Projects/Runs/Traffic 三层初次、空态、stale error 与刷新状态，并为 project/run/evidence reconcile 和 clipboard Toast 增加 identity guard；WorkspaceHints 已迁移 EmptyState，并通过 pending token、project visit generation、POST response merge 和 stale Toast/reload 抑制隔离跨项目 mutation；其余异步状态仍待迁移。',
     )
     expect(asyncRecord?.notes).toContain(
-      'ScenariosConsole、WorkersConsole、KnowledgeConsole 与 PromptGroupsConsole 已迁移加载/错误 Alert、Spinner 或编辑区 EmptyState；WorkerTemplatesPanel 已区分加载、失败与真实空态，并为删除增加 pending guard。',
+      'ScenariosConsole、KnowledgeConsole 与 PromptGroupsConsole 已迁移加载/错误 Alert、Spinner 或编辑区 EmptyState；WorkerTemplatesPanel 已区分加载、失败与真实空态，并为删除增加 pending guard。',
     )
   })
 
@@ -224,14 +224,14 @@ describe('frontend component migration inventory', () => {
       pages: [
         'Reports',
         'ConsoleReportTemplates',
-        'ConsoleDispatcher',
+        'ConsoleWorkers',
         'ConsolePrompts',
         'WorkspaceRuns',
         'WorkspaceArtifacts',
       ],
     })
     expect(record?.notes).toContain(
-      'Tabs primitive 已完成组件验证；ConsoleDispatcher 已迁移表单/YAML 模式并保留 dirty confirmation 与序列化行为；PromptGroups 已迁移文件 Tabs，保留未保存确认，并仅在异步读取成功后提交 selection；Runs 已迁移运行详情 Tabs，并完成扁平事件合同、轮询选择保留、project/run/artifact stale response guard、stdout/stderr/diagnostic 选择及 preview/content 下载语义的组件验证；WorkspaceArtifacts 已迁移交付产物/诊断日志本地 Tabs，并保留 category、kind 与 artifactId 深链合同；Findings 仅承载漏洞，Reports 独立为主导航并使用渲染/原文 Tabs；ConsoleReportTemplates 使用编辑/安全模板预览 Tabs；跨路由 ProjectWorkspace tabs 不属于本地状态 Tabs。',
+      'Tabs primitive 已完成组件验证；Worker 配置承载运行设置；PromptGroups 已迁移文件 Tabs，保留未保存确认，并仅在异步读取成功后提交 selection；Runs 已迁移运行详情 Tabs，并完成扁平事件合同、轮询选择保留、project/run/artifact stale response guard、stdout/stderr/diagnostic 选择及 preview/content 下载语义的组件验证；WorkspaceArtifacts 已迁移交付产物/诊断日志本地 Tabs，并保留 category、kind 与 artifactId 深链合同；Findings 仅承载漏洞，Reports 独立为主导航并使用渲染/原文 Tabs；ConsoleReportTemplates 使用编辑/安全模板预览 Tabs；跨路由 ProjectWorkspace tabs 不属于本地状态 Tabs。',
     )
     expect(record?.notes).toContain('本次未执行 E2E、axe 或视觉验证。')
   })

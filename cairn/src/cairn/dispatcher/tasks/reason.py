@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from cairn.dispatcher.runtime.traffic_execution import session_root_for_project
+
 from dataclasses import replace
+import json
 import logging
 import time
 
@@ -124,10 +127,12 @@ def run_reason_task(
                 admission_context=admission_context,
             )
 
+            output_retry = (admission_context or {}).get("reason_output_retry")
             frozen_delivery = register_delivery(
                 client, container_manager, container_name, project, task_run_id, worker,
                 phase="reason_execute", session=session, timeout_seconds=execution_timeout,
                 binding=reason_context.binding, inputs={"open_intent_ids": [item["id"] for item in reason_context.open_intents]},
+                deadline_at=output_retry["deadline_at"] if output_retry is not None else None,
             )
             LOG.debug(
                 "reason context prepared project=%s worker=%s facts=%s allowed_fact_ids=%s hints=%s open_intents=%s coverage_slots=%s",
@@ -143,6 +148,14 @@ def run_reason_task(
                 prompt_template,
                 reason_context.replacements,
             )
+            if output_retry is not None:
+                prompt += (
+                    "\n\nPrevious Reason output was rejected before business acceptance. "
+                    "Use the existing project Facts and evidence to generate a corrected decision; "
+                    "do not repeat completed exploration or invent completion sources. "
+                    "If completion is not supported, choose appropriate remaining work or explicitly reject.\n"
+                    + json.dumps(output_retry, ensure_ascii=False)
+                )
             record_prompt_rendered(
                 client,
                 project.project.id,
@@ -155,6 +168,9 @@ def run_reason_task(
                 replacement_keys=list(reason_context.replacements),
             )
 
+        task_execution = None if delivery_context is not None else container_manager.prepare_task_execution(
+            project.project, task_run_id, cancellation, container_runtime,
+        )
         execution_timeout = remaining_delivery_seconds(frozen_delivery)
         command = driver.build_execute(
             worker, prompt, session, phase="reason_execute",
@@ -165,6 +181,8 @@ def run_reason_task(
             conclude_only=delivery_context is not None,
             continuation=continuation_context,
             enable_checkpoints=checkpoint_staging,
+            session_root=session_root_for_project(project.project),
+            task_execution=task_execution,
         )
         execute_started = time.perf_counter()
         result = run_worker_process(
@@ -356,6 +374,7 @@ def run_reason_task(
         LOG.exception("reason task crashed project=%s worker=%s", project.project.id, worker.name)
         return "container_failed"
     finally:
+        container_manager.stop_task_execution(project.project.id, task_run_id)
         if result is not None:
             result.cleanup()
         # 无论任务如何结束，都停止 heartbeat 并释放 reason worker 槽位。

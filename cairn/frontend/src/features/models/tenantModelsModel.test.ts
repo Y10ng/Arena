@@ -4,7 +4,6 @@ import {
   customHeaderError,
   emptyTenantModelDraft,
   protocolDefaultEndpoints,
-  selectAfterModelListChange,
   tenantModelDraft,
   tenantModelDraftIsValid,
 } from './tenantModelsModel'
@@ -56,12 +55,6 @@ describe('tenant Models state helpers', () => {
     draft.custom_headers[0]!.value = 'changed'
     expect(model('m1').custom_headers[0]!.value).toBe('café-route')
     expect(JSON.stringify(draft)).not.toContain('credential')
-  })
-
-  it('keeps selection when present and falls back after deletion', () => {
-    expect(selectAfterModelListChange([model('m1'), model('m2')], 'm2')).toBe('m2')
-    expect(selectAfterModelListChange([model('m1')], 'm2')).toBe('m1')
-    expect(selectAfterModelListChange([], 'm2')).toBe('')
   })
 
   it('validates Header boundaries and required Model fields', () => {

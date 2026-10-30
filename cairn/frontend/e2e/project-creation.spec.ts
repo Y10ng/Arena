@@ -60,24 +60,6 @@ async function mockCreation(page: Page, createStatus = 422) {
           goal_template: '验证授权范围内的问题',
         },
       ],
-      '/tenant-workers/options': [
-        {
-          id: 'worker-check',
-          display_name: '受控 Worker',
-          model_id: 'model-check',
-          engine: 'pi',
-          available: true,
-          task_types: ['bootstrap', 'reason', 'explore'],
-        },
-      ],
-      '/worker-templates': [
-        {
-          id: 'template-check',
-          name: '受控默认组合',
-          is_default: true,
-          tenant_worker_ids: ['worker-check'],
-        },
-      ],
       '/library-catalog': [
         { key: 'reference-check', name: '接口参考资料', latest_version: 1, file_count: 2 },
       ],
@@ -104,18 +86,6 @@ async function mockCreation(page: Page, createStatus = 422) {
   })
   return requests
 }
-
-const completeWorkerIds = ['worker-bootstrap', 'worker-reason', 'worker-explore']
-const specialistWorkers = completeWorkerIds.map((id, index) => ({
-  id,
-  display_name: ['准备 Worker', '推理 Worker', '探索 Worker'][index],
-  model_id: 'model-check',
-  engine: 'pi',
-  available: true,
-  task_types: [['bootstrap'], ['reason'], ['explore']][index],
-  max_running: index === 2 ? 3 : 1,
-  executor_available: true,
-}))
 
 async function refreshCreationQueries(page: Page) {
   // 模拟页面再次可见，驱动真实 QueryClient 刷新，不重挂载当前草稿。
@@ -148,12 +118,6 @@ test('creation HTTP-equivalent randomUUID absence and optional cache failure sti
       return setItem.call(this, key, value)
     }
   })
-  let releaseDefault!: () => void
-  const defaultReady = new Promise<void>((resolve) => { releaseDefault = resolve })
-  await page.route('**/worker-templates', async (route) => {
-    await defaultReady
-    await route.fulfill({ json: [{ id: 'late-default', name: '延迟默认', is_default: true, tenant_worker_ids: ['worker-check'] }] })
-  })
   const submitted: Array<{ path: string; payload: Record<string, unknown> }> = []
   page.on('request', (request) => {
     const path = new URL(request.url()).pathname
@@ -171,9 +135,8 @@ test('creation HTTP-equivalent randomUUID absence and optional cache failure sti
   await page.locator('#np-title').fill('受控 Origin 提交')
   await page.locator('#np-origin-input').fill('  仅核验已有资料\n排除任何外部访问  ')
   await page.locator('#np-goal-input').fill('保留用户目标')
-  await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeDisabled()
-  releaseDefault()
-  await expect(page.locator('#np-execution-trigger')).toContainText('默认组合 · 受控 Worker')
+  await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeEnabled()
+  await expect(page.locator('#np-proxy-trigger')).toContainText('直接连接')
   expect(await page.evaluate(() => typeof crypto.randomUUID)).toBe('undefined')
   await dialog.getByRole('button', { name: '创建并启动' }).click()
   await expect(dialog.getByText('受控字段拒绝', { exact: true })).toBeVisible()
@@ -187,7 +150,7 @@ test('creation HTTP-equivalent randomUUID absence and optional cache failure sti
     await page.locator('#schedule-start').fill('2099-06-01T09:00')
     await dialog.getByRole('button', { name: '完成设置', exact: true }).click()
     await expect(dialog.locator('#np-targets')).toHaveCount(0)
-    await expect(page.locator('#np-execution-trigger')).not.toContainText('触发将受阻')
+    await expect(page.locator('#np-proxy-trigger')).toContainText('直接连接')
     await dialog.getByRole('button', { name: mode === 'once' ? '保存单次预约' : '保存重复计划', exact: true }).click()
     await expect(dialog.getByText('受控 Origin 计划拒绝', { exact: true })).toBeVisible()
     expect(submitted).toHaveLength(index + 1)
@@ -197,7 +160,8 @@ test('creation HTTP-equivalent randomUUID absence and optional cache failure sti
   for (const { path, payload } of submitted) {
     const project = path === '/projects' ? payload : payload.project
     expect(project).not.toHaveProperty('targets')
-    expect(project).toMatchObject({ origin: '  仅核验已有资料\n排除任何外部访问  ', goal: '保留用户目标', tenant_worker_ids: ['worker-check'] })
+    expect(project).not.toHaveProperty('tenant_worker_ids')
+    expect(project).toMatchObject({ origin: '  仅核验已有资料\n排除任何外部访问  ', goal: '保留用户目标' })
     expect(payload.request_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
   }
   expect(new Set(submitted.map(({ payload }) => payload.request_id)).size).toBe(4)
@@ -205,134 +169,44 @@ test('creation HTTP-equivalent randomUUID absence and optional cache failure sti
   expect(pageErrors).toEqual([])
 })
 
-test('execution defaults save a manual complete combination, reopen it and submit explicit IDs in every mode without refresh overwrites', async ({
-  page,
-}) => {
-  await mockCreation(page)
-  let templates = [
-    {
-      id: 'template-other',
-      name: '非默认模板',
-      tenant_worker_ids: ['worker-reason'],
-      is_default: false,
-    },
-  ]
-  let templateGets = 0
-  const savedDefaults: Array<{ method: string; path: string; body: Record<string, unknown> }> = []
+test('creation uses fixed tenant Workers without selection and preserves independent proxy input in every mode', async ({ page }) => {
+  const requests = await mockCreation(page)
   const immediate: Array<Record<string, unknown>> = []
   const schedules: Array<Record<string, unknown>> = []
-  const pageErrors: string[] = []
-  page.on('pageerror', (error) => pageErrors.push(error.message))
   page.on('request', (request) => {
     if (new URL(request.url()).pathname === '/projects' && request.method() === 'POST')
       immediate.push(request.postDataJSON())
   })
-  await page.route('**/tenant-workers/options', (route) =>
-    route.fulfill({ json: specialistWorkers }),
-  )
-  await page.route('**/worker-templates**', async (route) => {
-    const method = route.request().method(),
-      path = new URL(route.request().url()).pathname
-    if (method === 'GET' && path === '/worker-templates') {
-      templateGets++
-      await route.fulfill({ json: templates })
-    } else if (method === 'POST' && path === '/worker-templates') {
-      const body = route.request().postDataJSON()
-      savedDefaults.push({ method, path, body })
-      const saved = { id: 'template-saved', ...body }
-      templates = [...templates.map((template) => ({ ...template, is_default: false })), saved]
-      await route.fulfill({ json: saved })
-    } else if (method === 'PUT' && path === '/worker-templates/template-saved') {
-      const body = route.request().postDataJSON()
-      savedDefaults.push({ method, path, body })
-      const saved = { id: 'template-saved', name: '默认 Worker 组合', ...body }
-      templates = templates.map((template) =>
-        template.id === saved.id ? saved : { ...template, is_default: false },
-      )
-      await route.fulfill({ json: saved })
-    } else await route.fulfill({ status: 503, json: { detail: '禁止真实模板操作' } })
-  })
   await page.route('**/project-schedules', async (route) => {
     if (route.request().method() === 'POST') {
       schedules.push(route.request().postDataJSON())
-      await route.fulfill({ status: 422, json: { detail: '受控组合计划拒绝' } })
+      await route.fulfill({ status: 422, json: { detail: '受控计划拒绝' } })
     } else await route.fulfill({ json: [] })
   })
-  await page.setViewportSize({ width: 1440, height: 1000 })
   await page.goto('/#/projects')
-  const trigger = page.getByRole('button', { name: '新建项目', exact: true }).first()
-  await trigger.click()
+  await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
   const dialog = page.getByRole('dialog', { name: '新建项目', exact: true })
-  await expect(dialog.getByText('执行组合需要处理', { exact: true })).toBeVisible()
-  await expect(page.locator('#np-execution-trigger')).toContainText('尚未设置默认组合')
-  for (const worker of specialistWorkers)
-    await expect(
-      dialog.getByRole('checkbox', { name: `选择 Worker ${worker.display_name}` }),
-    ).not.toBeChecked()
-  await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeDisabled()
-  for (const worker of specialistWorkers)
-    await dialog.getByRole('checkbox', { name: `选择 Worker ${worker.display_name}` }).check()
-  await dialog.getByRole('button', { name: '保存为默认组合' }).click()
-  await expect(dialog.getByText('默认组合已保存', { exact: true })).toBeVisible()
-  expect(savedDefaults).toEqual([
-    {
-      method: 'POST',
-      path: '/worker-templates',
-      body: { name: '默认 Worker 组合', is_default: true, tenant_worker_ids: completeWorkerIds },
-    },
-  ])
-  await discardCreation(page)
-  await trigger.click()
-  await expect(page.locator('#np-execution-trigger')).toContainText(
-    '默认组合 · 准备 Worker、推理 Worker、探索 Worker',
-  )
-  await page.locator('#np-execution-trigger').click()
-  for (const worker of specialistWorkers)
-    await expect(
-      dialog.getByRole('checkbox', { name: `选择 Worker ${worker.display_name}` }),
-    ).toBeChecked()
-  await page.locator('#np-worker-template').click()
-  await page.getByRole('option', { name: '本次自定义', exact: true }).click()
-  for (const worker of specialistWorkers)
-    await expect(
-      dialog.getByRole('checkbox', { name: `选择 Worker ${worker.display_name}` }),
-    ).toBeChecked()
-  await dialog.getByRole('button', { name: '保存为默认组合' }).click()
-  await expect.poll(() => savedDefaults.length).toBe(2)
-  expect(savedDefaults[1]).toEqual({
-    method: 'PUT',
-    path: '/worker-templates/template-saved',
-    body: { is_default: true, tenant_worker_ids: completeWorkerIds },
-  })
-  await page.locator('#np-worker-template').click()
-  await page.getByRole('option', { name: '本次自定义', exact: true }).click()
-  const beforeRefresh = templateGets
-  templates = templates.map((template) =>
-    template.id === 'template-saved'
-      ? { ...template, tenant_worker_ids: ['worker-reason'] }
-      : template,
-  )
+  await expect(dialog.locator('#np-worker-template')).toHaveCount(0)
+  await expect(dialog.getByRole('checkbox', { name: /选择 Worker/ })).toHaveCount(0)
+  await expect(page.locator('#np-proxy-trigger')).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.locator('#np-proxy-trigger')).toContainText('直接连接')
+  await page.locator('#np-title').fill('受控固定 Worker 创建')
+  await page.locator('#np-proxy-trigger').click()
+  await dialog.getByLabel('连接方式', { exact: true }).click()
+  await page.getByRole('option', { name: 'HTTP 代理', exact: true }).click()
+  await dialog.getByLabel('代理地址', { exact: true }).fill('proxy.example.test')
+  await dialog.getByLabel('代理端口', { exact: true }).fill('8080')
   await refreshCreationQueries(page)
-  await expect.poll(() => templateGets).toBeGreaterThan(beforeRefresh)
-  await expect(page.locator('#np-worker-template')).toContainText('本次自定义')
-  for (const worker of specialistWorkers)
-    await expect(
-      dialog.getByRole('checkbox', { name: `选择 Worker ${worker.display_name}` }),
-    ).toBeChecked()
-  await page.screenshot({
-    path: test.info().outputPath('worker-default-complete.png'),
-    fullPage: true,
-  })
-  await page.locator('#np-title').fill('受控完整组合')
+  await expect(dialog.getByLabel('代理地址', { exact: true })).toHaveValue('proxy.example.test')
+  await expect(page.locator('#np-proxy-trigger')).toContainText('HTTP 代理')
   await dialog.getByRole('button', { name: '完成设置', exact: true }).click()
   await dialog.getByRole('button', { name: '创建并启动' }).click()
   await expect(dialog.getByText('受控字段拒绝', { exact: true })).toBeVisible()
   expect(immediate).toHaveLength(1)
-  expect(immediate[0]).toMatchObject({ tenant_worker_ids: completeWorkerIds })
+  expect(immediate[0]).not.toHaveProperty('tenant_worker_ids')
+  expect(immediate[0]).toMatchObject({ test_egress: { mode: 'http', host: 'proxy.example.test', port: 8080 } })
   for (const [mode, label] of [
-    ['once', '单次定时'],
-    ['daily', '每日重复'],
-    ['weekly', '每周重复'],
+    ['once', '单次定时'], ['daily', '每日重复'], ['weekly', '每周重复'],
   ]) {
     await page.locator('#schedule-mode').click()
     await page.getByRole('option', { name: label, exact: true }).click()
@@ -343,50 +217,21 @@ test('execution defaults save a manual complete combination, reopen it and submi
       await page.locator('#schedule-max').fill('2')
     }
     await dialog.getByRole('button', { name: '完成设置', exact: true }).click()
-    await dialog
-      .getByRole('button', { name: mode === 'once' ? '保存单次预约' : '保存重复计划', exact: true })
-      .click()
+    await dialog.getByRole('button', { name: mode === 'once' ? '保存单次预约' : '保存重复计划', exact: true }).click()
     await expect.poll(() => schedules.length).toBe(mode === 'once' ? 1 : mode === 'daily' ? 2 : 3)
-    expect(schedules.at(-1)).toMatchObject({
-      mode,
-      project: { tenant_worker_ids: completeWorkerIds },
-    })
-    await expect(dialog.getByText('受控组合计划拒绝', { exact: true })).toBeVisible()
+    expect(schedules.at(-1)).toMatchObject({ mode, project: { test_egress: { mode: 'http', host: 'proxy.example.test', port: 8080 } } })
+    expect(schedules.at(-1)!.project).not.toHaveProperty('tenant_worker_ids')
+    await expect(dialog.getByText('受控计划拒绝', { exact: true })).toBeVisible()
   }
-  expect(pageErrors).toEqual([])
+  expect(requests.some((request) => /\/(tenant-workers|worker-templates)/.test(request))).toBe(false)
 })
 
-test('execution defaults retain invalid IDs, explain missing roles and never replace historical plan Workers', async ({
-  page,
-}) => {
-  await mockCreation(page)
-  let workers = [
-    ...specialistWorkers,
-    {
-      ...specialistWorkers[0]!,
-      id: 'worker-disabled',
-      display_name: '失效 Worker',
-      available: false,
-      unavailable_reason: 'Model 已停用',
-    },
-  ]
-  let templateGets = 0
-  await page.route('**/tenant-workers/options', (route) => route.fulfill({ json: workers }))
-  await page.route('**/worker-templates', (route) => {
-    templateGets++
-    return route.fulfill({
-      json: [
-        {
-          id: 'template-invalid',
-          name: '待修复默认',
-          is_default: true,
-          tenant_worker_ids: ['worker-bootstrap', 'worker-disabled', 'worker-deleted'],
-        },
-      ],
-    })
-  })
+test('Worker configuration rejection preserves creation input and historical schedules no longer bind Workers', async ({ page }) => {
+  const requests = await mockCreation(page)
+  await page.route('**/projects', (route) => route.request().method() === 'POST'
+    ? route.fulfill({ status: 422, json: { detail: 'Worker explore (worker-explore) 不可用：model_unconfigured' } })
+    : route.fulfill({ json: [] }))
   const updates: Array<Record<string, unknown>> = []
-  const historicalIds = ['worker-history']
   const historical = {
     id: 'workers-history',
     tenant_id: 'ui-check',
@@ -412,7 +257,6 @@ test('execution defaults retain invalid IDs, explain missing roles and never rep
       origin: '历史背景',
       goal: '历史目标',
       scenario: 'goal-driven-v1',
-      tenant_worker_ids: historicalIds,
       targets: [],
       explore_deadline: null,
       authorization_expires_at: null,
@@ -432,62 +276,27 @@ test('execution defaults retain invalid IDs, explain missing roles and never rep
   await page.goto('/#/projects')
   await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
   const dialog = page.getByRole('dialog', { name: '新建项目', exact: true })
-  await expect(dialog.getByText('失效 Worker · Model 已停用', { exact: true })).toBeVisible()
-  await expect(
-    dialog.getByText('worker-deleted · Worker 已删除或不属于当前 Tenant', { exact: true }),
-  ).toBeVisible()
-  await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeDisabled()
-  await expect(dialog.getByRole('button', { name: '保存为默认组合' })).toBeDisabled()
-  await page.locator('#np-worker-template').click()
-  await page.getByRole('option', { name: '本次自定义', exact: true }).click()
-  const beforeRefresh = templateGets
-  workers = workers.filter((worker) => worker.id !== 'worker-disabled')
-  await refreshCreationQueries(page)
-  await expect.poll(() => templateGets).toBeGreaterThan(beforeRefresh)
-  await expect(
-    dialog.getByText('worker-disabled · Worker 已删除或不属于当前 Tenant', { exact: true }),
-  ).toBeVisible()
-  await expect(dialog.getByRole('button', { name: '移除失效绑定', exact: true })).toHaveCount(2)
-  await page.setViewportSize({ width: 480, height: 900 })
-  await page.screenshot({
-    path: test.info().outputPath('worker-invalid-narrow.png'),
-    fullPage: true,
-  })
-  await dialog.getByRole('button', { name: '移除失效绑定', exact: true }).first().click()
-  await dialog.getByRole('button', { name: '移除失效绑定', exact: true }).click()
-  await expect(page.locator('#np-execution-trigger')).toContainText(
-    '执行组合缺少角色：reason、explore',
-  )
-  await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeDisabled()
-  await dialog.getByRole('checkbox', { name: '选择 Worker 推理 Worker' }).check()
-  await dialog.getByRole('checkbox', { name: '选择 Worker 探索 Worker' }).check()
-  await expect(dialog.getByRole('button', { name: '保存为默认组合' })).toBeEnabled()
+  await page.locator('#np-title').fill('保留固定 Worker 拒绝草稿')
+  await page.locator('#np-origin-input').fill('不丢失用户原始背景')
+  await dialog.getByRole('button', { name: '创建并启动' }).click()
+  await expect(dialog.getByText('Worker explore (worker-explore) 不可用：model_unconfigured', { exact: true })).toBeVisible()
+  const configuration = dialog.getByRole('link', { name: '前往 Worker 配置' })
+  await expect(configuration).toHaveAttribute('href', '#/console/workers')
+  await expect(configuration).toHaveAttribute('target', '_blank')
+  await expect(page.locator('#np-title')).toHaveValue('保留固定 Worker 拒绝草稿')
+  await expect(page.locator('#np-origin-input')).toHaveValue('不丢失用户原始背景')
   await discardCreation(page)
-  workers = [
-    ...specialistWorkers,
-    {
-      ...specialistWorkers[0]!,
-      id: 'worker-history',
-      display_name: '历史 Worker',
-      task_types: ['bootstrap', 'reason', 'explore'],
-      executor_available: false,
-    },
-  ]
-  await page.setViewportSize({ width: 1440, height: 1000 })
   await page.goto('/#/project-schedules/workers-history')
   await page.getByRole('button', { name: '编辑未来配置' }).click()
   const editor = page.getByRole('dialog', { name: '编辑未来配置', exact: true })
-  await expect(page.locator('#np-execution-trigger')).toContainText('本次组合 · 历史 Worker')
-  if ((await page.locator('#np-execution-trigger').getAttribute('aria-expanded')) !== 'true')
-    await page.locator('#np-execution-trigger').click()
-  await expect(editor.getByRole('checkbox', { name: '选择 Worker 历史 Worker' })).toBeChecked()
-  for (const worker of specialistWorkers)
-    await expect(
-      editor.getByRole('checkbox', { name: `选择 Worker ${worker.display_name}` }),
-    ).not.toBeChecked()
+  await expect(editor.locator('#np-worker-template')).toHaveCount(0)
+  await expect(editor.getByRole('checkbox', { name: /选择 Worker/ })).toHaveCount(0)
+  await expect(editor.locator('#np-proxy-trigger')).toContainText('直接连接')
   await editor.getByRole('button', { name: '保存未来配置' }).click()
   await expect.poll(() => updates.length).toBe(1)
-  expect(updates[0]).toMatchObject({ version: 1, project: { tenant_worker_ids: historicalIds } })
+  expect(updates[0]).toMatchObject({ version: 1, project: { origin: '历史背景', targets: [] } })
+  expect(updates[0]!.project).not.toHaveProperty('tenant_worker_ids')
+  expect(requests.some((request) => /\/(tenant-workers|worker-templates)/.test(request))).toBe(false)
   await expect(editor.getByText('受控历史组合拒绝', { exact: true })).toBeVisible()
 })
 
@@ -503,7 +312,7 @@ test('project dialog preserves edits, nests the library picker, contains focus a
   await expect(dialog).toBeVisible()
   await expect(page.locator('#np-title')).toBeFocused()
   await expect(dialog.getByRole('button', { name: '关闭', exact: true })).toBeVisible()
-  await expect(page.locator('#np-execution-trigger')).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.locator('#np-proxy-trigger')).toHaveAttribute('aria-expanded', 'false')
   await page.keyboard.press('Escape')
   await expect(dialog).not.toBeVisible()
   await expect(trigger).toBeFocused()
@@ -511,7 +320,7 @@ test('project dialog preserves edits, nests the library picker, contains focus a
   await trigger.click()
   await page.locator('#np-title').fill('受控弹窗检查')
   await page.locator('#np-origin-input').fill('保留用户改写的背景与资料说明')
-  await expect(dialog.locator('#np-execution-settings')).not.toBeVisible()
+  await expect(dialog.locator('#np-proxy-settings')).not.toBeVisible()
   await expect(dialog.locator('#np-timing-settings')).not.toBeVisible()
   await page.screenshot({
     path: test.info().outputPath('project-dialog-compact.png'),
@@ -537,10 +346,16 @@ test('project dialog preserves edits, nests the library picker, contains focus a
   await page.locator('.ui-dialog__overlay').click({ position: { x: 4, y: 4 }, force: true })
   await expect(dialog).toBeVisible()
 
+  // 展开当前可编辑的代理字段，保留长表单的滚动与焦点覆盖。
+  await page.locator('#np-proxy-trigger').click()
+  await dialog.getByLabel('连接方式', { exact: true }).click()
+  await page.getByRole('option', { name: 'HTTP 代理', exact: true }).click()
+  await dialog.getByLabel('代理地址', { exact: true }).fill('proxy.example.test')
+  await dialog.getByLabel('代理端口', { exact: true }).fill('8080')
   for (const width of [1440, 480]) {
     await page.setViewportSize({ width, height: 900 })
-    if ((await page.locator('#np-execution-trigger').getAttribute('aria-expanded')) === 'false')
-      await page.locator('#np-execution-trigger').click()
+    if ((await page.locator('#np-proxy-trigger').getAttribute('aria-expanded')) === 'false')
+      await page.locator('#np-proxy-trigger').click()
     const geometry = await dialog.evaluate((element) => {
       const body = element.querySelector<HTMLElement>('.ui-dialog__body')!
       const footer = element.querySelector<HTMLElement>('.ui-dialog__footer')!
@@ -593,19 +408,19 @@ test('project dialog preserves edits, nests the library picker, contains focus a
   await expect(page.locator('#np-explore-deadline')).toHaveCount(0)
   await expect(page.locator('#np-authorization-expires-at')).toHaveCount(0)
   await page.keyboard.press('Escape')
-  await expect(dialog.locator('#np-execution-settings')).not.toBeVisible()
-  await expect(page.locator('#np-execution-trigger')).toBeFocused()
+  await expect(dialog.locator('#np-proxy-settings')).not.toBeVisible()
+  await expect(page.locator('#np-proxy-trigger')).toBeFocused()
   await dialog.getByRole('button', { name: '创建并启动' }).click()
   expect(payloads).toHaveLength(1)
   expect(payloads[0]).toMatchObject({
     origin: '保留用户改写的背景与资料说明',
     scenario: 'goal-driven-v1',
-    tenant_worker_ids: ['worker-check'],
     library_keys: [],
     explore_deadline: null,
     authorization_expires_at: null,
   })
   expect(payloads[0]).not.toHaveProperty('targets')
+  expect(payloads[0]).not.toHaveProperty('tenant_worker_ids')
   await expect(dialog.getByText('受控字段拒绝', { exact: true })).toBeVisible()
   await expect(page.locator('#np-title')).toHaveValue('受控弹窗检查')
   await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeEnabled()
@@ -669,7 +484,6 @@ test('scheduled creation preserves edited content, exposes settings on demand an
       origin: '仅验证界面，不执行任务',
       goal: '查看未来配置',
       scenario: 'goal-driven-v1',
-      tenant_worker_ids: ['worker-check'],
       targets: [],
       authorization_expires_at: null,
     },
@@ -777,12 +591,13 @@ test('scheduled creation preserves edited content, exposes settings on demand an
       project: { origin: '用户自行改写的背景', goal: '用户自行改写的目标' },
     })
     expect(previews.at(-1)!.project).not.toHaveProperty('targets')
+    expect(previews.at(-1)!.project).not.toHaveProperty('tenant_worker_ids')
     await dialog.getByRole('button', { name: '完成设置', exact: true }).click()
     await expect(page.locator('#np-timing-trigger')).toContainText('Asia/Shanghai')
     await expect(page.locator('#np-timing-trigger')).toContainText(
       mode === 'once' ? '2099-06-01 09:00' : '14:30',
     )
-    await expect(page.locator('#np-execution-trigger')).not.toContainText('触发将受阻')
+    await expect(page.locator('#np-proxy-trigger')).toContainText('直接连接')
   }
   expect(previews.at(-1)).toMatchObject({ local_time: '14:30', weekdays: [0, 1], max_runs: 2 })
   await page.screenshot({ path: test.info().outputPath('schedule-timing.png'), fullPage: true })
@@ -813,6 +628,7 @@ test('scheduled creation preserves edited content, exposes settings on demand an
     },
   })
   expect(submissions[0]!.project).not.toHaveProperty('targets')
+  expect(submissions[0]!.project).not.toHaveProperty('tenant_worker_ids')
   expect(submissions[0].request_id).toBeTruthy()
   await dialog.getByRole('button', { name: '取消', exact: true }).click()
   await page
@@ -868,7 +684,7 @@ test('once stop options use the plan timezone, isolate mode drafts and keep the 
   await dialog.getByRole('button', { name: /目标驱动探索/ }).click()
   await expect(scene).toHaveAttribute('open')
   await dialog.locator('.project-materials > summary').click()
-  await page.locator('#np-execution-trigger').click()
+  await page.locator('#np-proxy-trigger').click()
   for (const text of ['场景 ·', '自由描述已有信息', '自由描述希望达成的目标', '文件先加入临时批次', '文件先进入临时批次', '普通上传按原始字节保存', '项目只会使用这里选择的 Tenant Worker', '探索场景 (Scenario)', '执行边界'])
     await expect(dialog.getByText(text, { exact: false })).toHaveCount(0)
   await expect(page.locator('#np-authorization-expires-at')).toHaveCount(0)
@@ -955,7 +771,7 @@ test('historical once rescheduling and recurring edits preserve or explicitly cl
   const recurring = { ...base, id: 'recurring-history', mode: 'daily', project_id: null,
     local_time: '09:00', project: {
       title: '历史重复计划', origin: '历史背景', goal: '历史目标', scenario: 'goal-driven-v1',
-      tenant_worker_ids: ['worker-check'], targets: [],
+      targets: [],
       explore_deadline: deadline, authorization_expires_at: authorization,
     } }
   const updates: Array<Record<string, unknown>> = []
@@ -972,8 +788,8 @@ test('historical once rescheduling and recurring edits preserve or explicitly cl
     else await route.fulfill({ status: 503, json: { detail: '禁止真实计划操作' } })
   })
   await page.goto('/#/project-schedules/once-history')
-  await page.getByRole('button', { name: '改期', exact: true }).click()
-  const reschedule = page.getByRole('dialog', { name: '调整单次启动时间' })
+  await page.getByRole('button', { name: '改期与代理设置', exact: true }).click()
+  const reschedule = page.getByRole('dialog', { name: '调整单次启动时间与代理设置' })
   await expect(reschedule.getByText(/已有授权到期：2099\/6\/3 10:30:37 Asia\/Shanghai/)).toBeVisible()
   await expect(page.locator('#schedule-start')).toHaveValue('2099-06-01T09:00')
   await expect(page.locator('#schedule-stop')).toHaveValue('2099-06-01T10:30')
@@ -981,28 +797,28 @@ test('historical once rescheduling and recurring edits preserve or explicitly cl
   expect(await reschedule.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(false)
   await page.screenshot({ path: test.info().outputPath('historical-once-narrow.png'), fullPage: true })
   await page.setViewportSize({ width: 1440, height: 900 })
-  await reschedule.getByRole('button', { name: '保存改期' }).click()
+  await reschedule.getByRole('button', { name: '保存改期与代理设置' }).click()
   await expect.poll(() => updates.length).toBe(1)
   expect(updates[0]).toMatchObject({ start_at: base.start_at, version: 1 })
   expect(updates[0]).not.toHaveProperty('explore_deadline')
   expect(updates[0]).not.toHaveProperty('authorization_expires_at')
   await page.locator('#schedule-start').fill('2099-06-01T10:31')
-  await reschedule.getByRole('button', { name: '保存改期' }).click()
+  await reschedule.getByRole('button', { name: '保存改期与代理设置' }).click()
   await expect(reschedule.getByText('停止时间必须严格晚于启动时间。')).toBeVisible()
   expect(updates).toHaveLength(1)
   await page.locator('#schedule-start').fill('2099-06-01T09:30')
   await page.locator('#schedule-stop').fill('2099-06-01T11:30')
-  await reschedule.getByRole('button', { name: '保存改期' }).click()
+  await reschedule.getByRole('button', { name: '保存改期与代理设置' }).click()
   await expect.poll(() => updates.length).toBe(2)
   expect(updates[1]).toMatchObject({ start_at: '2099-06-01T09:30:00+08:00', explore_deadline: '2099-06-01T11:30:00+08:00' })
   await page.locator('#schedule-stop-mode').click()
   await page.getByRole('option', { name: '不限制停止时间', exact: true }).click()
   await page.locator('#schedule-start').fill('2099-06-04T09:00')
-  await reschedule.getByRole('button', { name: '保存改期' }).click()
+  await reschedule.getByRole('button', { name: '保存改期与代理设置' }).click()
   await expect(reschedule.getByText(/启动时间必须早于已有授权到期时间/)).toBeVisible()
   expect(updates).toHaveLength(2)
   await page.locator('#schedule-start').fill('2099-06-01T09:30')
-  await reschedule.getByRole('button', { name: '保存改期' }).click()
+  await reschedule.getByRole('button', { name: '保存改期与代理设置' }).click()
   await expect.poll(() => updates.length).toBe(3)
   expect(updates[2]).toMatchObject({ explore_deadline: null })
   expect(updates[2]).not.toHaveProperty('authorization_expires_at')
@@ -1010,13 +826,15 @@ test('historical once rescheduling and recurring edits preserve or explicitly cl
   await page.goto('/#/project-schedules/recurring-history')
   await page.getByRole('button', { name: '编辑未来配置' }).click()
   const editor = page.getByRole('dialog', { name: '编辑未来配置', exact: true })
-  await expect(editor.locator('#np-execution-trigger')).toContainText('受控 Worker')
-  if (await page.locator('#np-execution-trigger').getAttribute('aria-expanded') !== 'true')
-    await page.locator('#np-execution-trigger').click()
+  await expect(editor.locator('#np-proxy-trigger')).toContainText('直接连接')
+  if (await page.locator('#np-timing-trigger').getAttribute('aria-expanded') !== 'true')
+    await page.locator('#np-timing-trigger').click()
+  await expect(editor.locator('#np-proxy-settings #np-explore-deadline')).toHaveCount(0)
   await expect(editor.getByRole('heading', { name: '既有期限' })).toBeVisible()
   await editor.getByRole('button', { name: '保存未来配置' }).click()
   await expect.poll(() => updates.length).toBe(4)
   expect(updates[3]).toMatchObject({ project: { explore_deadline: deadline, authorization_expires_at: authorization }, version: 1 })
+  expect(updates[3]!.project).not.toHaveProperty('tenant_worker_ids')
   await page.locator('#np-explore-deadline').fill('')
   await page.locator('#np-authorization-expires-at').fill('')
   await editor.getByRole('button', { name: '保存未来配置' }).click()

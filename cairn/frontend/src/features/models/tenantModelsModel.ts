@@ -26,14 +26,6 @@ export const tenantModelDraft = (model: TenantModel): TenantModelDraft => ({
   enabled: model.enabled,
 })
 
-export const selectAfterModelListChange = (
-  models: TenantModel[],
-  selectedId: string,
-): string => {
-  if (models.some(model => model.id === selectedId)) return selectedId
-  return models[0]?.id || ''
-}
-
 const headerName = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
 const reservedHeaders = new Set([
   'authorization', 'x-api-key', 'host', 'content-length',

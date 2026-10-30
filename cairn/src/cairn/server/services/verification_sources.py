@@ -1,4 +1,4 @@
-"""只读取所选漏洞的原文和直接证据，不遍历 provenance 或运行资料。"""
+"""只读取所选漏洞的原文和直接证据，不扩展到无关历史或运行资料。"""
 
 from __future__ import annotations
 
@@ -48,6 +48,7 @@ def artifact_is_internal_file(artifact) -> bool:
         if any(
             root == path or root in path.parents for root in (
                 PurePosixPath("/home/kali/.pi"),
+                PurePosixPath("/home/kali/.cairn"),
                 PurePosixPath("/home/kali/workspace/.cairn/pi"),
                 PurePosixPath("/tmp/cairn-prompts"),
                 PurePosixPath("/opt/cairn/pi-agent"),
@@ -101,7 +102,7 @@ def _historical_resource_path(resource) -> str:
         raise HTTPException(409, "来源项目资料无法作为复测输入路径") from exc
 
 
-def _project_context(conn, project, missing: list[dict], *, resource_allowed) -> dict:
+def _project_context(conn, project, missing: list[dict], *, resource_allowed, include_context_materials: bool) -> dict:
     context = {
         "project_id": project["id"], "title": project["title"],
         "origin": None, "goal": None, "targets": [], "resource_refs": [],
@@ -141,6 +142,10 @@ def _project_context(conn, project, missing: list[dict], *, resource_allowed) ->
             "material_role": "historical_input", "available": False,
         }
         context["resource_refs"].append(item)
+        if not include_context_materials:
+            missing.append(_missing("project_context_not_reused_for_target", "project_resource", resource["id"],
+                                    "本次已明确指定目标，不自动复制来源环境资料或目标身份；原件仍保留。"))
+            continue
         try:
             path = _historical_resource_path(resource)
             validate_resource_content(_project_resource_disk_path(project["id"], resource["id"]), path=resource["path"],
@@ -159,7 +164,8 @@ def _project_context(conn, project, missing: list[dict], *, resource_allowed) ->
 
 def read_platform_vulnerability_source(conn, project_id: str, vulnerability_id: str,
                                       principal: RequestPrincipal, *, artifact_allowed, resource_allowed,
-                                      observation_id: str | None = None, for_creation: bool = False) -> tuple[dict, list]:
+                                      observation_id: str | None = None, for_creation: bool = False,
+                                      include_context_materials: bool = True) -> tuple[dict, list]:
     project = source_project(conn, project_id, principal, for_creation=for_creation)
     vulnerability = conn.execute(
         "SELECT * FROM vulnerabilities WHERE project_id = ? AND id = ?", (project_id, vulnerability_id),
@@ -176,11 +182,12 @@ def read_platform_vulnerability_source(conn, project_id: str, vulnerability_id: 
         "vulnerability": _fields(vulnerability, "id title severity vuln_type target confidence status remediation repro_steps fingerprint identity_json created_at updated_at"),
         "evidence": selected,
         "facts": [], "observations": [], "verifications": [], "fact_evidence": [],
-        "history_path": f"/projects/{project_id}/vulnerabilities/{vulnerability_id}/provenance",
+        "history_path": f"/projects/{project_id}/vulnerabilities/{vulnerability_id}",
         "artifacts": [], "missing_materials": [],
     }
     missing = snapshot["missing_materials"]
-    snapshot["project_context"] = _project_context(conn, project, missing, resource_allowed=resource_allowed)
+    snapshot["project_context"] = _project_context(conn, project, missing, resource_allowed=resource_allowed,
+                                                   include_context_materials=include_context_materials)
     observations = conn.execute(
         "SELECT * FROM vulnerability_observations WHERE project_id = ? AND vulnerability_id = ? ORDER BY observed_at, id",
         (project_id, vulnerability_id),
@@ -196,10 +203,14 @@ def read_platform_vulnerability_source(conn, project_id: str, vulnerability_id: 
     ).fetchall()
     snapshot["verifications"] = [
         {**_fields(row, "id vulnerability_id observation_id intent_id fact_id verifier_task_run_id verifier_worker discovery_task_run_id discovery_worker independence_level outcome created_at"),
-         "detail_path": snapshot["history_path"]}
+         "detail_path": f"{snapshot['history_path']}?observation_id={row['observation_id']}"}
         for row in verifications
     ]
     selected_observation = next((row for row in observations if row["id"] == selected["observation_id"]), None)
+    # 步骤与证据绑定同一个已选 Observation，不从最新发现或 canonical 正文猜关联。
+    selected["reproduction_steps"] = (
+        json.loads(selected_observation["reproduction_steps_json"]) if selected_observation is not None else []
+    )
     fact_id = selected_observation["source_fact_id"] if selected_observation is not None else vulnerability["source_fact_id"]
     references: dict[str, list[dict]] = {}
 
@@ -213,6 +224,30 @@ def read_platform_vulnerability_source(conn, project_id: str, vulnerability_id: 
     source_id = selected["observation_id"] or vulnerability_id
     for ref in evidence_refs(EvidenceItem.model_validate(item) for item in selected["evidence_items"]):
         reference(ref.artifact_id, source_type, source_id, ref.pointer)
+    from .flow_evidence import flow_metadata_allowed, resolve_flow_evidence
+
+    snapshot["flow_evidence"] = {}
+    for item in selected["evidence_items"]:
+        flow_id = item.get("flow_id")
+        if not flow_id or flow_id in snapshot["flow_evidence"]:
+            continue
+        try:
+            flow = resolve_flow_evidence(conn, project_id, flow_id)
+        except HTTPException as exc:
+            if exc.status_code not in {404, 409}:
+                raise
+            missing.append(_missing("source_flow_unreadable", "flow", flow_id, "历史流量未封存或原件不可读取；未注册为本轮新流量。"))
+            continue
+        if not flow_metadata_allowed(conn, flow, public=False):
+            snapshot["flow_evidence"][flow_id] = {key: flow[key] for key in (
+                "flow_id", "project_id", "scope", "revision", "state", "representation", "record_sha256", "projections",
+            )}
+            missing.append(_missing("source_flow_not_input", "flow", flow_id, "历史流量结构化元信息未通过内部输入边界；原件未改写。"))
+            continue
+        snapshot["flow_evidence"][flow_id] = {**flow, "material_role": "historical_input"}
+        for side, projection in flow["projections"].items():
+            if projection is not None:
+                reference(projection["body_artifact_id"], "flow", flow_id, side)
     if fact_id:
         fact = conn.execute("SELECT * FROM facts WHERE project_id = ? AND id = ?", (project_id, fact_id)).fetchone()
         if fact is None:
@@ -234,8 +269,9 @@ def read_platform_vulnerability_source(conn, project_id: str, vulnerability_id: 
             "SELECT artifact_id, pointer, verifier_run_id FROM fact_evidence "
             "WHERE project_id = ? AND fact_id = ? ORDER BY created_at, artifact_id, pointer", (project_id, key),
         ).fetchall()]
-        for ref in context_fact["evidence_refs"]:
-            reference(ref["artifact_id"], "project_context", key, ref["pointer"])
+        if include_context_materials:
+            for ref in context_fact["evidence_refs"]:
+                reference(ref["artifact_id"], "project_context", key, ref["pointer"])
     if not observations:
         missing.append(_missing("observations_not_recorded", "vulnerability", vulnerability_id, "来源未记录发现 Observation，不能据此宣称已有完整发现链。"))
     if not fact_id:
@@ -298,6 +334,7 @@ def save_platform_vulnerability_source(conn, project_id: str, snapshot: dict, ar
                      "source": snapshot["evidence"]["source"],
                      "item_ids": [item["id"] for item in snapshot["evidence"]["evidence_items"]]},
         "project_context": {"snapshot_path": SOURCE_REPORT_PATH, "pointer": "/project_context"},
+        "flow_evidence": {"snapshot_path": SOURCE_REPORT_PATH, "pointer": "/flow_evidence", "material_role": "historical_input"},
         "artifacts": snapshot["artifacts"], "resources": snapshot["project_context"]["resource_refs"],
         "missing_materials": snapshot["missing_materials"],
         "notice": snapshot["notice"],

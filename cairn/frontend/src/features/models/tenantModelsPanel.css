@@ -1,0 +1,149 @@
+.tenant-models-panel {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.model-table-container {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.model-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: var(--text-sm);
+}
+
+.model-table th,
+.model-table td {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+
+.model-table thead {
+  background: var(--bg-surface);
+  color: var(--text-muted);
+}
+
+.model-table th {
+  font-weight: var(--font-medium);
+}
+
+.model-table tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.model-table th[scope='row'] {
+  min-width: 130px;
+  max-width: 280px;
+  overflow-wrap: anywhere;
+}
+
+.model-table td:last-child {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.model-id {
+  margin-top: var(--space-1);
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+}
+
+.tenant-model-dialog .model-form,
+.tenant-model-dialog .model-fields,
+.tenant-model-dialog .model-advanced-body {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.tenant-model-dialog .model-fields {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.tenant-model-dialog .model-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: end;
+  gap: var(--space-4);
+}
+
+.tenant-model-dialog .model-discovery-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--space-3);
+}
+
+.tenant-model-dialog .model-enabled {
+  min-height: var(--control-height);
+  display: flex;
+  align-items: center;
+}
+
+.tenant-model-dialog .model-advanced {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-2);
+}
+
+.tenant-model-dialog .model-advanced summary {
+  min-height: var(--control-height);
+  align-content: center;
+  cursor: pointer;
+  font-weight: var(--font-medium);
+}
+
+.tenant-model-dialog .model-advanced-body {
+  padding-top: var(--space-3);
+}
+
+.tenant-model-dialog .model-advanced-body > .ui-button {
+  justify-self: start;
+}
+
+.tenant-model-dialog .model-header-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: var(--space-2);
+}
+
+.tenant-model-dialog .field-error {
+  margin: 0;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.tenant-model-dialog .model-test-result {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.tenant-model-dialog .model-test-result p {
+  margin-top: 0;
+}
+
+.tenant-model-dialog .model-test-result pre {
+  margin: 0;
+  max-height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: var(--text-sm)/1.55 var(--font-mono);
+}
+
+@media (max-width: 640px) {
+  .tenant-model-dialog .model-form-grid,
+  .tenant-model-dialog .model-discovery-row,
+  .tenant-model-dialog .model-header-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

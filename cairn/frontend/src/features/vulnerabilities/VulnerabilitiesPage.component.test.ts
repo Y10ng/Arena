@@ -76,6 +76,8 @@ const vulnerability: Vulnerability = {
   target: 'GET /users/2?password=clear-text',
   confidence: 0.9,
   status: 'new',
+  can_delete: true,
+  delete_block_reason: null,
   source_fact_id: null,
   remediation: '',
   evidence_items: [],

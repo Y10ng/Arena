@@ -1,0 +1,1 @@
+import{Ht as e}from"./ui-CApNYhjB.js";var t=t=>structuredClone(e(t)),n=e=>e instanceof Error?e.message:String(e||`未知错误`);export{n,t};

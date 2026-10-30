@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -612,14 +613,16 @@ def deactivate_project_resource_record(project_id: str, resource_id: str) -> Non
 
 
 def create_project_resource_batch(*, tenant_id: str, user_id: str | None, integration_id: str | None = None,
-                                  source_request_id: str | None = None) -> ProjectResourceBatch:
+                                  source_request_id: str | None = None, conn=None) -> ProjectResourceBatch:
     if not tenant_id:
         raise HTTPException(403, "Tenant context required")
-    cleanup_expired_project_resource_batches()
+    if conn is None:
+        cleanup_expired_project_resource_batches()
     batch_id = f"prb_{uuid4().hex}"
     created = datetime.now(timezone.utc)
     expires = created + timedelta(seconds=project_resource_batch_ttl_seconds())
-    with get_conn() as conn:
+    # Agent 将持久附件转交原业务时，批次与业务受理共用事务，失败不留下半份受理。
+    with (get_conn() if conn is None else nullcontext(conn)) as conn:
         # 用户与集成分别锁定真实主体，不能用伪造 user_id 混用归属或配额。
         owner_column, owner_id = _batch_owner(user_id, integration_id)
         _lock_batch_owner(conn, owner_column, owner_id)

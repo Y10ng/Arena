@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { CandidateSpool } from '../dist/candidate-spool.js';
 import { parseRequest } from '../dist/protocol.js';
 import { runRequest } from '../dist/runner.js';
-import { fixture } from './fixtures.mjs';
+import { fixture, parseFixtureRequest } from './fixtures.mjs';
 
 const MAGIC = Buffer.from('CRNCND01', 'ascii');
 const spoolRoot = '/tmp/cairn-prompts';
@@ -59,8 +59,8 @@ async function requestWithSpool(t, overrides = {}) {
   const captureId = randomUUID();
   const path = join(spoolRoot, `pi-candidates-${captureId}.bin`);
   t.after(() => rm(path, { force: true }));
-  request.capabilities = { candidate_capture: capability(path, captureId, overrides) };
-  return { request: parseRequest(request), path };
+  request.capabilities = { ...request.capabilities, candidate_capture: capability(path, captureId, overrides) };
+  return { request: parseFixtureRequest(request), path };
 }
 
 test('candidate capability is required and strictly bounds identity, paths, literals, and sizes', async (t) => {
@@ -72,11 +72,11 @@ test('candidate capability is required and strictly bounds identity, paths, lite
     ['max_candidates', 17], ['max_candidate_bytes', 2 * 1024 * 1024 + 1],
     ['max_manifest_bytes', 16 * 1024 + 1], ['max_spool_bytes', 34 * 1024 * 1024 + 1],
   ]) {
-    assert.throws(() => parseRequest({ ...request, capabilities: { candidate_capture: { ...original, [field]: value } } }), { code: 'invalid_request', path: `capabilities.candidate_capture.${field}` });
+    assert.throws(() => parseFixtureRequest({ ...request, capabilities: { ...request.capabilities, candidate_capture: { ...original, [field]: value } } }), { code: 'invalid_request', path: `capabilities.candidate_capture.${field}` });
   }
-  assert.throws(() => parseRequest({ ...request, capabilities: { candidate_capture: { ...original, spool_path: join(request.cwd, 'candidate.bin') } } }), { code: 'invalid_request', path: 'capabilities.candidate_capture.spool_path' });
-  assert.throws(() => parseRequest({ ...request, capabilities: { candidate_capture: { ...original, forbidden_literals: Array.from({ length: 33 }, (_, index) => `secret-${index}`) } } }), { code: 'invalid_request', path: 'capabilities.candidate_capture.forbidden_literals' });
-  assert.throws(() => parseRequest({ ...request, capabilities: { candidate_capture: { ...original, unexpected: true } } }), { code: 'invalid_request', path: 'capabilities.candidate_capture' });
+  assert.throws(() => parseFixtureRequest({ ...request, capabilities: { ...request.capabilities, candidate_capture: { ...original, spool_path: join(request.cwd, 'candidate.bin') } } }), { code: 'invalid_request', path: 'capabilities.candidate_capture.spool_path' });
+  assert.throws(() => parseFixtureRequest({ ...request, capabilities: { ...request.capabilities, candidate_capture: { ...original, forbidden_literals: Array.from({ length: 33 }, (_, index) => `secret-${index}`) } } }), { code: 'invalid_request', path: 'capabilities.candidate_capture.forbidden_literals' });
+  assert.throws(() => parseFixtureRequest({ ...request, capabilities: { ...request.capabilities, candidate_capture: { ...original, unexpected: true } } }), { code: 'invalid_request', path: 'capabilities.candidate_capture' });
 });
 
 test('production explore schema and null binding have cross-language canonical digest goldens', async (t) => {
@@ -128,7 +128,7 @@ for (const protocol of ['anthropic-messages', 'openai-chat-completions', 'openai
     const { request, candidateSpoolPath } = await fixture(t, protocol, [
       { tools: [{ name: 'submit_result', rawArgChunks: parts }] },
     ]);
-    const result = await runRequest(parseRequest(request));
+    const result = await runRequest(parseFixtureRequest(request));
     assert.equal(result.status, 'succeeded', JSON.stringify(result));
     const frame = decodeFrames(await readFile(candidateSpoolPath)).find((entry) => entry.manifest.record_kind === 'candidate');
     assert.deepEqual(frame.raw, Buffer.from(raw));
@@ -333,7 +333,7 @@ test('runner durably captures every malformed submit_result before SDK argument 
   const { request, calls, candidateSpoolPath } = await fixture(t, 'openai-chat-completions', [
     { tools: [{ name: 'submit_result', rawArgs: malformed }] },
   ]);
-  const result = await runRequest(parseRequest(request));
+  const result = await runRequest(parseFixtureRequest(request));
   assert.equal(result.status, 'failed', JSON.stringify(result));
   assert.equal(result.error.code, 'submission_invalid');
   assert.equal(result.error.issue.keyword, 'strict_json');
@@ -354,7 +354,7 @@ test('SDK awaits candidate fsync before submit_result tool execution starts', as
   const raw = '{"accepted":true,"data":{"status":"ok"}}';
   const { request, candidateSpoolPath } = await fixture(t, 'openai-chat-completions');
   let observedRaw;
-  const result = await runRequest(parseRequest(request), { audit: (event) => {
+  const result = await runRequest(parseFixtureRequest(request), { audit: (event) => {
     if (event.event === 'tool_execution_start' && event.tool_name === 'submit_result') {
       observedRaw = decodeFrames(readFileSync(candidateSpoolPath))[0].raw;
     }
@@ -368,7 +368,7 @@ test('schema-invalid attempts retain exact bytes and safe schema outcomes across
   const { request, candidateSpoolPath } = await fixture(t, 'openai-chat-completions', [
     { tools: [{ name: 'submit_result', args: { accepted: true, data: {} } }] },
   ]);
-  const result = await runRequest(parseRequest(request));
+  const result = await runRequest(parseFixtureRequest(request));
   assert.equal(result.error.code, 'submission_invalid');
   assert.equal(result.error.issue.keyword, 'additionalProperties');
   assert.equal(result.error.issue.path, '$');
@@ -395,7 +395,7 @@ test('artifact injection failure preserves pre-injection candidate and registere
   ]);
   workspace = request.cwd;
   await writeFile(join(workspace, 'evidence.log'), 'before');
-  const result = await runRequest(parseRequest(request));
+  const result = await runRequest(parseFixtureRequest(request));
   assert.equal(result.status, 'failed');
   assert.equal(result.result, null);
   assert.equal(result.submission_id, null);
@@ -428,7 +428,7 @@ test('runner admission failure stops before tool execution and never starts a re
     { tools: [{ name: 'submit_result', rawArgs: raw }] },
   ]);
   const audit = [];
-  const result = await runRequest(parseRequest(request), { audit: (event) => audit.push(event) });
+  const result = await runRequest(parseFixtureRequest(request), { audit: (event) => audit.push(event) });
   assert.equal(result.status, 'failed');
   assert.equal(result.error.code, 'candidate_admission_rejected');
   assert.equal(calls.length, 1);

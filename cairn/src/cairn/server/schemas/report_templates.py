@@ -6,6 +6,8 @@ from re import fullmatch
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from cairn.report_template_contract import parse_report_template
+
 
 class ReportTemplateUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -39,6 +41,7 @@ class ReportTemplateUpdate(BaseModel):
             raise ValueError("must not be empty")
         if len(value.encode("utf-8")) > 500_000:
             raise ValueError("must be 500000 UTF-8 bytes or fewer")
+        parse_report_template(value)
         # Markdown 缩进和末尾空格有语义，保存与 digest 均保留提交的正文。
         return value
 
@@ -80,6 +83,9 @@ class ReportTemplate(BaseModel):
     markdown_content: str | None = None
     digest_sha256: str | None = None
     compatibility_profiles: list[str] = Field(default_factory=list)
+    is_default: bool
+    supports_single_vulnerability: bool
+    validation_error: str | None
     created_at: str
     updated_at: str
 
@@ -90,6 +96,9 @@ class ReportTemplateCatalogEntry(BaseModel):
     description: str = ""
     digest_sha256: str
     compatibility_profiles: list[str] = Field(default_factory=list)
+    is_default: bool
+    supports_single_vulnerability: bool
+    validation_error: str | None
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

@@ -65,6 +65,9 @@
           :key="identity"
           :content="content"
           :anchor-prefix="readerId"
+          :identity="identity"
+          :images="images"
+          :load-image="loadImage"
           @headings="updateHeadings"
         />
         <pre v-else class="report-reader-raw">{{ content }}</pre>
@@ -78,11 +81,14 @@ import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { Button } from '@/components/ui'
 import SafeReportMarkdown from './SafeReportMarkdown.vue'
 import type { ReportHeading } from './safeReportMarkdown'
+import type { ReportDisplayImage, ReportImageLoader } from './reportImages'
 
 const props = withDefaults(
   defineProps<{
     content: string
     identity: string
+    images?: ReportDisplayImage[]
+    loadImage?: ReportImageLoader
     ready?: boolean
   }>(),
   { ready: true },
@@ -282,11 +288,14 @@ onBeforeUnmount(() => {
 }
 .report-reader-scroll :deep(.safe-report-markdown) {
   max-width: none;
-  font-size: 15px;
-  line-height: 1.75;
+  font-size: 14px;
+  line-height: 23px;
+}
+.report-reader-scroll :deep(.safe-report-markdown > div > :is(p, ul, ol, blockquote)) {
+  max-width: 55em;
 }
 .report-reader-scroll :deep(h1) {
-  font-size: 22px;
+  font-size: 20px;
 }
 .report-reader-scroll :deep(h2) {
   font-size: 18px;

@@ -25,18 +25,21 @@ from cairn.server.schemas.verification_requests import (
 from cairn.server.services import audit_task_runs, verification_requests as service
 from cairn.server.services.audit_events import create_agent_event_record
 from cairn.server.services.event_payloads import agent_event_to_model, result_event_to_model
-from test_external_verification_evidence import execution
+from test_external_verification_evidence import execution, private_postgres, verification_database
 
 
-@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("version", [1, 2, 3])
 def test_accepted_historical_result_replay_preserves_digest_and_archive(execution, version):
     user, machine, _model, _worker, detail, claim = execution
     result = {"outcome": "insufficient_evidence", "summary": "历史结果",
               "tested_scope": "历史本地材料", "notes": "原始说明\r\n \t",
               "limitations": ["未执行目标"], "reason_code": None, "evidence_refs": []}
-    if version == 2:
+    if version in {2, 3}:
         result.pop("evidence_refs")
-        result.update(schema_version=2, evidence_items=[])
+        result.update(schema_version=version, evidence_items=[])
+    if version == 3:
+        result.pop("notes")
+        result.update(key_evidence=[], test_steps=[])
     submission = VerificationResultSubmission(
         project_id=detail["project_id"], task_run_id=claim["task_run"]["id"],
         execution_generation=claim["execution_generation"], claim_token=claim["claim_token"], result=result,
@@ -54,8 +57,11 @@ def test_accepted_historical_result_replay_preserves_digest_and_archive(executio
     projected = service.submit_verification_result(detail["id"], submission, machine)["result"]
     assert projected == (result if version == 1 else {**result, "evidence_refs": []})
     report = service.verification_report(detail["id"], user)
-    assert result["notes"] in report and result["tested_scope"] in report
-    assert "历史记录未单独记录判断依据" in report and "### 步骤" not in report
+    assert result["tested_scope"] in report and result["limitations"][0] in report
+    if version != 3:
+        assert result["notes"] in report and "历史记录未单独记录判断依据" in report
+    assert "历史结果未记录修复建议" in report and "remediation" not in projected
+    assert "### 步骤" not in report
     _confirm_stopped(detail, claim)
     with db.get_conn() as conn:
         before_delete = dict(conn.execute("SELECT result_json,terminal_digest,terminal_at,accepted_at FROM verification_requests WHERE id = ?",
@@ -104,7 +110,7 @@ class ReceiptClient:
 
 
 def run_synthetic_task(monkeypatch, client, *, process_cancelled=False, claim=None, cancellation=None, on_execute=None,
-                       worker_data=None):
+                       worker_data=None, on_build=None):
     claim = claim or {
         "request_id": "synthetic-request", "project_id": "synthetic-project",
         "task_run": {"id": "synthetic-run", "session_id": SESSION},
@@ -122,7 +128,8 @@ def run_synthetic_task(monkeypatch, client, *, process_cancelled=False, claim=No
         "kind": "external_verification_result", "data": {
             "outcome": "insufficient_evidence", "summary": "合成证据不足",
             "tested_scope": "没有访问目标", "key_evidence": [], "test_steps": [],
-            "schema_version": 3, "limitations": ["没有执行实际复测"], "evidence_items": [],
+            "schema_version": 4, "remediation": "未执行实际复测，不能给出针对性修复建议。",
+            "limitations": ["没有执行实际复测"], "evidence_items": [],
         },
     }
     if worker_data is not None:
@@ -147,7 +154,8 @@ def run_synthetic_task(monkeypatch, client, *, process_cancelled=False, claim=No
         cancellation.finish_execution(managed)
         return process
 
-    driver = SimpleNamespace(prepare_session=lambda: session, build_execute=lambda *a, **k: "synthetic-invocation")
+    driver = SimpleNamespace(prepare_session=lambda: session,
+                             build_execute=on_build or (lambda *a, **k: "synthetic-invocation"))
     monkeypatch.setattr(task, "get_driver", lambda kind: driver)
     monkeypatch.setattr(task, "read_external_verification_instructions", lambda: "合成指引")
     monkeypatch.setattr(task, "record_prompt_rendered", lambda *a, **k: None)
@@ -157,8 +165,9 @@ def run_synthetic_task(monkeypatch, client, *, process_cancelled=False, claim=No
     monkeypatch.setattr(task, "record_process_artifacts", lambda *a, **k: None)
     outcome = task.run_external_verification_task(
         SimpleNamespace(runtime=SimpleNamespace(interval=3600), tasks=SimpleNamespace(explore=SimpleNamespace(timeout=60, conclude_timeout=10))),
-        client, SimpleNamespace(ensure_running=lambda *a: "synthetic-container"),
-        SimpleNamespace(project=SimpleNamespace(id=project_id)),
+        client, SimpleNamespace(ensure_running=lambda *a: "synthetic-container",
+                                prepare_task_execution=lambda *a: None, stop_task_execution=lambda *a: None),
+        SimpleNamespace(project=SimpleNamespace(id=project_id, scenario_snapshot={})),
         SimpleNamespace(name="synthetic-worker", type="pi"), cancellation, run_id,
         claim=claim, container_runtime=None, candidate_outbox=None,
     )
@@ -440,7 +449,7 @@ def _confirm_stopped(detail, claim, *, confirmed=True, cleanup="removed"):
                      (json.dumps(context), detail["project_id"], run["id"]))
 
 
-def test_v3_production_handle_resolution_acceptance_and_report(execution, monkeypatch):
+def test_v4_production_handle_resolution_acceptance_and_report(execution, monkeypatch):
     from cairn.dispatcher.tasks.common_base import ProcessArtifactRecord
     from cairn.server.services.audit_artifacts import _artifact_disk_path_from_row
     from test_external_verification_evidence import _upload
@@ -464,8 +473,9 @@ def test_v3_production_handle_resolution_acceptance_and_report(execution, monkey
              {"id": "partial", "kind": "http", "source": "capture", "request": {"artifact_handle": "local-0"}}]
     items.extend({"id": f"other-{index}", "kind": "artifact", "source": "capture",
                   "artifact": {"artifact_handle": f"local-{index}"}} for index in range(2, len(artifacts)))
-    data = {"schema_version": 3, "outcome": "not_reproduced", "summary": "所测资源拒绝访问，本次未复现。",
-            "tested_scope": "仅合成角色与所选资源", "limitations": ["没有访问真实目标"],
+    data = {"schema_version": 4, "outcome": "not_reproduced", "summary": "所测资源**拒绝访问**，本次未复现。",
+            "remediation": "- 保持统一对象归属检查。\n- 使用原角色回归允许与拒绝路径。\n\n```text\n未验证具体代码根因\n```\n",
+            "tested_scope": "| 身份 | 范围 |\n| --- | --- |\n| 合成角色 | 所选资源 |", "limitations": ["没有访问真实目标"],
             "key_evidence": [{"reason": "响应拒绝访问，仅支持本次未复现。", "evidence_item_ids": ["exchange"]}],
             "test_steps": [
                 {"action": "登记合成请求与响应", "observation": "收到拒绝访问响应", "evidence_item_ids": ["exchange", "partial"]},
@@ -490,8 +500,12 @@ def test_v3_production_handle_resolution_acceptance_and_report(execution, monkey
     assert service.get_verification_request(detail["id"], user)["can_delete"] is False
     assert "尚未回收" in service.get_verification_request(detail["id"], user)["delete_block_reason"]
     report = service.verification_report(detail["id"], user)
-    assert [line for line in report.splitlines() if line.startswith("## ")] == ["## 一、结论", "## 二、关键证据", "## 三、测试过程"]
-    assert "影响判断的条件与限制：" not in report and "实际测试范围：" not in report
+    assert [line for line in report.splitlines() if line.startswith("## ")] == ["## 一、漏洞概述", "## 二、复现过程与数据包", "## 三、修复建议"]
+    for key in ("summary", "tested_scope", "remediation"):
+        assert submitted[key] == data[key] and data[key] in report
+    assert data["limitations"][0] in report and "见第 1、2 步" in report
+    assert service.get_verification_request(detail["id"], user)["result"]["remediation"] == data["remediation"]
+    assert service.verification_result_receipt(detail["id"], VerificationResultSubmission.model_validate(client.calls["result"][0]), machine)["result_matches"]
     for content in (originals[0][2].decode(), originals[1][2].decode(), originals[2][2].decode()):
         assert content in report
     assert "````text" in report and "交互原文见第 1 步" in report and "本条未记录响应" in report
@@ -509,6 +523,80 @@ def test_v3_production_handle_resolution_acceptance_and_report(execution, monkey
         _artifact_disk_path_from_row(observed).write_bytes(b"changed")
     damaged_report = service.verification_report(detail["id"], user)
     assert data["summary"] in damaged_report and "原件不可读取" in damaged_report and "SHA256 不符" in damaged_report
+
+
+@pytest.mark.parametrize("version", [3, 4])
+def test_versioned_report_keeps_flow_only_scope_and_relationships(execution, version):
+    import base64
+    from hashlib import sha256
+    from jsonschema import Draft202012Validator
+    from cairn.dispatcher.tasks.artifact_records import resolve_declared_evidence_items
+    from cairn.dispatcher.tasks.common_base import ProcessArtifactRecord
+    from cairn.dispatcher.worker_protocol.submission import ExternalVerificationData, build_submit_result_schema
+    from cairn.server.services import flow_evidence
+    from test_external_verification_evidence import _upload
+
+    user, machine, _model, _worker, detail, claim = execution
+    body = b"synthetic response\n```html\n<script>not executable</script>\n```\n"
+    artifact = _upload(detail, claim, "raw_output", "flow-body.txt", body)
+    scope = {"task_run_id": claim["task_run"]["id"], "generation": claim["execution_generation"]}
+    record = {"scope": scope, "revision": 1, "state": "partial", "request": None,
+              "response": {"http_version": "HTTP/1.1", "status_code": 403,
+                           "reason_base64": base64.b64encode(b"Forbidden").decode(),
+                           "headers_base64": [], "body_sealed": True, "body_revision": 1, "body_bytes": len(body)}}
+    with db.get_conn() as conn:
+        conn.execute("INSERT INTO http_capture_scopes(id,project_id,task_run_id,generation,container_id,dispatcher_id,created_at) "
+                     "VALUES ('capture',?,?,?,'synthetic',?,'now')",
+                     (detail["project_id"], scope["task_run_id"], scope["generation"], machine.subject_id))
+        encoded = json.dumps(record)
+        conn.execute("INSERT INTO http_flows(id,project_id,capture_scope_id,revision,record_json,record_sha256,state,method,host,created_cursor,updated_cursor,received_at,updated_at) "
+                     "VALUES ('flow',?,'capture',1,?,?,'partial','GET','fixture.invalid',1,1,'now','now')",
+                     (detail["project_id"], encoded, sha256(encoded.encode()).hexdigest()))
+        conn.execute("INSERT INTO http_flow_bodies(project_id,flow_id,side,revision,artifact_id,size,sha256) VALUES (?,'flow','response',1,?,?,?)",
+                     (detail["project_id"], artifact.id, len(body), artifact.sha256))
+        projection = flow_evidence.resolve_flow_evidence(conn, detail["project_id"], "flow")["projections"]["response"]
+    data = {"schema_version": 4, "outcome": "not_reproduced", "summary": "**本次未复现**，不等于已修复。",
+            "remediation": "缺少代码根因证据；验证对象归属检查覆盖所有读取分支。",
+            "tested_scope": "仅合成角色与所选对象", "limitations": ["只保存响应，请求侧缺失。"],
+            "key_evidence": [{"reason": "拒绝访问只支持当前条件下的判断。", "evidence_item_ids": ["exchange"]}],
+            "test_steps": [{"action": "依据已知对象标识读取合成对象。", "observation": "收到拒绝访问。", "evidence_item_ids": ["exchange"]},
+                           {"action": "沿用第一步对象与身份复核已采集响应，不重发请求。", "observation": "仍为同一拒绝响应。", "evidence_item_ids": ["exchange"]}],
+            "evidence_items": [{"id": "exchange", "kind": "http", "source": "capture", "flow_id": "flow"}]}
+    schema = build_submit_result_schema("external_verify_execute")
+    validator = Draft202012Validator(schema)
+    validator.validate({"accepted": True, "data": data})
+    for invalid in ({k: v for k, v in data.items() if k != "remediation"}, {**data, "remediation": "   "}, {**data, "schema_version": 3}):
+        assert list(validator.iter_errors({"accepted": True, "data": invalid}))
+    parsed = ExternalVerificationData.model_validate(data)
+    resolved = resolve_declared_evidence_items(parsed.evidence_items, ProcessArtifactRecord(refs=[]), require_current_run=True)
+    result = parsed.model_dump(exclude={"artifacts", "evidence_items"})
+    result["evidence_items"] = [item.model_dump() for item in resolved]
+    if version == 3:
+        result["schema_version"] = 3
+        result.pop("remediation")
+    submission = VerificationResultSubmission(project_id=detail["project_id"], task_run_id=scope["task_run_id"],
+        execution_generation=scope["generation"], claim_token=claim["claim_token"], result=result)
+    if version == 3:
+        with db.get_conn() as conn:
+            row = service._owned_request(conn, detail["id"], user)
+            service._write_terminal(conn, row, kind="result", digest=service._digest({"task_run_id": scope["task_run_id"], "result": result}), result=result)
+    else:
+        accepted = service.submit_verification_result(detail["id"], submission, machine)
+        assert accepted["result"]["evidence_refs"] == []
+        assert accepted["result"]["remediation"] == data["remediation"]
+    with db.get_conn() as conn:
+        original = dict(conn.execute("SELECT result_json, terminal_digest, accepted_at, terminal_at FROM verification_requests WHERE id = ?", (detail["id"],)).fetchone())
+    report = service.verification_report(detail["id"], user)
+    for text in (data["summary"], data["tested_scope"], data["limitations"][0], data["key_evidence"][0]["reason"], data["test_steps"][1]["action"]):
+        assert text in report
+    assert "Flow flow · revision 1 · partial" in report and projection["sha256"] in report
+    assert "本交互未记录请求材料" in report and "本条未记录响应" not in report
+    assert "HTTP/1.1 403 Forbidden" in report and body.decode() in report
+    assert "````http" in report and "见第 1、2 步" in report and "交互原文见第 1 步" in report
+    assert (data["remediation"] if version == 4 else "历史结果未记录修复建议") in report
+    assert service.verification_result_receipt(detail["id"], submission, machine)["result_matches"]
+    with db.get_conn() as conn:
+        assert dict(conn.execute("SELECT result_json, terminal_digest, accepted_at, terminal_at FROM verification_requests WHERE id = ?", (detail["id"],)).fetchone()) == original
 
 
 def test_permanent_delete_removes_owned_records_and_keeps_existing_copies(execution):

@@ -1,5 +1,5 @@
 <template>
-  <div class="app-layout" :class="{ 'sidebar-collapsed': uiStore.isSidebarCollapsed }">
+  <div class="app-layout" :class="{ 'sidebar-collapsed': uiStore.isSidebarCollapsed, 'app-layout--agent': isAgentWorkbench }">
     <AppSidebar />
 
     <!-- Main Container -->
@@ -39,7 +39,8 @@
               <path d="M15 15l-3-3 3-3"></path>
             </svg>
           </button>
-          <nav class="breadcrumbs" aria-label="面包屑">
+          <div v-show="isAgentWorkbench" id="workbench-project-header" class="workbench-project-header" />
+          <nav v-if="!isAgentWorkbench" class="breadcrumbs" aria-label="面包屑">
             <ol>
               <li v-for="(crumb, idx) in breadcrumbs" :key="crumb.key">
                 <span v-if="idx > 0" class="separator" aria-hidden="true">/</span>
@@ -273,6 +274,14 @@ const workspaceStore = useWorkspaceStore()
 const router = useRouter()
 const route = useRoute()
 const queryClient = useQueryClient()
+const isAgentWorkbench = computed(() => route.name === 'WorkspaceAgent')
+
+// 路由主题落在根节点，保证 Portal 浮层与完整工作台使用同一组语义颜色。
+watch(isAgentWorkbench, active => {
+  if (active) document.documentElement.dataset.workbench = 'agent'
+  else delete document.documentElement.dataset.workbench
+}, { immediate: true })
+onUnmounted(() => { delete document.documentElement.dataset.workbench })
 
 const isRefreshing = ref(false)
 const isActorMenuOpen = ref(false)
@@ -314,7 +323,7 @@ const workspaceProjectId = computed(() =>
 // 阅读与编辑工作区继承 Shell 的剩余高度，普通表单页继续使用外层滚动。
 const usesWorkspaceViewport = computed(() =>
   Boolean(workspaceProjectId.value) ||
-  ['Reports', 'ConsoleKnowledge', 'ConsoleReportTemplates'].includes(String(route.name)),
+  ['Traffic', 'Reports', 'ConsoleKnowledge', 'ConsoleReportTemplates'].includes(String(route.name)),
 )
 
 // Navigation / Breadcrumbs

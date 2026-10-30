@@ -217,6 +217,70 @@
           "title": "CompleteResult",
           "type": "object"
         },
+        "EvidenceExcerpt": {
+          "additionalProperties": false,
+          "properties": {
+            "pointer": {
+              "pattern": "^utf8-bytes=[0-9]+:[0-9]+$",
+              "title": "Pointer",
+              "type": "string"
+            },
+            "representation": {
+              "anyOf": [
+                {
+                  "const": "http-evidence-v1",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Representation"
+            },
+            "revision": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Revision"
+            },
+            "sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Sha256"
+            },
+            "side": {
+              "enum": [
+                "request",
+                "response",
+                "artifact"
+              ],
+              "title": "Side",
+              "type": "string"
+            }
+          },
+          "required": [
+            "side",
+            "pointer"
+          ],
+          "title": "EvidenceExcerpt",
+          "type": "object"
+        },
         "FactResult": {
           "additionalProperties": false,
           "allOf": [
@@ -295,6 +359,13 @@
               "default": "",
               "title": "Remediation",
               "type": "string"
+            },
+            "reproduction_steps": {
+              "items": {
+                "$ref": "#/$defs/VerificationTestStep"
+              },
+              "title": "Reproduction Steps",
+              "type": "array"
             },
             "schema_version": {
               "const": 2,
@@ -448,6 +519,39 @@
           "title": "SurfaceResult",
           "type": "object"
         },
+        "VerificationTestStep": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Action",
+              "type": "string"
+            },
+            "evidence_item_ids": {
+              "items": {
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              "title": "Evidence Item Ids",
+              "type": "array"
+            },
+            "observation": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Observation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "observation",
+            "evidence_item_ids"
+          ],
+          "title": "VerificationTestStep",
+          "type": "object"
+        },
         "VulnerabilityAssetIdentity": {
           "additionalProperties": false,
           "properties": {
@@ -593,10 +697,102 @@
         },
         "WorkerEvidenceItem": {
           "additionalProperties": false,
+          "allOf": [
+            {
+              "else": {
+                "properties": {
+                  "excerpts": {
+                    "items": {
+                      "properties": {
+                        "representation": {
+                          "type": "null"
+                        },
+                        "revision": {
+                          "type": "null"
+                        },
+                        "sha256": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "if": {
+                "properties": {
+                  "flow_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "flow_id"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "artifact": {
+                    "type": "null"
+                  },
+                  "excerpts": {
+                    "items": {
+                      "properties": {
+                        "representation": {
+                          "const": "http-evidence-v1"
+                        },
+                        "revision": {
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "sha256": {
+                          "pattern": "^[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "side": {
+                          "enum": [
+                            "request",
+                            "response"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "representation",
+                        "sha256",
+                        "revision"
+                      ]
+                    }
+                  },
+                  "request": {
+                    "type": "null"
+                  },
+                  "response": {
+                    "type": "null"
+                  },
+                  "source": {
+                    "enum": [
+                      "capture",
+                      "historical"
+                    ]
+                  }
+                }
+              }
+            }
+          ],
           "description": "Worker 只提交已登记原件的引用，不生成或内联复现报文。",
           "oneOf": [
             {
               "anyOf": [
+                {
+                  "properties": {
+                    "flow_id": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "flow_id"
+                  ]
+                },
                 {
                   "properties": {
                     "request": {
@@ -647,6 +843,9 @@
                 }
               ],
               "properties": {
+                "flow_id": {
+                  "type": "null"
+                },
                 "kind": {
                   "const": "artifact"
                 },
@@ -674,6 +873,9 @@
                 }
               ],
               "properties": {
+                "flow_id": {
+                  "type": "null"
+                },
                 "kind": {
                   "const": "text"
                 },
@@ -697,6 +899,28 @@
                 }
               ],
               "default": null
+            },
+            "excerpts": {
+              "items": {
+                "$ref": "#/$defs/EvidenceExcerpt"
+              },
+              "title": "Excerpts",
+              "type": "array"
+            },
+            "flow_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Flow Id"
             },
             "id": {
               "minLength": 1,
@@ -1102,6 +1326,70 @@
           "title": "CompleteResult",
           "type": "object"
         },
+        "EvidenceExcerpt": {
+          "additionalProperties": false,
+          "properties": {
+            "pointer": {
+              "pattern": "^utf8-bytes=[0-9]+:[0-9]+$",
+              "title": "Pointer",
+              "type": "string"
+            },
+            "representation": {
+              "anyOf": [
+                {
+                  "const": "http-evidence-v1",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Representation"
+            },
+            "revision": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Revision"
+            },
+            "sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Sha256"
+            },
+            "side": {
+              "enum": [
+                "request",
+                "response",
+                "artifact"
+              ],
+              "title": "Side",
+              "type": "string"
+            }
+          },
+          "required": [
+            "side",
+            "pointer"
+          ],
+          "title": "EvidenceExcerpt",
+          "type": "object"
+        },
         "FactResult": {
           "additionalProperties": false,
           "allOf": [
@@ -1180,6 +1468,13 @@
               "default": "",
               "title": "Remediation",
               "type": "string"
+            },
+            "reproduction_steps": {
+              "items": {
+                "$ref": "#/$defs/VerificationTestStep"
+              },
+              "title": "Reproduction Steps",
+              "type": "array"
             },
             "schema_version": {
               "const": 2,
@@ -1333,6 +1628,39 @@
           "title": "SurfaceResult",
           "type": "object"
         },
+        "VerificationTestStep": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Action",
+              "type": "string"
+            },
+            "evidence_item_ids": {
+              "items": {
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              "title": "Evidence Item Ids",
+              "type": "array"
+            },
+            "observation": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Observation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "observation",
+            "evidence_item_ids"
+          ],
+          "title": "VerificationTestStep",
+          "type": "object"
+        },
         "VulnerabilityAssetIdentity": {
           "additionalProperties": false,
           "properties": {
@@ -1478,10 +1806,102 @@
         },
         "WorkerEvidenceItem": {
           "additionalProperties": false,
+          "allOf": [
+            {
+              "else": {
+                "properties": {
+                  "excerpts": {
+                    "items": {
+                      "properties": {
+                        "representation": {
+                          "type": "null"
+                        },
+                        "revision": {
+                          "type": "null"
+                        },
+                        "sha256": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "if": {
+                "properties": {
+                  "flow_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "flow_id"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "artifact": {
+                    "type": "null"
+                  },
+                  "excerpts": {
+                    "items": {
+                      "properties": {
+                        "representation": {
+                          "const": "http-evidence-v1"
+                        },
+                        "revision": {
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "sha256": {
+                          "pattern": "^[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "side": {
+                          "enum": [
+                            "request",
+                            "response"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "representation",
+                        "sha256",
+                        "revision"
+                      ]
+                    }
+                  },
+                  "request": {
+                    "type": "null"
+                  },
+                  "response": {
+                    "type": "null"
+                  },
+                  "source": {
+                    "enum": [
+                      "capture",
+                      "historical"
+                    ]
+                  }
+                }
+              }
+            }
+          ],
           "description": "Worker 只提交已登记原件的引用，不生成或内联复现报文。",
           "oneOf": [
             {
               "anyOf": [
+                {
+                  "properties": {
+                    "flow_id": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "flow_id"
+                  ]
+                },
                 {
                   "properties": {
                     "request": {
@@ -1532,6 +1952,9 @@
                 }
               ],
               "properties": {
+                "flow_id": {
+                  "type": "null"
+                },
                 "kind": {
                   "const": "artifact"
                 },
@@ -1559,6 +1982,9 @@
                 }
               ],
               "properties": {
+                "flow_id": {
+                  "type": "null"
+                },
                 "kind": {
                   "const": "text"
                 },
@@ -1582,6 +2008,28 @@
                 }
               ],
               "default": null
+            },
+            "excerpts": {
+              "items": {
+                "$ref": "#/$defs/EvidenceExcerpt"
+              },
+              "title": "Excerpts",
+              "type": "array"
+            },
+            "flow_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Flow Id"
             },
             "id": {
               "minLength": 1,
@@ -2058,6 +2506,70 @@
           "title": "CoverageResult",
           "type": "object"
         },
+        "EvidenceExcerpt": {
+          "additionalProperties": false,
+          "properties": {
+            "pointer": {
+              "pattern": "^utf8-bytes=[0-9]+:[0-9]+$",
+              "title": "Pointer",
+              "type": "string"
+            },
+            "representation": {
+              "anyOf": [
+                {
+                  "const": "http-evidence-v1",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Representation"
+            },
+            "revision": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Revision"
+            },
+            "sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Sha256"
+            },
+            "side": {
+              "enum": [
+                "request",
+                "response",
+                "artifact"
+              ],
+              "title": "Side",
+              "type": "string"
+            }
+          },
+          "required": [
+            "side",
+            "pointer"
+          ],
+          "title": "EvidenceExcerpt",
+          "type": "object"
+        },
         "ExperimentRecord": {
           "additionalProperties": false,
           "properties": {
@@ -2265,6 +2777,13 @@
               "title": "Remediation",
               "type": "string"
             },
+            "reproduction_steps": {
+              "items": {
+                "$ref": "#/$defs/VerificationTestStep"
+              },
+              "title": "Reproduction Steps",
+              "type": "array"
+            },
             "schema_version": {
               "const": 2,
               "title": "Schema Version",
@@ -2373,6 +2892,39 @@
             "surface_key"
           ],
           "title": "SurfaceResult",
+          "type": "object"
+        },
+        "VerificationTestStep": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Action",
+              "type": "string"
+            },
+            "evidence_item_ids": {
+              "items": {
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              "title": "Evidence Item Ids",
+              "type": "array"
+            },
+            "observation": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Observation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "observation",
+            "evidence_item_ids"
+          ],
+          "title": "VerificationTestStep",
           "type": "object"
         },
         "VulnerabilityAssetIdentity": {
@@ -2520,10 +3072,102 @@
         },
         "WorkerEvidenceItem": {
           "additionalProperties": false,
+          "allOf": [
+            {
+              "else": {
+                "properties": {
+                  "excerpts": {
+                    "items": {
+                      "properties": {
+                        "representation": {
+                          "type": "null"
+                        },
+                        "revision": {
+                          "type": "null"
+                        },
+                        "sha256": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "if": {
+                "properties": {
+                  "flow_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "flow_id"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "artifact": {
+                    "type": "null"
+                  },
+                  "excerpts": {
+                    "items": {
+                      "properties": {
+                        "representation": {
+                          "const": "http-evidence-v1"
+                        },
+                        "revision": {
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "sha256": {
+                          "pattern": "^[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "side": {
+                          "enum": [
+                            "request",
+                            "response"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "representation",
+                        "sha256",
+                        "revision"
+                      ]
+                    }
+                  },
+                  "request": {
+                    "type": "null"
+                  },
+                  "response": {
+                    "type": "null"
+                  },
+                  "source": {
+                    "enum": [
+                      "capture",
+                      "historical"
+                    ]
+                  }
+                }
+              }
+            }
+          ],
           "description": "Worker 只提交已登记原件的引用，不生成或内联复现报文。",
           "oneOf": [
             {
               "anyOf": [
+                {
+                  "properties": {
+                    "flow_id": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "flow_id"
+                  ]
+                },
                 {
                   "properties": {
                     "request": {
@@ -2574,6 +3218,9 @@
                 }
               ],
               "properties": {
+                "flow_id": {
+                  "type": "null"
+                },
                 "kind": {
                   "const": "artifact"
                 },
@@ -2601,6 +3248,9 @@
                 }
               ],
               "properties": {
+                "flow_id": {
+                  "type": "null"
+                },
                 "kind": {
                   "const": "text"
                 },
@@ -2624,6 +3274,28 @@
                 }
               ],
               "default": null
+            },
+            "excerpts": {
+              "items": {
+                "$ref": "#/$defs/EvidenceExcerpt"
+              },
+              "title": "Excerpts",
+              "type": "array"
+            },
+            "flow_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Flow Id"
             },
             "id": {
               "minLength": 1,
@@ -3093,6 +3765,70 @@
           "title": "CoverageResult",
           "type": "object"
         },
+        "EvidenceExcerpt": {
+          "additionalProperties": false,
+          "properties": {
+            "pointer": {
+              "pattern": "^utf8-bytes=[0-9]+:[0-9]+$",
+              "title": "Pointer",
+              "type": "string"
+            },
+            "representation": {
+              "anyOf": [
+                {
+                  "const": "http-evidence-v1",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Representation"
+            },
+            "revision": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Revision"
+            },
+            "sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Sha256"
+            },
+            "side": {
+              "enum": [
+                "request",
+                "response",
+                "artifact"
+              ],
+              "title": "Side",
+              "type": "string"
+            }
+          },
+          "required": [
+            "side",
+            "pointer"
+          ],
+          "title": "EvidenceExcerpt",
+          "type": "object"
+        },
         "ExperimentRecord": {
           "additionalProperties": false,
           "properties": {
@@ -3300,6 +4036,13 @@
               "title": "Remediation",
               "type": "string"
             },
+            "reproduction_steps": {
+              "items": {
+                "$ref": "#/$defs/VerificationTestStep"
+              },
+              "title": "Reproduction Steps",
+              "type": "array"
+            },
             "schema_version": {
               "const": 2,
               "title": "Schema Version",
@@ -3408,6 +4151,39 @@
             "surface_key"
           ],
           "title": "SurfaceResult",
+          "type": "object"
+        },
+        "VerificationTestStep": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Action",
+              "type": "string"
+            },
+            "evidence_item_ids": {
+              "items": {
+                "minLength": 1,
+                "pattern": "\\S",
+                "type": "string"
+              },
+              "title": "Evidence Item Ids",
+              "type": "array"
+            },
+            "observation": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "title": "Observation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action",
+            "observation",
+            "evidence_item_ids"
+          ],
+          "title": "VerificationTestStep",
           "type": "object"
         },
         "VulnerabilityAssetIdentity": {
@@ -3555,10 +4331,102 @@
         },
         "WorkerEvidenceItem": {
           "additionalProperties": false,
+          "allOf": [
+            {
+              "else": {
+                "properties": {
+                  "excerpts": {
+                    "items": {
+                      "properties": {
+                        "representation": {
+                          "type": "null"
+                        },
+                        "revision": {
+                          "type": "null"
+                        },
+                        "sha256": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "if": {
+                "properties": {
+                  "flow_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "flow_id"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "artifact": {
+                    "type": "null"
+                  },
+                  "excerpts": {
+                    "items": {
+                      "properties": {
+                        "representation": {
+                          "const": "http-evidence-v1"
+                        },
+                        "revision": {
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "sha256": {
+                          "pattern": "^[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "side": {
+                          "enum": [
+                            "request",
+                            "response"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "representation",
+                        "sha256",
+                        "revision"
+                      ]
+                    }
+                  },
+                  "request": {
+                    "type": "null"
+                  },
+                  "response": {
+                    "type": "null"
+                  },
+                  "source": {
+                    "enum": [
+                      "capture",
+                      "historical"
+                    ]
+                  }
+                }
+              }
+            }
+          ],
           "description": "Worker 只提交已登记原件的引用，不生成或内联复现报文。",
           "oneOf": [
             {
               "anyOf": [
+                {
+                  "properties": {
+                    "flow_id": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "flow_id"
+                  ]
+                },
                 {
                   "properties": {
                     "request": {
@@ -3609,6 +4477,9 @@
                 }
               ],
               "properties": {
+                "flow_id": {
+                  "type": "null"
+                },
                 "kind": {
                   "const": "artifact"
                 },
@@ -3636,6 +4507,9 @@
                 }
               ],
               "properties": {
+                "flow_id": {
+                  "type": "null"
+                },
                 "kind": {
                   "const": "text"
                 },
@@ -3659,6 +4533,28 @@
                 }
               ],
               "default": null
+            },
+            "excerpts": {
+              "items": {
+                "$ref": "#/$defs/EvidenceExcerpt"
+              },
+              "title": "Excerpts",
+              "type": "array"
+            },
+            "flow_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Flow Id"
             },
             "id": {
               "minLength": 1,
@@ -3984,6 +4880,70 @@
           "title": "AssessmentEvidenceRef",
           "type": "object"
         },
+        "EvidenceExcerpt": {
+          "additionalProperties": false,
+          "properties": {
+            "pointer": {
+              "pattern": "^utf8-bytes=[0-9]+:[0-9]+$",
+              "title": "Pointer",
+              "type": "string"
+            },
+            "representation": {
+              "anyOf": [
+                {
+                  "const": "http-evidence-v1",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Representation"
+            },
+            "revision": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Revision"
+            },
+            "sha256": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Sha256"
+            },
+            "side": {
+              "enum": [
+                "request",
+                "response",
+                "artifact"
+              ],
+              "title": "Side",
+              "type": "string"
+            }
+          },
+          "required": [
+            "side",
+            "pointer"
+          ],
+          "title": "EvidenceExcerpt",
+          "type": "object"
+        },
         "VerificationKeyEvidence": {
           "additionalProperties": false,
           "properties": {
@@ -4045,10 +5005,102 @@
         },
         "WorkerEvidenceItem": {
           "additionalProperties": false,
+          "allOf": [
+            {
+              "else": {
+                "properties": {
+                  "excerpts": {
+                    "items": {
+                      "properties": {
+                        "representation": {
+                          "type": "null"
+                        },
+                        "revision": {
+                          "type": "null"
+                        },
+                        "sha256": {
+                          "type": "null"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "if": {
+                "properties": {
+                  "flow_id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "flow_id"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "artifact": {
+                    "type": "null"
+                  },
+                  "excerpts": {
+                    "items": {
+                      "properties": {
+                        "representation": {
+                          "const": "http-evidence-v1"
+                        },
+                        "revision": {
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "sha256": {
+                          "pattern": "^[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "side": {
+                          "enum": [
+                            "request",
+                            "response"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "representation",
+                        "sha256",
+                        "revision"
+                      ]
+                    }
+                  },
+                  "request": {
+                    "type": "null"
+                  },
+                  "response": {
+                    "type": "null"
+                  },
+                  "source": {
+                    "enum": [
+                      "capture",
+                      "historical"
+                    ]
+                  }
+                }
+              }
+            }
+          ],
           "description": "Worker 只提交已登记原件的引用，不生成或内联复现报文。",
           "oneOf": [
             {
               "anyOf": [
+                {
+                  "properties": {
+                    "flow_id": {
+                      "not": {
+                        "type": "null"
+                      }
+                    }
+                  },
+                  "required": [
+                    "flow_id"
+                  ]
+                },
                 {
                   "properties": {
                     "request": {
@@ -4099,6 +5151,9 @@
                 }
               ],
               "properties": {
+                "flow_id": {
+                  "type": "null"
+                },
                 "kind": {
                   "const": "artifact"
                 },
@@ -4126,6 +5181,9 @@
                 }
               ],
               "properties": {
+                "flow_id": {
+                  "type": "null"
+                },
                 "kind": {
                   "const": "text"
                 },
@@ -4149,6 +5207,28 @@
                 }
               ],
               "default": null
+            },
+            "excerpts": {
+              "items": {
+                "$ref": "#/$defs/EvidenceExcerpt"
+              },
+              "title": "Excerpts",
+              "type": "array"
+            },
+            "flow_id": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "pattern": "^[A-Za-z0-9_-]+$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Flow Id"
             },
             "id": {
               "minLength": 1,
@@ -4287,6 +5367,20 @@
                           },
                           "required": [
                             "artifact"
+                          ]
+                        },
+                        {
+                          "properties": {
+                            "flow_id": {
+                              "type": "string"
+                            },
+                            "source": {
+                              "const": "capture"
+                            }
+                          },
+                          "required": [
+                            "flow_id",
+                            "source"
                           ]
                         }
                       ]
@@ -4587,36 +5681,6 @@
           "title": "AssessmentEvidenceRef",
           "type": "object"
         },
-        "CompleteResult": {
-          "additionalProperties": false,
-          "properties": {
-            "description": {
-              "minLength": 1,
-              "title": "Description",
-              "type": "string"
-            },
-            "evidence_refs": {
-              "items": {
-                "$ref": "#/$defs/AssessmentEvidenceRef"
-              },
-              "title": "Evidence Refs",
-              "type": "array"
-            },
-            "from": {
-              "items": {
-                "minLength": 1,
-                "type": "string"
-              },
-              "title": "From",
-              "type": "array"
-            }
-          },
-          "required": [
-            "description"
-          ],
-          "title": "CompleteResult",
-          "type": "object"
-        },
         "DepthReviewDecision": {
           "additionalProperties": false,
           "properties": {
@@ -4829,6 +5893,38 @@
           "title": "IntentDecision",
           "type": "object"
         },
+        "ReasonCompleteResult": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "minLength": 1,
+              "title": "Description",
+              "type": "string"
+            },
+            "evidence_refs": {
+              "items": {
+                "$ref": "#/$defs/AssessmentEvidenceRef"
+              },
+              "title": "Evidence Refs",
+              "type": "array"
+            },
+            "from": {
+              "items": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "minItems": 1,
+              "title": "From",
+              "type": "array"
+            }
+          },
+          "required": [
+            "description",
+            "from"
+          ],
+          "title": "ReasonCompleteResult",
+          "type": "object"
+        },
         "RejectedOption": {
           "additionalProperties": false,
           "properties": {
@@ -5010,7 +6106,7 @@
             "complete": {
               "anyOf": [
                 {
-                  "$ref": "#/$defs/CompleteResult"
+                  "$ref": "#/$defs/ReasonCompleteResult"
                 },
                 {
                   "type": "null"
@@ -5162,95 +6258,20 @@
           "title": "ArtifactDeclaration",
           "type": "object"
         },
-        "ReportFactReference": {
+        "SegmentReference": {
           "additionalProperties": false,
           "properties": {
-            "ref": {
-              "minLength": 1,
-              "title": "Ref",
-              "type": "string"
-            },
-            "type": {
-              "const": "fact",
-              "title": "Type",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type",
-            "ref"
-          ],
-          "title": "ReportFactReference",
-          "type": "object"
-        },
-        "ReportFinding": {
-          "additionalProperties": false,
-          "properties": {
-            "impact": {
-              "default": "",
-              "title": "Impact",
-              "type": "string"
-            },
-            "limitations": {
-              "default": "",
-              "title": "Limitations",
-              "type": "string"
-            },
-            "regression_steps": {
-              "minLength": 1,
-              "title": "Regression Steps",
-              "type": "string"
-            },
-            "remediation": {
-              "minLength": 1,
-              "title": "Remediation",
-              "type": "string"
-            },
-            "repro_steps": {
-              "minLength": 1,
-              "title": "Repro Steps",
-              "type": "string"
-            },
-            "root_cause": {
-              "default": "",
-              "title": "Root Cause",
-              "type": "string"
-            },
-            "vulnerability_id": {
-              "minLength": 1,
-              "title": "Vulnerability Id",
-              "type": "string"
-            }
-          },
-          "required": [
-            "vulnerability_id",
-            "repro_steps",
-            "remediation",
-            "regression_steps"
-          ],
-          "title": "ReportFinding",
-          "type": "object"
-        },
-        "ReportMarkdownFragment": {
-          "additionalProperties": false,
-          "properties": {
-            "markdown": {
+            "artifact_handle": {
               "minLength": 1,
               "pattern": "\\S",
-              "title": "Markdown",
-              "type": "string"
-            },
-            "type": {
-              "const": "markdown",
-              "title": "Type",
+              "title": "Artifact Handle",
               "type": "string"
             }
           },
           "required": [
-            "type",
-            "markdown"
+            "artifact_handle"
           ],
-          "title": "ReportMarkdownFragment",
+          "title": "SegmentReference",
           "type": "object"
         }
       },
@@ -5288,53 +6309,26 @@
         "data": {
           "additionalProperties": false,
           "properties": {
-            "executive_summary": {
-              "maxLength": 20000,
-              "minLength": 1,
-              "pattern": "\\S",
-              "title": "Executive Summary",
-              "type": "string"
-            },
-            "findings": {
-              "items": {
-                "$ref": "#/$defs/ReportFinding"
-              },
-              "title": "Findings",
-              "type": "array"
-            },
-            "layout": {
-              "items": {
-                "anyOf": [
-                  {
-                    "$ref": "#/$defs/ReportMarkdownFragment"
-                  },
-                  {
-                    "$ref": "#/$defs/ReportFactReference"
-                  }
-                ]
-              },
-              "minItems": 1,
-              "title": "Layout",
-              "type": "array"
-            },
-            "limitations": {
-              "default": "",
-              "title": "Limitations",
-              "type": "string"
-            },
             "schema_version": {
-              "const": 2,
+              "const": 5,
               "title": "Schema Version",
               "type": "integer"
+            },
+            "segment_refs": {
+              "items": {
+                "$ref": "#/$defs/SegmentReference"
+              },
+              "maxItems": 256,
+              "minItems": 1,
+              "title": "Segment Refs",
+              "type": "array"
             }
           },
           "required": [
             "schema_version",
-            "executive_summary",
-            "findings",
-            "layout"
+            "segment_refs"
           ],
-          "title": "ReportData",
+          "title": "ReportSegmentSubmission",
           "type": "object"
         },
         "reason": {

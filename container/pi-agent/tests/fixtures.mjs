@@ -3,6 +3,22 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { createLocalBashOperations } from '@mariozechner/pi-coding-agent';
+import { parseRequest } from '../dist/protocol.js';
+
+export function canonicalFixtureRequest(request) {
+  const execution = request.capabilities.task_execution;
+  return execution ? { ...request, capabilities: { ...request.capabilities, task_execution: {
+    ...execution, socket_path: `/run/cairn-exec/${execution.scope_id}/execute.sock`,
+  } } } : request;
+}
+
+export function parseFixtureRequest(request) {
+  // 先用正式路径校验契约，再仅为单元替身恢复临时 socket；生产 parser 不接受该路径。
+  const parsed = parseRequest(canonicalFixtureRequest(request));
+  if (request.capabilities.task_execution) parsed.capabilities.task_execution = request.capabilities.task_execution;
+  return parsed;
+}
 
 export const submissionSchema = {
   type: 'object',
@@ -14,8 +30,65 @@ export const submissionSchema = {
 export const ok = { tools: [{ name: 'submit_result', args: { accepted: true, data: { status: 'ok' } } }] };
 export async function fixture(t, protocol = 'openai-chat-completions', script = [ok]) {
   const cwd = await mkdtemp(join(tmpdir(), 'cairn-pi-test-'));
+  const sessionRoot = await mkdtemp(join(tmpdir(), 'cairn-pi-control-'));
   const calls = [];
   const sockets = new Set();
+  const executionSockets = new Set();
+  const executions = new Set();
+  const executionErrors = [];
+  const controllers = new Set();
+  const candidateSpoolPaths = [];
+  const scopeId = randomUUID().replaceAll('-', '');
+  const taskRuns = new Set();
+  const socketPath = join(sessionRoot, 'execute.sock');
+  const freshTaskExecution = (taskRunId = 'task-test') => {
+    taskRuns.add(taskRunId);
+    return { protocol: 'cairn-task-execution-v1', scope_id: scopeId, task_run_id: taskRunId, socket_path: socketPath };
+  };
+  // 仅测试替身调用本地 SDK operations，生产 runner 仍通过 task-bound Unix HTTP 执行。
+  const localOperations = createLocalBashOperations();
+  const executionServer = createServer((req, res) => {
+    const controller = new AbortController();
+    controllers.add(controller);
+    res.on('close', () => controller.abort());
+    const execution = (async () => {
+      try {
+        let raw = '';
+        for await (const chunk of req) raw += chunk;
+        const body = JSON.parse(raw);
+        // 仅承载 Bash 单元语义；stdin 驱动的证据采集由正式执行端用例验证。
+        if (req.method !== 'POST' || req.url !== '/execute' || body.scope_id !== scopeId || !taskRuns.has(body.task_run_id)
+          || body.cwd !== cwd || typeof body.command !== 'string' || !(body.timeout_seconds > 0) || body.stdin_base64) {
+          res.writeHead(400); res.end(); return;
+        }
+        res.writeHead(200, { 'content-type': 'application/x-ndjson' });
+        res.flushHeaders();
+        const send = (event) => { if (!res.destroyed) res.write(`${JSON.stringify(event)}\n`); };
+        try {
+          const result = await localOperations.exec(body.command, cwd, {
+            timeout: body.timeout_seconds, signal: controller.signal,
+            onData: (data) => {
+              for (let offset = 0; offset < data.length; offset += 65536) send({ stdout: data.subarray(offset, offset + 65536).toString('base64') });
+            },
+          });
+          send({ exit_code: result.exitCode ?? -1 });
+        } catch (error) {
+          const code = error.message?.startsWith('timeout:') ? 'execution_timeout' : controller.signal.aborted ? 'cancelled' : 'execution_unavailable';
+          executionErrors.push(code);
+          send({ error: code });
+        }
+        res.end();
+      } catch {
+        if (!res.headersSent) res.writeHead(400);
+        res.end();
+      } finally {
+        controllers.delete(controller);
+      }
+    })();
+    executions.add(execution);
+    void execution.finally(() => executions.delete(execution));
+  });
+  executionServer.on('connection', (socket) => { executionSockets.add(socket); socket.on('close', () => executionSockets.delete(socket)); });
   const server = createServer(async (req, res) => {
     let raw = '';
     for await (const chunk of req) raw += chunk;
@@ -87,8 +160,17 @@ export async function fixture(t, protocol = 'openai-chat-completions', script = 
     if (action.interrupt) res.destroy(); else res.end();
   });
   server.on('connection', (socket) => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const candidateSpoolPaths = [];
+  t.after(async () => {
+    for (const controller of controllers) controller.abort();
+    for (const socket of [...sockets, ...executionSockets]) socket.destroy();
+    await Promise.all([server, executionServer].map((listener) => new Promise((resolve) => listener.close(resolve))));
+    await Promise.all([...executions]);
+    await rm(cwd, { recursive: true, force: true });
+    await rm(sessionRoot, { recursive: true, force: true });
+    for (const path of candidateSpoolPaths) await rm(path, { force: true });
+  });
+  await new Promise((resolve, reject) => { executionServer.once('error', reject); executionServer.listen(socketPath, resolve); });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   const freshCandidateCapture = () => {
     const captureId = randomUUID();
     const spool_path = join('/tmp/cairn-prompts', `pi-candidates-${captureId}.bin`);
@@ -101,15 +183,15 @@ export async function fixture(t, protocol = 'openai-chat-completions', script = 
   };
   const candidateCapture = freshCandidateCapture();
   const candidateSpoolPath = candidateCapture.spool_path;
-  t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise((resolve) => server.close(resolve)); await rm(cwd, { recursive: true, force: true }); for (const path of candidateSpoolPaths) await rm(path, { force: true }); });
   const base = `http://127.0.0.1:${server.address().port}/tenant/prefix`;
   const suffix = protocol === 'anthropic-messages' ? '/v1/messages' : protocol === 'openai-responses' ? '/responses' : '/chat/completions';
   const request = {
     protocol: 'cairn-agent-request-v1', project_id: 'project-test', task_run_id: 'task-test', phase: 'explore_execute',
     prompt: 'Use submit_result to report status ok.', session: `pi:${randomUUID()}`, resume: false,
-    model: { protocol, model_name: 'fixture-model', base_url: base, inference_endpoint: base + suffix, auth_header: 'authorization-bearer', api_key: 'fixture-secret-key', custom_headers: [{ name: 'X-Fixture-Header', value: 'fixture-header-value' }] },
-    result_schema: submissionSchema, binding: null, timeout_seconds: 10, max_result_repairs: 2, conclude_only: false, cwd, session_root: join(cwd, '.cairn', 'pi'),
-    capabilities: { candidate_capture: candidateCapture },
+    model: { protocol, max_output_tokens: 16384, model_name: 'fixture-model', base_url: base, inference_endpoint: base + suffix, auth_header: 'authorization-bearer', api_key: 'fixture-secret-key', custom_headers: [{ name: 'X-Fixture-Header', value: 'fixture-header-value' }] },
+    result_schema: submissionSchema, binding: null, timeout_seconds: 10, max_result_repairs: 2, conclude_only: false, cwd, session_root: sessionRoot,
+    capabilities: { candidate_capture: candidateCapture, task_execution: freshTaskExecution() },
   };
-  return { request, calls, server, cwd, suffix, candidateSpoolPath, freshCandidateCapture };
+  return { request, calls, server, cwd, suffix, candidateSpoolPath, freshCandidateCapture, freshTaskExecution, executionErrors,
+    waitForExecutions: () => Promise.all([...executions]) };
 }

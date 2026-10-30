@@ -13,7 +13,7 @@ import Verifications from './Verifications.vue'
 const mocks = vi.hoisted(() => ({
   auth: {} as { session: AuthSession | null; authGeneration: number; isSuperAdmin: boolean },
   route: {} as { name: string; query: Record<string, string | string[]> },
-  push: vi.fn(), leave: vi.fn(), update: vi.fn(), api: vi.fn(),
+  push: vi.fn(), replace: vi.fn(), leave: vi.fn(), update: vi.fn(), api: vi.fn(),
   configuration: vi.fn(), options: vi.fn(), tenants: vi.fn(), saveConfiguration: vi.fn(),
   integrations: vi.fn(), createIntegration: vi.fn(), updateIntegration: vi.fn(), disableIntegration: vi.fn(), rotateIntegration: vi.fn(),
   readiness: vi.fn(), vulnerabilities: vi.fn(), requests: vi.fn(), createRequest: vi.fn(), request: vi.fn(), createBatch: vi.fn(),
@@ -21,7 +21,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('vue-router', async (original) => ({
   ...await original<typeof import('vue-router')>(),
   useRoute: () => mocks.route,
-  useRouter: () => ({ push: mocks.push }),
+  useRouter: () => ({ push: mocks.push, replace: mocks.replace }),
   onBeforeRouteLeave: mocks.leave,
   onBeforeRouteUpdate: mocks.update,
 }))
@@ -128,7 +128,7 @@ function fieldValue(wrapper: VueWrapper, selector = '#verification-config-name')
   return (wrapper.get(selector).element as HTMLInputElement).value
 }
 function modelLinks(wrapper: VueWrapper) {
-  return wrapper.findAllComponents(LinkStub).filter((link) => (link.props('to') as { name?: string }).name === 'ConsoleModels')
+  return wrapper.findAllComponents(LinkStub).filter((link) => (link.props('to') as { name?: string }).name === 'ConsoleWorkers')
 }
 
 beforeEach(() => {
@@ -137,6 +137,7 @@ beforeEach(() => {
   mocks.route = reactive({ name: 'VerificationConfiguration', query: {} })
   identity()
   mocks.push.mockResolvedValue(undefined)
+  mocks.replace.mockImplementation(async (location) => { mocks.route.query = location.query })
   mocks.configuration.mockResolvedValue(saved())
   mocks.options.mockResolvedValue(choices())
   mocks.saveConfiguration.mockImplementation(async (_tenant, body) => ({ ...saved(), ...body }))
@@ -154,6 +155,28 @@ afterEach(() => {
 })
 
 describe('个人复测执行配置', () => {
+  it.each(['详情返回', '刷新', '删除事件'])('复测%s按刷新后的总数校正空末页且保留筛选', async (entry) => {
+    mocks.route.name = 'Verifications'
+    mocks.route.query = { offset: '40', mode: 'retest', scroll: '300' }
+    const item = { id: 'last-round', title: '合成复测', mode: 'retest', execution_status: 'completed', source: { type: 'user', name: '本地样本' }, result: null, created_at: '2026-10-26T00:00:00Z' }
+    let total = entry === '详情返回' ? 40 : 41
+    mocks.requests.mockImplementation(async ({ offset }) => ({ total, items: offset < total ? [item] : [] }))
+    const wrapper = await mountPage(Verifications)
+    if (entry !== '详情返回') {
+      expect(mocks.replace).not.toHaveBeenCalled()
+      total = 40
+      if (entry === '刷新') await click(wrapper, '刷新')
+      else {
+        wrapper.findComponent({ name: 'VerificationActions' }).vm.$emit('deleted', item.id)
+        await flushPromises()
+      }
+    }
+    await flushPromises()
+    expect(mocks.replace).toHaveBeenCalledWith({ name: 'Verifications', query: { offset: '20', mode: 'retest', scroll: undefined } })
+    expect(mocks.requests).toHaveBeenLastCalledWith(expect.objectContaining({ offset: 20, mode: 'retest' }), expect.any(AbortSignal))
+    expect(wrapper.text()).toContain('第 2 页')
+  })
+
   it('普通路由、旧地址与导航可达，旧地址保留显式租户供页面拒绝越界', () => {
     const current = router.resolve({ name: 'VerificationConfiguration' })
     expect(current.matched.some((record) => record.meta.superAdmin)).toBe(false)

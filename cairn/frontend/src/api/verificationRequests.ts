@@ -1,6 +1,7 @@
 import { api, apiRaw, type ArtifactPreview } from './client'
 import type { EvidenceItem, EvidenceSource, EvidenceRef, ProjectResourceBatch, ProjectResourceBatchMember, ProjectResourceKind } from './types'
 import type { Vulnerability } from './client'
+import type { TestEgressInput, TestEgressPublic } from './testEgress'
 
 export type VerificationMode = 'reproduce' | 'retest'
 export type VerificationStatus = 'queued' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled' | 'cleanup_pending'
@@ -15,13 +16,16 @@ export interface VerificationInputSource {
   vulnerability_id: string
   observation_id?: string | null
   input_mode: 'current_vulnerability' | 'copied_snapshot'
+  availability: 'available' | 'deleted' | 'inaccessible'
+  availability_reason: string | null
 }
 export interface VerificationSourcePreview {
+  test_egress?: TestEgressPublic
   project_id: string
   vulnerability_id: string
   project_title: string
   vulnerability: Pick<Vulnerability, 'id' | 'title' | 'severity' | 'status' | 'target' | 'remediation' | 'repro_steps'> & Record<string, unknown>
-  evidence: { observation_id: string | null; source: EvidenceSource; evidence_items: EvidenceItem[] }
+  evidence: { observation_id: string | null; source: EvidenceSource; evidence_items: EvidenceItem[]; reproduction_steps: VerificationTestStep[] }
   project_context: Record<string, unknown>
   facts: { id: string; description: string; [key: string]: unknown }[]
   observations: { id: string; [key: string]: unknown }[]
@@ -31,12 +35,14 @@ export interface VerificationSourcePreview {
   missing_materials: { code: string; source_type: string; source_id: string; artifact_id?: string; message: string }[]
 }
 export interface CreateVerificationRequest {
+  test_egress?: TestEgressInput
   schema_version: 1
   request_id: string
   external_id: string | null
   mode: VerificationMode
   title: string
   origin?: string
+  target_url?: string
   report: VerificationReportInput
   resource_batch_id?: string
   previous_request_id?: string
@@ -57,6 +63,7 @@ export type VerificationResult = VerificationResultBase & (
   | { schema_version?: 1; notes: string; evidence_items?: never }
   | { schema_version: 2; notes: string; evidence_items: EvidenceItem[] }
   | { schema_version: 3; key_evidence: VerificationEvidenceReason[]; test_steps: VerificationTestStep[]; evidence_items: EvidenceItem[] }
+  | { schema_version: 4; remediation: string; key_evidence: VerificationEvidenceReason[]; test_steps: VerificationTestStep[]; evidence_items: EvidenceItem[] }
 )
 export interface VerificationError { code: string; message: string }
 export interface VerificationSummary {
@@ -103,10 +110,14 @@ export interface VerificationRun {
   error_message: string | null
 }
 export interface VerificationDetail extends VerificationSummary {
+  display_images?: import('@/features/reports/reportImages').ReportDisplayImage[]
+  test_egress?: TestEgressPublic
   project_id: string
   accepted_at: string | null
   terminal_at: string | null
   origin: string
+  target_url?: string | null
+  source_target?: string | null
   report: { type: 'markdown' | 'text' | 'file' | 'platform_vulnerability'; resource_id: string; manifest_resource_id: string | null } | null
   previous_request_id: string | null
   worker_template_id: string | null
@@ -154,18 +165,6 @@ export const cancelVerificationRequest = (id: string) =>
   api<VerificationDetail>('POST', `${requestPath(id)}/cancel`, {})
 export const deleteVerificationRequest = (id: string) =>
   api<void>('DELETE', requestPath(id))
-export async function downloadVerificationReport(id: string) {
-  const content = await api<unknown>('GET', verificationReportUrl(id))
-  if (typeof content !== 'string') throw new Error('报告响应不是 Markdown，未开始下载。')
-  const url = URL.createObjectURL(new Blob([content], { type: 'text/markdown;charset=utf-8' }))
-  const link = document.createElement('a')
-  link.href = url
-  link.download = `复测报告-${id}.md`
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-}
 const verificationSourcePath = (projectId: string, vulnerabilityId: string) =>
   `/api/v1/verification-sources/projects/${encodeURIComponent(projectId)}/vulnerabilities/${encodeURIComponent(vulnerabilityId)}`
 export const getVerificationSourcePreview = (projectId: string, vulnerabilityId: string, signal?: AbortSignal, observationId?: string) =>

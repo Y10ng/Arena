@@ -171,24 +171,25 @@ class CleanupMixin:
 
     def _retain_report_delivery_container(self, project_id: str) -> bool:
         try:
-            response = self.client.get_assessment_report_finalization(project_id)
+            response = self.client.list_assessment_report_finalizations(project_id)
         except requests.RequestException:
             LOG.warning("report delivery cleanup deferred project=%s reason=api_unreachable", project_id)
             return True
-        if response.status_code == 404:
-            return False
-        if not response.ok or not isinstance(response.data, dict) or "delivery_retry_route" not in response.data:
+        if not response.ok or not isinstance(response.data, list):
             # 暂时无法取得权威资格不是销毁原 session 的许可；下轮重新读取，不另存状态。
             LOG.warning("report delivery cleanup deferred project=%s reason=eligibility_unavailable status=%s", project_id, response.status_code)
             return True
-        route = response.data.get("delivery_retry_route")
-        if not isinstance(route, dict) or route.get("dispatcher_id") != self.dispatcher_id:
-            return False
-        if route.get("allowed") is not True and route.get("reason") != "execution_retry_cooldown":
-            return False
         metadata = self.container_manager.runtime_metadata(self.container_manager.container_name(project_id))
-        # 仅保留 Server 指定且本 owner 仍持有的原容器；不扩大到同名替换资源。
-        return bool(route.get("container_id") and metadata.get("container_id") == route["container_id"] and metadata.get("container_state") == "running")
+        for state in response.data:
+            route = state.get("delivery_retry_route")
+            if not isinstance(route, dict) or route.get("dispatcher_id") != self.dispatcher_id:
+                continue
+            if route.get("allowed") is not True and route.get("reason") != "execution_retry_cooldown":
+                continue
+            # 任一 scope 仍可交付时保留本 owner 的原容器，不扩大到同名替换资源。
+            if route.get("container_id") and metadata.get("container_id") == route["container_id"] and metadata.get("container_state") == "running":
+                return True
+        return False
 
     def _cleanup_completed_containers(self, summaries: list[ProjectSummary]) -> None:
         for summary in summaries:
@@ -264,6 +265,8 @@ class CleanupMixin:
             if cleanup_state != "paused" and self._candidate_container_blocked(name):
                 continue
             if name in self._cleanup_pending or any(task.project_id == summary.id for task in self.futures.values()):
+                continue
+            if cleanup_state == "paused" and self._retain_report_delivery_container(summary.id):
                 continue
             response = self.client.list_task_runs(summary.id)
             if not response.ok or not isinstance(response.data, list):
@@ -400,6 +403,16 @@ class CleanupMixin:
         # manager在列举、反查项目和删除时各自核验归属，防止列举后的名称替换扩大清理范围。
         # 启动健康检查容器使用独立前缀，不会被managed_container_names列出。
         known_ids = {summary.id for summary in summaries}
+        bridge = self.container_manager.traffic_execution
+        if bridge is not None:
+            # 控制容器可能已删除，私有 manifest 仍是测试物理资源的独立清理来源。
+            for project_id in bridge.pending_cleanup_projects() - known_ids:
+                name = self.container_manager.container_name(project_id)
+                if name in self._cleanup_pending or self._candidate_container_blocked(name):
+                    continue
+                future = self.cleanup_executor.submit(bridge.cleanup_project, project_id)
+                self.cleanup_futures[future] = (name, None, None)
+                self._cleanup_pending.add(name)
         for name in self.container_manager.managed_container_names():
             if self._candidate_container_blocked(name):
                 continue
@@ -491,6 +504,17 @@ class CleanupMixin:
         for task in self.futures.values():
             summary = summary_by_project.get(task.project_id)
             status = summary.status if summary is not None else "deleted"
+            if task.task_type == "agent_chat" and summary is not None:
+                # 只读项目对话不随研究暂停/完成取消；轮次取消由专用heartbeat裁决。
+                continue
+            if task.task_type == "report" and task.report_generation_token is not None and summary is not None:
+                state = self.client.get_assessment_report_finalization(task.project_id, generation_token=task.report_generation_token)
+                if state.ok and isinstance(state.data, dict):
+                    if state.data.get("cancel_requested_at") or state.data.get("status") == "cancelled":
+                        task.cancellation.cancel("report_cancelled")
+                if task.report_scope_key:
+                    # 单条只读整理不随项目暂停取消；短暂读取失败也不能把暂停误作显式取消。
+                    continue
             user_stopping = bool(
                 summary is not None
                 and status == "active"

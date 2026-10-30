@@ -5,11 +5,17 @@ import { ApiError } from '@/api/client'
 import type { VerificationSummary } from '@/api/verificationRequests'
 import VerificationActions from './VerificationActions.vue'
 
-const mocks = vi.hoisted(() => ({ remove: vi.fn(), download: vi.fn() }))
+const mocks = vi.hoisted(() => ({ remove: vi.fn(), download: vi.fn(), read: vi.fn(), detail: vi.fn(), create: vi.fn() }))
 vi.mock('@/api/verificationRequests', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/api/verificationRequests')>(),
   deleteVerificationRequest: mocks.remove,
-  downloadVerificationReport: mocks.download,
+  getVerificationRequest: mocks.detail,
+}))
+vi.mock('@/features/reports/reportExport', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/features/reports/reportExport')>(),
+  fetchReportMarkdown: mocks.read,
+  createReportExport: mocks.create,
+  downloadReportBlob: mocks.download,
 }))
 
 const summary: VerificationSummary = {
@@ -53,6 +59,9 @@ beforeEach(() => {
   HTMLElement.prototype.releasePointerCapture = () => undefined
   mocks.remove.mockReset()
   mocks.download.mockReset()
+  mocks.read.mockReset()
+  mocks.detail.mockReset()
+  mocks.create.mockReset().mockResolvedValue(new Blob(['报告']))
 })
 afterEach(() => {
   wrappers.splice(0).forEach((wrapper) => wrapper.unmount())
@@ -61,13 +70,38 @@ afterEach(() => {
 })
 
 describe('复测永久删除操作', () => {
-  it('详情菜单不重复再次复测，执行未止的删除原因可见', async () => {
+  it('证据包图片清单失败仍导出正文，切换轮次取消迟到的纯Markdown下载', async () => {
+    const result = { schema_version: 4 as const, outcome: 'not_reproduced' as const, summary: '本轮未复现', remediation: '检查资源归属', tested_scope: '合成证据', limitations: [], reason_code: null, evidence_refs: [], evidence_items: [], test_steps: [], key_evidence: [] }
+    const { wrapper } = render({ ...summary, result })
+    mocks.read.mockResolvedValueOnce('# 本轮正文\n\n```http\n原始报文\n```')
+    mocks.detail.mockRejectedValueOnce(new Error('图片清单不可用'))
+    await openMenu()
+    menuItem('Markdown 证据包').click()
+    await flushPromises()
+    expect(mocks.read).toHaveBeenCalledWith('/api/v1/verification-requests/round-a/report', expect.any(AbortSignal))
+    expect(mocks.detail).toHaveBeenCalledWith('round-a', expect.any(AbortSignal))
+    expect(mocks.create).toHaveBeenCalledWith(expect.stringContaining('图片清单读取失败；正文与原文证据仍已保留。'), 'tar', '复测报告-round-a', [])
+    expect(mocks.download).toHaveBeenCalledWith(expect.any(Blob), '复测报告-round-a', 'tar')
+    let resolve!: (value: string) => void
+    mocks.read.mockImplementationOnce(() => new Promise<string>((done) => { resolve = done }))
+    await openMenu()
+    menuItem('导出报告').click()
+    await flushPromises()
+    const signal = mocks.read.mock.calls[1]![1] as AbortSignal
+    await wrapper.setProps({ request: { ...summary, id: 'round-b', result } })
+    expect(signal.aborted).toBe(true)
+    resolve('过期正文')
+    await flushPromises()
+    expect(mocks.download).toHaveBeenCalledTimes(1)
+  })
+
+  it('删除入口和禁用原因默认可见，详情菜单不重复再次复测', async () => {
     render({ ...summary, can_delete: false, delete_block_reason: '执行环境尚未回收' }, 'detail')
+    const remove = button('删除复测记录')
+    expect(remove.disabled).toBe(true)
+    expect(document.getElementById(remove.getAttribute('aria-describedby')!)?.textContent).toBe('执行环境尚未回收')
     await openMenu()
     expect(document.body.textContent).not.toContain('再次复测')
-    const remove = menuItem('删除')
-    expect(remove.getAttribute('data-disabled')).not.toBeNull()
-    expect(remove.textContent).toContain('执行环境尚未回收')
     remove.click()
     await flushPromises()
     expect(mocks.remove).not.toHaveBeenCalled()
@@ -76,8 +110,7 @@ describe('复测永久删除操作', () => {
   it('严格清理失败不移除行，重读待清理投影，只有成功后才通知删除', async () => {
     const { wrapper, invalidate } = render()
     mocks.remove.mockRejectedValueOnce(new ApiError('文件清理失败，可重试', 503, null)).mockResolvedValueOnce(undefined)
-    await openMenu()
-    menuItem('删除').click()
+    button('删除复测记录').click()
     await flushPromises()
     expect(document.body.textContent).toContain('删除此轮复测及其产生的文件，不影响原漏洞和其他已受理复测；删除后无法恢复。')
     expect(document.body.textContent).not.toContain('底层原件仍保留')
@@ -98,7 +131,7 @@ describe('复测永久删除操作', () => {
     await openMenu()
     expect(menuItem('再次复测').getAttribute('data-disabled')).not.toBeNull()
     expect(menuItem('导出报告').getAttribute('data-disabled')).not.toBeNull()
-    expect(menuItem('重试清理').getAttribute('data-disabled')).toBeNull()
+    expect(button('重试清理').disabled).toBe(false)
     menuItem('再次复测').click()
     menuItem('导出报告').click()
     await flushPromises()

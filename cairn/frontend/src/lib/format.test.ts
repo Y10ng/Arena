@@ -101,6 +101,7 @@ describe('status meta', () => {
     assert.equal(taskTypeText('bootstrap'), '启动');
     assert.equal(taskTypeText('reason'), '推理');
     assert.equal(taskTypeText('explore'), '探索');
+    assert.equal(taskTypeText('agent_chat'), '项目对话');
     assert.equal(taskTypeText('custom_task'), 'custom_task');
     assert.equal(taskTypeText(''), '');
   });

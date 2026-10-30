@@ -1057,6 +1057,58 @@ WHERE jsonb_typeof(features_json::jsonb) = 'object'
 """
 
 
+# 单条整理复用报告受理记录；作用域与已接受成果独立于最近一次尝试的状态。
+POSTGRES_REPORT_SCOPES_V61_SCHEMA = """\
+LOCK TABLE assessment_report_finalizations IN ACCESS EXCLUSIVE MODE;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM assessment_report_finalizations WHERE status IN ('pending', 'running')) THEN
+        RAISE EXCEPTION 'report_scope_outstanding_generation_resolution_required';
+    END IF;
+END;
+$$;
+ALTER TABLE assessment_report_finalizations ADD COLUMN scope_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE assessment_report_finalizations ADD COLUMN vulnerability_id TEXT;
+ALTER TABLE assessment_report_finalizations ADD COLUMN observation_id TEXT;
+ALTER TABLE assessment_report_finalizations ADD COLUMN frozen_packet_json TEXT;
+ALTER TABLE assessment_report_finalizations ADD COLUMN accepted_artifact_id TEXT;
+ALTER TABLE assessment_report_finalizations ADD COLUMN accepted_generation_token TEXT;
+ALTER TABLE assessment_report_finalizations ADD COLUMN accepted_input_sha256 TEXT;
+ALTER TABLE assessment_report_finalizations ADD COLUMN cancel_requested_at TEXT;
+ALTER TABLE assessment_report_finalizations DROP CONSTRAINT assessment_report_finalizations_pkey;
+ALTER TABLE assessment_report_finalizations ADD PRIMARY KEY (project_id, scope_key);
+CREATE UNIQUE INDEX idx_assessment_report_generation
+ON assessment_report_finalizations(project_id, generation_token);
+ALTER TABLE assessment_report_finalizations ADD CONSTRAINT fk_report_accepted_artifact
+FOREIGN KEY (accepted_artifact_id, project_id) REFERENCES artifacts(id, project_id)
+ON DELETE SET NULL (accepted_artifact_id);
+UPDATE assessment_report_finalizations
+SET accepted_artifact_id = artifact_id,
+    accepted_generation_token = generation_token,
+    accepted_input_sha256 = input_snapshot_sha256
+WHERE status = 'ready';
+"""
+
+
+# 每次发现独立保存过程与建议；历史建议来源未知，保留 NULL 而不复制 canonical。
+POSTGRES_DISCOVERY_READABLE_V63_SCHEMA = """\
+ALTER TABLE vulnerability_observations ADD COLUMN reproduction_steps_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE vulnerability_observations ADD COLUMN remediation TEXT;
+"""
+
+
+# 只放宽报告段的身份清单；普通执行与 outcome 的容量约束保持不变。
+POSTGRES_REPORT_CANDIDATE_CAPACITY_V64_SCHEMA = """\
+ALTER TABLE task_run_candidates
+    DROP CONSTRAINT task_run_candidates_artifact_count_check,
+    ADD CONSTRAINT task_run_candidates_artifact_count_check
+        CHECK (artifact_count BETWEEN 0 AND CASE WHEN phase = 'report_execute' THEN 256 ELSE 32 END),
+    DROP CONSTRAINT task_run_candidates_manifest_json_check,
+    ADD CONSTRAINT task_run_candidates_manifest_json_check
+        CHECK (octet_length(manifest_json) BETWEEN 2 AND CASE WHEN phase = 'report_execute' THEN 131072 ELSE 16384 END);
+"""
+
+
 # 轻量隔离测试直接执行 db.SCHEMA；迁移基线仍单独引用上面的冻结 SCHEMA。
 _CURRENT_BASE_SCHEMA = (
     SCHEMA.replace(

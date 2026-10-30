@@ -54,6 +54,13 @@ describe('navigation registry', () => {
     expect(router.resolve('/projects/project-a/hints').name).toBe('WorkspaceHints')
   })
 
+  it('sends retired global configuration and provenance URLs to NotFound', () => {
+    for (const path of ['/provenance', '/console/models', '/console/dispatcher', '/console/timeout']) {
+      expect(router.resolve(path).name).toBe('NotFound')
+    }
+    expect(router.getRoutes().find((route) => route.path === '/console')?.redirect).toBe('/console/workers')
+  })
+
   it('keeps tenant and super-admin navigation visibility aligned with route meta', () => {
     const privilegedRegistryNames = navigationRegistry
       .filter((item) => item.role === 'super-admin')
@@ -67,7 +74,6 @@ describe('navigation registry', () => {
     expect(privilegedRegistryNames).toEqual(privilegedRouterNames)
 
     expect(sidebarNavigation('system', false).map((item) => item.routeName)).toEqual([
-      'ConsoleModels',
       'ConsoleWorkers',
       'VerificationConfiguration',
     ])
@@ -77,7 +83,7 @@ describe('navigation registry', () => {
     const tenantCommands = commandItemsFromRegistry(false)
     expect(tenantCommands.some((item) => item.id === 'go:Monitoring')).toBe(false)
     expect(tenantCommands.some((item) => item.id === 'go:ConsoleUsers')).toBe(false)
-    expect(tenantCommands.some((item) => item.id === 'go:ConsoleModels')).toBe(true)
+    expect(tenantCommands.some((item) => item.id === 'go:ConsoleWorkers')).toBe(true)
 
     const adminCommands = commandItemsFromRegistry(true)
     expect(adminCommands.some((item) => item.id === 'go:Monitoring')).toBe(true)
@@ -148,10 +154,10 @@ describe('navigation registry', () => {
     expect(
       breadcrumbsFromRegistry('WorkspaceGraph', 'project-a').map((crumb) => crumb.text),
     ).toEqual(['Arena', '任务管理', 'project-a'])
-    expect(breadcrumbsFromRegistry('ConsoleDispatcher').map((crumb) => crumb.text)).toEqual([
+    expect(breadcrumbsFromRegistry('ConsoleWorkers').map((crumb) => crumb.text)).toEqual([
       'Arena',
       '系统管理',
-      'Dispatcher',
+      'Worker 配置',
     ])
     expect(breadcrumbsFromRegistry('Monitoring').map((crumb) => crumb.text)).toEqual([
       'Arena',

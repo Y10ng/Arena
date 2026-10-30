@@ -1,4 +1,4 @@
-import type { TenantWorker } from './workers'
+import type { TestEgressInput, TestEgressPublic } from '../testEgress'
 
 export interface ProjectReason {
   worker?: string | null
@@ -21,10 +21,6 @@ export interface ProjectWorkerBinding {
   unavailable_reason?: string | null
 }
 
-export interface UpdateProjectWorkersRequest {
-  tenant_worker_ids: string[]
-}
-
 export interface ReportCapability {
   supported: boolean
   policy_version: number
@@ -33,6 +29,7 @@ export interface ReportCapability {
 }
 
 export interface ProjectSummary {
+  test_egress?: TestEgressPublic
   id: string
   schedule_id?: string | null
   title: string
@@ -168,10 +165,6 @@ export interface ProjectRuntimeV2 extends ProjectRuntimeBase {
 }
 
 export type ProjectRuntime = ProjectRuntimeV1 | ProjectRuntimeV2
-
-export interface ProjectManagementOptions {
-  tenant_workers: TenantWorker[]
-}
 
 export interface AssessmentEvidenceRef {
   artifact_id?: string | null
@@ -331,6 +324,18 @@ export interface EvidenceRef {
 
 export type EvidenceSource = 'capture' | 'manual' | 'historical'
 
+export interface EvidenceExcerpt {
+  side: 'request' | 'response' | 'artifact'
+  pointer: string
+}
+
+export interface FlowEvidenceExcerpt extends EvidenceExcerpt {
+  side: 'request' | 'response'
+  representation: 'http-evidence-v1'
+  sha256: string
+  revision: number
+}
+
 interface EvidenceItemBase {
   id: string
   role: 'primary' | 'supporting'
@@ -338,9 +343,137 @@ interface EvidenceItemBase {
   source: EvidenceSource
 }
 
+export type TrafficSide = 'request' | 'response'
+export type TrafficState = 'receiving' | 'complete' | 'partial' | 'failed'
+export interface TrafficScope {
+  id: string
+  project_id: string
+  task_run_id: string
+  generation: number
+  container_id: string
+}
+export interface TrafficFlowDetail {
+  header_text: { request: string; response: string | null }
+  location?: { host: string; request_url: string; request_path: string; connection_host: string; address_issue: string | null }
+  id: string
+  project_id: string
+  scope: TrafficScope
+  revision: number
+  state: TrafficState
+  source_state: TrafficState
+  received_at?: string
+  updated_at?: string
+  started_at?: number
+  finished_at?: number | null
+  error?: { code: string; message: string | null } | null
+  observations?: { observation_id: string; vulnerability_id: string; status: string; task_run_id: string }[]
+  sync: {
+    pending_sides?: TrafficSide[]
+    bodies: Record<TrafficSide, {
+      status: 'available' | 'absent' | 'pending' | 'receiving'
+      artifact_id: string | null
+      revision?: number | null
+      captured_bytes?: number
+      accepted_bytes?: number
+      sealed_bytes?: number | null
+      sealed?: boolean
+    }>
+  }
+}
+export interface TrafficBodyPreview {
+  side: TrafficSide
+  revision: number | null
+  sealed: boolean
+  source_sealed: boolean
+  body_complete: boolean
+  captured_bytes: number
+  accepted_bytes: number
+  sealed_bytes: number | null
+  size: number
+  offset: number
+  next_offset: number
+  bytes_read: number
+  has_more: boolean
+  content_base64: string
+}
+export interface TrafficPreview {
+  project_id: string
+  flow_id: string
+  side: TrafficSide
+  revision: number
+  representation: 'http-preview'
+  stable: false
+  header_text: string
+  header_truncated: boolean
+  text: string
+  body_display: 'utf8' | 'binary' | 'non-utf8' | 'compressed'
+  offset: number
+  next_offset: number
+  accepted_bytes: number
+  captured_bytes: number
+  source_sealed: boolean
+  sealed: boolean
+  has_more: boolean
+}
+export interface TrafficReadable {
+  project_id: string
+  flow_id: string
+  side: TrafficSide
+  revision: number
+  representation: 'http-readable'
+  excerpt_eligible: false
+  header_text: string
+  body_text: string
+  decode_status: 'complete' | 'too-large' | 'invalid-encoding' | 'unsupported-encoding' | 'non-text' | 'pending' | 'deferred'
+  read_mode: 'auto' | 'manual'
+  deferred_reason: 'raw-size' | 'decoded-size' | 'display-size' | null
+  body_bytes: number | null
+  decoded: boolean
+  text_escaped: boolean
+  display_truncated: boolean
+  content_encodings: string[]
+  // 完整时为正文大小；超限时仅为已探测下界，未能解码时未知。
+  decoded_body_bytes: number | null
+  body_limit: number
+  body_artifact_id?: string
+  body_sha256?: string
+}
+export interface TrafficProjection {
+  flow_id: string
+  project_id: string
+  scope: TrafficScope
+  revision: number
+  state: TrafficState
+  side: TrafficSide
+  representation: 'http-evidence-v1'
+  sha256: string
+  size: number
+  offset: number
+  next_offset: number
+  text: string
+  body_artifact_id: string
+  body_sha256: string
+  body_display: 'utf8' | 'binary' | 'non-utf8' | 'compressed'
+  header_size: number
+  has_more: boolean
+}
+
 export type EvidenceItem = EvidenceItemBase & (
   | {
       kind: 'http'
+      flow_id: string
+      excerpts?: FlowEvidenceExcerpt[]
+      request?: null
+      response?: null
+      request_text?: null
+      response_text?: null
+      artifact?: null
+      text?: null
+    }
+  | {
+      kind: 'http'
+      flow_id?: null
+      excerpts?: EvidenceExcerpt[]
       request?: EvidenceRef | null
       response?: EvidenceRef | null
       request_text?: string | null
@@ -350,6 +483,8 @@ export type EvidenceItem = EvidenceItemBase & (
     }
   | {
       kind: 'artifact'
+      flow_id?: null
+      excerpts?: EvidenceExcerpt[]
       artifact: EvidenceRef
       request?: null
       response?: null
@@ -359,6 +494,8 @@ export type EvidenceItem = EvidenceItemBase & (
     }
   | {
       kind: 'text'
+      flow_id?: null
+      excerpts?: EvidenceExcerpt[]
       artifact?: EvidenceRef | null
       text?: string | null
       request?: null
@@ -421,13 +558,23 @@ export interface AssessmentReportGenerationRequest {
 export interface AssessmentReportFinalization {
   project_id: string
   version: number
-  status: 'pending' | 'running' | 'ready' | 'failed'
+  status: 'pending' | 'running' | 'ready' | 'failed' | 'cancelled'
+  scope_key?: string
+  vulnerability_id?: string | null
+  observation_id?: string | null
+  accepted_artifact_id?: string | null
+  accepted_generation_token?: string | null
+  accepted_input_sha256?: string | null
+  cancel_requested_at?: string | null
+  stale?: boolean
+  source_status?: 'available' | 'deleted'
   attempt_count: number
   claimed_by: string | null
   lease_expires_at: string | null
   next_attempt_at: string | null
   artifact_id: string | null
   last_error: string
+  last_error_code?: string | null
   generation_started_at: string
   generation_token: string
   claim_token: string | null
@@ -533,12 +680,12 @@ export interface ProjectLibraryBinding {
 }
 
 export interface CreateProjectRequest {
+  test_egress?: TestEgressInput
   request_id?: string
   title: string
   origin: string
   goal: string
   scenario: string
-  tenant_worker_ids: string[]
   explore_deadline?: string | null
   authorization_expires_at: string | null
   hints?: Array<{ content: string }>
@@ -550,6 +697,7 @@ export interface CreateProjectRequest {
 
 export interface ProjectDetail {
   project: {
+    test_egress?: TestEgressPublic
     id: string
     schedule_id?: string | null
     title: string

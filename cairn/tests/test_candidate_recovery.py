@@ -330,7 +330,7 @@ def test_candidate_recovery_reverifies_proof_confirms_fence_and_only_replays_cap
             "generation": 0,
             "process_started": True,
             "termination_confirmed": True,
-            "cleanup_confirmed": True,
+            "cleanup_confirmed": False,
         },
         "candidate_recovery": {
             "status": "stopped",
@@ -1025,7 +1025,7 @@ def test_report_candidate_recovery_requires_strict_finish_receipt_before_fence_r
         "generation": 0,
         "process_started": True,
         "termination_confirmed": True,
-        "cleanup_confirmed": True,
+        "cleanup_confirmed": False,
     }
     entries = report_outbox.entries()
     assert len(entries) == 1

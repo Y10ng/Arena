@@ -5,11 +5,14 @@ from __future__ import annotations
 from .common_base import *
 from dataclasses import replace
 from cairn.dispatcher.runtime.process import ManagedProcess
+from cairn.dispatcher.runtime.traffic_reader import TrafficReadBinding, TrafficReader
+from cairn.dispatcher.runtime.project_tools import ProjectToolBinding
 
 from .candidate_capture_outbox import (
     CandidateCaptureOutbox,
     CandidateCaptureOutboxError,
     CandidateExecutionFence,
+    PERMANENT_CANDIDATE_REJECTIONS,
 )
 from .candidate_intake import CandidateIntakeSummary, intake_worker_candidates
 from .checkpoint_intake import intake_worker_checkpoints
@@ -298,9 +301,13 @@ def worker_process_failure(
     if result.returncode != 0:
         return process_failure("process", "process_exit_nonzero")
     if result.candidate_capture_integrity_error is not None:
-        return process_failure(
-            "candidate_integrity",
-            result.candidate_capture_integrity_error,
+        return WorkerResultFailure(
+            failure_class="candidate_integrity", code=result.candidate_capture_integrity_error,
+            message=("执行身份不一致，报告未被接受" if phase == "report_execute" else "执行身份不一致，候选未被接受")
+            if result.candidate_capture_integrity_error in PERMANENT_CANDIDATE_REJECTIONS
+            else "候选接收失败；未接受业务成果",
+            fingerprint="", origin="dispatcher_process", phase=phase, exit_code=result.returncode,
+            http_status=result.candidate_capture_http_status,
         )
     return None
 
@@ -320,10 +327,19 @@ def run_worker_process(
     task_run_id: str | None = None,
     payload_recorder_enabled: bool = False,
     candidate_outbox: CandidateCaptureOutbox | None = None,
+    project_tools_binding: ProjectToolBinding | None = None,
 ) -> ProcessResult:
     if type(timeout_seconds) is not int or timeout_seconds <= 0:
         raise ValueError("worker execution requires a positive integer timeout")
     invocation = argv if isinstance(argv, DriverResult) else DriverResult(argv=argv)
+    chat = phase == "chat_turn"
+    event_client = None if chat else client
+    traffic = None
+    if invocation.task_execution_scope_id is not None:
+        bridge = container_manager.traffic_execution
+        traffic = bridge.task(project_id, task_run_id) if bridge is not None else None
+        if traffic is None or traffic.scope.id != invocation.task_execution_scope_id or cancellation is not traffic.cancellation:
+            raise RuntimeError("traffic_execution_binding_mismatch")
     if invocation.candidate_spool is not None and (
         client is None
         or candidate_outbox is None
@@ -335,8 +351,12 @@ def run_worker_process(
     ):
         raise RuntimeError("candidate capture identity is required before model execution")
     if cancellation is not None and cancellation.is_cancelled:
+        if traffic is not None:
+            traffic.stop(cancellation.reason)
         return ProcessResult(1, "", "", cancelled=True, cancel_reason=cancellation.reason)
     if lease is not None and lease.failure is not None:
+        if traffic is not None:
+            traffic.stop("heartbeat_lost")
         return ProcessResult(1, "", "", cancelled=True, cancel_reason="heartbeat_lost")
     command_argv = invocation.argv
     LOG.info(
@@ -346,7 +366,7 @@ def run_worker_process(
         phase,
         timeout_seconds,
     )
-    record_command_started(client, project_id, task_run_id, phase=phase, worker=worker, argv=command_argv)
+    record_command_started(event_client, project_id, task_run_id, phase=phase, worker=worker, argv=command_argv)
     payload_log = prepare_payload_recorder(
         container_manager,
         container_name,
@@ -366,7 +386,7 @@ def run_worker_process(
     browser_session = None
     try:
         prepare_browser_session = getattr(container_manager, "prepare_browser_session", None)
-        if callable(prepare_browser_session):
+        if not chat and traffic is None and callable(prepare_browser_session):
             process_env, browser_session = prepare_browser_session(
                 container_name, dict(process_env), project_id=project_id, task_run_id=task_run_id,
             )
@@ -397,7 +417,26 @@ def run_worker_process(
     process_started = False
     process_start_attempted = False
     candidate_fence: CandidateExecutionFence | None = None
+    traffic_reader = None
     try:
+        if invocation.project_tools_socket_path is not None:
+            if not chat or project_tools_binding is None or project_tools_binding.project_id != project_id or project_tools_binding.task_run_id != task_run_id:
+                raise RuntimeError("project_tools_binding_invalid")
+            directory = container_manager.chat_directory(project_id) / "prompts"
+            traffic_reader = TrafficReader(directory, PurePosixPath(invocation.project_tools_socket_path).name, project_tools_binding)
+        if invocation.traffic_read_socket_path is not None:
+            bridge = container_manager.traffic_execution
+            if bridge is None or client is None or project_id is None or task_run_id is None or phase == "report_execute":
+                raise RuntimeError("traffic_read_binding_missing")
+            descriptor = invocation.candidate_spool
+            if descriptor is None or invocation.traffic_read_socket_path != f"/tmp/cairn-prompts/pi-traffic-{descriptor.capture_id}.sock":
+                raise RuntimeError("traffic_read_binding_invalid")
+            # 只取已挂载的控制私有目录，不准备 executor、collector 或新的 scope。
+            directory = bridge._runtime(project_id).control_prompts
+            traffic_reader = TrafficReader(
+                directory, f"pi-traffic-{descriptor.capture_id}.sock",
+                TrafficReadBinding(client, project_id, task_run_id),
+            )
         _write_worker_input_files(
             container_manager,
             container_name,
@@ -436,6 +475,8 @@ def run_worker_process(
             command_argv,
             timeout_seconds=timeout_seconds,
         )
+        if traffic is not None:
+            traffic.process = process
         if candidate_fence is not None:
             process.retain_execution_control()
 
@@ -484,13 +525,18 @@ def run_worker_process(
                 process.on_execution_started = observe_start
         # 先接入粘性取消，再允许 start，堵住 precheck 与实际启动之间的租约失败窗口。
         if lease is not None:
-            lease.attach_process(process)
+            # 新执行的 lease 取消同时广播给控制进程与独立测试 scope。
+            lease.attach_process(cancellation if traffic is not None else process)
         if cancellation is not None:
             cancellation.attach_process(process)
         process_start_attempted = True
         process.start()
         process_started = True
     except BaseException:
+        if traffic_reader is not None:
+            traffic_reader.close()
+        if traffic is not None:
+            traffic.stop("control_start_failed")
         if lease is not None:
             lease.attach_process(None)
         if cancellation is not None:
@@ -498,6 +544,10 @@ def run_worker_process(
             if process is not None:
                 cancellation.finish_execution(process)
         retained_paths: set[str] = set()
+        if invocation.report_segment_manifest_path is not None and process_start_attempted:
+            retained_paths.add(invocation.report_segment_manifest_path)
+        if invocation.http_evidence_manifest_path is not None and process_start_attempted:
+            retained_paths.add(invocation.http_evidence_manifest_path)
         if invocation.candidate_spool is not None and process_start_attempted:
             retained_paths.add(invocation.candidate_spool.path)
         elif candidate_fence is not None and candidate_outbox is not None:
@@ -527,7 +577,7 @@ def run_worker_process(
             retained_paths=retained_paths,
         )
         record_command_finished(
-            client,
+            event_client,
             project_id,
             task_run_id,
             phase=phase,
@@ -557,6 +607,12 @@ def run_worker_process(
     try:
         try:
             result = process.communicate(timeout=communicate_timeout(timeout_seconds))
+            if traffic is not None:
+                traffic.stop(result.cancel_reason or ("task_timeout" if did_timeout(result) else "control_finished"))
+                if not traffic.execution_completed:
+                    cancellation.cancel("traffic_termination_unconfirmed")
+                    result.cancelled = True
+                    result.cancel_reason = "traffic_termination_unconfirmed"
             execution_resources_resolved = (
                 _execution_completed(process)
             )
@@ -565,7 +621,7 @@ def run_worker_process(
                 _execution_completed(process)
             )
             record_command_finished(
-                client,
+                event_client,
                 project_id,
                 task_run_id,
                 phase=phase,
@@ -636,6 +692,7 @@ def run_worker_process(
             result.candidate_capture_pending = candidate_summary.pending > 0
             result.candidate_capture_frames = candidate_summary.frames_seen
             result.candidate_capture_integrity_error = candidate_summary.integrity_error
+            result.candidate_capture_http_status = candidate_summary.rejection_http_status
             if (
                 candidate_summary.host_durable
                 and candidate_summary.integrity_error is None
@@ -684,6 +741,10 @@ def run_worker_process(
                         type(exc).__name__,
                     )
     finally:
+        if traffic_reader is not None:
+            traffic_reader.close()
+        if traffic is not None:
+            traffic.stop("control_finished")
         # 未决执行可能迟到启动或继续写入；此时保留全部输入，由 fence/container 恢复路径最终回收。
         if not execution_resources_resolved:
             retained_paths = {item.path for item in written_files}
@@ -694,6 +755,10 @@ def run_worker_process(
                 if invocation.candidate_spool is not None
                 else set()
             )
+            if invocation.report_segment_manifest_path is not None:
+                retained_paths.add(invocation.report_segment_manifest_path)
+            if invocation.http_evidence_manifest_path is not None:
+                retained_paths.add(invocation.http_evidence_manifest_path)
         _remove_worker_input_files(
             container_manager,
             container_name,
@@ -727,7 +792,7 @@ def run_worker_process(
             before_count=oom_kill_count_before,
         )
         record_command_finished(
-            client,
+            event_client,
             project_id,
             task_run_id,
             phase=phase,
@@ -736,6 +801,11 @@ def run_worker_process(
             result=result,
             duration_seconds=time.perf_counter() - started,
         )
+        if chat:
+            if not execution_resources_resolved:
+                result.cancelled = True
+                result.cancel_reason = "execution_unconfirmed"
+            return result
         failure = None
         if client is not None and project_id is not None and task_run_id is not None:
             failure = worker_process_failure(

@@ -1,4 +1,4 @@
-"""跨线程取消令牌，把调度层的取消请求转发给正在运行的进程。"""
+"""跨线程取消令牌，同时收口控制进程与独立测试资源的终止证明。"""
 
 from __future__ import annotations
 
@@ -47,6 +47,15 @@ class TaskCancellation:
         self._reason: str | None = None
         self.generation = generation
         self._executions: dict[int, _ExecutionRecord] = {}
+        self._resources: list[object] = []
+
+    def register_resource(self, resource) -> None:
+        """独立测试资源也参与终止证明，取消先于准备完成时仍立即生效。"""
+        with self._lock:
+            self._resources.append(resource)
+            reason = self._reason
+        if reason is not None:
+            resource.cancel(reason)
 
     def register_execution(self, process: ManagedProcess) -> None:
         with self._lock:
@@ -95,7 +104,7 @@ class TaskCancellation:
                 ),
                 "termination_confirmed": task_finished and all(
                     record.finished and record.completed for record in records
-                ),
+                ) and all(_true_property(resource, "execution_completed") for resource in self._resources),
                 "cleanup_confirmed": False,
             }
 
@@ -113,6 +122,10 @@ class TaskCancellation:
             if not already_cancelled:
                 self._reason = reason
             process = self._process
+            resources = tuple(self._resources)
+        if not already_cancelled:
+            for resource in resources:
+                resource.cancel(self._reason)
         if process is not None and not already_cancelled:
             process.cancel(self._reason)
         return not already_cancelled

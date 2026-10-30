@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { TenantWorker } from '@/api/types'
 import {
-  defaultTenantWorkerDraft,
-  selectAfterWorkerListChange,
   tenantWorkerDraft,
   tenantWorkerDraftIsValid,
   tenantWorkerStatusLabel,
@@ -30,28 +28,11 @@ const worker = (id: string, overrides: Partial<TenantWorker> = {}): TenantWorker
 })
 
 describe('tenant Worker state helpers', () => {
-  it('creates independent default and persisted drafts', () => {
-    const first = defaultTenantWorkerDraft('model-1')
-    const second = defaultTenantWorkerDraft('model-2')
-    first.task_types.pop()
-
-    expect(first.model_id).toBe('model-1')
-    expect(second).toEqual({
-      display_name: '',
-      model_id: 'model-2',
-      task_types: ['reason', 'bootstrap', 'explore'],
-      max_running: 1,
-      priority: 100,
-      enabled: true,
-    })
-    expect(tenantWorkerDraft(worker('w1'))).toEqual({
-      display_name: 'Worker w1',
-      model_id: 'model-1',
-      task_types: ['reason', 'explore'],
-      max_running: 2,
-      priority: 50,
-      enabled: true,
-    })
+  it('creates only editable fields and accepts an unconfigured model', () => {
+    const draft = tenantWorkerDraft(worker('w1', { model_id: null, enabled: false }))
+    expect(draft).toEqual({ model_id: null, max_running: 2, priority: 50, enabled: false, expected_revision: 3 })
+    expect(tenantWorkerDraftIsValid(draft)).toBe(true)
+    expect(tenantWorkerDraftIsValid({ ...draft, model_id: '' })).toBe(false)
   })
 
   it('validates required integer ranges before submitting', () => {
@@ -63,25 +44,20 @@ describe('tenant Worker state helpers', () => {
     expect(tenantWorkerDraftIsValid({ ...draft, priority: Number.NaN })).toBe(false)
   })
 
-  it('keeps selection when present and falls back after deletion', () => {
-    expect(selectAfterWorkerListChange([worker('w1'), worker('w2')], 'w2')).toBe('w2')
-    expect(selectAfterWorkerListChange([worker('w1')], 'w2')).toBe('w1')
-    expect(selectAfterWorkerListChange([], 'w2')).toBe('')
-  })
-
   it('maps known unavailable reasons and safely handles unknown values', () => {
-    expect(tenantWorkerUnavailableLabel('engine_unsupported')).toBe('历史引擎不受支持 · 请新建 pi Worker')
+    expect(tenantWorkerUnavailableLabel('engine_unsupported')).toBe('引擎不受支持')
+    expect(tenantWorkerUnavailableLabel('model_unconfigured')).toBe('未配置模型')
     expect(tenantWorkerUnavailableLabel('worker_disabled')).toBe('已禁用')
-    expect(tenantWorkerUnavailableLabel('model_disabled')).toBe('Model 已禁用')
-    expect(tenantWorkerUnavailableLabel('model_protocol_unsupported')).toBe('Model 协议不受支持')
-    expect(tenantWorkerUnavailableLabel('model_incomplete')).toBe('Model 未完成')
-    expect(tenantWorkerUnavailableLabel('credential_missing')).toBe('缺少 Key')
+    expect(tenantWorkerUnavailableLabel('model_disabled')).toBe('模型已禁用')
+    expect(tenantWorkerUnavailableLabel('model_protocol_unsupported')).toBe('模型协议不受支持')
+    expect(tenantWorkerUnavailableLabel('model_incomplete')).toBe('模型配置未完成')
+    expect(tenantWorkerUnavailableLabel('credential_missing')).toBe('缺少模型凭据')
     expect(tenantWorkerUnavailableLabel('future_reason')).toBe('不可用')
     expect(tenantWorkerUnavailableLabel(null)).toBe('不可用')
   })
 
   it('separates configuration readiness from Dispatcher runtime status', () => {
-    expect(tenantWorkerStatusLabel(worker('ready'))).toBe('可用')
+    expect(tenantWorkerStatusLabel(worker('ready'))).toBe('配置就绪')
     expect(tenantWorkerStatusLabel(worker('offline', {
       executor_available: false,
     }))).toBe('配置就绪 · Dispatcher 不可用')
@@ -89,6 +65,6 @@ describe('tenant Worker state helpers', () => {
       available: false,
       unavailable_reason: 'credential_missing',
       executor_available: false,
-    }))).toBe('缺少 Key')
+    }))).toBe('缺少模型凭据')
   })
 })

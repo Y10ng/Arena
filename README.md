@@ -8,7 +8,7 @@ Arena 是面向本地和内部使用的自主安全探索平台。通过 **Origi
 
 - **Server / UI**：Python 服务端提供 API 和构建后的 Vue 界面。
 - **Dispatcher**：原生 Linux 进程，负责调度、容器执行和结果回收。
-- **Worker**：Docker 镜像，内含 pi runner、浏览器及常用 Web 测试工具；默认名为 `arena-worker:local`，也可使用自定义镜像名。
+- **Worker 与执行环境**：主 Worker 镜像内含 pi runner、浏览器及常用 Web 测试工具；当前任务还需要流量网关和执行器镜像，默认分别为 `arena-worker:local`、`arena-traffic-gateway:local`、`arena-task-executor:local`。也可配置配套的自定义镜像。
 - **PostgreSQL**：保存账号、配置、项目与执行记录；可使用项目自带的数据库 Compose，也可连接已有 PostgreSQL。
 
 Compose 只负责数据库，不是全栈容器部署。内部 Python 包、CLI 与部分协议标识沿用 `cairn`，不影响产品名称 Arena。
@@ -17,8 +17,8 @@ Compose 只负责数据库，不是全栈容器部署。内部 Python 包、CLI 
 
 完整步骤统一见 **[Linux 安装、配置与更新指南](docs/deployment-linux-zh.md)**：
 
-- **使用已有 Worker 镜像**：取得配套应用部署包，拉取或导入 Worker 镜像，在宿主机安装并启动应用；仍需要 Python、uv 和 Docker。
-- **从源码完整安装**：获取源码、安装 Python 依赖、构建正式前端与 Worker 镜像，再启动完整系统。
+- **使用已有 Worker 镜像**：取得配套应用部署包，拉取或导入主 Worker、流量网关和执行器三个镜像，在宿主机安装并启动应用；仍需要 Python、uv 和 Docker。
+- **从源码完整安装**：获取源码、安装 Python 依赖、构建正式前端与上述三个镜像，再启动完整系统。
 
 当前没有已核实的预构建镜像或部署包下载地址；没有配套资产时选择源码路径。两条路径共用登录、配置和维护说明，不是全栈 Docker 部署。
 
@@ -26,13 +26,13 @@ Compose 只负责数据库，不是全栈容器部署。内部 Python 包、CLI 
 
 ## 使用流程
 
-1. 登录后在 Models / Workers 界面配置模型凭据、启用 pi Worker 并绑定模型，无需再复制到 YAML。
-2. 创建项目、选择 Worker，用 Origin、Goal 描述背景、目标与实际授权范围；资料库和上传资料按需使用。
+1. 登录后在 Worker 配置中设置模型与三类普通 Worker，项目 Agent 使用独立模型配置；无需再把模型凭据复制到 YAML。
+2. 创建项目，用 Origin、Goal 描述背景、目标与实际授权范围；普通 Worker 自动关联，资料库、上传资料和代理设置按需使用。
 3. 查看运行状态、事实与证据、漏洞及验证结果，按需要生成报告。
 
 **创建项目可能立即执行并产生模型费用，模型连通性测试也可能调用付费 API。** 服务能启动不等于模型、真实任务或漏洞发现效果已经验证。
 
-日常启停、日志、源码与部署包更新、数据保留及排障均见主指南。私有配置、密钥和运行资料不应进入 Git 或发布包。
+日常启停、日志、源码与部署包更新、数据保留及排障均见主指南。**推送 GitHub 代码不等于发布镜像或自动更新已安装实例。** 当前源码更新需要按指南执行；部署包更新器会刷新默认主 Worker，但网关和执行器仍须提前准备，尚不能称为完整的一键升级。Docker 复用相同镜像层，不是按文件对整套环境打补丁；具体缓存条件见主指南。私有配置、密钥和运行资料不应进入 Git 或发布包。
 
 Worker 专属环境见 [容器说明](container/README.md)，pi 模型协议限制见 [runner 说明](container/pi-agent/README.md)。
 

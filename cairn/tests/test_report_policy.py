@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
@@ -7,9 +8,12 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 from cairn.dispatcher.prompt_resources import validate_report_prompt_resources
+from cairn.server.auth import RequestPrincipal
+from cairn.server.routers import projects as project_routes
 from cairn.server.schemas.scenarios import Scenario
 from cairn.server.services.assessment_policy import frozen_execution_features, scenario_snapshot
 from cairn.server.services import assessment_reports, project_records
@@ -18,6 +22,7 @@ from cairn.server.services.report_policy import (
     parse_report_execution_plan,
     report_policy_from_project_row,
 )
+from test_report_frozen_rendering import TEMPLATE
 
 
 def _row(snapshot: object, *, status: str = "completed") -> dict[str, str]:
@@ -71,7 +76,8 @@ def test_platform_report_policy_freezes_only_pi_packet_contract() -> None:
     assert plan.report_prompt_group == "goal-driven-v1"
     assert plan.version == 2
     assert plan.packet_version == 2
-    assert plan.output_contract_version == 3
+    assert plan.output_contract_version == 4
+    assert plan.report_data_schema_version == 4
     assert plan.execution_engine == "pi"
     assert plan.execution_contract_version == 1
     assert "{report_packet_json}" in prompt_markdown
@@ -81,6 +87,8 @@ def test_platform_report_policy_freezes_only_pi_packet_contract() -> None:
 
 @pytest.mark.parametrize(("field", "value"), [
     ("version", 1), ("packet_version", 1), ("output_contract_version", 2),
+    ("output_contract_version", 3),
+    ("report_data_schema_version", 3), ("report_data_schema_version", None),
     ("execution_engine", "claudecode"), ("execution_contract_version", None),
 ])
 def test_old_unsupported_frozen_plan_is_rejected_not_upgraded(field: str, value: object) -> None:
@@ -133,7 +141,10 @@ class _ReportRequestConnection:
                 "report_prompt_digest_sha256", "report_prompt_markdown", "created_at", "updated_at",
             )
             self.finalization = dict(zip(names, parameters, strict=True))
-            self.finalization.update(status="pending", attempt_count=0, last_error="")
+            self.finalization.update(
+                scope_key="", vulnerability_id=None, observation_id=None, frozen_packet_json=None,
+                status="pending", attempt_count=0, last_error="", cancel_requested_at=None,
+            )
             self.writes += 1
         else:
             assert "SELECT * FROM assessment_report_finalizations" in sql
@@ -144,7 +155,7 @@ def _request_dependencies(monkeypatch, project):
     monkeypatch.setattr(assessment_reports, "_lock_report_project", lambda _conn, _id: project)
     monkeypatch.setattr(project_records, "project_pause_unconfirmed", lambda _conn, _id: False)
     monkeypatch.setattr(assessment_reports, "assessment_has_running_work", lambda _conn, _id: False)
-    markdown = "# 受控模板\n"
+    markdown = TEMPLATE
     monkeypatch.setattr(assessment_reports, "require_report_template_profile", lambda *_args: SimpleNamespace(
         key="synthetic-template", digest_sha256=sha256(markdown.encode()).hexdigest(),
         markdown_content=markdown, compatibility_profiles=["assessment-report-packet-v1"],
@@ -207,3 +218,83 @@ def test_default_report_capability_does_not_bypass_active_project_restriction(mo
         )
     assert rejected.value.detail == "assessment_report_project_active"
     assert conn.writes == 0
+
+
+@pytest.fixture
+def report_request_client(monkeypatch):
+    _request_dependencies(monkeypatch, _row(_snapshot()))
+    conn = _ReportRequestConnection()
+
+    @contextmanager
+    def get_conn():
+        yield conn
+
+    monkeypatch.setattr(project_routes, "get_conn", get_conn)
+    app = FastAPI()
+    app.include_router(project_routes.router)
+    app.dependency_overrides[project_routes.require_user_tenant_project] = lambda: RequestPrincipal(
+        kind="user", subject_id="synthetic-user", tenant_id="synthetic-tenant", role="user",
+    )
+    with TestClient(app) as client:
+        yield conn, client
+
+
+@pytest.mark.parametrize("query, extra_body", [
+    ({"vulnerability_id": "synthetic-vulnerability"}, {}),
+    ({"observation_id": "synthetic-observation"}, {}),
+    ({"vulnerability_id": "synthetic-vulnerability", "observation_id": "synthetic-observation"}, {}),
+    ({"vulnerability_id": ""}, {}),
+    ({"observation_id": ""}, {}),
+    ({}, {"vulnerability_id": "synthetic-vulnerability"}),
+    ({}, {"observation_id": "synthetic-observation"}),
+    ({}, {"vulnerability_id": None}),
+])
+def test_report_request_rejects_retired_scope_without_creating_project_report(report_request_client, query, extra_body):
+    conn, client = report_request_client
+    response = client.post(
+        "/projects/synthetic-project/assessment-report-finalization/request",
+        params=query, json={"template_key": "synthetic-template", **extra_body},
+    )
+    assert response.status_code == 422
+    if query:
+        assert response.json()["detail"] == "assessment_report_single_vulnerability_generation_removed"
+    else:
+        errors = response.json()["detail"]
+        assert {(tuple(error["loc"]), error["type"]) for error in errors} == {
+            (("body", key), "extra_forbidden") for key in extra_body
+        }
+    assert conn.writes == 0
+    assert conn.finalization is None
+
+
+@pytest.mark.parametrize("scope", [
+    {"vulnerability_id": "synthetic-vulnerability"},
+    {"observation_id": "synthetic-observation"},
+    {"vulnerability_id": "synthetic-vulnerability", "observation_id": "synthetic-observation"},
+])
+def test_report_request_service_no_longer_accepts_single_vulnerability_parameters(scope):
+    conn = _ReportRequestConnection()
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        assessment_reports.request_assessment_report_generation(
+            conn, "synthetic-project", template_key="synthetic-template", requested_by="synthetic-user", **scope,
+        )
+    assert conn.writes == 0
+
+
+def test_report_request_route_still_accepts_project_report_with_selected_template(report_request_client):
+    conn, client = report_request_client
+    response = client.post(
+        "/projects/synthetic-project/assessment-report-finalization/request",
+        json={"template_key": "synthetic-template"},
+    )
+    assert response.status_code == 202
+    result = response.json()
+    assert result["status"] == "pending" and result["scope_key"] == ""
+    assert result["vulnerability_id"] is None and result["observation_id"] is None
+    assert result["template_key"] == "synthetic-template" and result["requested_by"] == "synthetic-user"
+    assert result["claim_token"] is None
+    assert conn.writes == 1
+    assert conn.finalization["template_markdown"] == TEMPLATE
+    assert conn.finalization["frozen_packet_json"] is None
+    plan = parse_report_execution_plan(conn.finalization["report_execution_plan_json"])
+    assert plan.report_prompt_group == "goal-driven-v1"

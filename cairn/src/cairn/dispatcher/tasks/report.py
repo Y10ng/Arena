@@ -1,21 +1,28 @@
-"""Report 任务：项目完成后按用户请求生成漏洞复现包与 Markdown 汇总报告。
+"""按用户请求整理单漏洞结构化成果或生成整体 Markdown 报告。
 
-任务沿用 durable claim/lease 与 generation fencing，冻结模板和权威输入快照；任何失败只影响
-报告 finalization，不改变项目完成状态或既有漏洞成果。
+复用 durable claim/lease 与 generation fencing；单条可在活跃项目整理，失败不改变项目
+执行状态或上一份已接受内容。两种作用域均只消费冻结的已有材料，不访问目标。
 """
 
 from __future__ import annotations
 
-from collections import Counter
+from cairn.dispatcher.runtime.traffic_execution import session_root_for_project
+
 from datetime import datetime
 from hashlib import sha256
 import json
 from dataclasses import dataclass, replace
 import logging
-import re
 import time
 
+from pydantic import ValidationError
+
 from cairn.assessment_contracts import GOAL_DRIVEN_PROTOCOL
+from cairn.report_readable import READABLE_REPORT_FILENAME, readable_finding_context, validate_report_readable
+from cairn.report_segments import assemble_report_segments
+from cairn.dispatcher.tasks.report_segments import capture_report_segments
+from cairn.dispatcher.tasks.report_rendering import render_frozen_report
+from cairn.server.services.report_policy import REPORT_OUTPUT_CONTRACT_VERSION
 from cairn.dispatcher.config import DispatchConfig, WorkerConfig
 from cairn.dispatcher.contracts import validate_report_payload
 from cairn.dispatcher.prompting import (
@@ -42,9 +49,7 @@ from cairn.dispatcher.tasks.common import (
 )
 from cairn.dispatcher.worker_protocol.submission import (
     REPORT_DATA_SCHEMA_VERSION,
-    REPORT_FACT_REFS,
     ReportData,
-    ReportFactReference,
 )
 from cairn.dispatcher.worker_result_gateway import (
     WorkerRequestError,
@@ -72,6 +77,7 @@ from cairn.dispatcher.tasks.write_outcomes import (
     response_detail_code,
 )
 from cairn.dispatcher.workers.registry import get_driver
+from cairn.dispatcher.workers.base import REPORT_READONLY_INPUT_ROOT, WorkerInputFile
 from cairn.server.models import AssessmentReportTaskRunResult, ProjectDetail
 
 LOG = logging.getLogger(__name__)
@@ -131,12 +137,14 @@ def _is_recovered_report_finish_receipt(
     data: object,
     *,
     project_id: str,
+    generation_token: str | None = None,
 ) -> bool:
     """严格识别 claim endpoint 返回的已完成 receipt，避免伪字段跳过 Worker。"""
     return (
         isinstance(data, dict)
         and data.get("protocol") == _REPORT_FINISH_PROTOCOL
         and data.get("project_id") == project_id
+        and (generation_token is None or data.get("generation_token") == generation_token)
         and data.get("status") == "ready"
         and data.get("finish_disposition") in ("accepted", "recovered")
         and _canonical_receipt_identifier(data.get("task_run_id"), max_length=128)
@@ -320,7 +328,8 @@ def _frozen_execution_error(
         "execution_engine": "pi",
         "report_policy_version": 1,
         "packet_version": 2,
-        "output_contract_version": 3,
+        "output_contract_version": REPORT_OUTPUT_CONTRACT_VERSION,
+        "report_data_schema_version": REPORT_DATA_SCHEMA_VERSION,
         "completeness_rule_version": 1,
     }
     for key, expected in required_versions.items():
@@ -593,6 +602,8 @@ def run_post_completion_report(
     durable_request: bool = False,
     finish_outbox: ReportFinishOutbox | None = None,
     candidate_outbox: CandidateCaptureOutbox | None = None,
+    generation_token: str | None = None,
+    cancellation: TaskCancellation | None = None,
 ) -> str | WorkerResultFailure:
     """仅执行显式请求、持有冻结计划和独立 claim 的报告。"""
     if not durable_request:
@@ -609,15 +620,8 @@ def run_post_completion_report(
     except Exception:
         LOG.exception("report final project refresh failed project=%s", project_id)
         return "project_refresh_failed"
-    allowed_statuses = {"completed", "stopped"} if durable_request else {"completed"}
-    if project.project.status not in allowed_statuses:
-        LOG.info(
-            "report deferred because project lifecycle is ineligible project=%s status=%s durable=%s",
-            project_id,
-            project.project.status,
-            durable_request,
-        )
-        return "deferred"
+    # 整体资格和活跃项目的单条资格由 Server 按 claim 作用域判断。
+    requested_generation_token = generation_token
 
     durable = durable_request
     finish_finalization = getattr(
@@ -650,7 +654,8 @@ def run_post_completion_report(
             return "server_write_failed"
         if finish_outbox is not None:
             try:
-                if finish_outbox.has_project(project_id):
+                if (finish_outbox.has_generation(project_id, requested_generation_token)
+                    if requested_generation_token is not None else finish_outbox.has_project(project_id)):
                     # direct 调用也必须服从 journal fence，不能绕过 scheduler 重跑模型。
                     LOG.warning(
                         "report durable journal already pending project=%s code=report_delivery_pending",
@@ -667,7 +672,8 @@ def run_post_completion_report(
         lease_seconds = max(300, config.tasks.report.timeout + 300)
         if lease_seconds > 1800:
             return "report_timeout_exceeds_lease"
-        claim = claim_finalization(project_id, worker.name, lease_seconds=lease_seconds)
+        claim = claim_finalization(project_id, worker.name, lease_seconds=lease_seconds,
+                                   **({"generation_token": requested_generation_token} if requested_generation_token else {}))
         claim_detail = (
             claim.data.get("detail") if isinstance(claim.data, dict) else None
         )
@@ -695,6 +701,7 @@ def run_post_completion_report(
             if _is_recovered_report_finish_receipt(
                 claim.data,
                 project_id=project_id,
+                generation_token=requested_generation_token,
             ):
                 return "skipped"
             if receipt_candidate:
@@ -755,8 +762,9 @@ def run_post_completion_report(
                 report_execution_plan_sha256 = plan_digest_value
             if isinstance(prompt_digest_value, str) and prompt_digest_value:
                 report_prompt_digest_sha256 = prompt_digest_value
-        if generation_token is None or claim_token is None or task_run_id is None:
-            LOG.warning("report finalization claim identity missing project=%s", project_id)
+        if (generation_token is None or claim_token is None or task_run_id is None
+            or (requested_generation_token is not None and generation_token != requested_generation_token)):
+            LOG.warning("report finalization claim identity missing or mismatched project=%s", project_id)
             return "server_write_failed"
         execution_error = _frozen_execution_error(
             report_execution_plan_json,
@@ -863,6 +871,7 @@ def run_post_completion_report(
         finish_outbox=finish_outbox,
         authenticated_dispatcher_id=authenticated_dispatcher_id,
         candidate_outbox=candidate_outbox,
+        cancellation=cancellation,
     )
     if durable:
         assert task_run_id is not None
@@ -940,29 +949,90 @@ def run_post_completion_report(
     return outcome
 
 
-def _collect_report_packet_json(client: CairnClient, project_id: str) -> str | None:
-    """读取 Server 一次性聚合的权威 Report Packet。"""
-    get_packet = getattr(client, "get_assessment_report_packet", None)
-    if not callable(get_packet):
-        return None
-    resp = get_packet(project_id)
-    if not resp.ok or not isinstance(resp.data, dict):
-        LOG.warning(
-            "report packet read failed project=%s status=%s code=%s",
-            project_id,
-            resp.status_code,
-            response_detail_code(resp),
-        )
-        return None
-    packet_json = format_json_block(resp.data)
+class ReportPacketReadError(ValueError):
+    """区分传输、Server 响应和冻结数据合同失败，不携带材料正文。"""
+
+
+def _collect_report_packet_json(client: CairnClient, project_id: str, *, generation_token: str | None = None) -> str:
+    """读取 Server 一次性聚合的权威 Report Packet，不自动重试或延长超时。"""
+    resp = client.get_assessment_report_packet(
+        project_id, **({"generation_token": generation_token} if generation_token else {}),
+    )
+    if not resp.ok:
+        code = resp.error_code or f"http_{resp.status_code}"
+        LOG.warning("report packet read failed project=%s code=%s", project_id, code)
+        raise ReportPacketReadError(f"权威 Report Packet 读取失败：{code}")
     try:
+        packet_json = format_json_block(resp.data)
         packet = _frozen_report_packet(packet_json)
         if packet["project"].get("id") != project_id:
             raise ValueError("report_packet_project_mismatch")
     except (TypeError, ValueError) as exc:
-        LOG.warning("report packet invalid project=%s error=%s", project_id, exc)
-        return None
+        LOG.warning("report packet invalid project=%s error=%s", project_id, type(exc).__name__)
+        raise ReportPacketReadError("权威 Report Packet 数据合同无效：report_packet_contract_invalid") from exc
     return packet_json
+
+
+def _readable_input_references(report_packet_json: str, graph_yaml: str):
+    """索引先于原件进入上下文；按材料身份分段读取，不强塞所有附件。"""
+    packet = json.loads(report_packet_json)
+    contents = packet.pop("artifact_contents")
+    packet_reference, graph_reference, files = build_report_readonly_input_references("{}", graph_yaml)
+    directory = files[0].path.rsplit("/", 1)[0]
+    originals = []
+    index = {}
+    for artifact_id, content in contents.items():
+        if "text" not in content:
+            index[artifact_id] = content
+            continue
+        path = directory + "/evidence-" + sha256(artifact_id.encode("utf-8")).hexdigest() + ".txt"
+        index[artifact_id] = {"path": path, "size_bytes": len(content["text"].encode("utf-8"))}
+        originals.append(WorkerInputFile(path=path, content=content["text"], owner="root", mode=0o444,
+                                         allowed_root=REPORT_READONLY_INPUT_ROOT, readonly_directory=directory))
+    packet["artifact_reads"] = index
+    flow_reads = {}
+    for flow_id, sides in packet.pop("flow_contents", {}).items():
+        flow_reads[flow_id] = {}
+        for side, content in sides.items():
+            ranges = [content] if "text" in content else content.get("selections", [])
+            entries = []
+            for value in ranges:
+                identity = f"{flow_id}:{side}:{value['offset']}:{value['next_offset']}"
+                path = directory + "/flow-" + sha256(identity.encode("utf-8")).hexdigest() + ".txt"
+                entries.append({key: item for key, item in value.items() if key != "text"} | {"path": path})
+                originals.append(WorkerInputFile(path=path, content=value["text"], owner="root", mode=0o444,
+                                                 allowed_root=REPORT_READONLY_INPUT_ROOT, readonly_directory=directory))
+            flow_reads[flow_id][side] = {"ranges": entries, **({"unavailable": content["unavailable"]} if content.get("unavailable") else {})}
+    packet["flow_reads"] = flow_reads
+    if "flow_evidence" in packet:
+        # 模型只读索引也不能绕过交付检查读取被拒绝的原头；权威 Packet 在服务端完整保留。
+        packet["flow_evidence"] = {flow_id: {key: value for key, value in flow.items() if key != "record"}
+                                   for flow_id, flow in packet["flow_evidence"].items()}
+    # 默认工作视图只承载本次发现相关信息；全量索引仍在同一只读冻结目录按需读取。
+    full_path = directory + "/packet-full.json"
+    full_input = replace(files[0], path=full_path, content=format_json_block(packet))
+    source_fact_ids = {item.get("source_fact_id") for item in [*packet["vulnerabilities"], *packet["observations"]]}
+    facts = [item for item in packet.get("facts", []) if item["id"] in source_fact_ids]
+    evidence_ids = {
+        reference["artifact_id"]
+        for source in [*packet["vulnerabilities"], *packet["observations"]]
+        for item in source.get("evidence_items", source.get("record_evidence_items", []))
+        for side in ("request", "response", "artifact")
+        if isinstance(reference := item.get(side), dict)
+    }
+    evidence_ids.update(item["artifact_id"] for item in packet.get("evidence_links", []) if item.get("fact_id") in source_fact_ids)
+    working = {key: value for key, value in packet.items() if key not in {
+        "task_runs", "assessment_attempts", "artifacts", "artifact_reads", "facts", "evidence_links",
+    }}
+    working.update(facts=facts, artifacts=[item for item in packet.get("artifacts", []) if item["id"] in evidence_ids],
+                   artifact_reads={key: value for key, value in index.items() if key in evidence_ids},
+                   frozen_materials_path=full_path)
+    working["http_evidence_render_sources"] = {
+        key: {"source": value["source"], "notice": value["notice"]}
+        for key, value in packet.get("http_evidence_render_sources", {}).items()
+    }
+    files = (replace(files[0], content=format_json_block(working)), files[1], full_input, *originals)
+    return packet_reference, graph_reference, files
 
 
 def _packet_list_json(report_packet_json: str, key: str) -> str:
@@ -1009,16 +1079,18 @@ def _frozen_report_packet(report_packet_json: str) -> dict[str, object]:
         raise ValueError("report_packet_unsupported")
     if not isinstance(packet.get("project"), dict):
         raise ValueError("report_packet_project_missing")
-    summary = packet.get("assessment_summary")
-    if not isinstance(summary, dict) or not isinstance(summary.get("execution"), dict):
-        raise ValueError("report_packet_summary_missing")
-    coverage = summary.get("coverage")
-    if not isinstance(coverage, dict) or any(
-        not isinstance(coverage.get(key), list)
-        or any(not isinstance(item, dict) for item in coverage[key])
-        for key in ("tested", "blocked", "untested")
-    ):
-        raise ValueError("report_packet_coverage_missing")
+    scope = packet.get("report_scope")
+    if scope is None:
+        summary = packet.get("assessment_summary")
+        if not isinstance(summary, dict) or not isinstance(summary.get("execution"), dict):
+            raise ValueError("report_packet_summary_missing")
+        coverage = summary.get("coverage")
+        if not isinstance(coverage, dict) or any(
+            not isinstance(coverage.get(key), list)
+            or any(not isinstance(item, dict) for item in coverage[key])
+            for key in ("tested", "blocked", "untested")
+        ):
+            raise ValueError("report_packet_coverage_missing")
     for key in ("vulnerabilities", "observations", "observation_statuses"):
         values = packet.get(key)
         if not isinstance(values, list):
@@ -1033,7 +1105,16 @@ def _frozen_report_packet(report_packet_json: str) -> dict[str, object]:
             if item_id in seen:
                 raise ValueError(f"report_packet_id_duplicate:{key}:{item_id}")
             seen.add(item_id)
+    if not isinstance(packet.get("artifact_contents"), dict):
+        raise ValueError("report_packet_artifact_contents_missing")
     observations = {item["id"]: item for item in packet["observations"]}
+    if scope is not None:
+        if (not isinstance(scope, dict) or set(scope) != {"vulnerability_id", "observation_id"}
+            or [item["id"] for item in packet["vulnerabilities"]] != [scope["vulnerability_id"]]
+            or list(observations) != ([scope["observation_id"]] if scope["observation_id"] is not None else [])
+            or any(item.get("vulnerability_id") != scope["vulnerability_id"] for item in observations.values())):
+            raise ValueError("report_packet_scope_mismatch")
+        return packet
     statuses = {item["id"]: item for item in packet["observation_statuses"]}
     if observations.keys() != statuses.keys():
         raise ValueError("report_packet_observation_status_mismatch")
@@ -1059,8 +1140,9 @@ def _packet_vulnerability_context(
 ) -> tuple[str, dict[str, str]]:
     packet = _frozen_report_packet(report_packet_json)
     vulnerabilities = packet["vulnerabilities"]
+    accepted = {item["vulnerability_id"] for item in packet.get("accepted_readable_findings", [])}
     return format_json_block(vulnerabilities), {
-        item["id"]: str(item.get("title") or "") for item in vulnerabilities
+        item["id"]: str(item.get("title") or "") for item in vulnerabilities if item["id"] not in accepted
     }
 
 
@@ -1087,407 +1169,25 @@ def _report_completeness_error(
     missing = sorted(id_to_title.keys() - seen)
     if missing:
         return f"report_vulnerability_missing:{missing[0]}"
-    required_refs = {*REPORT_FACT_REFS, *(f"finding:{key}" for key in id_to_title)}
-    seen_refs: set[str] = set()
-    for item in result.layout:
-        if not isinstance(item, ReportFactReference):
-            continue
-        if item.ref not in required_refs:
-            return f"report_layout_ref_unknown:{item.ref}"
-        if item.ref in seen_refs:
-            return f"report_layout_ref_duplicate:{item.ref}"
-        seen_refs.add(item.ref)
-    missing_refs = sorted(required_refs - seen_refs)
-    if missing_refs:
-        return f"report_layout_ref_missing:{missing_refs[0]}"
     return None
-
-
-def _report_table(
-    headers: tuple[str, ...], rows: list[tuple[object, ...]],
-) -> str:
-    def cell(value: object) -> str:
-        if value is None or value == "":
-            return "未记录"
-        return (
-            str(value).replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace("|", "&#124;")
-            .replace("\r", "").replace("\n", "<br>")
-        )
-
-    if not rows:
-        return "冻结快照未记录此类条目。"
-    return "\n".join([
-        "| " + " | ".join(headers) + " |",
-        "| " + " | ".join("---" for _ in headers) + " |",
-        *("| " + " | ".join(cell(value) for value in row) + " |" for row in rows),
-    ])
-
-
-def _report_list_text(value: object) -> str:
-    """将冻结快照中的字符串列表压缩为稳定、可读的单元格文本。"""
-    if not isinstance(value, list):
-        return ""
-    return "; ".join(str(item).strip() for item in value if str(item).strip())
-
-
-def _report_evidence_text(value: object) -> str:
-    """展示服务端已解析的证据引用，不把句柄或缺失字段写成证据。"""
-    if not isinstance(value, list):
-        return ""
-    references: list[str] = []
-    for item in value:
-        if not isinstance(item, dict):
-            continue
-        artifact_id = str(item.get("artifact_id") or "").strip()
-        if not artifact_id:
-            continue
-        reference = artifact_id
-        pointer = str(item.get("pointer") or "").strip()
-        verifier_run_id = str(item.get("verifier_run_id") or "").strip()
-        if pointer:
-            reference += f" {pointer}"
-        if verifier_run_id:
-            reference += f" (verifier {verifier_run_id})"
-        references.append(reference)
-    return "; ".join(references)
-
-
-def _report_main_headings(
-    markdown: str, *, require_closed: bool = False,
-) -> list[tuple[int, str]]:
-    """只提取顶层 ATX/Setext 主标题，跳过代码和 HTML 块，不把代码示例当成章节。"""
-    headings: list[tuple[int, str]] = []
-    paragraph: list[str] = []
-    fence = ""
-    fence_length = 0
-    fence_indent = 0
-    comment = False
-    raw_tag: str | None = None
-    html_block = False
-    for original in markdown.splitlines():
-        line = original.expandtabs(4)
-        if fence:
-            if re.fullmatch(
-                r" {" + str(fence_indent) + "," + str(fence_indent + 3) + "}"
-                + re.escape(fence) + "{" + str(fence_length) + r",}[ \t]*", line,
-            ):
-                fence = ""
-            continue
-        if raw_tag:
-            if re.search(r"</" + raw_tag + r"\s*>", line, re.IGNORECASE):
-                raw_tag = None
-            continue
-        if comment:
-            if "-->" not in line:
-                continue
-            line = line.split("-->", 1)[1]
-            comment = False
-        if html_block:
-            if not line.strip():
-                html_block = False
-            continue
-        if line.startswith("    "):
-            paragraph.clear()
-            continue
-        opening = re.match(r" {0,3}((?:[-+*]|\d{1,9}[.)])[ \t]{1,4})?(`{3,}|~{3,})(.*)$", line)
-        if opening and not (opening[2][0] == "`" and "`" in opening[3]):
-            fence, fence_length = opening[2][0], len(opening[2])
-            # 列表内围栏按内容缩进闭合，不把闭围栏误认成新的开围栏。
-            fence_indent = opening.start(2) if opening[1] else 0
-            paragraph.clear()
-            continue
-        leading_comment = line.lstrip().startswith("<!--")
-        cursor = 0
-        while token := re.search(r"`+|<!--", line[cursor:]):
-            start, end = cursor + token.start(), cursor + token.end()
-            if token[0].startswith("`"):
-                # 成对行内代码中的注释标记只是文本，不能把它当成跨片段注释。
-                closing = re.search(r"(?<!`)" + re.escape(token[0]) + r"(?!`)", line[end:])
-                cursor = end + closing.end() if closing else end
-                continue
-            closing = line.find("-->", end)
-            if closing < 0:
-                comment = True
-                line = line[:start]
-                break
-            line = line[:start] + line[closing + 3:]
-            cursor = start
-        # 行首注释不产生标题，但仍须检查同一行剩余注释是否闭合。
-        if leading_comment or not line.strip():
-            paragraph.clear()
-            continue
-        raw = re.match(r" {0,3}<(pre|script|style|textarea)(?:\s|>|$)", line, re.IGNORECASE)
-        if raw:
-            paragraph.clear()
-            if not re.search(r"</" + raw[1] + r"\s*>", line, re.IGNORECASE):
-                raw_tag = raw[1].lower()
-            continue
-        if re.match(
-            r" {0,3}</?(?:address|article|aside|blockquote|details|div|dl|fieldset|figure|footer|form|"
-            r"h[1-6]|header|hr|iframe|li|main|nav|ol|p|section|table|tbody|td|th|thead|tr|ul)(?:\s|/?>|$)",
-            line, re.IGNORECASE,
-        ):
-            html_block = True
-            paragraph.clear()
-            continue
-        atx = re.match(r" {0,3}(#{1,6})(?:[ \t]+(.*)|$)", line)
-        if atx:
-            if len(atx[1]) <= 2:
-                title = re.sub(r"[ \t]+#+[ \t]*$", "", atx[2] or "").strip()
-                headings.append((len(atx[1]), title))
-            paragraph.clear()
-            continue
-        setext = re.fullmatch(r" {0,3}(=+|-+)[ \t]*", line)
-        if setext and paragraph:
-            headings.append((1 if setext[1][0] == "=" else 2, " ".join(paragraph)))
-            paragraph.clear()
-        elif not line.strip() or re.match(r" {0,3}(?:>|[-+*][ \t]+|\d+[.)][ \t]+)", line):
-            paragraph.clear()
-        else:
-            paragraph.append(line.strip())
-    if require_closed and (fence or comment or raw_tag):
-        # 每个片段须独立闭合，不能把随后展开的事实藏进代码或 HTML 注释。
-        raise ValueError("report_layout_unclosed_block")
-    return headings
-
-
-def _validate_report_template_headings(markdown: str, template_markdown: str) -> None:
-    expected = _report_main_headings(template_markdown)
-    if not expected:
-        return
-    actual = _report_main_headings(markdown)
-    if len(expected) != len(actual):
-        raise ValueError("report_template_heading_mismatch")
-    title_placeholder = r"\{\{\s*report_title\s*\}\}"
-    for (expected_level, expected_title), (level, title) in zip(expected, actual):
-        # 只识别既有标题意图；成品必须展开，不能以字面占位符冒充标题。
-        title_parts = re.split(title_placeholder, expected_title)
-        title_pattern = ".+".join(re.escape(part) for part in title_parts)
-        if (
-            expected_level != level or re.search(title_placeholder, title)
-            or re.fullmatch(title_pattern, title) is None
-        ):
-            raise ValueError("report_template_heading_mismatch")
 
 
 def _render_report_markdown(
     data: dict[str, object], *, report_packet_json: str, report_template_markdown: str,
+    display_images: list[dict] | None = None,
 ) -> str:
-    """模板决定布局；程序原位展开完整冻结事实及其所属解释，不补回固定章节。"""
-    if not isinstance(report_template_markdown, str) or not report_template_markdown.strip():
-        raise ValueError("report_template_snapshot_missing")
+    """冻结模板是唯一排版来源，模型没有整篇布局或原始报文写入权。"""
     packet = _frozen_report_packet(report_packet_json)
-    vulnerabilities = packet["vulnerabilities"]
-    error = _report_completeness_error(
-        data, id_to_title={item["id"]: str(item.get("title") or "") for item in vulnerabilities},
-    )
+    _, expected = _packet_vulnerability_context(report_packet_json)
+    error = _report_completeness_error(data, id_to_title=expected)
     if error is not None:
         raise ValueError(error)
-    result = ReportData.model_validate(data)
-    findings = {item.vulnerability_id: item for item in result.findings}
-    project = packet["project"]
-    summary = packet["assessment_summary"]
-    execution = summary.get("execution") or {}
-    observations = packet["observations"]
-    statuses = packet["observation_statuses"]
-    status_by_id = {item["id"]: item for item in statuses}
-    status_counts = Counter(item["verification_status"] for item in statuses)
-    severity_counts = Counter(str(item.get("severity") or "未记录") for item in vulnerabilities)
-    stopped = project.get("status") == "stopped"
-    goal_driven = _packet_is_goal_driven(packet)
-    execution_identity = (
-        _report_table(("项目 ID", "标题", "项目状态", "协议", "停止原因"), [(
-            project.get("id"), project.get("title"), project.get("status"),
-            project.get("assessment_protocol"), summary.get("stop_reason"),
-        )])
-        if goal_driven
-        else _report_table(("项目 ID", "标题", "项目状态", "阶段", "停止原因"), [(
-            project.get("id"), project.get("title"), project.get("status"),
-            execution.get("phase"), summary.get("stop_reason"),
-        )])
-    )
-    blocks: dict[str, list[str]] = {
-        "scope": [
-            "### 报告边界与授权范围（冻结快照）",
-            (
-                "项目已停止（stopped）；本报告为截止快照的部分报告，不代表评估完成或完整覆盖。"
-                if stopped else "报告仅描述冻结快照内的评估记录；项目状态不等于完整覆盖或无剩余风险。"
-            ),
-            "报告交付与目标测试状态独立；本文生成不代表修复已实施或修复已验证。",
-            "事实区由程序生成。模型解释与建议仅供分析，不是新的测试、源码审计或复核证据。",
-            execution_identity,
-            _report_table(("Target ID", "类型", "范围"), [
-                (item.get("id"), item.get("type"), item.get("value"))
-                for item in packet.get("targets", [])
-            ]),
-            "### 执行摘要（模型解释）",
-            result.executive_summary,
-        ],
-        "counts": [
-            "### 漏洞与复核计数（冻结快照）",
-            f"Canonical 漏洞记录数：{len(vulnerabilities)}；Observation 数：{len(observations)}。",
-            "同一漏洞的多个 Observation 不重复计入漏洞数；记录状态不替代逐 Observation 的独立复核。",
-            _report_table(("记录严重度", "漏洞记录数"), sorted(severity_counts.items())),
-            _report_table(("Observation 复核状态", "数量"), sorted(status_counts.items())),
-        ],
-    }
-    if not vulnerabilities:
-        blocks["counts"].append("冻结快照中没有漏洞记录；未发现已确认漏洞不等于证明目标不存在漏洞。")
-    lines = [
-        (
-            "### 工作结果与未完成事项（冻结快照）"
-            if goal_driven
-            else "### 覆盖与未完成义务（冻结快照）"
-        ),
-        (
-            "目标驱动工作按已接受的 ExperimentRecord 和 Intent 结论汇总；已测、阻塞、未测分别列出，不把未执行方向写成安全。"
-            if goal_driven
-            else (
-                "已启用结构化 Coverage；已测、阻塞、未测分别列出，不将跳过项算作已测。"
-                if execution.get("minimum_coverage_enabled")
-                else "结构化 Coverage 未启用或未记录；缺失数据不能解释为零工作或完整覆盖。"
-            )
-        ),
-    ]
-    coverage = summary.get("coverage") or {}
-    cells = {item.get("slot_key"): item for item in packet.get("coverage_cells", [])}
-    for key, label in (("tested", "已测"), ("blocked", "阻塞"), ("untested", "未测/未完成")):
-        entries = coverage.get(key, [])
-        if goal_driven:
-            table = _report_table(("Intent", "工作", "优先级", "结果", "原因", "Fact"), [
-                (item.get("intent_id"), item.get("description"), item.get("priority"),
-                 item.get("result"), item.get("reason"), item.get("fact_id"))
-                for item in entries
-            ])
-        else:
-            table = _report_table(("Cell", "结果", "原因", "Fact", "Surface", "测试族"), [
-                (item.get("slot_key"), item.get("result"), item.get("reason"), item.get("fact_id"),
-                 cells.get(item.get("slot_key"), {}).get("surface_key"),
-                 cells.get(item.get("slot_key"), {}).get("test_family"))
-                for item in entries
-            ])
-        lines.extend([f"#### {label}（{len(entries)}）", table])
-    if goal_driven:
-        experiment_entries = [
-            item
-            for key in ("tested", "blocked", "untested")
-            for item in coverage.get(key, [])
-            if item.get("hypothesis")
-        ]
-        lines.extend([
-            "#### 已接受实验详情",
-            "以下内容直接来自冻结的 ExperimentRecord；观察、限制和证据引用彼此独立，缺失项不由模型补写。",
-            _report_table(("Fact", "假设", "观察", "限制", "尝试策略", "证据"), [
-                (
-                    item.get("fact_id"),
-                    item.get("hypothesis"),
-                    _report_list_text(item.get("observations")),
-                    _report_list_text(item.get("limitations")),
-                    _report_list_text(item.get("attempted_strategies")),
-                    _report_evidence_text(item.get("evidence_refs")),
-                )
-                for item in experiment_entries
-            ]),
-        ])
-    else:
-        selected = summary.get("selected_deep", [])
-        lines.extend([
-            "#### 已选择的深测义务",
-            _report_table(("Intent", "Cell", "选择 Fact", "结果 Fact", "处置", "处置原因"), [
-                (item.get("id"), item.get("slot_key"), item.get("depth_review_fact_id"),
-                 item.get("to_fact_id"), item.get("conclusion"), item.get("conclusion_reason"))
-                for item in selected
-            ]),
-        ])
-    blocks["work_results"] = lines
-    # 旧 goal-driven Packet 也可能已冻结额度字段，必须保留其原义。
-    historical_limits = not goal_driven or any(
-        key in execution for key in ("budget", "verification_reserve", "remaining_total", "remaining_discovery")
-    )
-    execution_fields = (
-        "deadline", "authorization_expires_at", "attempts_started",
-        "verification_attempts_started",
-    ) if not historical_limits else (
-        "budget", "deadline", "authorization_expires_at", "attempts_started", "verification_reserve",
-        "verification_attempts_started", "remaining_total", "remaining_discovery",
-        "depth_review_fact_id", "accepted_input_digest",
-    )
-    blocks["execution_status"] = [
-        "### 历史额度与执行计量（冻结原件）" if historical_limits else "### 执行停止时间与累计计量（冻结快照）",
-        "以下保留历史冻结额度材料，不是当前目标驱动的有效额度政策；历史未执行或未复核工作不能由文字补齐。" if historical_limits else "未设置执行停止时间表示不限期；真实授权期限、单 Run 超时与有界故障恢复仍然有效。累计逻辑 Attempt 次数不是模型调用次数、token 或 API 费用，也不构成次数上限。",
-        _report_table(("执行字段", "冻结值"), [
-            (key, "不限" if not historical_limits and key == "deadline" and key in execution and execution[key] is None else execution.get(key))
-            for key in execution_fields
-        ]),
-        _report_table(("任务类型", "记录的执行次数"), [
-            (item.get("task_type"), item.get("execution_count"))
-            for item in summary.get("calls_by_task_type", [])
-        ]),
-        "### 逐 Observation 复核状态（冻结快照）",
-        "run_failed、not_run、pending、not_scheduled 表示尚无对应复核结论；不能改写成 insufficient_evidence 或 confirmed。conflicting 保留相互冲突的实际结论。",
-        _report_table(("Observation", "漏洞 ID", "复核状态", "来源 Fact", "发现 TaskRun", "证据条目 / 历史包"), [
-            (item["id"], item.get("vulnerability_id"), status_by_id[item["id"]]["verification_status"],
-             item.get("source_fact_id"), item.get("task_run_id"),
-             json.dumps(item["evidence_items"], ensure_ascii=False) if "evidence_items" in item
-             else f"历史冻结 packet Artifact: {item.get('packet_artifact_id') or '未记录'}")
-            for item in observations
-        ]),
-        _report_table(("Observation", "Verification", "实际结论", "Verifier TaskRun"), [
-            (item["id"], verification.get("id"), verification.get("outcome"), verification.get("verifier_task_run_id"))
-            for item in statuses for verification in item.get("verifications", [])
-        ]),
-        _report_table(("Observation", "Verifier Intent", "处置", "处置原因", "结果 Fact"), [
-            (item["id"], intent.get("id"), intent.get("conclusion"), intent.get("conclusion_reason"), intent.get("to_fact_id"))
-            for item in statuses for intent in item.get("intents", [])
-        ]),
-    ]
-    for vulnerability in vulnerabilities:
-        finding = findings[vulnerability["id"]]
-        blocks[f"finding:{vulnerability['id']}"] = [
-            f"### 漏洞 {vulnerability['id']}",
-            "以下仅补充解释与建议。复现说明基于已有证据，报告阶段不执行目标测试；回归方法未执行，不能视为修复已验证。",
-            _report_table(("漏洞 ID", "标题", "严重度", "目标", "记录状态", "来源 Fact"), [(
-                vulnerability["id"], vulnerability.get("title"), vulnerability.get("severity"),
-                vulnerability.get("target"), vulnerability.get("status"), vulnerability.get("source_fact_id"),
-            )]),
-            "#### 业务影响（模型解释）", finding.impact or "未补充；以冻结证据为准。",
-            "#### 根因分析（模型解释；推断不构成源码定位证明）", finding.root_cause or "证据不足，无法定位根因。",
-            "#### 复现说明（报告阶段未执行）", finding.repro_steps,
-            "#### 修复建议（未实施）", finding.remediation,
-            "#### 修复后回归方法（未执行）", finding.regression_steps,
-            "#### 本项限制（模型解释）", finding.limitations or "未补充；冻结快照中的限制仍适用。",
-        ]
-    blocks["limitations"] = [
-        "### 限制与剩余风险",
-        "未测范围、阻塞条件、未运行或冲突的复核均保留为缺口，不能由文字补齐。黑盒证据不足以证明具体源码文件、行号或修复效果。",
-        result.limitations or "模型未补充限制；这不表示不存在限制。",
-    ]
-    blocks["evidence_index"] = [
-        "### 证据索引（冻结快照）",
-        "索引只列出输入快照中的 Artifact 与来源绑定，不把模型生成的说明作为新增实测证据。原始请求、响应和复现记录保持不变。",
-        _report_table(("Artifact", "类型", "TaskRun", "URI", "SHA-256"), [
-            (item.get("id"), item.get("kind"), item.get("task_run_id"), item.get("uri"), item.get("sha256"))
-            for item in packet.get("artifacts", [])
-        ]),
-        _report_table(("Fact", "Artifact", "Pointer", "Verifier TaskRun"), [
-            (item.get("fact_id"), item.get("artifact_id"), item.get("pointer"), item.get("verifier_run_id"))
-            for item in packet.get("evidence_links", [])
-        ]),
-        _report_table(("Verification", "Observation", "Artifact", "Pointer", "Verifier TaskRun"), [
-            (item.get("id"), item.get("observation_id"), evidence.get("artifact_id"), evidence.get("pointer"), item.get("verifier_task_run_id"))
-            for item in packet.get("verifications", []) for evidence in item.get("evidence", [])
-        ]),
-        "#### 漏洞链候选",
-        f"快照包含 {len(packet.get('chain_candidates', []))} 项候选关联；候选关联不等于已复现的利用链。",
-    ]
-    expanded: list[str] = []
-    for item in result.layout:
-        fragment = "\n\n".join(blocks[item.ref]) if isinstance(item, ReportFactReference) else item.markdown
-        _report_main_headings(fragment, require_closed=True)
-        expanded.append(fragment)
-    markdown = "\n\n".join(expanded) + "\n"
-    _validate_report_template_headings(markdown, report_template_markdown)
+    resolved = {**data, "findings": [*data["findings"], *packet.get("accepted_readable_findings", [])]}
+    result = validate_report_readable(resolved, packet)
+    packet["display_images"] = [*packet.get("display_images", []), *(display_images or [])]
+    markdown = render_frozen_report(ReportData.model_validate(result.model_dump()), packet, report_template_markdown)
+    if any(image.get("unavailable_reason") for image in display_images or []):
+        markdown += "\n\n> 部分可选数据包图片未能生成或发布；正文与原始证据仍可交付。\n"
     return markdown
 
 
@@ -1506,27 +1206,41 @@ def _prepare_report_output(
     completeness_rule_version: object = None,
     input_snapshot_artifact_id: str | None = None,
     input_snapshot_sha256: str | None = None,
+    display_images: list[dict] | None = None,
 ) -> tuple[str, dict[str, object]] | str:
     """一次性渲染 exact Markdown 与 Artifact metadata，恢复时禁止再次渲染。"""
+    from fastapi import HTTPException
+    from cairn.server.services.verification_requests import _validate_public_text
+
     try:
         packet = _frozen_report_packet(report_packet_json)
         if packet["project"].get("id") != project_id:
             raise ValueError("report_packet_project_mismatch")
-        report_markdown = _render_report_markdown(
-            data,
-            report_packet_json=report_packet_json,
-            report_template_markdown=report_template_markdown,
-        )
+        if packet.get("report_scope") is not None:
+            result = validate_report_readable(data, packet)
+            for finding in result.findings:
+                _validate_public_text(readable_finding_context(finding, packet))
+            report_markdown = json.dumps(result.model_dump(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        else:
+            report_markdown = _render_report_markdown(
+                data,
+                report_packet_json=report_packet_json,
+                report_template_markdown=report_template_markdown,
+                display_images=display_images,
+            )
+        _validate_public_text({"content": report_markdown})
+    except HTTPException:
+        return "policy_denied"
     except (TypeError, ValueError) as exc:
         LOG.warning("report render rejected project=%s error=%s", project_id, exc)
         return "request_contract"
     return report_markdown, {
         "source": "report_task",
-        "format": "markdown",
+        "format": "json" if packet.get("report_scope") is not None else "markdown",
         "report_generation_token": report_generation_token,
         "report_template_key": report_template_key,
         "packet_version": packet["version"],
-        "output_contract_version": 3,
+        "output_contract_version": REPORT_OUTPUT_CONTRACT_VERSION,
         "report_data_schema_version": REPORT_DATA_SCHEMA_VERSION,
         "report_template_digest_sha256": report_template_digest_sha256,
         "report_policy_version": report_policy_version,
@@ -1555,6 +1269,7 @@ def _write_report_results(
     completeness_rule_version: object = None,
     input_snapshot_artifact_id: str | None = None,
     input_snapshot_sha256: str | None = None,
+    display_images: list[dict] | None = None,
 ) -> ReportArtifactIdentity | str:
     """兼容直接调用：渲染后立即写入 Artifact。durable 路径先写 journal。"""
     prepared = _prepare_report_output(
@@ -1571,6 +1286,7 @@ def _write_report_results(
         completeness_rule_version=completeness_rule_version,
         input_snapshot_artifact_id=input_snapshot_artifact_id,
         input_snapshot_sha256=input_snapshot_sha256,
+        display_images=display_images,
     )
     if isinstance(prepared, str):
         return prepared
@@ -1581,7 +1297,7 @@ def _write_report_results(
         task_run_id=task_run_id,
         kind="report",
         content=report_markdown,
-        filename=REPORT_ARTIFACT_FILENAME,
+        filename=READABLE_REPORT_FILENAME if metadata["format"] == "json" else REPORT_ARTIFACT_FILENAME,
         metadata=metadata,
         category="deliverable",
     )
@@ -1641,6 +1357,7 @@ def run_report_task(
     finish_outbox: ReportFinishOutbox | None = None,
     authenticated_dispatcher_id: str | None = None,
     candidate_outbox: CandidateCaptureOutbox | None = None,
+    cancellation: TaskCancellation | None = None,
 ) -> str | WorkerResultFailure:
     """同步执行报告；程序失败返回固定诊断，调用方据此告警但不阻断 complete。"""
     project_id = project.project.id
@@ -1659,7 +1376,8 @@ def run_report_task(
         return "report_execution_plan_missing"
     if not task_run_id or not report_generation_token:
         return "report_claim_identity_missing"
-    for key, expected in (("packet_version", 2), ("output_contract_version", 3)):
+    for key, expected in (("packet_version", 2), ("output_contract_version", REPORT_OUTPUT_CONTRACT_VERSION),
+                          ("report_data_schema_version", REPORT_DATA_SCHEMA_VERSION)):
         if report_execution_plan.get(key) != expected:
             return f"report_execution_plan_unsupported:{key}"
     if not all((report_template_key, report_template_markdown, report_template_digest_sha256, report_template_compatibility_profiles)):
@@ -1675,8 +1393,12 @@ def run_report_task(
         "compatibility_profiles": report_template_compatibility_profiles,
     }
     requires_authoritative_packet = True
-    cancellation = TaskCancellation(generation=getattr(project.project, "execution_generation", 0))
+    cancellation = cancellation or TaskCancellation(generation=getattr(project.project, "execution_generation", 0))
     execution_timeout = config.tasks.report.timeout
+    if worker.model_binding is not None:
+        worker = worker.model_copy(update={"model_binding": worker.model_binding.model_copy(update={
+            "max_output_tokens": config.tasks.report.max_output_tokens,
+        })})
     try:
         driver = get_driver(worker.type)
         advisory_context = knowledge_base_runtime_context(
@@ -1738,12 +1460,13 @@ def run_report_task(
                 except (OSError, ValueError, KeyError, TypeError) as exc:
                     raise DeliveryUnavailable from exc
             else:
-                report_packet_json = _collect_report_packet_json(client, project_id)
-                if report_packet_json is None:
+                try:
+                    report_packet_json = _collect_report_packet_json(client, project_id, generation_token=report_generation_token)
+                except ReportPacketReadError as exc:
                     _finish(
                         "failed",
                         error_type="report_packet_read_failed",
-                        error_message="权威 Report Packet 读取失败",
+                        error_message=str(exc),
                     )
                     return "report_packet_read_failed"
                 frozen_graph_yaml = export_yaml.strip()
@@ -1903,37 +1626,46 @@ def run_report_task(
         assert report_packet_json is not None
         final_export_yaml = export_yaml.strip()
         packet_reference, graph_reference, readonly_inputs = (
-            build_report_readonly_input_references(
+            _readable_input_references(
                 report_packet_json,
                 final_export_yaml,
             )
         )
         vulns_json, id_to_title = _packet_vulnerability_context(report_packet_json)
-        layout_context = (
+        template_context = (
             "\n\n---\n\n"
-            "本次报告使用 ReportData schema_version=2 和单一 layout。每个以下事实 ref 恰好引用一次，"
-            "逐漏洞解释仍通过 findings 按稳定 ID 提交；Markdown 片段负责模板章节、静态说明与整体建议，"
-            "不得手写替代事实块。片段须独立闭合代码块或 HTML 注释，不能遮蔽事实。可用 ref：\n\n"
-            + format_json_block([*REPORT_FACT_REFS, *(f"finding:{key}" for key in id_to_title)])
-            + "\n\n以下是本次受理时冻结的自由 Markdown 展示模板。由它决定最终主要标题和顺序，"
-            "不要追加旧固定十章；{{ report_title }} 是标题意图，使用本次报告的实际标题。"
-            "正文中的排版指示应执行，不要当成结论照抄。事实内部为 H3/H4，不改变模板 H1/H2：\n\n"
-            "<frozen_report_template>\n"
-            + report_template_markdown
-            + "\n</frozen_report_template>\n"
+            "本次只使用分段报告提交合同schema_version=5；最终submit_result只传segment_refs，禁止重发全部正文。"
+            "先以save_report_segment保存有界内容单元（kind为finding/executive_summary/overall_remediation/limitations）。"
+            "finding段显式携带vulnerability_id和observation_id，按需要填写description/steps/remediation/limitations；"
+            "同一漏洞可以多段，文字按清单顺序以段落连接、steps按顺序追加；不能机械切断一个操作/观察。"
+            "每条最终须明确提供description、steps（材料不足时显式[]）、remediation；限制可选。"
+            "完整来源无需改写时用reuse_source:[description,steps,remediation]显式复用冻结所选Observation及其source_fact；"
+            "程序解析步骤、证据关联和已有选段，不必重抄或重算；需要时仍可据实改写。"
+            "缺来源会报错，不猜补其他Observation；复用字段不能再提交正文。新选段不提交sha256，由程序校验原件。"
+            "每段key唯一且重放内容必须相同；最终清单只引用保存成功返回的artifact_handle，失败不能伪造引用。"
+            f"单次输出预算为{config.tasks.report.max_output_tokens} tokens，"
+            "总报告可超过该单次预算；每次只完成一个较小单元，不在后续调用重写已保存内容。"
+            "不得提交 layout、标题、整篇 Markdown 或原始 HTTP；步骤是材料解释，不是新增执行记录。"
+            "先读索引并选择相关交互，再按artifact_reads路径用read_evidence读取必要范围；offset与选段均为UTF-8原件字节。"
+            "允许读取尾部和supporting反证，不只读文件开头，不把所有附件铺满上下文。"
+            "对关键交互可用render_http_evidence(source_key)尝试可选截图，只选http_evidence_render_sources已有键；"
+            "图片由程序发布与排版，不填入segment_refs或证据。缺图继续交付正文，禁止重新请求目标。"
+            "accepted_readable_findings已由程序冻结复用，findings仅填写其余漏洞ID。"
+            "程序按以下受理时冻结模板确定性展开字段：\n\n"
+            "<frozen_report_template>\n" + report_template_markdown + "\n</frozen_report_template>\n"
         )
         if delivery_context is not None:
             prompt = (
                 f"{DELIVERY_PROMPT}\n\n"
                 "如需恢复原冻结输入，只能通过以下只读引用重新读取：\n\n"
-                f"{packet_reference}\n\n{graph_reference}{layout_context}"
+                f"{packet_reference}\n\n{graph_reference}{template_context}"
             )
             session = frozen_delivery["session_id"]
         else:
             coverage_json = _packet_coverage_json(report_packet_json)
             chain_candidates_json = _packet_list_json(report_packet_json, "chain_candidates")
             replacements = {
-                "project_summary": format_json_block(project.project.model_dump()),
+                "project_summary": format_json_block(project.project.model_dump(exclude={'test_egress'})),
                 "coverage_json": coverage_json,
                 "vulns_json": vulns_json,
                 "chain_candidates_json": chain_candidates_json,
@@ -1950,7 +1682,7 @@ def run_report_task(
                 if durable_request and frozen_report_prompt is not None
                 else load_prompt(prompt_group, "report.md")
             )
-            prompt = render_prompt(prompt_source, replacements) + layout_context
+            prompt = render_prompt(prompt_source, replacements) + template_context
             record_prompt_rendered(
                 client,
                 project_id,
@@ -1966,18 +1698,38 @@ def run_report_task(
             session = driver.prepare_session()
             snapshot_path = f"/tmp/cairn-prompts/report-delivery-{task_run_id}.json"
             container_manager.write_text_file(container_name, snapshot_path, snapshot_json, owner="kali", mode=0o600)
+            binding = {"report_segments": {
+                "project_id": project_id, "task_run_id": task_run_id,
+                "generation_token": report_generation_token,
+                "input_snapshot_sha256": input_snapshot_sha256,
+                "report_template_digest_sha256": report_template_digest_sha256,
+            }}
             frozen_delivery = register_delivery(
                 client, container_manager, container_name, project, task_run_id, worker,
                 phase="report_execute", session=session, timeout_seconds=execution_timeout,
+                binding=binding,
                 inputs={"snapshot_path": snapshot_path, "input_snapshot_artifact_id": input_snapshot_artifact_id,
                         "input_snapshot_sha256": input_snapshot_sha256, "generation_token": report_generation_token},
             )
         execution_timeout = remaining_delivery_seconds(frozen_delivery)
+        # 首次执行和续交付只消费登记身份，不从后来读取的业务值重新组装。
+        binding = frozen_delivery["binding"]
+        if not isinstance(binding, dict) or set(binding) != {"report_segments"}:
+            raise DeliveryUnavailable
+        segment_binding = binding["report_segments"]
+        if not isinstance(segment_binding, dict) or segment_binding.get("task_run_id") != task_run_id:
+            raise DeliveryUnavailable
         command = driver.build_execute(
             worker, prompt, session, phase="report_execute", project_id=project_id,
             task_run_id=task_run_id, timeout_seconds=execution_timeout,
+            binding=binding,
+            inputs={"frozen_materials_path": next(item.path for item in readonly_inputs if item.path.endswith("/packet-full.json"))},
             resume=delivery_context is not None, conclude_only=delivery_context is not None,
+            session_root=session_root_for_project(project.project),
         )
+        assert command.candidate_spool is not None
+        segment_manifest_path = command.report_segment_manifest_path
+        assert segment_manifest_path is not None
         # Pi private request 必须保持第一个输入；冻结输入只追加到本次进程生命周期。
         command.input_files = (*command.input_files, *readonly_inputs)
         if finish_outbox is not None:
@@ -2032,6 +1784,15 @@ def run_report_task(
         )
         execute_ms = int((time.perf_counter() - execute_started) * 1000)
         total_ms = int((time.perf_counter() - task_started) * 1000)
+        display_images = []
+        if command.http_evidence_manifest_path is not None:
+            from .report_images import capture_report_images
+
+            display_images = capture_report_images(
+                client, container_manager, container_name, manifest_path=command.http_evidence_manifest_path,
+                project_id=project_id, task_run_id=task_run_id,
+                snapshot_artifact_id=input_snapshot_artifact_id, packet=_frozen_report_packet(report_packet_json),
+            )
         record_process_artifacts(
             client,
             project_id,
@@ -2039,6 +1800,18 @@ def run_report_task(
             phase="report_execute",
             result=result,
         )
+        segment_records: dict[str, dict] = {}
+        segment_declarations: list[dict] = []
+        segment_capture_failed = False
+        try:
+            segment_records, segment_declarations = capture_report_segments(
+                client, container_manager, container_name, manifest_path=segment_manifest_path,
+                binding=segment_binding,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            segment_capture_failed = True
+            LOG.warning("report segment capture failed project=%s task_run=%s error=%s",
+                        project_id, task_run_id, type(exc).__name__)
         failure = worker_process_failure(
             result, phase="report_execute", project_id=project_id,
             task_run_id=task_run_id, session=session,
@@ -2103,6 +1876,22 @@ def run_report_task(
             )
             _finish("failed", error_type="worker_rejected", error_message="报告任务被 worker 拒绝")
             return "worker_rejected"
+        if segment_capture_failed:
+            _finish("failed", error_type="artifact_error", error_message="报告分段材料保存失败；本地已保存内容保留，未接受成品")
+            return "artifact_error"
+        try:
+            if data.get("artifacts", []) != segment_declarations:
+                raise ValueError("report_segment_manifest_conflict")
+            data = assemble_report_segments(
+                data["segment_refs"], segment_records, binding=segment_binding,
+                packet=_frozen_report_packet(report_packet_json),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            # Pydantic 的异常正文可能包含段内容；诊断只保留合同码，不复制材料。
+            code = "report_segment_content_invalid" if isinstance(exc, ValidationError) else str(exc)
+            LOG.warning("report segments rejected project=%s task_run=%s code=%s", project_id, task_run_id, code)
+            _finish("failed", error_type="result_schema", error_message=code)
+            return "report_incomplete"
         completeness_error = _report_completeness_error(data, id_to_title=id_to_title)
         if completeness_error is not None:
             record_validation_result(
@@ -2123,6 +1912,7 @@ def run_report_task(
             return "report_incomplete"
         output_arguments = {
             "data": data,
+            "display_images": display_images,
             "report_packet_json": report_packet_json,
             "report_template_markdown": report_template_markdown,
             "report_generation_token": report_generation_token,

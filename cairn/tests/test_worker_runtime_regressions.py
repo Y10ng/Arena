@@ -559,6 +559,26 @@ def test_materialize_selected_worker_skips_all_workers_on_open_shared_binding() 
     )
 
 
+def test_lowered_capacity_blocks_new_dispatch_without_changing_inflight() -> None:
+    runtime = object.__new__(WorkerRuntimeMixin)
+    inflight = SimpleNamespace(worker_name="worker-a")
+    runtime.futures = {"existing": inflight}
+    current = WorkerConfig(id="worker-a", name="worker-a", engine="pi", task_types=["explore"], concurrency=1, priority=100)
+    runtime._project_worker_config = lambda binding: current
+    runtime._materialize_worker = lambda *args: (current, {"worker_revision": 2}, None)
+    runtime._observe_selection = lambda *args: None
+    selection = WorkerSelection(
+        worker=current, candidate_order=[{"id": "worker-a", "max_running": 3}],
+        blocked_busy=[], blocked_cooldown=[], blocked_rejected=[],
+        blocked_task_type=[], blocked_disabled=[],
+    )
+    assert runtime._materialize_selected_worker(
+        "proj-1", "explore", selection, [SimpleNamespace(id="worker-a")],
+    ) is None
+    assert selection.blocked_busy[0]["max_running"] == 1
+    assert runtime.futures == {"existing": inflight}
+
+
 class FakeProcess:
     def __init__(self) -> None:
         self.started = False

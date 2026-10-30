@@ -25,6 +25,7 @@ from cairn.server.models import (
 from cairn.server.services import create_vulnerability, list_vulnerabilities, update_vulnerability
 from cairn.server.services import audit_artifacts
 from report_test_support import ephemeral_report_finish_outbox
+from test_report_frozen_rendering import TEMPLATE, _data as report_data, _packet
 
 
 def make_conn() -> sqlite3.Connection:
@@ -54,43 +55,16 @@ def report_config(timeout: int = 600):
     )
 
 
-def report_data(*ids: str) -> dict[str, object]:
-    return {
-        "schema_version": 2,
-        "layout": [
-            {"type": "markdown", "markdown": "# Template"},
-            *({"type": "fact", "ref": ref} for ref in report.REPORT_FACT_REFS),
-            *({"type": "fact", "ref": f"finding:{value}"} for value in ids),
-        ],
-        "executive_summary": "建议依据已有证据修复权限边界。",
-        "findings": [{
-            "vulnerability_id": value,
-            "impact": "已有证据支持的业务影响。",
-            "root_cause": "黑盒推断，未获得源码证据。",
-            "repro_steps": "按证据包中的已有身份、请求和预期行为说明复现。",
-            "remediation": "建议检查服务端授权边界。",
-            "regression_steps": "修复后使用正常对照和不同身份重测。",
-            "limitations": "修复和回归方案尚未执行。",
-        } for value in ids],
-        "limitations": "报告只解释冻结材料。",
-        "artifacts": [],
-    }
-
-
 def report_packet(*ids: str) -> dict[str, object]:
-    return {
-        "version": 2,
-        "project": {"id": "p1", "title": "冻结报告", "status": "stopped"},
-        "assessment_summary": {
-            "project_status": "stopped", "stop_reason": "user_stopped",
-            "execution": {"phase": "finalizing", "budget": None},
-            "coverage": {"tested": [], "blocked": [], "untested": []},
-            "selected_deep": [], "calls_by_task_type": [],
-        },
-        "vulnerabilities": [{"id": value, "title": "相同标题", "severity": "high"} for value in ids],
-        "observations": [], "observation_statuses": [], "coverage_cells": [],
-        "chain_candidates": [], "artifacts": [], "evidence_links": [], "verifications": [],
-    }
+    packet = _packet(empty=True)
+    packet["vulnerabilities"] = [
+        {
+            "id": value, "title": "相同标题", "severity": "high", "status": "open",
+            "target": "/fixture", "repro_steps": "合成冻结步骤", "record_evidence_items": [],
+        }
+        for value in ids
+    ]
+    return packet
 
 
 def report_payload(data: dict[str, object]) -> dict[str, object]:
@@ -131,11 +105,18 @@ def test_validate_report_payload_allows_id_without_title() -> None:
     assert "title" not in data["findings"][0]
 
 
-@pytest.mark.parametrize("field", ["repro_steps", "remediation", "regression_steps"])
+@pytest.mark.parametrize("field", ["impact", "root_cause", "remediation", "regression_steps", "limitations"])
 def test_validate_report_payload_explanation_fields_must_be_str(field: str) -> None:
     data = report_data("v001")
     data["findings"][0][field] = 42
     with pytest.raises(ValueError, match=field):
+        validate_report_payload(report_payload(data))
+
+
+def test_validate_report_payload_step_explanation_must_be_str() -> None:
+    data = report_data("v001")
+    data["findings"][0]["steps"][0]["explanation"] = 42
+    with pytest.raises(ValueError, match="explanation"):
         validate_report_payload(report_payload(data))
 
 
@@ -202,7 +183,7 @@ class FakePostCompletionClient:
                 "completeness_rule_version": 1,
                 "execution_profile_id": "default-copy-v2",
                 "knowledge_key": None,
-                "output_contract_version": 3,
+                "output_contract_version": 4,
                 "packet_version": 2,
                 "execution_contract_version": 1,
                 "execution_engine": "pi",
@@ -244,8 +225,8 @@ class FakePostCompletionClient:
                 "requested_at": "2026-08-17T00:01:00Z",
                 "template_key": "standard-pentest",
                 "template_compatibility_profiles": ["assessment-report-packet-v1"],
-                "template_digest_sha256": sha256(b"# Template").hexdigest(),
-                "template_markdown": "# Template",
+                "template_digest_sha256": sha256(TEMPLATE.encode()).hexdigest(),
+                "template_markdown": TEMPLATE,
                 "report_execution_plan_json": self.execution_plan,
                 "report_execution_plan_sha256": self.execution_plan_digest,
                 "report_prompt_digest_sha256": self.prompt_digest,
@@ -497,11 +478,11 @@ def test_post_completion_uses_claim_task_run_and_timeout_sized_lease(monkeypatch
     assert captured["report_claim_token"] == client.claim_token
     assert captured["report_generation_token"] == client.generation_token
     assert captured["report_template_key"] == "standard-pentest"
-    assert captured["report_template_markdown"] == "# Template"
-    assert captured["report_template_digest_sha256"] == sha256(b"# Template").hexdigest()
+    assert captured["report_template_markdown"] == TEMPLATE
+    assert captured["report_template_digest_sha256"] == sha256(TEMPLATE.encode()).hexdigest()
     assert captured["report_template_compatibility_profiles"] == ["assessment-report-packet-v1"]
     assert "report_template_version" not in captured
-    assert captured["report_execution_plan"]["output_contract_version"] == 3
+    assert captured["report_execution_plan"]["output_contract_version"] == 4
     assert client.finalization_finishes == ["ready"]
 
 
@@ -1417,10 +1398,10 @@ def test_default_copy_packet_failure_stops_before_worker_and_artifact(
         durable_request=True,
         report_claim_token="claim-1",
         report_generation_token="generation-1",
-        report_execution_plan={"packet_version": 2, "output_contract_version": 3, "template_profile": "assessment-report-packet-v1"},
+        report_execution_plan={"packet_version": 2, "output_contract_version": 4, "template_profile": "assessment-report-packet-v1"},
         report_template_key="fixture",
-        report_template_markdown="# Template",
-        report_template_digest_sha256=sha256(b"# Template").hexdigest(),
+        report_template_markdown=TEMPLATE,
+        report_template_digest_sha256=sha256(TEMPLATE.encode()).hexdigest(),
         report_template_compatibility_profiles=["assessment-report-packet-v1"],
         frozen_report_prompt="frozen prompt",
         container_runtime=container_runtime,
@@ -1487,15 +1468,16 @@ def test_report_without_frozen_claim_never_starts_worker(monkeypatch) -> None:
     ("report_template_digest_sha256", "0" * 64, "report_template_digest_mismatch"),
     ("report_template_compatibility_profiles", ["other"], "report_template_profile_mismatch"),
     ("report_execution_plan", {"packet_version": 2, "output_contract_version": 2}, "report_execution_plan_unsupported:output_contract_version"),
+    ("report_execution_plan", {"packet_version": 2, "output_contract_version": 3}, "report_execution_plan_unsupported:output_contract_version"),
 ])
-def test_report_rejects_incompatible_frozen_layout_before_worker(monkeypatch, field, value, error):
+def test_report_rejects_incompatible_frozen_template_before_worker(monkeypatch, field, value, error):
     monkeypatch.setattr(report, "get_driver", lambda *args: pytest.fail("坏冻结合同不能启动 Worker"))
     arguments = {
         "task_run_id": "t", "report_generation_token": "g", "report_claim_token": "c",
         "durable_request": True, "frozen_report_prompt": "frozen prompt",
-        "report_execution_plan": {"packet_version": 2, "output_contract_version": 3, "template_profile": "assessment-report-packet-v1"},
-        "report_template_key": "fixture", "report_template_markdown": "# Template",
-        "report_template_digest_sha256": sha256(b"# Template").hexdigest(),
+        "report_execution_plan": {"packet_version": 2, "output_contract_version": 4, "template_profile": "assessment-report-packet-v1"},
+        "report_template_key": "fixture", "report_template_markdown": TEMPLATE,
+        "report_template_digest_sha256": sha256(TEMPLATE.encode()).hexdigest(),
         "report_template_compatibility_profiles": ["assessment-report-packet-v1"],
     }
     arguments[field] = value
@@ -1601,7 +1583,7 @@ def test_report_duplicate_titles_write_only_frozen_artifact() -> None:
     identity = report._write_report_results(
         client, "p1", "tr001", data=report_data("v001", "v002"),
         report_packet_json=json.dumps(packet), report_generation_token="generation-1",
-        report_template_markdown="# Template",
+        report_template_markdown=TEMPLATE,
     )
     assert isinstance(identity, report.ReportArtifactIdentity)
     assert identity.artifact_id == "a001"

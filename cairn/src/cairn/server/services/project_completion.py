@@ -473,7 +473,7 @@ def project_reopen_reason(conn, project) -> str | None:
     if policy_from_project_row(project).phased:
         return "assessment_new_project_required"
     report = conn.execute(
-        "SELECT status FROM assessment_report_finalizations WHERE project_id = ?",
+        "SELECT status FROM assessment_report_finalizations WHERE project_id = ? AND scope_key = ''",
         (project["id"],),
     ).fetchone()
     if report is not None and report["status"] != "ready":

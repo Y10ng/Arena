@@ -5,22 +5,63 @@
   <div v-else-if="rows.length === 0" class="data-table__state">
     {{ emptyLabel }}
   </div>
-  <div v-else class="data-table__scroll" role="region" :aria-label="caption" tabindex="0">
-    <table class="data-table" :class="`data-table--${density}`">
+  <div
+    v-else
+    ref="scrollContainer"
+    class="data-table__scroll"
+    role="region"
+    :aria-label="caption"
+    tabindex="0"
+  >
+    <table
+      class="data-table"
+      :class="[`data-table--${density}`, { 'data-table--resizable': resizableColumns }]"
+      :style="resizableColumns ? { width: `${tableWidth}px` } : undefined"
+    >
       <caption class="data-table__caption">
         {{
           caption
         }}
       </caption>
+      <colgroup v-if="resizableColumns">
+        <col
+          v-for="column in columns"
+          :key="column.key"
+          :style="{ width: `${columnWidth(column)}px` }"
+        />
+        <col v-if="hasActions" style="width: 96px" />
+      </colgroup>
       <thead>
         <tr>
           <th
-            v-for="column in columns"
+            v-for="(column, columnIndex) in columns"
             :key="column.key"
             scope="col"
             :class="`data-table__cell--${column.align ?? 'start'}`"
           >
-            {{ column.label }}
+            <span v-if="resizableColumns" class="data-table__cell-content" :title="column.label">{{
+              column.label
+            }}</span>
+            <template v-else>{{ column.label }}</template>
+            <span
+              v-if="resizableColumns && columnIndex < columns.length - 1"
+              class="data-table__column-resizer"
+              role="separator"
+              tabindex="0"
+              :aria-label="`调整${column.label}列宽`"
+              aria-orientation="vertical"
+              :aria-valuenow="columnWidth(column)"
+              :aria-valuemin="minimumWidth(column)"
+              :aria-valuemax="boundaryMaximum(columnIndex)"
+              @pointerdown.stop.prevent="startColumnResize($event, columnIndex)"
+              @pointermove.stop="resizeColumn"
+              @pointerup.stop="endColumnResize"
+              @pointercancel.stop="endColumnResize"
+              @lostpointercapture="columnDrag = null"
+              @click.stop.prevent
+              @dblclick.stop.prevent
+              @keydown.stop="resizeColumnKey($event, columnIndex)"
+            />
           </th>
           <th v-if="hasActions" class="data-table__action-heading" scope="col">
             {{ actionColumnLabel }}
@@ -35,34 +76,58 @@
               :key="column.key"
               :class="`data-table__cell--${column.align ?? 'start'}`"
             >
-              <slot :name="`cell-${column.key}`" :row="row" :column="column" :row-index="rowIndex">
+              <div
+                v-if="resizableColumns"
+                class="data-table__cell-content"
+                :title="String(column.value?.(row, rowIndex) ?? '')"
+              >
+                <slot
+                  :name="`cell-${column.key}`"
+                  :row="row"
+                  :column="column"
+                  :row-index="rowIndex"
+                >
+                  {{ column.value?.(row, rowIndex) }}
+                </slot>
+              </div>
+              <slot
+                v-else
+                :name="`cell-${column.key}`"
+                :row="row"
+                :column="column"
+                :row-index="rowIndex"
+              >
                 {{ column.value?.(row, rowIndex) }}
               </slot>
             </td>
             <td v-if="hasActions" class="data-table__action-cell">
-              <Button
-                variant="link"
-                size="sm"
-                :aria-label="actionLabel?.(row, rowIndex)"
-                :aria-expanded="isRowExpanded ? Boolean(isRowExpanded(row, rowIndex)) : undefined"
-                :aria-controls="isRowExpanded ? rowDetailId?.(row, rowIndex) : undefined"
-                @click.stop="emit('row-action', row)"
-              >
-                <ChevronDown
-                  v-if="isRowExpanded"
-                  :size="14"
-                  class="data-table__expand-icon"
-                  :class="{ 'is-expanded': isRowExpanded(row, rowIndex) }"
-                  aria-hidden="true"
-                />
-                {{
-                  isRowExpanded
-                    ? isRowExpanded(row, rowIndex)
-                      ? '收起'
-                      : '展开'
-                    : actionColumnLabel
-                }}
-              </Button>
+              <div class="data-table__actions">
+                <Button
+                  class="data-table__action-trigger"
+                  variant="link"
+                  size="sm"
+                  :aria-label="actionLabel?.(row, rowIndex)"
+                  :aria-expanded="isRowExpanded ? Boolean(isRowExpanded(row, rowIndex)) : undefined"
+                  :aria-controls="isRowExpanded ? rowDetailId?.(row, rowIndex) : undefined"
+                  @click.stop="emit('row-action', row)"
+                >
+                  <ChevronDown
+                    v-if="isRowExpanded"
+                    :size="14"
+                    class="data-table__expand-icon"
+                    :class="{ 'is-expanded': isRowExpanded(row, rowIndex) }"
+                    aria-hidden="true"
+                  />
+                  {{
+                    isRowExpanded
+                      ? isRowExpanded(row, rowIndex)
+                        ? '收起'
+                        : '展开'
+                      : actionColumnLabel
+                  }}
+                </Button>
+                <slot name="row-actions" :row="row" :row-index="rowIndex" />
+              </div>
             </td>
           </tr>
           <tr v-if="isRowExpanded?.(row, rowIndex)" class="data-table__detail-row">
@@ -84,12 +149,12 @@
 </template>
 
 <script setup lang="ts" generic="Row, ColumnKey extends string = string">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { HTMLAttributes } from 'vue'
 import Button from '../ui/Button.vue'
 import { ChevronDown } from '@lucide/vue'
 
-export type DataTableDensity = 'default' | 'compact'
+export type DataTableDensity = 'default' | 'compact' | 'traffic'
 export type DataTableColumnAlign = 'start' | 'center' | 'end'
 export type DataTableRowKey = string | number
 export type DataTableCellValue = string | number | null | undefined
@@ -104,6 +169,9 @@ export interface DataTableColumn<Row, ColumnKey extends string = string> {
   key: ColumnKey
   label: string
   align?: DataTableColumnAlign
+  width?: number
+  minWidth?: number
+  flexible?: boolean
   value?: (row: Row, rowIndex: number) => DataTableCellValue
 }
 
@@ -124,6 +192,7 @@ const props = withDefaults(
     rowKey: (row: Row, rowIndex: number) => DataTableRowKey
     caption: string
     density?: DataTableDensity
+    resizableColumns?: boolean
     loading?: boolean
     loadingLabel?: string
     emptyLabel?: string
@@ -137,6 +206,7 @@ const props = withDefaults(
   }>(),
   {
     density: 'default',
+    resizableColumns: false,
     loading: false,
     loadingLabel: '正在加载…',
     emptyLabel: '暂无数据',
@@ -151,6 +221,7 @@ const props = withDefaults(
 defineSlots<
   DataTableSlots<Row, ColumnKey> & {
     'row-detail'?: (props: { row: Row; rowIndex: number }) => unknown
+    'row-actions'?: (props: { row: Row; rowIndex: number }) => unknown
   }
 >()
 
@@ -159,6 +230,156 @@ const emit = defineEmits<{
 }>()
 
 const hasActions = computed(() => props.actionLabel !== undefined)
+// 仅用户调宽更新偏好；容器变窄不覆盖它，恢复空间后仍能还原合理比例。
+const preferredWidths = ref<Record<string, number>>({})
+const scrollContainer = ref<HTMLElement | null>(null)
+const containerWidth = ref(0)
+let columnDrag: {
+  pointerId: number
+  startX: number
+  width: number
+  pairWidth: number
+  index: number
+} | null = null
+function minimumWidth(column: DataTableColumn<Row, ColumnKey>) {
+  return Math.max(48, column.minWidth ?? 80)
+}
+function preferredWidth(column: DataTableColumn<Row, ColumnKey>) {
+  return Math.max(minimumWidth(column), preferredWidths.value[column.key] ?? column.width ?? 160)
+}
+
+// 按偏好比例分配组内空间；触底列先锁定，其余列继续分摊，避免长内容撑破外缘。
+function fitColumns(columns: readonly DataTableColumn<Row, ColumnKey>[], available: number) {
+  const widths: Record<string, number> = {}
+  let remaining = [...columns]
+  while (remaining.length) {
+    const weight = remaining.reduce((total, column) => total + preferredWidth(column), 0)
+    const atMinimum = remaining.filter(
+      (column) => (available * preferredWidth(column)) / weight < minimumWidth(column),
+    )
+    if (!atMinimum.length) {
+      remaining.forEach((column) => {
+        widths[column.key] = (available * preferredWidth(column)) / weight
+      })
+      break
+    }
+    for (const column of atMinimum) {
+      widths[column.key] = minimumWidth(column)
+      available -= widths[column.key]!
+    }
+    remaining = remaining.filter((column) => !atMinimum.includes(column))
+  }
+  return widths
+}
+const fittedWidths = computed(() => {
+  const columns = props.columns
+  const actionWidth = hasActions.value ? 96 : 0
+  const minimum = columns.reduce((total, column) => total + minimumWidth(column), 0)
+  const preferred = columns.reduce((total, column) => total + preferredWidth(column), 0)
+  const available = Math.max(
+    minimum,
+    (containerWidth.value || preferred + actionWidth) - actionWidth,
+  )
+  const flexible = columns.filter((column) => column.flexible)
+  if (!flexible.length) return fitColumns(columns, available)
+  const fixed = columns.filter((column) => !column.flexible)
+  const fixedPreferred = fixed.reduce((total, column) => total + preferredWidth(column), 0)
+  const flexibleMinimum = flexible.reduce((total, column) => total + minimumWidth(column), 0)
+  const fixedAvailable = Math.min(fixedPreferred, available - flexibleMinimum)
+  return {
+    ...fitColumns(fixed, fixedAvailable),
+    ...fitColumns(flexible, available - fixedAvailable),
+  }
+})
+function columnWidth(column: DataTableColumn<Row, ColumnKey>) {
+  return fittedWidths.value[column.key] ?? preferredWidth(column)
+}
+const tableWidth = computed(() =>
+  props.columns.reduce((total, column) => total + columnWidth(column), hasActions.value ? 96 : 0),
+)
+watch(
+  [scrollContainer, () => props.resizableColumns],
+  ([element, enabled], _, onCleanup) => {
+    if (!element || !enabled) return
+    const measure = () => {
+      // clientWidth 排除边框与纵向滚动条；只观察容器，不用表格宽度反向驱动测量。
+      if (element.clientWidth > 0 && element.clientWidth !== containerWidth.value) {
+        columnDrag = null
+        containerWidth.value = element.clientWidth
+      }
+    }
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    measure()
+    onCleanup(() => observer.disconnect())
+  },
+  { flush: 'post' },
+)
+watch(
+  () => props.columns,
+  () => {
+    columnDrag = null
+  },
+)
+
+function boundaryMaximum(index: number) {
+  const left = props.columns[index]!
+  const right = props.columns[index + 1]!
+  return columnWidth(left) + columnWidth(right) - minimumWidth(right)
+}
+function setBoundaryWidth(index: number, width: number, pairWidth: number) {
+  const left = props.columns[index]!
+  const right = props.columns[index + 1]!
+  const next = Math.max(minimumWidth(left), Math.min(pairWidth - minimumWidth(right), width))
+  // 固定本次实际布局，只交换相邻两列空间；其他列与表格总宽不受拖动影响。
+  preferredWidths.value = {
+    ...preferredWidths.value,
+    ...fittedWidths.value,
+    [left.key]: next,
+    [right.key]: pairWidth - next,
+  }
+}
+function startColumnResize(event: PointerEvent, index: number) {
+  if (event.button !== 0) return
+  const left = props.columns[index]!
+  const right = props.columns[index + 1]!
+  columnDrag = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    width: columnWidth(left),
+    pairWidth: columnWidth(left) + columnWidth(right),
+    index,
+  }
+  const handle = event.currentTarget as HTMLElement
+  handle.focus({ preventScroll: true })
+  handle.setPointerCapture(event.pointerId)
+}
+function resizeColumn(event: PointerEvent) {
+  if (columnDrag?.pointerId !== event.pointerId) return
+  setBoundaryWidth(
+    columnDrag.index,
+    columnDrag.width + event.clientX - columnDrag.startX,
+    columnDrag.pairWidth,
+  )
+}
+function endColumnResize(event: PointerEvent) {
+  if (columnDrag?.pointerId !== event.pointerId) return
+  columnDrag = null
+  ;(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId)
+}
+function resizeColumnKey(event: KeyboardEvent, index: number) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault()
+  const left = props.columns[index]!
+  const right = props.columns[index + 1]!
+  const width =
+    event.key === 'Home'
+      ? minimumWidth(left)
+      : event.key === 'End'
+        ? boundaryMaximum(index)
+        : columnWidth(left) + (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 40 : 10)
+  setBoundaryWidth(index, width, columnWidth(left) + columnWidth(right))
+}
 
 function resolvedRowAttrs(row: Row, rowIndex: number): DataTableRowAttrs {
   const attrs = { ...(props.rowAttrs?.(row, rowIndex) ?? {}) } as HTMLAttributes & {
@@ -214,6 +435,53 @@ defineOptions({ name: 'DataTable' })
   font-size: var(--text-md);
 }
 
+.data-table--resizable {
+  table-layout: fixed;
+  min-width: 0;
+}
+
+.data-table--resizable thead th {
+  position: relative;
+  padding-inline-end: var(--space-3);
+}
+
+.data-table__cell-content {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.data-table__column-resizer {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-end: 0;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.data-table__column-resizer::after {
+  content: '';
+  position: absolute;
+  inset-block: 20%;
+  inset-inline-end: 2px;
+  width: 2px;
+  background: var(--border-strong);
+}
+
+.data-table__column-resizer:hover::after,
+.data-table__column-resizer:focus-visible::after {
+  background: var(--accent);
+}
+.data-table__column-resizer:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 .data-table__caption {
   position: absolute;
   width: 1px;
@@ -267,6 +535,20 @@ defineOptions({ name: 'DataTable' })
   height: calc(var(--control-height) + var(--space-2));
 }
 
+.data-table--traffic {
+  font-size: var(--text-xs);
+  line-height: 18px;
+}
+
+.data-table--traffic th,
+.data-table--traffic td {
+  padding: var(--space-1) var(--space-2);
+}
+
+.data-table--traffic tbody tr {
+  height: 30px;
+}
+
 .data-table__cell--start {
   text-align: start;
 }
@@ -307,6 +589,19 @@ defineOptions({ name: 'DataTable' })
 .data-table tbody tr.data-table__row--active .data-table__action-cell,
 .data-table tbody tr.data-table__row--active:hover .data-table__action-cell {
   background: var(--surface-selected);
+}
+
+.data-table__actions {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--space-1);
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.data-table__actions > :deep(*) {
+  flex-shrink: 0;
 }
 
 .data-table__expand-icon {

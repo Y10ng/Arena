@@ -5,13 +5,15 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from cairn import __version__
 from cairn.server import db
 from cairn.server.routers import (
     admin,
+    agent_conversations,
     audit,
     auth,
     candidates,
@@ -27,6 +29,7 @@ from cairn.server.routers import (
     libraries,
     monitoring,
     models,
+    overview,
     project_resources,
     project_schedules,
     project_runtime,
@@ -37,9 +40,9 @@ from cairn.server.routers import (
     scenarios,
     settings,
     tenant_workers,
+    traffic,
     vulnerabilities,
     verification_requests,
-    worker_templates,
 )
 
 STATIC_DIR = Path(os.environ.get("CAIRN_STATIC_DIR", Path(__file__).parent / "static"))
@@ -65,8 +68,17 @@ app = FastAPI(
     openapi_url=None,
 )
 
+@app.exception_handler(RequestValidationError)
+async def request_validation_error(_request, exc: RequestValidationError):
+    # Pydantic 的 input/ctx 可能包含整份请求及只写凭据，不能进入普通错误响应。
+    return JSONResponse(status_code=422, content={
+        "detail": [{key: error[key] for key in ("loc", "msg", "type")} for error in exc.errors()],
+    })
+
+
 app.include_router(health.router)
 app.include_router(auth.router)
+app.include_router(agent_conversations.router)
 app.include_router(candidates.router)
 app.include_router(execution_events.router)
 app.include_router(admin.router)
@@ -85,7 +97,7 @@ app.include_router(projects.router)
 app.include_router(project_schedules.router)
 app.include_router(verification_requests.router)
 app.include_router(project_resources.router)
-app.include_router(worker_templates.router)
+app.include_router(overview.router)
 app.include_router(models.router)
 app.include_router(tenant_workers.router)
 app.include_router(tenant_workers.dispatcher_router)
@@ -95,6 +107,7 @@ app.include_router(intents.router)
 app.include_router(coverage_slots.router)
 app.include_router(vulnerabilities.router)
 app.include_router(audit.router)
+app.include_router(traffic.router)
 app.include_router(monitoring.router)
 app.include_router(export.router)
 

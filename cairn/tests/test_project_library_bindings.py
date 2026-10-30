@@ -17,8 +17,6 @@ from cairn.server.auth import RequestPrincipal, create_user_with_personal_tenant
 from cairn.server.models import CreateProjectRequest
 from cairn.server.routers.projects import get_library_catalog
 from cairn.server.schemas.libraries import LibraryFileWrite
-from cairn.server.schemas.models import CreateTenantModelRequest
-from cairn.server.schemas.tenant_workers import CreateTenantWorkerRequest
 from cairn.server.services import model_credentials
 from cairn.server.services.libraries import (
     archive_library,
@@ -30,9 +28,8 @@ from cairn.server.services.project_records import (
     delete_project_record,
     get_project_detail,
 )
-from cairn.server.services.tenant_models import create_tenant_model
-from cairn.server.services.tenant_workers import create_tenant_worker
 from cairn.server.services import tenant_workers as tenant_workers_service
+from test_project_creation_workers import _worker as configure_workers
 
 
 @pytest.fixture(autouse=True)
@@ -74,20 +71,7 @@ def _principal(login: str) -> RequestPrincipal:
 
 
 def _worker(principal: RequestPrincipal):
-    model = create_tenant_model(
-        CreateTenantModelRequest(
-            display_name="Project Library Model",
-            protocol="anthropic-messages",
-            base_url="https://api.example.test",
-            model_name="claude-test",
-            api_key="project-secret",
-        ),
-        principal=principal,
-    )
-    return create_tenant_worker(
-        CreateTenantWorkerRequest(display_name="Project Library Worker", model_id=model.id),
-        principal=principal,
-    )
+    return configure_workers(principal, "Project Library Model")[0]
 
 
 def _request(principal: RequestPrincipal, worker_id: str, **updates) -> CreateProjectRequest:
@@ -96,7 +80,6 @@ def _request(principal: RequestPrincipal, worker_id: str, **updates) -> CreatePr
         "origin": "https://example.com",
         "goal": "Audit the target",
         "scenario": "default",
-        "tenant_worker_ids": [worker_id],
         "authorization_expires_at": None,
     }
     values.update(updates)

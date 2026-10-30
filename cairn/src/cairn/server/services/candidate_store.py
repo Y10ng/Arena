@@ -19,6 +19,7 @@ from cairn.server.db import get_conn
 from cairn.server.schemas.candidates import (
     CANDIDATE_MAX_CANDIDATES_PER_TASK_RUN,
     CANDIDATE_MAX_MANIFEST_BYTES,
+    candidate_manifest_byte_limit,
     CANDIDATE_MAX_OUTCOMES_PER_CANDIDATE,
     CANDIDATE_MAX_RAW_BYTES,
     CANDIDATE_MAX_SPOOL_BYTES,
@@ -253,7 +254,7 @@ def capture_candidate(
 ) -> CandidateReceipt:
     if manifest.project_id != project_id or manifest.task_run_id != task_run_id:
         raise HTTPException(409, "candidate_route_identity_mismatch")
-    if len(manifest_bytes) > CANDIDATE_MAX_MANIFEST_BYTES:
+    if len(manifest_bytes) > candidate_manifest_byte_limit(manifest.phase):
         raise HTTPException(413, "candidate_manifest_too_large")
     if len(raw) != manifest.raw_size_bytes:
         raise HTTPException(422, "candidate_raw_size_mismatch")

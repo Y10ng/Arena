@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -13,6 +15,7 @@ class ReportInventoryItem(BaseModel):
     artifact_uri: str
     artifact_sha256: str
     artifact_size: int
+    source_status: Literal["available", "deleted", "unknown"] = "unknown"
     created_at: str
     template_key: str
     template_version: int | None = None

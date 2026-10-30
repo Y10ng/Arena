@@ -1,6 +1,10 @@
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { TSchema } from "typebox";
 import type { SubmissionDiagnostics } from "./submission.js";
+import type { ProjectToolsCapability } from "./project-tools.js";
+import type { TaskExecutionBinding } from "./task-execution.js";
+import type { HttpTrafficBinding } from "./http-flows.js";
+import type { FrozenHttpRenderCapability } from "./http-evidence-render.js";
 
 export const PHASE_RESULT_KINDS = {
   bootstrap_execute: "bootstrap_result",
@@ -13,7 +17,7 @@ export const PHASE_RESULT_KINDS = {
   reason_execute: "reason_result",
   report_execute: "report_result",
 } as const;
-export type Phase = keyof typeof PHASE_RESULT_KINDS;
+export type Phase = keyof typeof PHASE_RESULT_KINDS | "chat_turn";
 export type JsonObject = Record<string, unknown>;
 export const EXECUTION_CHECKPOINT_PROTOCOL = "cairn-execution-event-v1" as const;
 export const EXECUTION_CHECKPOINT_SPOOL_ROOT = "/tmp/cairn-prompts";
@@ -31,6 +35,16 @@ export const CANDIDATE_SPOOL_HARD_LIMITS = {
   max_forbidden_literals: 32,
   max_forbidden_literal_bytes: 4 * 1024,
 } as const;
+export const REPORT_SEGMENT_HARD_LIMITS = {
+  max_artifacts: 256,
+  max_manifest_bytes: 128 * 1024,
+  max_segment_bytes: 1024 * 1024,
+} as const;
+export function candidateLimits(request: Pick<AgentRequest, "phase" | "capabilities">) {
+  return request.phase === "report_execute" && request.capabilities.report_segments
+    ? { ...CANDIDATE_SPOOL_HARD_LIMITS, max_artifacts: REPORT_SEGMENT_HARD_LIMITS.max_artifacts, max_manifest_bytes: REPORT_SEGMENT_HARD_LIMITS.max_manifest_bytes }
+    : CANDIDATE_SPOOL_HARD_LIMITS;
+}
 export const EXECUTION_CHECKPOINT_HARD_LIMITS = {
   max_events: 64,
   max_event_bytes: 16 * 1024,
@@ -59,6 +73,17 @@ export interface CandidateCaptureCapability {
   max_spool_bytes: number;
   forbidden_literals: string[];
 }
+export interface ReportSegmentCapability {
+  binding: {
+    project_id: string;
+    task_run_id: string;
+    generation_token: string;
+    input_snapshot_sha256: string;
+    report_template_digest_sha256: string;
+  };
+  segment_schema: TSchema;
+  manifest_path: string;
+}
 export interface AgentRequest {
   protocol: "cairn-agent-request-v1";
   project_id: string;
@@ -71,6 +96,7 @@ export interface AgentRequest {
   model: {
     protocol: "anthropic-messages" | "openai-chat-completions" | "openai-responses";
     model_name: string;
+    max_output_tokens: number;
     inference_endpoint: string;
     base_url: string;
     auth_header: "authorization-bearer" | "x-api-key";
@@ -98,8 +124,13 @@ export interface AgentRequest {
   cwd: string;
   session_root: string;
   capabilities: {
-    candidate_capture: CandidateCaptureCapability;
+    candidate_capture?: CandidateCaptureCapability;
+    project_tools?: ProjectToolsCapability;
+    task_execution?: TaskExecutionBinding;
+    http_traffic?: HttpTrafficBinding;
+    http_evidence_render?: FrozenHttpRenderCapability;
     execution_checkpoints?: ExecutionCheckpointCapability;
+    report_segments?: ReportSegmentCapability;
   };
 }
 export interface AgentEnvelope {
@@ -132,7 +163,7 @@ function exactKeys(value: JsonObject, expected: readonly string[]): boolean {
 function assert(condition: unknown, field: string): asserts condition {
   if (!condition) throw new AgentFailure("invalid_request", `Invalid request field: ${field}`, field);
 }
-function parseCandidateCapture(value: unknown): CandidateCaptureCapability {
+function parseCandidateCapture(value: unknown, report = false): CandidateCaptureCapability {
   const prefix = "capabilities.candidate_capture";
   assert(object(value), prefix);
   assert(exactKeys(value, ["protocol", "spool_path", "capture_id", "max_candidates", "max_candidate_bytes", "max_manifest_bytes", "max_spool_bytes", "forbidden_literals"]), prefix);
@@ -142,7 +173,8 @@ function parseCandidateCapture(value: unknown): CandidateCaptureCapability {
   const spoolPath = resolve(value.spool_path as string);
   assert(dirname(spoolPath) === CANDIDATE_SPOOL_ROOT && spoolPath === value.spool_path && basename(spoolPath) === `pi-candidates-${value.capture_id}.bin`, `${prefix}.spool_path`);
   for (const key of ["max_candidates", "max_candidate_bytes", "max_manifest_bytes", "max_spool_bytes"] as const) {
-    assert(Number.isInteger(value[key]) && (value[key] as number) > 0 && (value[key] as number) <= CANDIDATE_SPOOL_HARD_LIMITS[key], `${prefix}.${key}`);
+    const maximum = report && key === "max_manifest_bytes" ? REPORT_SEGMENT_HARD_LIMITS.max_manifest_bytes : CANDIDATE_SPOOL_HARD_LIMITS[key];
+    assert(Number.isInteger(value[key]) && (value[key] as number) > 0 && (value[key] as number) <= maximum, `${prefix}.${key}`);
   }
   assert(Array.isArray(value.forbidden_literals) && value.forbidden_literals.length <= CANDIDATE_SPOOL_HARD_LIMITS.max_forbidden_literals, `${prefix}.forbidden_literals`);
   const forbiddenLiterals = value.forbidden_literals as unknown[];
@@ -179,13 +211,30 @@ function parseExecutionCheckpoints(value: unknown): ExecutionCheckpointCapabilit
     max_spool_bytes: value.max_spool_bytes as number,
   };
 }
+function parseReportSegments(value: unknown, raw: JsonObject): ReportSegmentCapability {
+  const prefix = "capabilities.report_segments";
+  assert(raw.phase === "report_execute" && object(value) && exactKeys(value, ["binding", "segment_schema", "manifest_path"]), prefix);
+  const binding = value.binding;
+  assert(object(binding) && exactKeys(binding, ["project_id", "task_run_id", "generation_token", "input_snapshot_sha256", "report_template_digest_sha256"]), `${prefix}.binding`);
+  assert(binding.project_id === raw.project_id && binding.task_run_id === raw.task_run_id, `${prefix}.binding`);
+  assert(typeof binding.generation_token === "string" && binding.generation_token.length > 0 && !binding.generation_token.includes("\0"), `${prefix}.binding.generation_token`);
+  for (const key of ["input_snapshot_sha256", "report_template_digest_sha256"]) {
+    assert(typeof binding[key] === "string" && /^[a-f0-9]{64}$/.test(binding[key] as string), `${prefix}.binding.${key}`);
+  }
+  assert(object(value.segment_schema), `${prefix}.segment_schema`);
+  const capture = (raw.capabilities as JsonObject).candidate_capture;
+  assert(object(capture) && typeof capture.capture_id === "string", "capabilities.candidate_capture.capture_id");
+  assert(value.manifest_path === join(CANDIDATE_SPOOL_ROOT, `pi-report-segments-${capture.capture_id}.json`), `${prefix}.manifest_path`);
+  return value as unknown as ReportSegmentCapability;
+}
 export function parseRequest(raw: unknown): AgentRequest {
   assert(object(raw), "$");
   assert(raw.protocol === "cairn-agent-request-v1", "protocol");
   for (const key of ["project_id", "task_run_id", "phase", "prompt", "session"]) {
     assert(typeof raw[key] === "string" && raw[key].length > 0 && !raw[key].includes("\0"), key);
   }
-  assert(Object.hasOwn(PHASE_RESULT_KINDS, raw.phase as string), "phase");
+  const chat = raw.phase === "chat_turn";
+  assert(chat || Object.hasOwn(PHASE_RESULT_KINDS, raw.phase as string), "phase");
   assert(/^pi:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(raw.session as string), "session");
   for (const key of ["resume", "conclude_only"]) assert(typeof raw[key] === "boolean", key);
   const normalContinuation = raw.resume === true && raw.conclude_only === false && (raw.phase as string).endsWith("_execute") && raw.phase !== "report_execute";
@@ -216,6 +265,7 @@ export function parseRequest(raw: unknown): AgentRequest {
   assert(["anthropic-messages", "openai-chat-completions", "openai-responses"].includes(model.protocol as string), "model.protocol");
   assert(["authorization-bearer", "x-api-key"].includes(model.auth_header as string), "model.auth_header");
   for (const key of ["model_name", "inference_endpoint", "base_url", "api_key"]) assert(typeof model[key] === "string" && model[key].length > 0, `model.${key}`);
+  assert(Number.isSafeInteger(model.max_output_tokens) && (model.max_output_tokens as number) > 0, "model.max_output_tokens");
   assert(Array.isArray(model.custom_headers) && model.custom_headers.every((h) => object(h) && typeof h.name === "string" && typeof h.value === "string"), "model.custom_headers");
   assert(raw.binding === null || object(raw.binding), "binding");
   if (object(raw.binding)) {
@@ -228,15 +278,56 @@ export function parseRequest(raw: unknown): AgentRequest {
   }
   assert(object(raw.capabilities), "capabilities");
   const capabilityKeys = Object.keys(raw.capabilities);
-  assert(capabilityKeys.length >= 1 && capabilityKeys.length <= 2 && capabilityKeys.includes("candidate_capture") && capabilityKeys.every((key) => ["candidate_capture", "execution_checkpoints"].includes(key)), "capabilities");
+  assert(chat
+    ? capabilityKeys.length === 1 && capabilityKeys[0] === "project_tools"
+    : capabilityKeys.length >= 1 && capabilityKeys.length <= 6 && capabilityKeys.includes("candidate_capture") && capabilityKeys.every((key) => ["candidate_capture", "execution_checkpoints", "report_segments", "task_execution", "http_traffic", "http_evidence_render"].includes(key)), "capabilities");
+  const projectTools = raw.capabilities.project_tools;
+  if (chat) {
+    assert(raw.conclude_only === false && raw.binding === null && raw.continuation === undefined && maxRepairs === 0, "chat_turn");
+    assert(object(projectTools) && exactKeys(projectTools, ["protocol", "socket_path", "workspace_path", "forbidden_literals"]), "capabilities.project_tools");
+    assert(projectTools.protocol === "cairn-project-tools-v1", "capabilities.project_tools.protocol");
+    assert(typeof projectTools.workspace_path === "string" && isAbsolute(projectTools.workspace_path) && /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,199}$/.test(basename(projectTools.workspace_path)) && dirname(projectTools.workspace_path) === (raw.cwd ?? "/home/kali/workspace"), "capabilities.project_tools.workspace_path");
+    assert(typeof projectTools.socket_path === "string" && /^\/tmp\/cairn-prompts\/pi-project-[0-9a-f]{32}\.sock$/.test(projectTools.socket_path), "capabilities.project_tools.socket_path");
+    assert(Array.isArray(projectTools.forbidden_literals) && projectTools.forbidden_literals.length <= 32 && projectTools.forbidden_literals.every((item) => typeof item === "string" && item.length > 0 && Buffer.byteLength(item) <= 4096), "capabilities.project_tools.forbidden_literals");
+  }
+  const httpRender = raw.capabilities.http_evidence_render;
+  if (httpRender !== undefined) {
+    assert(raw.phase === "report_execute" && object(httpRender) && exactKeys(httpRender, ["frozen_materials_path", "manifest_path"]), "capabilities.http_evidence_render");
+    const capture = raw.capabilities.candidate_capture;
+    assert(object(capture) && httpRender.manifest_path === `/tmp/cairn-prompts/pi-http-evidence-${capture.capture_id}.json`, "capabilities.http_evidence_render.manifest_path");
+    assert(typeof httpRender.frozen_materials_path === "string" && /^\/opt\/cairn\/readonly-inputs\/[A-Za-z0-9_-]+\/packet-full\.json$/.test(httpRender.frozen_materials_path), "capabilities.http_evidence_render.frozen_materials_path");
+  }
+  const httpTraffic = raw.capabilities.http_traffic;
+  if (httpTraffic !== undefined) {
+    assert(raw.phase !== "report_execute" && object(httpTraffic) && exactKeys(httpTraffic, ["protocol", "project_id", "task_run_id", "socket_path"]), "capabilities.http_traffic");
+    assert(httpTraffic.protocol === "cairn-traffic-read-v1" && httpTraffic.project_id === raw.project_id && httpTraffic.task_run_id === raw.task_run_id, "capabilities.http_traffic");
+    const capture = raw.capabilities.candidate_capture;
+    assert(object(capture) && httpTraffic.socket_path === `/tmp/cairn-prompts/pi-traffic-${capture.capture_id}.sock`, "capabilities.http_traffic.socket_path");
+  }
+  const taskExecution = raw.capabilities.task_execution;
+  const readonly = chat || raw.conclude_only || (raw.phase as string).endsWith("_conclude") || raw.phase === "report_execute";
+  assert(readonly || taskExecution !== undefined, "capabilities.task_execution");
+  if (taskExecution !== undefined) {
+    assert(object(taskExecution) && exactKeys(taskExecution, ["protocol", "scope_id", "task_run_id", "socket_path"]), "capabilities.task_execution");
+    assert(taskExecution.protocol === "cairn-task-execution-v1" && taskExecution.task_run_id === raw.task_run_id, "capabilities.task_execution.task_run_id");
+    assert(typeof taskExecution.scope_id === "string" && /^[0-9a-f]{32}$/.test(taskExecution.scope_id), "capabilities.task_execution.scope_id");
+    assert(taskExecution.socket_path === `/run/cairn-exec/${taskExecution.scope_id}/execute.sock`, "capabilities.task_execution.socket_path");
+  }
+  const reportSegments = raw.capabilities.report_segments === undefined ? undefined : parseReportSegments(raw.capabilities.report_segments, raw);
+  assert(raw.phase !== "report_execute" || reportSegments !== undefined, "capabilities.report_segments");
   const capabilities: AgentRequest["capabilities"] = {
-    candidate_capture: parseCandidateCapture(raw.capabilities.candidate_capture),
+    ...(chat ? { project_tools: projectTools as unknown as ProjectToolsCapability } : { candidate_capture: parseCandidateCapture(raw.capabilities.candidate_capture, reportSegments !== undefined) }),
+    ...(taskExecution === undefined ? {} : { task_execution: taskExecution as unknown as TaskExecutionBinding }),
+    ...(httpTraffic === undefined ? {} : { http_traffic: httpTraffic as unknown as HttpTrafficBinding }),
+    ...(httpRender === undefined ? {} : { http_evidence_render: httpRender as unknown as FrozenHttpRenderCapability }),
     ...(raw.capabilities.execution_checkpoints === undefined ? {} : { execution_checkpoints: parseExecutionCheckpoints(raw.capabilities.execution_checkpoints) }),
+    ...(reportSegments === undefined ? {} : { report_segments: reportSegments }),
   };
   const cwd = raw.cwd ?? "/home/kali/workspace";
   assert(typeof cwd === "string" && isAbsolute(cwd), "cwd");
-  const sessionRoot = raw.session_root ?? join(cwd, ".cairn", "pi");
+  const sessionRoot = raw.session_root ?? "/home/kali/.cairn/pi";
   assert(typeof sessionRoot === "string" && isAbsolute(sessionRoot), "session_root");
+  assert(!(chat || taskExecution || httpTraffic) || (resolve(sessionRoot) !== resolve(cwd) && !resolve(sessionRoot).startsWith(resolve(cwd) + "/")), "session_root");
   return {
     ...raw,
     cwd,

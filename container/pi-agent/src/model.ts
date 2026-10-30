@@ -31,7 +31,7 @@ export function requestModel(request: AgentRequest): Model<Api> {
     baseUrl: `${endpoint.origin}${endpoint.pathname.slice(0, -suffix.length)}`,
     reasoning: false, input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128000, maxTokens: 16384,
+    contextWindow: 128000, maxTokens: config.max_output_tokens,
     // pi 类型未表达底层官方客户端支持的 null 删除语义；HTTP 夹具检查只发送选定的认证头。
     headers: headers as Record<string, string>,
     ...(config.protocol === "openai-chat-completions" ? { compat: { supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false } } : {}),

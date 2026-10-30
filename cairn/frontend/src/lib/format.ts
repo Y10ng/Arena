@@ -157,6 +157,7 @@ export const TASK_TYPE_LABELS: Record<string, string> = Object.freeze({
   explore: '探索',
   verify: '验证',
   conclude: '收敛',
+  agent_chat: '项目对话',
 });
 
 export function taskTypeText(value: any): string {

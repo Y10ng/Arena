@@ -397,6 +397,18 @@
   gap: var(--space-3);
 }
 
+/* Agent 的项目身份直接进入 Shell 顶栏，不再叠加面包屑与项目标题栏。 */
+.app-layout--agent .topbar {
+  height: auto;
+  min-height: 72px;
+  gap: var(--space-4);
+  background: var(--color-canvas);
+}
+.workbench-project-header { flex: 1; min-width: 0; }
+.app-layout--agent .btn-command { min-width: var(--control-height-sm); padding-inline: var(--space-2); }
+.app-layout--agent .btn-command > span,
+.app-layout--agent .btn-command > kbd { display: none; }
+
 /* 长项目名不能把面包屑挤出顶栏并遮住工作空间操作。 */
 .topbar .left-section {
   min-width: 0;

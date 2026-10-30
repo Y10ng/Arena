@@ -1,7 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { defineComponent, nextTick, ref } from 'vue'
 import type { PropType } from 'vue'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import DataTable from './DataTable.vue'
 import type {
   DataTableActiveRowAria,
@@ -106,6 +106,8 @@ const DataTableHost = defineComponent({
   `,
 })
 
+afterEach(() => vi.unstubAllGlobals())
+
 describe('DataTable', () => {
   it('renders native table semantics, a caption, column slots, and a scroll region', () => {
     const wrapper = mount(DataTableHost, { props: { initialRows: rows } })
@@ -209,9 +211,162 @@ describe('DataTable', () => {
         .every((cell) => cell.classes().includes('data-table__action-cell')),
     ).toBe(true)
     expect(buttons.every((button) => button.attributes('type') === 'button')).toBe(true)
+    expect(wrapper.findAll('td.data-table__action-cell > .data-table__actions')).toHaveLength(2)
+    expect(
+      wrapper.findAll('.data-table__actions').every((group) => group.findAll('button').length === 1),
+    ).toBe(true)
 
     await buttons[1]?.trigger('click')
 
     expect(wrapper.emitted('row-action')).toEqual([[rows[1]]])
+  })
+})
+
+describe('DataTable 固定外缘调宽', () => {
+  const resizeColumns = [
+    { key: 'time', label: '时间', width: 100, minWidth: 80 },
+    { key: 'host', label: 'Host', width: 300, minWidth: 120, flexible: true },
+    { key: 'path', label: '路径', width: 500, minWidth: 160, flexible: true },
+    { key: 'status', label: '状态', width: 100, minWidth: 80 },
+  ] satisfies DataTableColumn<ProjectRow>[]
+  async function setupTable() {
+    let width = 1200
+    let notify = () => {}
+    const disconnect = vi.fn()
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(callback: () => void) {
+          notify = callback
+        }
+        observe(element: HTMLElement) {
+          Object.defineProperty(element, 'clientWidth', { configurable: true, get: () => width })
+        }
+        disconnect = disconnect
+      },
+    )
+    const select = vi.fn()
+    const wrapper = mount(DataTable, {
+      props: {
+        rows,
+        columns: resizeColumns,
+        rowKey: (row) => (row as ProjectRow).id,
+        caption: '流量',
+        resizableColumns: true,
+        rowAttrs: () => ({ onClick: select }),
+      },
+    })
+    await nextTick()
+    return {
+      wrapper,
+      select,
+      disconnect,
+      widths: () =>
+        wrapper
+          .findAll('col')
+          .map((col) => Number.parseFloat((col.element as HTMLElement).style.width)),
+      total: () => Number.parseFloat((wrapper.get('table').element as HTMLElement).style.width),
+      resize: async (next: number) => {
+        width = next
+        notify()
+        await nextTick()
+      },
+    }
+  }
+
+  it('仅有内部边界，指针和键盘交换相邻列空间并遵守两侧最小宽', async () => {
+    const { wrapper, widths, total, select } = await setupTable()
+    expect(widths()).toEqual([100, 375, 625, 100])
+    expect(total()).toBe(1200)
+    expect(wrapper.findAll('[role="separator"]')).toHaveLength(3)
+    expect(wrapper.get('th:last-child').find('[role="separator"]').exists()).toBe(false)
+    const handle = wrapper.get('[aria-label="调整Host列宽"]')
+    expect(handle.attributes('aria-valuemax')).toBe('840')
+    const capture = vi.fn()
+    const release = vi.fn()
+    Object.assign(handle.element, { setPointerCapture: capture, releasePointerCapture: release })
+    const pointer = async (type: string, clientX: number, pointerId = 4) => {
+      const event = new MouseEvent(type, { bubbles: true, button: 0, clientX })
+      Object.defineProperty(event, 'pointerId', { value: pointerId })
+      handle.element.dispatchEvent(event)
+      await nextTick()
+    }
+    await pointer('pointerdown', 200)
+    await pointer('pointermove', 240, 9)
+    expect(widths()).toEqual([100, 375, 625, 100])
+    await pointer('pointermove', 240)
+    expect(widths()).toEqual([100, 415, 585, 100])
+    await pointer('pointerup', 240)
+    expect(capture).toHaveBeenCalledWith(4)
+    expect(release).toHaveBeenCalledWith(4)
+    await handle.trigger('keydown', { key: 'ArrowLeft', shiftKey: true })
+    expect(widths()).toEqual([100, 375, 625, 100])
+    await handle.trigger('keydown', { key: 'ArrowRight', shiftKey: true })
+    expect(widths()).toEqual([100, 415, 585, 100])
+    await pointer('pointerdown', 200)
+    await pointer('pointermove', 2000)
+    expect(widths()).toEqual([100, 840, 160, 100])
+    await pointer('pointermove', -2000)
+    expect(widths()).toEqual([100, 120, 880, 100])
+    await pointer('pointercancel', -2000)
+    await pointer('pointermove', 250)
+    expect(widths()).toEqual([100, 120, 880, 100])
+    await handle.trigger('keydown', { key: 'End' })
+    await handle.trigger('keydown', { key: 'ArrowRight' })
+    expect(widths()).toEqual([100, 840, 160, 100])
+    await handle.trigger('keydown', { key: 'Home' })
+    await handle.trigger('keydown', { key: 'ArrowLeft' })
+    expect(widths()).toEqual([100, 120, 880, 100])
+    expect(total()).toBe(1200)
+    await handle.trigger('click')
+    expect(select).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('容器改变优先分配弹性列，窄于最小总宽才溢出且恢复用户比例', async () => {
+    const { wrapper, widths, total, resize, disconnect } = await setupTable()
+    await wrapper
+      .get('[aria-label="调整Host列宽"]')
+      .trigger('keydown', { key: 'ArrowRight', shiftKey: true })
+    await resize(1600)
+    expect(widths()).toEqual([100, 581, 819, 100])
+    expect(total()).toBe(1600)
+    await resize(480)
+    expect(widths()).toEqual([100, 120, 160, 100])
+    await resize(460)
+    expect(widths()).toEqual([90, 120, 160, 90])
+    expect(total()).toBe(460)
+    await resize(300)
+    expect(widths()).toEqual([80, 120, 160, 80])
+    expect(total()).toBe(440)
+    await resize(1600)
+    expect(widths()).toEqual([100, 581, 819, 100])
+    await wrapper.setProps({ rows: [...rows].reverse() })
+    expect(widths()).toEqual([100, 581, 819, 100])
+    await wrapper.setProps({ columns: resizeColumns.slice(1) })
+    expect(total()).toBe(1600)
+    expect(widths()[0]).toBeCloseTo(622.5)
+    expect(widths()[1]).toBeCloseTo(877.5)
+    expect(wrapper.findAll('[role="separator"]')).toHaveLength(2)
+    await wrapper.setProps({ columns: resizeColumns })
+    expect(widths()).toEqual([100, 581, 819, 100])
+    await wrapper.setProps({ loading: true })
+    expect(disconnect).toHaveBeenCalledTimes(1)
+    await wrapper.setProps({ loading: false })
+    expect(widths()).toEqual([100, 581, 819, 100])
+    wrapper.unmount()
+    expect(disconnect).toHaveBeenCalledTimes(2)
+  })
+
+  it('未启用调宽时不测量或注入布局，保留普通表格行为', async () => {
+    const observer = vi.fn()
+    vi.stubGlobal('ResizeObserver', observer)
+    const wrapper = mount(DataTableHost, { props: { initialRows: rows, actions: true } })
+    await nextTick()
+    expect(observer).not.toHaveBeenCalled()
+    expect(wrapper.find('colgroup').exists()).toBe(false)
+    expect(wrapper.find('[role="separator"]').exists()).toBe(false)
+    expect(wrapper.get('table').attributes('style')).toBeUndefined()
+    wrapper.unmount()
   })
 })

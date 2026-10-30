@@ -127,6 +127,81 @@ test('readonly inputs remain readable but cannot be registered as artifacts', as
   await assert.rejects(registry.register('.cairn/readonly-inputs/request.txt', 'file'), { code: 'artifact_invalid' });
 });
 
+test('report read_evidence preserves byte offsets, UTF-8 chunks and relevant tail selection', async (t) => {
+  const chunks = [];
+  const { request, cwd, calls } = await fixture(t, 'openai-chat-completions', [
+    { tools: [{ name: 'read_evidence', args: { path: 'large.txt', offset: 0 } }] },
+    (call) => {
+      const chunk = JSON.parse(call.body.messages.filter((message) => message.role === 'tool').at(-1).content);
+      chunks.push(chunk);
+      return { tools: [{ name: 'read_evidence', args: { path: 'large.txt', offset: chunk.next_offset, length: 64 } }] };
+    },
+    (call) => {
+      chunks.push(JSON.parse(call.body.messages.filter((message) => message.role === 'tool').at(-1).content));
+      return ok;
+    },
+  ]);
+  const original = 'a'.repeat(32767) + '尾部关键结果';
+  await writeFile(join(cwd, 'large.txt'), original);
+  request.phase = 'report_execute';
+  assert.equal((await runRequest(request)).status, 'succeeded');
+  assert.equal(chunks[0].bytes_read, 32767);
+  assert.equal(chunks[0].next_offset, 32767);
+  assert.equal(chunks[1].byte_start, 32767);
+  assert.equal(chunks[1].text, '尾部关键结果');
+  assert.equal(chunks[1].next_offset, Buffer.byteLength(original));
+  assert.equal(chunks[1].eof, true);
+  for (const chunk of chunks) {
+    assert.deepEqual(Object.keys(chunk).sort(), ['byte_start', 'bytes_read', 'eof', 'next_offset', 'pointer', 'text', 'total_bytes']);
+    assert.equal(chunk.pointer, `utf8-bytes=${chunk.byte_start}:${chunk.next_offset}`);
+    assert.equal(chunk.bytes_read, Buffer.byteLength(chunk.text));
+    assert.equal(chunk.total_bytes, Buffer.byteLength(original));
+    assert.equal(chunk.text, Buffer.from(original).subarray(chunk.byte_start, chunk.next_offset).toString('utf8'));
+    assert.ok(chunk.bytes_read <= 32768);
+  }
+  assert.equal(chunks.some((chunk) => chunk.text.includes('�')), false);
+  assert.equal(await readFile(join(cwd, 'large.txt'), 'utf8'), original);
+  assert.deepEqual(calls[0].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+});
+
+test('read_evidence SDK rejects ambiguous matches and invalid ranges without hiding UTF-8 bytes', async (t) => {
+  const bom = String.fromCodePoint(0xfeff);
+  const original = bom + '𠮷ababa\r\n尾';
+  const cases = [
+    [{ match: 'aba' }, /match is ambiguous/],
+    [{ match: 'missing' }, /match was not found/],
+    [{ match: '' }, /match/],
+    [{ match: '𠮷', length: 3 }, /within the requested length/],
+    [{ offset: 3, length: 1 }, /too small/],
+    [{ offset: 4 }, /not valid UTF-8/],
+    [{ offset: 1000 }, /beyond the original file/],
+    [{ path: 'invalid.txt' }, /not valid UTF-8/],
+    [{ path: 'oversized.txt', match: 'missing' }, /32 MiB/],
+    [{ match: 'aba', offset: 8 }, { text: 'aba', byte_start: 9, bytes_read: 3, next_offset: 12, eof: false, pointer: 'utf8-bytes=9:12' }],
+    [{ offset: 0, length: 7 }, { text: bom + '𠮷', byte_start: 0, bytes_read: 7, next_offset: 7, eof: false, pointer: 'utf8-bytes=0:7' }],
+    [{ offset: Buffer.byteLength(original) }, { text: '', byte_start: 17, bytes_read: 0, next_offset: 17, eof: true, pointer: 'utf8-bytes=17:17' }],
+  ];
+  const { request, cwd, calls } = await fixture(t, 'openai-chat-completions', [
+    { tools: cases.map(([args]) => ({ name: 'read_evidence', args: { path: 'utf8.txt', ...args } })) },
+    ok,
+  ]);
+  await writeFile(join(cwd, 'utf8.txt'), original);
+  await writeFile(join(cwd, 'invalid.txt'), Buffer.from([0x61, 0xff]));
+  await writeFile(join(cwd, 'oversized.txt'), '');
+  await truncate(join(cwd, 'oversized.txt'), 32 * 1024 * 1024 + 1);
+  request.phase = 'explore_conclude';
+  assert.equal((await runRequest(request)).status, 'succeeded');
+  const results = calls[1].body.messages.filter((message) => message.role === 'tool');
+  assert.equal(results.length, cases.length);
+  for (const [index, [, expected]] of cases.entries()) {
+    if (expected instanceof RegExp) assert.match(results[index].content, expected);
+    else assert.deepEqual(JSON.parse(results[index].content), { ...expected, total_bytes: Buffer.byteLength(original) });
+  }
+  assert.equal(await readFile(join(cwd, 'utf8.txt'), 'utf8'), original);
+  assert.deepEqual(await readFile(join(cwd, 'invalid.txt')), Buffer.from([0x61, 0xff]));
+  assert.deepEqual(calls[0].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+});
+
 test('managed report and project input roots are readable but never registrable or traversable', async (t) => {
   const { request, cwd } = await fixture(t);
   const managedRoot = await mkdtemp(join(tmpdir(), 'cairn-readonly-inputs-'));

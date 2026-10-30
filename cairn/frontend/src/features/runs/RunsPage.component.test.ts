@@ -6,8 +6,16 @@ import type { TaskRunCommandEvent } from './runTypes'
 
 const mocks = vi.hoisted(() => ({
   useRunsPage: vi.fn(),
+  useQuery: vi.fn(),
   selectTerminalOutput: vi.fn(),
+  api: vi.fn(),
 }))
+
+vi.mock('@/api/client', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@/api/client')>(),
+  api: mocks.api,
+}))
+vi.mock('@tanstack/vue-query', () => ({ useQuery: mocks.useQuery }))
 
 vi.mock('./useRunsPage', () => ({
   useRunsPage: mocks.useRunsPage,
@@ -23,6 +31,7 @@ function createRunsPageState() {
   const activeDetailTab = ref('terminal')
   const selectedRun = ref({
     id: 'run-a',
+    project_id: 'project-a',
     session_id: 'session-a',
     execution_profile: 'default',
     task_type: 'explore',
@@ -38,6 +47,7 @@ function createRunsPageState() {
     artifacts: ref([]),
     autoScrollTerminal: ref(true),
     captureTruncationMessage: ref(''),
+    chatRunNotice: ref(false),
     commandEvents: ref<TaskRunCommandEvent[]>([]),
     detailTabs,
     filteredRuns: ref([
@@ -56,6 +66,7 @@ function createRunsPageState() {
     isLoadingRuns: ref(false),
     isLoadingTerminalPreview: ref(false),
     linkedIntentOutcomeText: vi.fn(() => ''),
+    openProjectAgent: vi.fn(),
     previewArtifact: vi.fn(),
     previewTruncationMessage: ref(''),
     refetchRuns: vi.fn(),
@@ -147,12 +158,101 @@ function selectTab(name: string) {
 }
 
 beforeEach(() => {
+  mocks.api.mockReset()
+  mocks.useQuery.mockReset().mockReturnValue({ data: ref(undefined), isError: ref(false) })
   mocks.selectTerminalOutput.mockReset()
   mocks.useRunsPage.mockReset().mockReturnValue(createRunsPageState())
   document.body.innerHTML = ''
 })
 
 describe('RunsPage details', () => {
+  it('offers the project Agent entry for an excluded chat link without showing another run detail', async () => {
+    const state = createRunsPageState()
+    state.chatRunNotice.value = true
+    state.selectedRun.value = null as never
+    state.selectedRunId.value = null as never
+    mocks.useRunsPage.mockReturnValue(state)
+    const wrapper = mount(RunsPage)
+
+    const notice = wrapper.get('.runs-sidebar .ui-alert')
+    expect(notice.text()).toContain('此记录属于 Agent 对话')
+    expect(notice.get('button').text()).toBe('打开项目 Agent')
+    await notice.get('button').trigger('click')
+    expect(state.openProjectAgent).toHaveBeenCalledOnce()
+    expect(wrapper.find('.run-details-panel').exists()).toBe(false)
+    expect(wrapper.findAll('.run-row')).toHaveLength(1)
+    expect(mocks.useQuery.mock.calls[0]![0].enabled.value).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('queries a terminal run beyond the first 100 traffic scopes and polls until synchronization and stopping are confirmed', async () => {
+    const scopes = Array.from({ length: 101 }, (_, index) => ({
+      id: `scope-${String(index).padStart(3, '0')}`,
+      task_run_id: index === 100 ? 'run-a' : `other-run-${index}`,
+      status: {
+        state: 'stopped', failure_code: 'traffic_capture_stalled', control_stopped: true,
+        test_stopped: true, collector_stopped: true, upload_complete: false,
+      },
+    }))
+    expect(scopes.slice(0, 100).some((scope) => scope.task_run_id === 'run-a')).toBe(false)
+    mocks.api.mockImplementation(async (_method, path) => {
+      const url = new URL(path, 'http://synthetic.invalid')
+      expect(url.pathname).toBe('/projects/project-a/traffic/scopes/status')
+      const runId = url.searchParams.get('task_run_id')
+      const matching = runId === null ? scopes : scopes.filter((scope) => scope.task_run_id === runId)
+      return { items: matching.slice(0, Number(url.searchParams.get('limit'))), has_more: matching.length > 100, next_cursor: null }
+    })
+    const data = ref<{ items: typeof scopes }>()
+    mocks.useQuery.mockReturnValue({ data, isError: ref(false) })
+    const wrapper = mount(RunsPage)
+    const options = mocks.useQuery.mock.calls[0]![0]
+    const signal = new AbortController().signal
+    data.value = await options.queryFn({ signal })
+    await flushPromises()
+    expect(mocks.api).toHaveBeenCalledWith('GET', '/projects/project-a/traffic/scopes/status?limit=100&task_run_id=run-a', undefined, signal)
+    expect(data.value!.items).toHaveLength(1)
+    const query = { state: { data: data.value, status: 'success' } }
+    const status = data.value!.items[0]!.status
+    expect(wrapper.get('[aria-label="本次运行流量状态"]').text()).toBe('采集已停止，正在同步已有流量')
+    expect(options.refetchInterval(query)).toBe(3000)
+    status.state = 'blocked'
+    await flushPromises()
+    expect(wrapper.get('[aria-label="本次运行流量状态"]').text()).toBe('同步失败')
+    expect(options.refetchInterval(query)).toBe(3000)
+    status.upload_complete = true
+    await flushPromises()
+    expect(wrapper.get('[aria-label="本次运行流量状态"]').text()).toBe('同步完成')
+    expect(options.refetchInterval(query)).toBe(false)
+    for (const key of ['control_stopped', 'test_stopped', 'collector_stopped'] as const) {
+      status[key] = false
+      expect(options.refetchInterval(query)).toBe(3000)
+      status[key] = true
+    }
+    wrapper.unmount()
+  })
+
+  it('shows traffic query failures without a cached scope and retains stale observations with manual retry', async () => {
+    const data = ref<{ items: { task_run_id: string; status: null }[] }>()
+    const isError = ref(true)
+    const refetch = vi.fn()
+    mocks.useQuery.mockReturnValue({ data, isError, refetch })
+    const wrapper = mount(RunsPage)
+    const alert = wrapper.get('[aria-label="本次运行流量状态"]')
+    expect(alert.text()).toContain('流量状态查询失败，当前状态未知')
+    expect(alert.text()).not.toContain('显示上次观测')
+    await alert.get('button').trigger('click')
+    expect(refetch).toHaveBeenCalledOnce()
+    const options = mocks.useQuery.mock.calls[0]![0]
+    expect(options.refetchInterval({ state: { status: 'error' } })).toBe(false)
+    data.value = { items: [{ task_run_id: 'run-a', status: null }] }
+    await flushPromises()
+    expect(alert.text()).toContain('采集状态未上报 · 状态刷新失败，显示上次观测')
+    isError.value = false
+    await flushPromises()
+    expect(alert.text()).toBe('采集状态未上报')
+    wrapper.unmount()
+  })
+
   it('opens a run and returns to the narrow list without stacking two high panels', async () => {
     const state = createRunsPageState()
     mocks.useRunsPage.mockReturnValue(state)

@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 from cairn.assessment_contracts import GOAL_DRIVEN_PROTOCOL, validate_goal_driven_experiment
 from cairn.server.models import CoverageSlot
-from cairn.evidence_contracts import evidence_refs
+from cairn.evidence_contracts import evidence_refs, has_evidence
 
 from .assessment_policy import (
     DEFAULT_COPY_BLOCKER_COOLDOWN_SECONDS,
@@ -537,6 +537,8 @@ def validate_structured_coverage_result(
         if key not in evidence_keys:
             raise HTTPException(422, "coverage_result evidence_refs must also appear in evidence")
 
+    from .vulnerabilities import has_current_evidence
+
     outcome = coverage_result.outcome
     if outcome != "finding" and vulnerability is not None:
         raise HTTPException(
@@ -558,8 +560,8 @@ def validate_structured_coverage_result(
         if policy.outcome_contract_version >= 2:
             if not coverage_result.baseline or not coverage_result.variants:
                 raise HTTPException(422, "finding_baseline_variants_required")
-            if not _has_current_run_artifact(
-                conn, project_id, task_run_id, evidence_refs(vulnerability.evidence_items)
+            if not has_current_evidence(
+                conn, project_id, task_run_id, vulnerability.evidence_items
             ):
                 raise HTTPException(422, "finding_evidence_current_run_required")
             if not _has_current_run_artifact(
@@ -567,7 +569,7 @@ def validate_structured_coverage_result(
             ):
                 raise HTTPException(422, "coverage_evidence_current_run_required")
         else:
-            has_reproduction = bool(evidence_refs(vulnerability.evidence_items))
+            has_reproduction = has_evidence(vulnerability.evidence_items, current=True)
             if not has_reproduction:
                 raise HTTPException(422, "finding requires reproduction evidence")
     elif outcome == "temporarily_blocked":
@@ -607,6 +609,8 @@ def validate_structured_coverage_result(
 
 def validate_assessment_experiment(conn, project_id: str, intent, body, slot) -> dict | None:
     """持久化前校验唯一实验记录与证据边界；不复制 coverage 正文。"""
+    from .vulnerabilities import has_current_evidence
+
     record = body.assessment_record
     policy = _project_policy(conn, project_id)
     goal_driven = policy.protocol == GOAL_DRIVEN_PROTOCOL
@@ -652,9 +656,12 @@ def validate_assessment_experiment(conn, project_id: str, intent, body, slot) ->
     supplied = {(ref.artifact_id, ref.pointer) for ref in [*body.evidence, *finding_refs]}
     if any((ref.artifact_id, ref.pointer) not in supplied for ref in refs):
         raise HTTPException(422, "experiment_evidence_must_appear_in_evidence")
-    if not refs or not _has_current_run_artifact(
-        conn, project_id, body.task_run_id, refs
-    ):
+    # finding 的唯一关系在 evidence_items；无需为 flow 再伪造一份 Artifact 引用。
+    finding_current = (
+        body.vulnerability is not None and record.outcome == "finding"
+        and has_current_evidence(conn, project_id, body.task_run_id, body.vulnerability.evidence_items)
+    )
+    if not finding_current and not _has_current_run_artifact(conn, project_id, body.task_run_id, refs):
         raise HTTPException(422, "experiment_current_run_evidence_required")
 
     outcome = record.outcome if goal_driven else body.coverage_result.outcome
@@ -708,8 +715,8 @@ def validate_assessment_experiment(conn, project_id: str, intent, body, slot) ->
         if outcome == "finding":
             if vulnerability is None or vulnerability.identity is None:
                 raise HTTPException(422, "finding_requires_vulnerability_identity")
-            if not _has_current_run_artifact(
-                conn, project_id, body.task_run_id, evidence_refs(vulnerability.evidence_items)
+            if not has_current_evidence(
+                conn, project_id, body.task_run_id, vulnerability.evidence_items
             ):
                 raise HTTPException(422, "finding_evidence_current_run_required")
         elif outcome == "temporarily_blocked" and (

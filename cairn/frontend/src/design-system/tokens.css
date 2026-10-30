@@ -110,6 +110,30 @@
   --layout-workspace-tabs-height: 36px;
   --layout-content-max: 1440px;
   --layout-content-narrow: 960px;
+
+  /* 独立工作台使用阅读型比例；仅在对应工作区启用，不改变管理页密度。 */
+  --workbench-history-width: 272px;
+  --workbench-results-width: 352px;
+  --workbench-reading-width: 68rem;
+  --workbench-body-size: 15px;
+  --workbench-welcome-size: 32px;
+  --workbench-bubble-radius: 18px;
+  --workbench-input-radius: 20px;
+  --workbench-canvas: #1d1f1c;
+  --workbench-sidebar: #181a17;
+  --workbench-surface: #252823;
+  --workbench-inset: #30342c;
+  --workbench-hover: #343930;
+  --workbench-border: #41473b;
+  --workbench-border-subtle: #343a2f;
+  --workbench-border-strong: #59624f;
+  --workbench-text: #eceee6;
+  --workbench-secondary: #bac0af;
+  --workbench-tertiary: #9da58f;
+  --workbench-accent: #c8d5ac;
+  --workbench-accent-hover: #d8e3c2;
+  --workbench-accent-contrast: #242b1b;
+  --workbench-accent-soft: rgb(200 213 172 / 12%);
   --overlay-dialog-sm: 420px;
   --overlay-dialog-md: 560px;
   --overlay-dialog-lg: 760px;
@@ -246,6 +270,22 @@
 [data-theme='light'] {
   color-scheme: light;
 
+  --workbench-canvas: #fcfbf8;
+  --workbench-sidebar: #f2f1eb;
+  --workbench-surface: #ffffff;
+  --workbench-inset: #eeeee5;
+  --workbench-hover: #e7e8dd;
+  --workbench-border: #dedfd4;
+  --workbench-border-subtle: #e8e8df;
+  --workbench-border-strong: #b9bfab;
+  --workbench-text: #292e24;
+  --workbench-secondary: #626957;
+  --workbench-tertiary: #747c66;
+  --workbench-accent: #3d4c2d;
+  --workbench-accent-hover: #2c3920;
+  --workbench-accent-contrast: #ffffff;
+  --workbench-accent-soft: rgb(61 76 45 / 9%);
+
   --color-canvas: #f6f7f9;
   --color-sidebar: #f0f2f6;
   --color-surface: #ffffff;
@@ -343,6 +383,52 @@
   --graph-minimap-bg: rgb(255 255 255 / 92%);
   --graph-minimap-viewport: rgb(31 41 55 / 8%);
   --graph-minimap-viewport-border: rgb(31 41 55 / 42%);
+}
+
+/* 路由级工作台语义覆盖同时作用于 Shell 与 Portal，普通页面仍使用原主题。 */
+:root[data-workbench='agent'],
+.workbench-surface {
+  --color-canvas: var(--workbench-canvas);
+  --color-sidebar: var(--workbench-sidebar);
+  --color-surface: var(--workbench-surface);
+  --color-surface-raised: var(--workbench-surface);
+  --color-surface-inset: var(--workbench-inset);
+  --color-surface-hover: var(--workbench-hover);
+  --color-surface-selected: var(--workbench-hover);
+  --color-border: var(--workbench-border);
+  --color-border-subtle: var(--workbench-border-subtle);
+  --color-border-strong: var(--workbench-border-strong);
+  --color-text: var(--workbench-text);
+  --color-text-secondary: var(--workbench-secondary);
+  --color-text-tertiary: var(--workbench-tertiary);
+  --color-accent: var(--workbench-accent);
+  --color-accent-hover: var(--workbench-accent-hover);
+  --color-accent-contrast: var(--workbench-accent-contrast);
+  --color-accent-soft: var(--workbench-accent-soft);
+  --color-link: var(--workbench-accent);
+  --color-link-hover: var(--workbench-accent-hover);
+  --bg-base: var(--color-canvas);
+  --bg-surface: var(--color-surface);
+  --bg-elevated: var(--color-surface-raised);
+  --bg-inset: var(--color-surface-inset);
+  --surface-raised: var(--color-surface-raised);
+  --surface-hover: var(--color-surface-hover);
+  --surface-selected: var(--color-surface-selected);
+  --border: var(--color-border);
+  --border-color: var(--color-border);
+  --border-faint: var(--color-border-subtle);
+  --border-subtle: var(--color-border-subtle);
+  --border-strong: var(--color-border-strong);
+  --text: var(--color-text);
+  --text-muted: var(--color-text-secondary);
+  --text-secondary: var(--color-text-secondary);
+  --text-faint: var(--color-text-tertiary);
+  --accent: var(--color-accent);
+  --accent-hover: var(--color-accent-hover);
+  --accent-dim: var(--color-accent-soft);
+  --link: var(--color-link);
+  --link-hover: var(--color-link-hover);
+  --ring: 0 0 0 1px var(--color-canvas), 0 0 0 3px var(--color-accent-soft);
 }
 
 @media (prefers-reduced-motion: reduce) {

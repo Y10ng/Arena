@@ -14,6 +14,8 @@ from cairn.server.auth import RequestPrincipal
 from cairn.server.db import PostgresConnection, get_conn, schedule_transaction
 from cairn.server.schemas.project_schedules import CreateScheduleRequest, ScheduleActionRequest, ScheduleTiming, UpdateScheduleRequest
 from cairn.server.schemas.projects import CreateProjectRequest
+from cairn.server.schemas.test_egress import TestEgressInput, TestEgressView, egress_request_identity
+from .test_egress import inherited_input, public_project_egress, save_project_egress, stored_settings
 
 from .creation_requests import begin_creation_request, complete_creation_request
 from .libraries import (
@@ -31,7 +33,7 @@ from .schedule_resources import (
 from .schedule_times import effective_boundary, end_boundary, iso, next_times, timestamp
 from .scenarios import get_scenario_or_404, resolve_scenario_key, validate_scenario_values
 from .targets import normalize_target_value
-from .tenant_workers import validate_tenant_worker_selection
+from .tenant_workers import resolve_general_workers
 
 logger = logging.getLogger(__name__)
 EMPTY_SCOPE_REASON = "当前执行环境无法隔离空授权范围，仅资料任务暂不能自动启动；请保留资料并调整为已明确授权的范围，或等待离线执行支持。"
@@ -80,7 +82,7 @@ def _creator_available(conn, row):
 def _validate_input(conn, project: CreateProjectRequest, tenant_id: str, now: datetime):
     scenario = get_scenario_or_404(conn, resolve_scenario_key(conn, project.scenario))
     validate_scenario_values(conn, [scenario])
-    validate_tenant_worker_selection(conn, tenant_id=tenant_id, worker_ids=project.tenant_worker_ids, require_all_roles=True)
+    resolve_general_workers(conn, tenant_id=tenant_id)
     seen = set()
     for target in project.targets or []:
         key = (target.type, normalize_target_value(target.type, target.value))
@@ -94,8 +96,18 @@ def _validate_input(conn, project: CreateProjectRequest, tenant_id: str, now: da
         get_library(conn, key)
 
 
-def _stored_project(project: CreateProjectRequest) -> str:
-    return json.dumps(project.model_dump(mode="json", exclude={"request_id", "resource_batch_id", "resources"}), ensure_ascii=False)
+def _stored_project(project: CreateProjectRequest, egress: TestEgressView) -> str:
+    public = project.model_dump(mode="json", exclude={"request_id", "resource_batch_id", "resources", "test_egress"})
+    return json.dumps(public | {"test_egress": egress.model_dump()}, ensure_ascii=False)
+
+
+def _project_input(row, *, with_auth=False) -> CreateProjectRequest:
+    values = json.loads(row["project_json"])
+    egress = TestEgressView.model_validate(values.pop("test_egress"))
+    body = TestEgressInput(mode=egress.mode, host=egress.host, port=egress.port)
+    if with_auth:
+        body = inherited_input(egress, row["test_egress_auth"], tenant_id=row["tenant_id"], owner_kind="schedule", owner_id=row["id"])
+    return CreateProjectRequest(**values, test_egress=body)
 
 
 def _replace_library_bindings(conn, schedule_id: str, keys: list[str], refresh: list[str]):
@@ -142,9 +154,14 @@ def create_schedule(body: CreateScheduleRequest, principal: RequestPrincipal, *,
     if not principal.tenant_id:
         raise HTTPException(403, "缺少 Tenant")
     with schedule_transaction() as conn:
+        payload = body.model_dump(mode="json", exclude={"request_id"})
+        if "test_egress" in body.project.model_fields_set:
+            payload["project"]["test_egress"] = egress_request_identity(body.project.test_egress)
+        else:
+            payload["project"].pop("test_egress")
         request = begin_creation_request(
             conn, tenant_id=principal.tenant_id, user_id=principal.subject_id, operation="schedule",
-            request_id=str(body.request_id), payload=body.model_dump(mode="json", exclude={"request_id"}),
+            request_id=str(body.request_id), payload=payload,
         )
         if request["schedule_id"]:
             schedule_id = request["schedule_id"]
@@ -156,13 +173,16 @@ def create_schedule(body: CreateScheduleRequest, principal: RequestPrincipal, *,
             if next_run is None:
                 raise HTTPException(422, "在结束、授权与执行期限内没有有效的未来启动时间")
             schedule_id = str(uuid4())
+            egress, encrypted_auth = (None, None) if body.mode == "once" else stored_settings(
+                body.project.test_egress, tenant_id=principal.tenant_id, owner_kind="schedule", owner_id=schedule_id,
+            )
             conn.execute(
                 """INSERT INTO project_schedules(id,tenant_id,creator_id,mode,status,version,timezone,start_at,
-                   local_time,weekdays_json,end_date,max_runs,next_run_at,project_json,created_at,updated_at)
-                   VALUES(?,?,?,?,'active',1,?,?,?,?,?,?,?,?,?,?)""",
+                   local_time,weekdays_json,end_date,max_runs,next_run_at,project_json,created_at,updated_at,test_egress_auth)
+                   VALUES(?,?,?,?,'active',1,?,?,?,?,?,?,?,?,?,?,?)""",
                 (schedule_id, principal.tenant_id, principal.subject_id, body.mode, body.timezone, body.start_at,
                  body.local_time, json.dumps(body.weekdays), body.end_date, body.max_runs, next_run,
-                 None if body.mode == "once" else _stored_project(body.project), iso(current), iso(current)),
+                 None if body.mode == "once" else _stored_project(body.project, egress), iso(current), iso(current), encrypted_auth),
             )
             project_id = None
             if body.mode == "once":
@@ -186,12 +206,14 @@ def _library_views(conn, schedule_id):
 
 def _view(conn, row):
     result = dict(row)
+    result.pop("test_egress_auth")
     result["weekdays"] = json.loads(result.pop("weekdays_json"))
     result["project"] = json.loads(result.pop("project_json")) if row["project_json"] else None
     result["resources"] = [item.model_dump() if hasattr(item, "model_dump") else dict(item) for item in list_schedule_resource_records(conn, row["id"])]
     result["library_bindings"] = _library_views(conn, row["id"])
     if row["mode"] == "once":
-        project = conn.execute("SELECT explore_deadline,authorization_expires_at FROM projects WHERE id=?", (row["project_id"],)).fetchone()
+        project = conn.execute("SELECT explore_deadline,authorization_expires_at,test_egress_json FROM projects WHERE id=?", (row["project_id"],)).fetchone()
+        result["test_egress"] = public_project_egress(project).model_dump() if project else None
         result["explore_deadline"] = project["explore_deadline"] if project else None
         result["authorization_expires_at"] = project["authorization_expires_at"] if project else None
     last = conn.execute("SELECT * FROM project_schedule_occurrences WHERE schedule_id=? ORDER BY processed_at DESC,id DESC LIMIT 1", (row["id"],)).fetchone()
@@ -246,6 +268,8 @@ def update_schedule(schedule_id, body: UpdateScheduleRequest, principal, *, now=
                     raise HTTPException(422, "执行停止时间必须晚于当前时间")
                 conn.execute("UPDATE projects SET explore_deadline=? WHERE id=?", (body.explore_deadline, project["id"]))
                 project = _lock_project(conn, project["id"])
+            if body.test_egress is not None:
+                save_project_egress(conn, project["id"], body.test_egress)
             _validate_pending(conn, project, current, require_scope=False)
             boundary = min((timestamp(project[key]) for key in ("authorization_expires_at", "explore_deadline") if project[key]), default=None)
             if boundary and timestamp(body.start_at) >= boundary:
@@ -253,11 +277,17 @@ def update_schedule(schedule_id, body: UpdateScheduleRequest, principal, *, now=
             project_json = None
             next_run = iso(timestamp(body.start_at))
         else:
-            stored_input = CreateProjectRequest.model_validate(json.loads(row["project_json"]))
+            stored_input = _project_input(row)
             if stored_input.targets is not None and body.project.targets is None:
                 raise HTTPException(422, "已有显式范围计划必须保留 targets，不能在编辑中改为 Origin 来源")
             _validate_input(conn, body.project, row["tenant_id"], current)
-            project_json = _stored_project(body.project)
+            egress, encrypted_auth = stored_settings(
+                body.project.test_egress, tenant_id=row["tenant_id"], owner_kind="schedule", owner_id=schedule_id,
+                current=TestEgressView.model_validate(json.loads(row["project_json"])["test_egress"]),
+                encrypted_auth=row["test_egress_auth"],
+            )
+            conn.execute("UPDATE project_schedules SET test_egress_auth=? WHERE id=?", (encrypted_auth, schedule_id))
+            project_json = _stored_project(body.project, egress)
             _replace_library_bindings(conn, schedule_id, body.project.library_keys, body.refresh_library_keys)
             update_schedule_resources(conn, schedule_id, resource_ids=body.resource_ids, batch_id=body.project.resource_batch_id, tenant_id=row["tenant_id"], user_id=principal.subject_id, created_by=principal.subject_id)
             next_run, status, reason = _future_state(body, body.project, current, row["generated_count"])
@@ -297,10 +327,7 @@ def _validate_pending(conn, project, current, *, require_scope=True):
     allowed = {item.key for item in scenario_feature_schema()}
     scenario = scenario.model_copy(update={"features": {key: value for key, value in scenario.features.items() if key in allowed}})
     validate_scenario_values(conn, [scenario])
-    bindings = conn.execute("SELECT tenant_worker_id FROM project_tenant_workers WHERE project_id=? ORDER BY position", (project["id"],)).fetchall()
-    if not bindings:
-        raise HTTPException(409, "计划的 Worker 绑定已失效")
-    validate_tenant_worker_selection(conn, tenant_id=project["tenant_id"], worker_ids=[item["tenant_worker_id"] for item in bindings])
+    resolve_general_workers(conn, tenant_id=project["tenant_id"])
     for key, label in (("authorization_expires_at", "授权期限"), ("explore_deadline", "执行停止时间")):
         if project[key] and timestamp(project[key]) <= current:
             raise HTTPException(409, f"{label}已到期，请显式更新")
@@ -349,7 +376,7 @@ def _consume_locked(conn, row, current, *, force=False):
         conn.execute("UPDATE project_schedules SET status='completed',next_run_at=NULL,block_reason=NULL,last_project_id=?,generated_count=1,updated_at=? WHERE id=?", (project["id"], iso(current), row["id"]))
         return True
     rule = _timing(row)
-    project_input = CreateProjectRequest.model_validate(json.loads(row["project_json"]))
+    project_input = _project_input(row)
     if rule.max_runs is not None and row["generated_count"] >= rule.max_runs:
         conn.execute("UPDATE project_schedules SET status='completed',next_run_at=NULL,updated_at=? WHERE id=?", (iso(current), row["id"]))
         return True
@@ -389,7 +416,7 @@ def _consume_locked(conn, row, current, *, force=False):
             generated = row["generated_count"]
             project_id = row["last_project_id"]
         else:
-            detail = create_project_record(project_input, conn=conn, tenant_id=row["tenant_id"], creator=row["creator_id"], library_revisions=revisions)
+            detail = create_project_record(_project_input(row, with_auth=True), conn=conn, tenant_id=row["tenant_id"], creator=row["creator_id"], library_revisions=revisions)
             project_id = detail.project.id
             copy_schedule_resources_to_project(conn, row["id"], project_id, created_by=row["creator_id"])
             _occurrence(conn, row, due, due, current, "started", project_id=project_id)
@@ -442,7 +469,7 @@ def schedule_action(schedule_id, body: ScheduleActionRequest, principal, *, now=
                     next_run = None
                 elif body.action == "resume":
                     _creator_available(conn, row)
-                    project_input = CreateProjectRequest.model_validate(json.loads(row["project_json"]))
+                    project_input = _project_input(row)
                     _validate_input(conn, project_input, row["tenant_id"], current)
                     next_run, status, reason = _future_state(_timing(row), project_input, current, row["generated_count"])
                 conn.execute("UPDATE project_schedules SET status=?,next_run_at=?,block_reason=?,version=version+1,updated_at=? WHERE id=?", (status, next_run, reason, iso(current), schedule_id))

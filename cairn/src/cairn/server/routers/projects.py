@@ -1,11 +1,12 @@
 """项目与目标接口，维护 fact graph 的根节点、运行状态和 reason 租约。"""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from cairn.server.auth import (
     RequestPrincipal,
     protect_cookie_request,
     require_dispatcher_protocol,
+    require_dispatcher,
     require_tenant_project,
     require_user,
     require_user_tenant_project,
@@ -30,7 +31,6 @@ from cairn.server.models import (
     Intent,
     Library,
     ProjectDetail,
-    ProjectManagementOptions,
     ProjectMeta,
     ProjectSummary,
     ReauthorizeProjectRequest,
@@ -40,25 +40,25 @@ from cairn.server.models import (
     Target,
     UpdateProjectTitleRequest,
     UpdateProjectStatusRequest,
-    UpdateProjectWorkersRequest,
     UpdateTargetRequest,
 )
 from cairn.server.services import (
     bind_assessment_report_input_snapshot,
     build_assessment_report_packet,
+    prepare_assessment_report_packet,
     claim_assessment_report_finalization,
     claim_project_reason_record,
     complete_project_record,
     create_target_record,
     delete_project_record,
     finish_assessment_report_finalization,
+    get_assessment_report_finish_receipt,
     get_assessment_report_finalization,
     get_project_detail,
     heartbeat_project_reason_record,
     list_project_summaries,
     list_selectable_current_libraries,
     list_target_records,
-    list_tenant_workers,
     release_project_reason_record,
     replay_assessment_report_finalization,
     reopen_project_record,
@@ -67,11 +67,32 @@ from cairn.server.services import (
     project_lifecycle_action,
     reauthorize_project_record,
     update_project_title_record,
-    update_project_workers_record,
     update_target_record,
 )
 
+from cairn.server.services.assessment_reports import (
+    cancel_assessment_report_generation,
+    list_assessment_report_finalizations,
+)
+
+from cairn.server.schemas.test_egress import TestEgressInput, TestEgressView
+from cairn.server.services.test_egress import resolve_task_test_egress, save_project_egress
+
 router = APIRouter(tags=["projects"])
+
+
+@router.put("/projects/{project_id}/test-egress", response_model=TestEgressView,
+            dependencies=[Depends(require_user_tenant_project)])
+def update_test_egress(project_id: str, body: TestEgressInput):
+    with get_conn() as conn:
+        return save_project_egress(conn, project_id, body)
+
+
+@router.post("/projects/{project_id}/task-runs/{task_run_id}/test-egress")
+def task_test_egress(project_id: str, task_run_id: str, response: Response,
+                     principal: RequestPrincipal = Depends(require_dispatcher)):
+    response.headers["Cache-Control"] = "no-store"
+    return resolve_task_test_egress(project_id, task_run_id, principal)
 
 
 # Project 端点只做 HTTP 编排，状态迁移和 graph 不变量集中在 service 层校验。
@@ -104,29 +125,6 @@ def create_project(
 )
 def get_project(project_id: str):
     return get_project_detail(project_id)
-
-
-def _project_tenant_id(project_id: str) -> str:
-    """从目标项目解析 Tenant，禁止使用操作者或客户端提供的 Tenant。"""
-    with get_conn() as conn:
-        row = conn.execute("SELECT tenant_id FROM projects WHERE id = ?", (project_id,)).fetchone()
-    if row is None:
-        from fastapi import HTTPException
-
-        raise HTTPException(404, "Project not found")
-    return str(row["tenant_id"])
-
-
-@router.get(
-    "/projects/{project_id}/management-options",
-    response_model=ProjectManagementOptions,
-    dependencies=[Depends(require_user_tenant_project)],
-)
-def get_project_management_options(project_id: str):
-    tenant_id = _project_tenant_id(project_id)
-    return ProjectManagementOptions(
-        tenant_workers=list_tenant_workers(tenant_id=tenant_id),
-    )
 
 
 @router.get("/projects/{project_id}/targets", response_model=list[Target], dependencies=[Depends(require_tenant_project)])
@@ -187,19 +185,6 @@ def update_project_status(project_id: str, body: UpdateProjectStatusRequest):
     return update_project_status_record(project_id, body)
 
 
-@router.put("/projects/{project_id}/workers", response_model=ProjectMeta)
-def update_project_workers(
-    project_id: str,
-    body: UpdateProjectWorkersRequest,
-    _principal: RequestPrincipal = Depends(require_user_tenant_project),
-):
-    return update_project_workers_record(
-        project_id,
-        body,
-        tenant_id=_project_tenant_id(project_id),
-    )
-
-
 @router.post("/projects/{project_id}/reason/claim", response_model=ProjectMeta, dependencies=[Depends(require_tenant_project)])
 def claim_project_reason(project_id: str, body: ReasonClaimRequest):
     # reason 是项目级租约，和 intent worker 租约分离，防止决策阶段并发写入 graph。
@@ -228,9 +213,13 @@ def release_project_reason(project_id: str, body: HeartbeatRequest):
     response_model=AssessmentReportPacket,
     dependencies=[Depends(require_tenant_project)],
 )
-def get_assessment_report_packet(project_id: str):
+def get_assessment_report_packet(project_id: str, generation_token: str | None = None):
     with get_conn() as conn:
-        return build_assessment_report_packet(conn, project_id)
+        generation_token = prepare_assessment_report_packet(conn, project_id, generation_token=generation_token)
+    with get_conn() as conn:
+        # PostgreSQL 快照固定本次输入；后续聊天和导出不会延长项目写锁。
+        conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        return build_assessment_report_packet(conn, project_id, generation_token=generation_token)
 
 
 @router.get(
@@ -238,9 +227,44 @@ def get_assessment_report_packet(project_id: str):
     response_model=AssessmentReportFinalizationView,
     dependencies=[Depends(require_tenant_project)],
 )
-def get_assessment_report_finalization_route(project_id: str):
+def get_assessment_report_finalization_route(
+    project_id: str, vulnerability_id: str | None = None, observation_id: str | None = None,
+    generation_token: str | None = None,
+):
     with get_conn() as conn:
-        return get_assessment_report_finalization(conn, project_id)
+        return get_assessment_report_finalization(
+            conn, project_id, vulnerability_id=vulnerability_id,
+            observation_id=observation_id, generation_token=generation_token,
+        )
+
+
+@router.get("/projects/{project_id}/assessment-report-finalizations", response_model=list[AssessmentReportFinalizationView],
+            dependencies=[Depends(require_tenant_project)])
+def list_assessment_report_finalizations_route(project_id: str):
+    with get_conn() as conn:
+        return list_assessment_report_finalizations(conn, project_id)
+
+
+@router.post("/projects/{project_id}/assessment-report-finalization/cancel", response_model=AssessmentReportFinalizationView)
+def cancel_assessment_report_generation_route(
+    project_id: str, vulnerability_id: str | None = None, observation_id: str | None = None,
+    principal: RequestPrincipal = Depends(require_user_tenant_project),
+):
+    with get_conn() as conn:
+        return cancel_assessment_report_generation(conn, project_id, vulnerability_id=vulnerability_id, observation_id=observation_id)
+
+
+@router.get("/projects/{project_id}/assessment-report-finalization/accepted", dependencies=[Depends(require_tenant_project)])
+def get_accepted_readable_report_route(
+    project_id: str, vulnerability_id: str, observation_id: str | None = None,
+):
+    from cairn.server.services.vulnerability_reports import read_accepted_vulnerability_report
+
+    with get_conn() as conn:
+        result = read_accepted_vulnerability_report(conn, project_id, vulnerability_id, observation_id)
+        if result is None:
+            raise HTTPException(404, "assessment_report_accepted_not_found")
+        return result
 
 
 @router.post(
@@ -251,8 +275,12 @@ def get_assessment_report_finalization_route(project_id: str):
 def request_assessment_report_generation_route(
     project_id: str,
     body: AssessmentReportGenerationRequest,
+    request: Request,
     principal: RequestPrincipal = Depends(require_user_tenant_project),
 ):
+    # 旧单漏洞请求必须明确拒绝，不能忽略范围后创建项目总报告。
+    if {"vulnerability_id", "observation_id"}.intersection(request.query_params):
+        raise HTTPException(422, "assessment_report_single_vulnerability_generation_removed")
     with get_conn() as conn:
         return request_assessment_report_generation(
             conn,
@@ -275,6 +303,7 @@ def claim_assessment_report_finalization_route(
         project_id,
         body.worker,
         lease_seconds=body.lease_seconds,
+        generation_token=body.generation_token,
         principal=principal,
     )
 
@@ -312,6 +341,18 @@ def finish_assessment_report_finalization_route(
         body,
         principal=principal,
     )
+
+
+@router.get(
+    "/projects/{project_id}/assessment-report-finalization/finish-receipts/{task_run_id}",
+    response_model=AssessmentReportFinishReceiptView,
+)
+def get_assessment_report_finish_receipt_route(
+    project_id: str,
+    task_run_id: str,
+    principal: RequestPrincipal = Depends(require_tenant_project),
+):
+    return get_assessment_report_finish_receipt(project_id, task_run_id, principal=principal)
 
 
 @router.post(

@@ -1,9 +1,39 @@
-import { mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import SafeReportMarkdown from './SafeReportMarkdown.vue'
 
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
 describe('SafeReportMarkdown', () => {
+  it('授权图片按需读取、失败只显示说明，切换取消旧读取并释放 Blob', async () => {
+    const create = vi.fn().mockReturnValue('blob:controlled-image')
+    const revoke = vi.fn()
+    vi.stubGlobal('URL', class extends URL { static createObjectURL = create; static revokeObjectURL = revoke })
+    vi.stubGlobal('createImageBitmap', vi.fn().mockResolvedValue({ close: vi.fn() }))
+    const image = { artifact_id: 'image-a', caption: '受控图片', content_type: 'image/png' }
+    const load = vi.fn().mockResolvedValue(new Blob(['controlled'], { type: 'image/png' }))
+    const wrapper = mount(SafeReportMarkdown, { props: { content: '**正文继续**\n\n![任意图](https://example.test/x.png)', identity: 'a', images: [image], loadImage: load } })
+    expect(load).not.toHaveBeenCalled()
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('img').attributes('src')).toBe('blob:controlled-image')
+    expect(load).toHaveBeenCalledTimes(1)
+    expect(wrapper.html()).not.toContain('https://example.test/x.png')
+    const firstSignal = load.mock.calls[0]![1] as AbortSignal
+    await wrapper.setProps({ identity: 'b', images: [{ ...image, artifact_id: 'image-b' }] })
+    expect(firstSignal.aborted).toBe(true)
+    expect(revoke).toHaveBeenCalledWith('blob:controlled-image')
+    expect(wrapper.find('img').exists()).toBe(false)
+    load.mockRejectedValueOnce(new Error('图片不可用'))
+    await wrapper.get('button').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('图片不可用')
+    expect(wrapper.get('strong').text()).toBe('正文继续')
+    expect(wrapper.find('img').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('renders report markdown without changing MarkdownPreview behavior', () => {
     const wrapper = mount(SafeReportMarkdown, {
       props: {

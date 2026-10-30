@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -13,26 +14,30 @@ from pydantic import ValidationError
 from cairn.server import db
 from cairn.server.auth import RequestPrincipal, create_user_with_personal_tenant
 from cairn.server.schemas.models import CreateTenantModelRequest
-from cairn.server.schemas.tenant_workers import CreateTenantWorkerRequest, UpdateTenantWorkerRequest
+from cairn.server.schemas.tenant_workers import UpdateTenantWorkerRequest
 from cairn.server.services import model_credentials
 from cairn.server.services.tenant_models import create_tenant_model, update_tenant_model
 from cairn.server.schemas.models import UpdateTenantModelRequest
 from cairn.server.services.time_utils import utcnow
 from cairn.server.services.tenant_workers import (
-    create_tenant_worker,
-    delete_tenant_worker,
     get_tenant_worker,
     list_tenant_workers,
     resolve_project_worker_execution_binding,
     update_tenant_worker,
     validate_tenant_worker_selection,
+    project_worker_bindings,
 )
 
 
+from test_postgres_bootstrap import postgres_instance, empty_postgres_url
+
+
 @pytest.fixture(autouse=True)
-def configured_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def configured_database(request, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    if os.environ.get("CAIRN_TEST_POSTGRES_BOOTSTRAP") != "1":
+        pytest.skip("需显式启用一次性 PostgreSQL，不连接业务库")
     db._reset_for_tests()
-    db.configure(tmp_path / "tenant-workers.db")
+    db.configure(database_url=request.getfixturevalue("empty_postgres_url"), artifact_path=tmp_path / "artifacts")
     keyring = tmp_path / "keyring.json"
     keyring.write_text(
         json.dumps({"active_version": "key-v1", "keys": {"key-v1": base64.b64encode(b"w" * 32).decode()}}),
@@ -67,22 +72,28 @@ def _model(
     )
 
 
-def test_worker_crud_is_tenant_scoped_and_engine_is_fixed() -> None:
-    tenant_a = _principal("worker-a")
-    tenant_b = _principal("worker-b")
-    model = _model(tenant_a)
-    created = create_tenant_worker(
-        CreateTenantWorkerRequest(display_name="Primary", model_id=model.id),
-        principal=tenant_a,
+def _configure_worker(principal, model_id, *, role="reason", max_running=1, priority=100):
+    worker = next(w for w in list_tenant_workers(tenant_id=principal.tenant_id) if w.task_types == [role])
+    return update_tenant_worker(
+        worker.id,
+        UpdateTenantWorkerRequest(model_id=model_id, max_running=max_running, priority=priority,
+                                  enabled=True, expected_revision=worker.revision),
+        principal=principal,
     )
 
-    assert created.engine == "pi"
-    assert created.unavailable_reason == "credential_missing"
-    assert [item.id for item in list_tenant_workers(tenant_id=tenant_a.tenant_id)] == [created.id]
-    assert list_tenant_workers(tenant_id=tenant_b.tenant_id) == []
+
+def test_fixed_workers_initialize_without_models_and_are_tenant_scoped() -> None:
+    tenant_a = _principal("worker-a")
+    tenant_b = _principal("worker-b")
+    workers = list_tenant_workers(tenant_id=tenant_a.tenant_id)
+    assert [(w.task_types, w.max_running) for w in workers] == [(["bootstrap"], 1), (["reason"], 1), (["explore"], 3)]
+    assert all(w.model_id is None and not w.available and w.unavailable_reason == "model_unconfigured" for w in workers)
+    other = list_tenant_workers(tenant_id=tenant_b.tenant_id)
+    assert len(other) == 3 and not {w.id for w in workers} & {w.id for w in other}
     with pytest.raises(HTTPException) as hidden:
-        get_tenant_worker(created.id, tenant_id=tenant_b.tenant_id)
+        get_tenant_worker(workers[0].id, tenant_id=tenant_b.tenant_id)
     assert hidden.value.status_code == 404
+    assert [w.id for w in list_tenant_workers(tenant_id=tenant_a.tenant_id)] == [w.id for w in workers]
 
 
 @pytest.mark.parametrize("protocol", ["anthropic-messages", "openai-chat-completions", "openai-responses"])
@@ -92,23 +103,18 @@ def test_all_platform_model_protocols_can_be_bound_but_cross_tenant_models_canno
     model = _model(tenant_a, protocol, api_key="binding-test-key")
     foreign = _model(tenant_b)
 
-    worker = create_tenant_worker(
-        CreateTenantWorkerRequest(display_name="Unified pi", model_id=model.id), principal=tenant_a,
-    )
+    worker = _configure_worker(tenant_a, model.id)
     assert worker.engine == "pi"
     assert worker.available is True
     with pytest.raises(HTTPException) as hidden:
-        create_tenant_worker(CreateTenantWorkerRequest(display_name="Foreign", model_id=foreign.id), principal=tenant_a)
+        _configure_worker(tenant_a, foreign.id)
     assert hidden.value.status_code == 404
 
 
 def test_existing_pi_worker_remains_available_when_model_changes_to_supported_protocol() -> None:
     principal = _principal("binding-protocol-change")
     model = _model(principal, api_key="protocol-secret")
-    worker = create_tenant_worker(
-        CreateTenantWorkerRequest(display_name="Stable binding", model_id=model.id),
-        principal=principal,
-    )
+    worker = _configure_worker(principal, model.id)
 
     updated_model = update_tenant_model(
         model.id,
@@ -137,30 +143,18 @@ def test_existing_pi_worker_remains_available_when_model_changes_to_supported_pr
 def test_revision_conflict_and_safe_audit() -> None:
     principal = _principal("worker-revision")
     model = _model(principal, api_key="worker-known-secret")
-    worker = create_tenant_worker(CreateTenantWorkerRequest(display_name="Worker", model_id=model.id), principal=principal)
-    updated = update_tenant_worker(
-        worker.id,
-        UpdateTenantWorkerRequest(
-            display_name="Worker 2",
-            model_id=model.id,
-            task_types=["bootstrap", "explore"],
-            max_running=2,
-            priority=50,
-            enabled=True,
-            expected_revision=worker.revision,
-        ),
-        principal=principal,
-    )
-    assert updated.revision == 2
-
+    worker = _configure_worker(principal, model.id)
+    body = UpdateTenantWorkerRequest(model_id=model.id, max_running=2, priority=50,
+                                    enabled=True, expected_revision=worker.revision)
+    updated = update_tenant_worker(worker.id, body, principal=principal)
+    assert updated.revision == worker.revision + 1
     with pytest.raises(HTTPException) as conflict:
-        delete_tenant_worker(worker.id, expected_revision=worker.revision, principal=principal)
+        update_tenant_worker(worker.id, body, principal=principal)
     assert conflict.value.status_code == 409
     with db.get_conn() as conn:
-        metadata = [row["metadata_json"] for row in conn.execute("SELECT metadata_json FROM security_audit_events").fetchall()]
+        metadata = [row["metadata_json"] for row in conn.execute("SELECT metadata_json FROM security_audit_events")]
     assert "worker-known-secret" not in json.dumps(metadata)
-
-    delete_tenant_worker(worker.id, expected_revision=updated.revision, principal=principal)
+    assert get_tenant_worker(worker.id, tenant_id=principal.tenant_id).max_running == 2
 
 
 def test_project_execution_binding_is_scoped_and_secret_is_transient(
@@ -184,10 +178,7 @@ def test_project_execution_binding_is_scoped_and_secret_is_transient(
         "cairn.server.services.tenant_workers.dispatcher_executor_available",
         lambda conn: True,
     )
-    worker = create_tenant_worker(
-        CreateTenantWorkerRequest(display_name="Execution", model_id=model.id),
-        principal=principal,
-    )
+    worker = _configure_worker(principal, model.id)
     assert worker.available is True
     assert worker.executor_available is True
     assert worker.model_display_name == "Anthropic Messages Test Model"
@@ -290,10 +281,7 @@ def test_project_execution_binding_is_scoped_and_secret_is_transient(
 def test_completed_and_stopped_projects_allow_report_binding_but_reject_reason() -> None:
     principal = _principal("worker-completed-report")
     model = _model(principal, api_key="completed-report-secret")
-    worker = create_tenant_worker(
-        CreateTenantWorkerRequest(display_name="Report", model_id=model.id),
-        principal=principal,
-    )
+    worker = _configure_worker(principal, model.id)
     with db.get_conn() as conn:
         conn.execute(
             "INSERT INTO projects (id, title, status, created_at, scenario_key, preferred_workers_json, tenant_id) "
@@ -365,9 +353,7 @@ def test_legacy_engines_remain_readable_but_cannot_be_selected_updated_or_execut
 ) -> None:
     principal = _principal("legacy-worker")
     model = _model(principal, api_key="legacy-test-key")
-    worker = create_tenant_worker(
-        CreateTenantWorkerRequest(display_name="Historical", model_id=model.id), principal=principal,
-    )
+    worker = _configure_worker(principal, model.id)
     project_id = _bind_project(principal, worker)
     with db.get_conn() as conn:
         conn.execute("UPDATE tenant_workers SET engine = ? WHERE id = ?", (engine, worker.id))
@@ -380,7 +366,7 @@ def test_legacy_engines_remain_readable_but_cannot_be_selected_updated_or_execut
     assert historical.engine == engine
     assert historical.available is False
     assert historical.unavailable_reason == "engine_unsupported"
-    assert list_tenant_workers(tenant_id=principal.tenant_id)[0].engine == engine
+    assert next(w for w in list_tenant_workers(tenant_id=principal.tenant_id) if w.id == worker.id).engine == engine
     with db.get_conn() as conn, pytest.raises(HTTPException, match="engine_unsupported"):
         validate_tenant_worker_selection(conn, tenant_id=principal.tenant_id, worker_ids=[worker.id])
     with pytest.raises(HTTPException, match="engine_unsupported") as rejected:
@@ -390,7 +376,7 @@ def test_legacy_engines_remain_readable_but_cannot_be_selected_updated_or_execut
         update_tenant_worker(
             worker.id,
             UpdateTenantWorkerRequest(
-                display_name="Must not convert", model_id=model.id, expected_revision=worker.revision,
+                model_id=model.id, max_running=1, priority=100, enabled=True, expected_revision=worker.revision,
             ),
             principal=principal,
         )
@@ -399,10 +385,11 @@ def test_legacy_engines_remain_readable_but_cannot_be_selected_updated_or_execut
     assert unchanged.revision == worker.revision
 
 
-@pytest.mark.parametrize("engine", ["claudecode", "codex", "mock", "future-engine"])
-def test_new_worker_requests_reject_non_pi_engines(engine: str) -> None:
+@pytest.mark.parametrize("identity", [{"engine": "pi"}, {"task_types": ["explore"]}, {"purpose": "verification"}])
+def test_worker_update_cannot_change_fixed_identity(identity) -> None:
     with pytest.raises(ValidationError):
-        CreateTenantWorkerRequest(display_name="Invalid", model_id="model-id", engine=engine)
+        UpdateTenantWorkerRequest(model_id=None, max_running=1, priority=100, enabled=True,
+                                  expected_revision=1, **identity)
 
 
 @pytest.mark.parametrize(
@@ -429,13 +416,7 @@ def test_execution_binding_preserves_protocol_endpoint_headers_and_scheduling(
         ),
         principal=principal,
     )
-    worker = create_tenant_worker(
-        CreateTenantWorkerRequest(
-            display_name="Protocol worker", model_id=model.id,
-            task_types=["reason", "explore"], max_running=7, priority=-12,
-        ),
-        principal=principal,
-    )
+    worker = _configure_worker(principal, model.id, max_running=7, priority=-12)
     project_id = _bind_project(principal, worker)
     binding = resolve_project_worker_execution_binding(project_id, worker.id, task_type="reason")
     expected_endpoint = (
@@ -454,7 +435,7 @@ def test_execution_binding_preserves_protocol_endpoint_headers_and_scheduling(
     assert binding.custom_headers == model.custom_headers
     assert binding.credential_version == model.credential_version
     assert binding.credential_version_id and binding.credential_fingerprint
-    assert binding.task_types == ["reason", "explore"]
+    assert binding.task_types == ["reason"]
     assert binding.max_running == 7
     assert binding.priority == -12
     assert binding.api_key == "binding-fixture-key"
@@ -465,21 +446,23 @@ def test_execution_binding_preserves_protocol_endpoint_headers_and_scheduling(
     update_tenant_worker(
         worker.id,
         UpdateTenantWorkerRequest(
-            display_name=worker.display_name, model_id=model.id, expected_revision=worker.revision,
+            model_id=model.id, max_running=1, priority=-12, enabled=True, expected_revision=worker.revision,
         ),
         principal=principal,
     )
-    with pytest.raises(HTTPException, match="revision is stale"):
-        resolve_project_worker_execution_binding(project_id, worker.id, task_type="reason")
+    refreshed = resolve_project_worker_execution_binding(project_id, worker.id, task_type="reason")
+    assert refreshed.worker_revision == worker.revision + 1
+    assert refreshed.max_running == 1
+    assert binding.worker_revision == worker.revision and binding.max_running == 7
+    with db.get_conn() as conn:
+        projection = project_worker_bindings(conn, project_id)[0]
+        assert projection["currently_available"] and projection["revision_at_bind"] == worker.revision
 
 
 def test_worker_runtime_status_uses_dispatcher_heartbeat_not_static_pool() -> None:
     principal = _principal("worker-heartbeat")
     model = _model(principal, api_key="heartbeat-secret")
-    worker = create_tenant_worker(
-        CreateTenantWorkerRequest(display_name="Heartbeat", model_id=model.id),
-        principal=principal,
-    )
+    worker = _configure_worker(principal, model.id)
     assert worker.executor_available is False
 
     with db.get_conn() as conn:
@@ -507,7 +490,7 @@ def test_worker_availability_tracks_model_configuration() -> None:
         ),
         principal=principal,
     )
-    worker = create_tenant_worker(CreateTenantWorkerRequest(display_name="State", model_id=model.id), principal=principal)
+    worker = _configure_worker(principal, model.id)
     assert worker.unavailable_reason == "model_incomplete"
 
     model = update_tenant_model(

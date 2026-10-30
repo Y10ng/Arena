@@ -18,7 +18,7 @@ from cairn.dispatcher.prompt_resources import (
 )
 
 
-TaskType = Literal["reason", "explore", "bootstrap"]
+TaskType = Literal["reason", "explore", "bootstrap", "agent_chat"]
 WorkerType = Literal["pi"]
 ProviderApi = Literal["anthropic-messages", "openai-responses", "openai-chat-completions"]
 CompletedAction = Literal["remove", "stop"]
@@ -61,6 +61,7 @@ class BootstrapTaskConfig(BaseModel):
 class ReportTaskConfig(BaseModel):
     # 报告任务使用冻结的场景策略和独立报告 Prompt，不再由运行时探索组决定。
     timeout: int = Field(gt=0, default=600)
+    max_output_tokens: int = Field(default=16384, gt=0, strict=True)
 
 
 class TasksConfig(BaseModel):
@@ -76,6 +77,8 @@ class ContainerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     image: str
+    traffic_gateway_image: str = "arena-traffic-gateway:local"
+    task_executor_image: str = "arena-task-executor:local"
     allowed_images: list[str] = Field(default_factory=list)
     network_mode: str
     completed_action: CompletedAction
@@ -154,6 +157,7 @@ class PiModelConfig(BaseModel):
     base_url: str = Field(min_length=1)
     auth_header: str = Field(min_length=1)
     api_key: str = Field(min_length=1, repr=False)
+    max_output_tokens: int = Field(default=16384, gt=0, strict=True)
     custom_headers: list[ModelHeader] = Field(default_factory=list, repr=False)
 
 
@@ -189,6 +193,7 @@ class ModelConfig(BaseModel):
     provider_id: str
     upstream_model: str
     context_window: int | None = Field(default=None, gt=0)
+    max_output_tokens: int = Field(default=16384, gt=0, strict=True)
 
     @field_validator("id", "provider_id", "upstream_model")
     @classmethod
@@ -489,6 +494,7 @@ class DispatchConfig(BaseModel):
             worker.model_binding = PiModelConfig(
                 protocol=provider.provider_api,
                 model_name=model.upstream_model,
+                max_output_tokens=model.max_output_tokens,
                 inference_endpoint=provider.inference_endpoint,
                 base_url=provider.base_url,
                 auth_header=provider.auth_header,

@@ -1,14 +1,18 @@
-import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { DOMWrapper, flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { defineComponent, h } from 'vue'
 import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/api/client'
 import NewVerification from './NewVerification.vue'
+import VerificationForm from './VerificationForm.vue'
+import TestEgressFields from '@/components/patterns/TestEgressFields.vue'
 import VerificationDetail from './VerificationDetail.vue'
+import VerificationSourcePreview from './VerificationSourcePreview.vue'
+import EvidenceItemDisclosure from '@/components/patterns/EvidenceItemDisclosure.vue'
 import VerificationIntegrations from './VerificationIntegrations.vue'
 import VulnerabilityDetail from '@/features/vulnerabilities/VulnerabilityDetail.vue'
 import EvidenceReader from '@/components/patterns/EvidenceReader.vue'
-import type { EvidenceItem, EvidenceRef } from '@/api/types'
+import type { EvidenceItem, EvidenceRef, TrafficFlowDetail, TrafficProjection, TrafficReadable } from '@/api/types'
 
 const mocks = vi.hoisted(() => ({
   route: { query: {} as Record<string, string>, params: { id: 'request-a' } },
@@ -19,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   configuration: vi.fn(), options: vi.fn(), tenants: vi.fn(),
   project: vi.fn(), vulnerability: vi.fn(), duplicates: vi.fn(),
   request: vi.fn(), fetchText: vi.fn(), artifactPreview: vi.fn(), materialPreview: vi.fn(), selectRaw: vi.fn(),
+  trafficFlow: vi.fn(), trafficReadable: vi.fn(), trafficProjection: vi.fn(), trafficPreview: vi.fn(), trafficBody: vi.fn(), selectTextRange: vi.fn(),
 }))
 vi.mock('vue-router', async (original) => ({
   ...await original<typeof import('vue-router')>(),
@@ -36,6 +41,11 @@ vi.mock('@/api/client', async (original) => ({
   getProjectDetail: mocks.project,
   getVulnerability: mocks.vulnerability,
   getDuplicateVulnerabilityCandidates: mocks.duplicates,
+  getTrafficFlow: mocks.trafficFlow,
+  getTrafficReadable: mocks.trafficReadable,
+  getTrafficProjection: mocks.trafficProjection,
+  getTrafficPreview: mocks.trafficPreview,
+  getTrafficBodyPreview: mocks.trafficBody,
 }))
 vi.mock('@/api/verificationRequests', async (original) => ({
   ...await original<typeof import('@/api/verificationRequests')>(),
@@ -64,7 +74,7 @@ const SelectStub = defineComponent({
 const OverlayStub = { template: '<div><slot name="title" /><slot name="trigger" /><slot /><slot name="footer" /></div>' }
 const wrappers: VueWrapper[] = []
 const clients: QueryClient[] = []
-async function mountPage(component: typeof NewVerification | typeof VerificationIntegrations | typeof VulnerabilityDetail | typeof VerificationDetail | typeof EvidenceReader, props = {}) {
+async function mountPage(component: typeof NewVerification | typeof VerificationForm | typeof VerificationIntegrations | typeof VulnerabilityDetail | typeof VerificationDetail | typeof EvidenceReader | typeof VerificationSourcePreview, props = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
   clients.push(client)
   const wrapper = mount(component, {
@@ -74,7 +84,7 @@ async function mountPage(component: typeof NewVerification | typeof Verification
       stubs: {
         UiDialog: OverlayStub, UiDrawer: OverlayStub, UiPopover: OverlayStub, UiSelect: SelectStub,
         RouterLink: { template: '<a><slot /></a>' },
-        MonacoEditor: defineComponent({ props: ['modelValue'], setup: (props, { expose }) => { expose({ selectAll: mocks.selectRaw }); return () => h('pre', { 'data-testid': 'evidence-content' }, props.modelValue) } }), MarkdownPreview: true,
+        MonacoEditor: defineComponent({ props: ['modelValue'], setup: (props, { expose }) => { expose({ selectAll: mocks.selectRaw, selectTextRange: mocks.selectTextRange }); return () => h('pre', { 'data-testid': 'evidence-content' }, props.modelValue) } }), MarkdownPreview: true,
       },
     },
   })
@@ -89,10 +99,13 @@ async function click(wrapper: Pick<VueWrapper, 'findAll'>, text: string) {
   await flushPromises()
 }
 async function expectOriginalUrl(wrapper: Pick<VueWrapper, 'get'>, label: string, url: string) {
-  await wrapper.get(`button[aria-label="${label}更多"]`).trigger('click')
+  const trigger = wrapper.get(`button[aria-label="${label}更多"]`)
+  await trigger.trigger('click')
   await flushPromises()
-  expect(document.body.querySelector('a[download]')?.getAttribute('href')).toBe(url)
-  document.body.querySelector('[role="menu"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+  // Portal 关闭动画期间可能保留另一侧菜单，按当前触发器关联核对原件。
+  const menu = document.getElementById(trigger.attributes('aria-controls') || '')
+  expect(menu?.querySelector('a[download]')?.getAttribute('href')).toBe(url)
+  menu?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
   await flushPromises()
 }
 async function fillManual(wrapper: VueWrapper) {
@@ -104,6 +117,31 @@ async function submit(wrapper: VueWrapper) {
   await wrapper.get('#new-verification-form').trigger('submit')
   await flushPromises()
 }
+const flowDetail: TrafficFlowDetail = {
+  id: 'flow-a', project_id: 'project-a', revision: 3, state: 'partial', source_state: 'partial',
+  header_text: { request: 'GET /中文 HTTP/1.1\r\nX-Sample: first\r\nX-Sample: second\r\n\r\n', response: null },
+  scope: { id: 'scope-a', project_id: 'project-a', task_run_id: 'run-original', generation: 2, container_id: 'container-a' },
+  sync: { bodies: { request: { status: 'available', artifact_id: 'body-a', revision: 1, accepted_bytes: 70000 }, response: { status: 'absent', artifact_id: null } } },
+}
+const flowHeader = 'GET /中文 HTTP/1.1\r\nX-Sample: first\r\nX-Sample: second\r\n\r\n'
+const flowProjection: TrafficProjection = {
+  flow_id: 'flow-a', project_id: 'project-a', scope: flowDetail.scope, revision: 3, state: 'partial', side: 'request',
+  representation: 'http-evidence-v1', sha256: 'a'.repeat(64), size: 70004, offset: 0, next_offset: 65536, has_more: true,
+  text: flowHeader.padEnd(65532, 'x'), header_size: new TextEncoder().encode(flowHeader).byteLength,
+  body_artifact_id: 'body-a', body_sha256: 'b'.repeat(64), body_display: 'utf8',
+}
+const flowReadable: TrafficReadable = {
+  project_id: 'project-a', flow_id: 'flow-a', side: 'request', revision: 3,
+  representation: 'http-readable', excerpt_eligible: false, header_text: flowHeader, body_text: '中文'.padEnd(69996, 'x'),
+  read_mode: 'auto', deferred_reason: null, body_bytes: 70000, decoded_body_bytes: 70000, body_limit: 10485760,
+  decode_status: 'complete', decoded: false, text_escaped: false, display_truncated: false, content_encodings: [],
+  body_artifact_id: 'body-a', body_sha256: 'b'.repeat(64),
+}
+const flowEvidence: EvidenceItem = {
+  id: 'flow-item', kind: 'http', flow_id: 'flow-a', role: 'primary', title: '同一 URL 的选定交互', source: 'historical',
+  excerpts: [{ side: 'request', pointer: 'utf8-bytes=65536:65542', representation: 'http-evidence-v1', sha256: 'a'.repeat(64), revision: 3 }],
+}
+
 const expiredError = () => new ApiError('Project resource batch expired', 410, { detail: 'Project resource batch expired' })
 const saved = {
   tenant_id: 'tenant-a', model_id: 'model-a', display_name: '已保存名称', engine: 'pi',
@@ -115,7 +153,16 @@ const batch = {
 }
 
 beforeEach(() => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
   vi.clearAllMocks()
+  HTMLElement.prototype.scrollIntoView = vi.fn()
+  mocks.trafficFlow.mockReset().mockResolvedValue(flowDetail)
+  mocks.trafficReadable.mockReset().mockResolvedValue(flowReadable)
+  mocks.trafficProjection.mockReset().mockImplementation(async (_project, _flow, _side, offset) => offset === 0 ? flowProjection : {
+    ...flowProjection, offset, next_offset: 70004, has_more: false, text: '中文'.padEnd(4464, 'y'),
+  })
+  mocks.trafficPreview.mockReset().mockResolvedValue({ project_id: 'project-a', flow_id: 'flow-a', side: 'request', revision: 3, representation: 'http-preview', stable: false, header_text: flowHeader, header_truncated: false, text: '已确认前缀', body_display: 'utf8', offset: 0, next_offset: 15, accepted_bytes: 15, captured_bytes: 20, has_more: false, sealed: false, source_sealed: false })
+  mocks.trafficBody.mockReset().mockResolvedValue({ side: 'request', revision: 1, sealed: true, source_sealed: true, body_complete: true, captured_bytes: 4, accepted_bytes: 4, sealed_bytes: 4, size: 4, offset: 0, next_offset: 4, bytes_read: 4, has_more: false, content_base64: 'AP9BQg==' })
   mocks.route.query = { input: 'manual' }
   mocks.route.params.id = 'request-a'
   mocks.push.mockResolvedValue(undefined)
@@ -126,10 +173,10 @@ beforeEach(() => {
   mocks.options.mockResolvedValue({ models: [{ id: 'model-a', display_name: '本地模型', model_name: 'local', enabled: true }], engines: [{ id: 'pi', name: 'pi' }], defaults: saved })
   mocks.tenants.mockResolvedValue([{ id: 'tenant-a', name: '当前租户' }])
   mocks.project.mockResolvedValue({ project: { id: 'project-a', tenant_id: 'tenant-a' } })
-  mocks.vulnerability.mockResolvedValue({ id: 'vuln-a', project_id: 'project-a', title: '全局成果原文', severity: 'high', status: 'new', confidence: 0.8, observation_id: 'observation-a', source: 'capture', evidence_items: [], record_evidence_items: [], observations: [], verifications: [], run_artifacts: [] })
+  mocks.vulnerability.mockResolvedValue({ id: 'vuln-a', project_id: 'project-a', title: '全局成果原文', severity: 'high', status: 'new', confidence: 0.8, observation_id: 'observation-a', readable: { vulnerability_id: 'vuln-a', observation_id: 'observation-a', description_markdown: '全局成果原文', reproduction_markdown: '', remediation_markdown: '', limitations_markdown: '', key_evidence_markdown: '' }, source: 'capture', evidence_items: [], record_evidence_items: [], observations: [], verifications: [], run_artifacts: [] })
   mocks.duplicates.mockResolvedValue({ project_id: 'project-a', requested_vulnerability_id: 'vuln-a', candidates: [] })
   mocks.history.mockResolvedValue({ items: [], total: 0 })
-  mocks.preview.mockResolvedValue({ project_id: 'project-a', vulnerability_id: 'vuln-a', project_title: '当前租户项目', vulnerability: { id: 'vuln-a', title: '全局成果原文', severity: 'high', status: 'new' }, evidence: { observation_id: 'observation-a', source: 'capture', evidence_items: [] }, project_context: {}, facts: [], observations: [], verifications: [], fact_evidence: [], artifacts: [], missing_materials: [] })
+  mocks.preview.mockResolvedValue({ project_id: 'project-a', vulnerability_id: 'vuln-a', project_title: '当前租户项目', vulnerability: { id: 'vuln-a', title: '全局成果原文', severity: 'high', status: 'new' }, evidence: { observation_id: 'observation-a', source: 'capture', evidence_items: [], reproduction_steps: [] }, project_context: {}, facts: [], observations: [], verifications: [], fact_evidence: [], artifacts: [], missing_materials: [] })
 })
 afterEach(() => {
   wrappers.splice(0).forEach((wrapper) => wrapper.unmount())
@@ -139,26 +186,185 @@ afterEach(() => {
 })
 
 describe('复测收尾交互边界', () => {
+  it('本次目标独立提交，响应未知时锁定且重试不改变目标', async () => {
+    mocks.createRequest.mockRejectedValue(new TypeError('response lost'))
+    const wrapper = await mountPage(NewVerification)
+    await fillManual(wrapper)
+    await wrapper.get('#new-verification-target').setValue('https://new.example.test/instance')
+    await submit(wrapper)
+    const payload = mocks.createRequest.mock.calls[0]![0]
+    expect(payload.target_url).toBe('https://new.example.test/instance')
+    expect(payload.report.content).toBe('原正文，保留换行\n第二行')
+    expect(wrapper.get('#new-verification-target').element.matches(':disabled')).toBe(true)
+    await click(wrapper, '用原请求重试')
+    expect(mocks.createRequest.mock.calls[1]![0]).toEqual(payload)
+  })
 
-  it('v3仅展示三段结果并按实际步骤读取证据，不读取输入快照', async () => {
+  it('复制复测保留已绑定目标而不回退历史地址', async () => {
+    mocks.route.query = { source_request_id: 'request-a' }
+    mocks.request.mockResolvedValue({ id: 'request-a', title: '复制资料', target_url: 'https://new.example.test/instance', source_target: 'http://old.example.test/', report: { resource_id: 'resource-a' }, input_source: null })
+    mocks.createRequest.mockRejectedValue(new ApiError('受控拒绝', 422, {}))
+    const wrapper = await mountPage(NewVerification)
+    expect((wrapper.get('#new-verification-target').element as HTMLInputElement).value).toBe('https://new.example.test/instance')
+    await click(wrapper, '复制上一轮输入')
+    await submit(wrapper)
+    expect(mocks.createRequest.mock.calls[0]![0].target_url).toBe('https://new.example.test/instance')
+  })
+
+  it('代理设置：外部默认直连，凭据变更触发离开保护且未知受理重试保持原请求', async () => {
+    mocks.createRequest.mockRejectedValue(new TypeError('response lost'))
+    const wrapper = await mountPage(NewVerification)
+    const fields = wrapper.getComponent(TestEgressFields)
+    expect(fields.props('modelValue').mode).toBe('direct')
+    fields.vm.$emit('update:modelValue', { mode: 'socks5', host: 'proxy.example.test', port: 1080, auth_action: 'replace', username: 'sample-user', password: 'sample-password' })
+    await flushPromises()
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    expect(wrapper.getComponent(VerificationForm).vm.canLeave()).toBe(false)
+    expect(confirm).toHaveBeenCalled()
+    await fillManual(wrapper)
+    const store = vi.spyOn(Storage.prototype, 'setItem')
+    await submit(wrapper)
+    const payload = mocks.createRequest.mock.calls[0]![0]
+    expect(payload.test_egress).toEqual({ mode: 'socks5', host: 'proxy.example.test', port: 1080, auth_action: 'replace', username: 'sample-user', password: 'sample-password' })
+    expect(fields.props('disabled')).toBe(true)
+    expect(wrapper.getComponent(VerificationForm).vm.canLeave()).toBe(false)
+    await click(wrapper, '用原请求重试')
+    expect(mocks.createRequest.mock.calls[1]![0]).toEqual(payload)
+    expect(store).not.toHaveBeenCalled()
+  })
+
+  it('代理设置：复制平台慢响应期间禁止单独设置，完成后默认继承CURRENT且可显式编辑', async () => {
+    mocks.route.query = { source_request_id: 'request-a' }
+    mocks.request.mockResolvedValue({ id: 'request-a', title: '复制资料', report: { resource_id: 'resource-a' }, input_source: { project_id: 'project-a', vulnerability_id: 'vuln-a' }, test_egress: { mode: 'http', host: 'old.example.test', port: 8080, auth_configured: false, revision: 1 } })
+    const current = { project: { id: 'project-a', test_egress: { mode: 'socks5', host: 'current.example.test', port: 1080, auth_configured: true, revision: 5 } } }
+    let resolveProject!: (value: typeof current) => void
+    mocks.project.mockReturnValueOnce(new Promise((resolve) => { resolveProject = resolve }))
+    mocks.createRequest.mockRejectedValue(new ApiError('受控拒绝', 422, {}))
+    const wrapper = await mountPage(NewVerification)
+    expect(mocks.project).toHaveBeenCalledWith('project-a')
+    const choice = wrapper.get<HTMLSelectElement>('#verification-egress-choice')
+    expect(choice.element.disabled).toBe(true)
+    expect(choice.element.value).toBe('inherit')
+    expect(wrapper.findComponent(TestEgressFields).exists()).toBe(false)
+    await click(wrapper, '复制上一轮输入')
+    await submit(wrapper)
+    expect(mocks.createRequest).not.toHaveBeenCalled()
+    resolveProject(current)
+    await flushPromises()
+    expect(choice.element.disabled).toBe(false)
+    const fields = wrapper.getComponent(TestEgressFields)
+    expect(fields.props('modelValue')).toMatchObject({ mode: 'socks5', host: 'current.example.test', port: 1080, password: '' })
+    expect(fields.props('disabled')).toBe(true)
+    await submit(wrapper)
+    expect(mocks.createRequest.mock.calls[0]![0]).not.toHaveProperty('test_egress')
+    await click(wrapper, '修改未受理的输入')
+    await choice.setValue('custom')
+    expect(fields.props('disabled')).toBe(false)
+    expect(fields.props('modelValue')).toMatchObject({ mode: 'socks5', host: 'current.example.test', port: 1080 })
+    await submit(wrapper)
+    expect(mocks.createRequest.mock.calls[1]![0].test_egress).toEqual({ mode: 'socks5', host: 'current.example.test', port: 1080, auth_action: 'keep' })
+  })
+
+  it('代理设置：复制平台读取失败及重试中禁止单独设置，成功后从来源代理初始化', async () => {
+    mocks.route.query = { source_request_id: 'request-a' }
+    mocks.request.mockResolvedValue({ id: 'request-a', title: '复制资料', report: { resource_id: 'resource-a' }, input_source: { project_id: 'project-a', vulnerability_id: 'vuln-a' } })
+    const current = { project: { id: 'project-a', test_egress: { mode: 'http', host: 'retry.example.test', port: 8080, auth_configured: false, revision: 2 } } }
+    let resolveProject!: (value: typeof current) => void
+    mocks.project.mockRejectedValueOnce(new Error('读取失败')).mockReturnValueOnce(new Promise((resolve) => { resolveProject = resolve }))
+    const wrapper = await mountPage(NewVerification)
+    const choice = wrapper.get<HTMLSelectElement>('#verification-egress-choice')
+    expect(choice.element.disabled).toBe(true)
+    expect(choice.element.value).toBe('inherit')
+    expect(wrapper.text()).toContain('无法读取来源项目当前代理设置，请重试。')
+    await click(wrapper, '重新读取')
+    expect(mocks.project).toHaveBeenCalledTimes(2)
+    expect(choice.element.disabled).toBe(true)
+    expect(choice.element.value).toBe('inherit')
+    expect(wrapper.findComponent(TestEgressFields).exists()).toBe(false)
+    resolveProject(current)
+    await flushPromises()
+    expect(choice.element.disabled).toBe(false)
+    expect(wrapper.text()).not.toContain('无法读取来源项目当前代理设置，请重试。')
+    await choice.setValue('custom')
+    expect(wrapper.getComponent(TestEgressFields).props('modelValue')).toMatchObject({ mode: 'http', host: 'retry.example.test', port: 8080 })
+    await click(wrapper, '复制上一轮输入')
+    mocks.createRequest.mockResolvedValueOnce({ id: 'accepted-copy', execution_status: 'queued' })
+    await submit(wrapper)
+    expect(mocks.createRequest.mock.calls[0]![0].test_egress).toEqual({ mode: 'http', host: 'retry.example.test', port: 8080, auth_action: 'keep' })
+  })
+
+  it('代理设置：复制平台切换来源后，迟到出口响应不覆盖本轮真实编辑', async () => {
+    mocks.request.mockImplementation(async (id: string) => ({ id, title: '复制资料', report: { resource_id: 'resource-a' }, input_source: { project_id: id === 'request-a' ? 'project-a' : 'project-b', vulnerability_id: 'vuln-a' } }))
+    const current = { project: { id: 'project-b', test_egress: { mode: 'socks5', host: 'current.example.test', port: 1080, auth_configured: false, revision: 2 } } }
+    let resolveOldProject!: (value: typeof current) => void
+    mocks.project.mockReturnValueOnce(new Promise((resolve) => { resolveOldProject = resolve })).mockResolvedValueOnce(current)
+    const wrapper = await mountPage(VerificationForm, { sourceRequestId: 'request-a' })
+    expect(mocks.project).toHaveBeenCalledWith('project-a')
+    await wrapper.setProps({ sourceRequestId: 'request-b' })
+    await flushPromises()
+    expect(mocks.project).toHaveBeenCalledWith('project-b')
+    await wrapper.get('#verification-egress-choice').setValue('custom')
+    const fields = wrapper.getComponent(TestEgressFields)
+    const edited = { ...fields.props('modelValue'), host: 'edited.example.test', port: 1081 }
+    fields.vm.$emit('update:modelValue', edited)
+    await flushPromises()
+    resolveOldProject({ project: { id: 'project-a', test_egress: { ...current.project.test_egress, host: 'late.example.test' } } })
+    await flushPromises()
+    expect(fields.props('modelValue')).toEqual(edited)
+    await click(wrapper, '复制上一轮输入')
+    mocks.createRequest.mockResolvedValueOnce({ id: 'accepted-copy', execution_status: 'queued' })
+    await submit(wrapper)
+    expect(mocks.createRequest.mock.calls[0]![0].test_egress).toEqual({ mode: 'socks5', host: 'edited.example.test', port: 1081, auth_action: 'keep' })
+  })
+
+  it('代理设置：平台来源显示CURRENT公共设置，默认省略覆盖且允许显式清除认证', async () => {
+    mocks.route.query = { input: 'platform', source_project_id: 'project-a', source_vulnerability_id: 'vuln-a' }
+    const preview = await mocks.preview()
+    mocks.preview.mockResolvedValue({ ...preview, test_egress: { mode: 'http', host: 'current.example.test', port: 8080, auth_configured: true, revision: 4 } })
+    mocks.createRequest.mockRejectedValue(new ApiError('受控拒绝', 422, {}))
+    const wrapper = await mountPage(NewVerification)
+    const fields = wrapper.getComponent(TestEgressFields)
+    expect(fields.props('modelValue')).toMatchObject({ mode: 'http', host: 'current.example.test', password: '' })
+    expect(fields.props('authConfigured')).toBe(true)
+    expect(fields.props('disabled')).toBe(true)
+    await submit(wrapper)
+    expect(mocks.createRequest.mock.calls[0]![0]).not.toHaveProperty('test_egress')
+    await click(wrapper, '修改未受理的输入')
+    await wrapper.get('#verification-egress-choice').setValue('custom')
+    fields.vm.$emit('update:modelValue', { ...fields.props('modelValue'), auth_action: 'clear' })
+    await submit(wrapper)
+    expect(mocks.createRequest.mock.calls[1]![0].test_egress).toEqual({ mode: 'http', host: 'current.example.test', port: 8080, auth_action: 'clear' })
+  })
+
+
+  it.each([3, 4])('v%s仅展示三段结果并按实际步骤读取证据，不读取输入快照', async (version) => {
     const item = { id: 'http-a', kind: 'http', role: 'primary', source: 'capture', title: '关键交互', request: { artifact_id: 'result-artifact' }, response: null }
     const result = {
-      schema_version: 3, outcome: 'not_reproduced', summary: '本次请求被拒绝，不能据此断言已修复。', tested_scope: '仅使用隔离样本，未测试其他身份。', limitations: ['未验证生产环境，不据此判断已修复。'], reason_code: null,
+      schema_version: version, ...(version === 4 ? { remediation: '**检查归属**\n\n- 增加跨身份验证。' } : {}), outcome: 'not_reproduced', summary: '本次请求被拒绝，不能据此断言已修复。', tested_scope: '仅使用隔离样本，未测试其他身份。', limitations: ['未验证生产环境，不据此判断已修复。'], reason_code: null,
       evidence_refs: [{ artifact_id: 'result-artifact' }], evidence_items: [item],
       key_evidence: [{ reason: '请求未返回受保护内容。', evidence_item_ids: ['http-a'] }],
       test_steps: [{ action: '发送隔离样本请求', observation: '未取得响应原件。', evidence_item_ids: ['http-a'] }],
     }
     mocks.request.mockResolvedValue({
       id: 'request-a', project_id: 'execution-project', title: '证据对照', mode: 'retest', execution_status: 'completed', can_delete: true,
+      target_url: 'https://new.example.test/instance', source_target: 'http://old.example.test/',
       result, input_source: { project_id: 'project-a', vulnerability_id: 'vuln-a', observation_id: 'observation-a', input_mode: 'current_vulnerability' },
       report: { resource_id: 'snapshot-a' }, materials: [{ id: 'material-a', path: 'input/original.http' }],
-      runs: [], artifacts: [], history: [], cleanup: { status: 'pending', error: null }, source: { type: 'user', name: '本地测试' }, tenant_workers: [],
+      runs: [], artifacts: [{ id: 'result-artifact', size: 24 }], history: [], cleanup: { status: 'pending', error: null }, source: { type: 'user', name: '本地测试' }, tenant_workers: [],
     })
     mocks.artifactPreview.mockResolvedValue({ project_id: 'execution-project', artifact_id: 'result-artifact', content: 'GET /current HTTP/1.1', truncated: false })
     const wrapper = await mountPage(VerificationDetail)
-    expect(wrapper.findAll('.verification-report-section h2').map((item) => item.text())).toEqual(['一、结论', '二、关键证据', '三、测试过程'])
+    expect(wrapper.text()).toContain('历史来源：http://old.example.test/')
+    expect(wrapper.text()).toContain('本次目标：https://new.example.test/instance')
+    expect(wrapper.find('a[href="https://new.example.test/instance"]').exists()).toBe(false)
+    expect(wrapper.findAll('.verification-report-section h2').map((item) => item.text())).toEqual(['一、漏洞概述', '二、复现过程与数据包', '三、修复建议'])
+    if (version === 4) expect(wrapper.get('.verification-remediation strong').text()).toBe('检查归属')
+    else expect(wrapper.get('.verification-remediation').text()).toContain('历史结果未记录本轮修复建议')
     expect(wrapper.text()).toContain('本次未复现')
     expect(wrapper.text()).toContain('请求未返回受保护内容。')
+    expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(0)
+    expect(mocks.artifactPreview).not.toHaveBeenCalled()
+    await click(wrapper, '关键交互 · 步骤 1')
     expect(wrapper.text()).toContain('GET /current HTTP/1.1')
     expect(wrapper.text()).toContain('未记录响应')
     const conclusion = wrapper.get('.verification-conclusion')
@@ -174,15 +380,15 @@ describe('复测收尾交互边界', () => {
     expect(wrapper.find('.verification-step-navigation').exists()).toBe(false)
     expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(1)
     expect(wrapper.get('.verification-result-summary').text()).toBe(result.summary)
-    const step = wrapper.get('.verification-current-step').element as HTMLElement
-    const scroll = vi.fn()
-    step.scrollIntoView = scroll
-    await click(wrapper, '关键交互 · 步骤 1')
-    expect(scroll).toHaveBeenCalledWith({ block: 'nearest', behavior: 'auto' })
-    expect(document.activeElement).toBe(step)
+    expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', behavior: 'auto' })
+    expect(document.activeElement).toBe(wrapper.get('.evidence-item-disclosure > summary').element)
+    const disclosure = wrapper.get('.evidence-item-disclosure')
+    ;(disclosure.element as HTMLDetailsElement).open = false
+    await disclosure.trigger('toggle')
+    expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(0)
   })
 
-  it('默认选中含主证据的步骤，一条依据的多个交互可精确定位且只挂载当前步骤', async () => {
+  it('真实步骤连续展示，判断依据定位首个真实引用且各交互默认折叠', async () => {
     const http = { id: 'http-a', kind: 'http', role: 'primary', source: 'capture', title: '受保护响应', request: { artifact_id: 'request-original' }, response: { artifact_id: 'response-original' } }
     const log = { id: 'log-a', kind: 'text', role: 'supporting', source: 'capture', title: '本轮观察', artifact: { artifact_id: 'log-original' } }
     const contents: Record<string, string> = { 'request-original': 'GET /sample HTTP/1.1', 'response-original': 'HTTP/1.1 403 Forbidden', 'log-original': '同一交互的独立观察原文' }
@@ -194,30 +400,22 @@ describe('复测收尾交互边界', () => {
         { action: '发送样本请求', observation: '本次响应为拒绝访问。', evidence_item_ids: ['http-a', 'log-a'] },
         { action: '对照同一份记录', observation: '引用已有交互，不声称再次发送。', evidence_item_ids: ['http-a'] },
       ] },
-      input_source: null, report: null, runs: [], artifacts: [], history: [], cleanup: { status: 'removed', error: null }, source: { type: 'user', name: '本地测试' }, tenant_workers: [],
+      input_source: null, report: null, runs: [], artifacts: Object.keys(contents).map((id) => ({ id, size: 64 })), history: [], cleanup: { status: 'removed', error: null }, source: { type: 'user', name: '本地测试' }, tenant_workers: [],
     })
     const wrapper = await mountPage(VerificationDetail)
-    const current = wrapper.get('.verification-current-step')
-    const element = current.element as HTMLElement
-    element.scrollIntoView = vi.fn()
-    expect(current.get('h3').text()).toBe('2. 发送样本请求')
-    expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(1)
-    expect(current.text()).toContain('HTTP/1.1 403 Forbidden')
-    expect(current.text()).not.toContain('同一交互的独立观察原文')
+    expect(wrapper.findAll('.verification-test-step h3').map((heading) => heading.text())).toEqual(['步骤 1', '步骤 2', '步骤 3'])
+    expect(wrapper.text()).toContain('引用已有交互，不声称再次发送。')
+    expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(0)
+    expect(mocks.artifactPreview).not.toHaveBeenCalled()
     await click(wrapper, '本轮观察 · 步骤 2')
-    expect(current.text()).toContain('同一交互的独立观察原文')
-    expect(current.text()).not.toContain('GET /sample HTTP/1.1')
+    expect(wrapper.text()).toContain('同一交互的独立观察原文')
+    expect(wrapper.text()).not.toContain('GET /sample HTTP/1.1')
     expect(wrapper.findComponent(EvidenceReader).props('selectedItemId')).toBe('log-a')
-    const nav = wrapper.get('.verification-step-navigation')
-    await nav.findAll('button')[2]!.trigger('click')
-    await flushPromises()
-    expect(current.get('h3').text()).toBe('3. 对照同一份记录')
-    expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(1)
-    expect(wrapper.findAll('[data-testid="evidence-content"]')).toHaveLength(2)
     await click(wrapper, '受保护响应 · 步骤 2')
-    expect(current.get('h3').text()).toBe('2. 发送样本请求')
-    expect(wrapper.findComponent(EvidenceReader).props('selectedItemId')).toBe('http-a')
-    expect(document.activeElement).toBe(element)
+    expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(2)
+    expect(wrapper.findAll('.verification-test-step')[1]!.text()).toContain('HTTP/1.1 403 Forbidden')
+    expect(wrapper.findAll('.verification-test-step')[2]!.findComponent(EvidenceReader).exists()).toBe(false)
+    expect(document.activeElement).toBe(wrapper.findAll('.verification-test-step')[1]!.get('summary').element)
     expect(mocks.artifactPreview).toHaveBeenCalledWith('request-a', 'response-original', expect.any(AbortSignal))
     expect(mocks.artifactPreview).toHaveBeenCalledWith('request-a', 'log-original', expect.any(AbortSignal))
   })
@@ -235,40 +433,65 @@ describe('复测收尾交互边界', () => {
         key_evidence: [{ reason: '直接核对独立原文及已有交互。', evidence_item_ids: ['key-only', 'primary'] }],
         test_steps: emptySteps ? [] : [{ action: '核对已有交互', observation: '未再次发送请求。', evidence_item_ids: ['primary'] }, { action: '对照同一原件', observation: '共享同一证据。', evidence_item_ids: ['primary'] }],
       },
-      input_source: null, report: null, runs: [], artifacts: [], history: [], cleanup: { status: 'removed', error: null }, source: { type: 'user', name: '本地测试' }, tenant_workers: [],
+      input_source: null, report: null, runs: [], artifacts: Object.keys(contents).map((id) => ({ id, size: 64 })), history: [], cleanup: { status: 'removed', error: null }, source: { type: 'user', name: '本地测试' }, tenant_workers: [],
     })
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     const wrapper = await mountPage(VerificationDetail)
-    const current = wrapper.get('.verification-current-step')
-    const element = current.element as HTMLElement
-    element.scrollIntoView = vi.fn()
-    expect(current.text()).toContain(contents['request-original'])
-    expect(wrapper.findComponent(EvidenceReader).props('selectedItemId')).toBe('primary')
-    expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(1)
+    expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(0)
+    expect(mocks.artifactPreview).not.toHaveBeenCalled()
     await click(wrapper, '独立关键原文 · 未关联步骤')
-    expect(current.get('h3').text()).toBe('未关联步骤的证据')
-    expect(current.text()).toContain(contents['key-original'])
+    const materials = wrapper.get('section[aria-label="其他材料"]')
+    expect(materials.text()).toContain(contents['key-original'])
     expect(wrapper.findComponent(EvidenceReader).props('selectedItemId')).toBe('key-only')
-    expect(document.activeElement).toBe(element)
-    await expectOriginalUrl(current, '记录原文', '/api/v1/verification-requests/request-a/artifacts/key-original')
-    await current.get('button[aria-label="记录原文复制原文"]').trigger('click')
+    await expectOriginalUrl(materials, '记录原文', '/api/v1/verification-requests/request-a/artifacts/key-original')
+    await materials.get('button[aria-label="记录原文复制原文"]').trigger('click')
     await flushPromises()
     expect(writeText).toHaveBeenCalledWith(contents['key-original'])
-    await click(wrapper, '独立补充记录')
-    expect(current.text()).toContain(contents['supporting-original'])
-    expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(1)
-    expect(wrapper.findAll('.verification-step-number')).toHaveLength(emptySteps ? 0 : 2)
+    const supportingDisclosure = wrapper.findAllComponents(EvidenceItemDisclosure).find((item) => item.props('item').id === 'supporting')!
+    await supportingDisclosure.vm.reveal()
+    await flushPromises()
+    expect(materials.text()).toContain(contents['supporting-original'])
+    expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(2)
+    expect(wrapper.findAll('.verification-test-step')).toHaveLength(emptySteps ? 1 : 3)
     if (emptySteps) {
       expect(wrapper.text()).toContain('本次未记录已执行的测试步骤。')
-      expect(wrapper.find('.verification-step-navigation').exists()).toBe(false)
       expect(wrapper.text()).not.toContain('步骤 1')
     } else {
       await click(wrapper, '本轮交互 · 步骤 1')
-      expect(current.get('h3').text()).toBe('1. 核对已有交互')
-      expect(current.text()).toContain(contents['request-original'])
-      expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(1)
+      expect(wrapper.findAll('.verification-test-step')[0]!.text()).toContain(contents['request-original'])
+      expect(wrapper.findAll('.verification-test-step')[1]!.findComponent(EvidenceReader).exists()).toBe(false)
     }
+  })
+
+  it('来源步骤仅使用所选Observation，inline懒挂且切换来源释放阅读器', async () => {
+    const preview = await mocks.preview()
+    preview.evidence = {
+      observation_id: 'selected-old', source: 'capture',
+      reproduction_steps: [{ action: '旧发现真实操作', observation: '旧发现真实观察', evidence_item_ids: ['inline', 'missing'] }],
+      evidence_items: [
+        { id: 'inline', kind: 'http', title: '旧发现交互', source: 'manual', request_text: 'GET /old HTTP/1.1' },
+        { id: 'attachment', kind: 'artifact', title: '未绑定附件', artifact: { artifact_id: 'large-file' } },
+      ],
+    }
+    preview.artifacts = [{ artifact_id: 'large-file', size_bytes: 800000, available: true }]
+    preview.observations = [{ id: 'latest-other' }]
+    const wrapper = await mountPage(VerificationSourcePreview, { preview })
+    expect(wrapper.text()).toContain('旧发现真实操作')
+    expect(wrapper.text()).toContain('旧发现真实观察')
+    expect(wrapper.text()).toContain('missing（未找到引用）')
+    expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(0)
+    const shells = wrapper.findAllComponents(EvidenceItemDisclosure)
+    expect(shells[1]!.props('artifactSize')!({ artifact_id: 'large-file' })).toBe(800000)
+    await shells[0]!.vm.reveal()
+    await flushPromises()
+    expect(wrapper.text()).toContain('GET /old HTTP/1.1')
+    expect(wrapper.findComponent(EvidenceReader).props('entityKey')).toContain('selected-old')
+    await wrapper.setProps({ preview: { ...preview, evidence: { observation_id: 'new-source', source: 'capture', reproduction_steps: [], evidence_items: [] }, vulnerability: { ...preview.vulnerability, repro_steps: '真实历史复现正文' } } })
+    expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(0)
+    expect(wrapper.text()).toContain('真实历史复现正文')
+    expect(wrapper.text()).not.toContain('GET /old HTTP/1.1')
+    expect(mocks.artifactPreview).not.toHaveBeenCalled()
   })
 
   it('复制API拒绝按侧反馈且不假成功，手工恢复选中Raw原文', async () => {
@@ -286,10 +509,159 @@ describe('复测收尾交互边界', () => {
     expect(panel.get('[role="status"]').text()).toContain('浏览器未允许剪贴板写入')
     expect(wrapper.get('article[aria-label="响应阅读器"]').find('[role="status"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('已复制原文')
-    await click(panel, '选择 Raw 手工复制')
+    await click(new DOMWrapper(document.body), '选择当前文本手工复制')
     expect(mocks.selectRaw).toHaveBeenCalledOnce()
     expect(panel.get('[data-testid="evidence-content"]').text()).toContain('"dup":1,"dup":2,"large":9007199254740993123')
     expect(panel.findAll('button').find((button) => button.text() === 'Raw')?.attributes('aria-pressed')).toBe('true')
+  })
+
+  it('flow默认读取正文，显式投影按绝对UTF8字节分页和定位选段，保留历史来源及缺侧', async () => {
+    const loadPreview = vi.fn()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const wrapper = await mountPage(EvidenceReader, {
+      entityKey: 'observation-a', projectId: 'project-a', items: [flowEvidence], selectedItemId: 'flow-item', loadPreview, originalUrl: () => null,
+    })
+    expect(mocks.trafficFlow).toHaveBeenCalledWith('project-a', 'flow-a', expect.any(AbortSignal))
+    expect(mocks.trafficReadable).toHaveBeenCalledExactlyOnceWith('project-a', 'flow-a', 'request', expect.any(AbortSignal), 'auto')
+    expect(mocks.trafficProjection).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="evidence-content"]').element.textContent).toBe(flowHeader + flowReadable.body_text)
+    await wrapper.get('button[aria-label="请求复制正文视图"]').trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenLastCalledWith(flowHeader + flowReadable.body_text)
+    expect(wrapper.get('[role="status"]').text()).toBe('已复制正文视图')
+    await click(wrapper, '投影')
+    expect(mocks.trafficProjection).toHaveBeenCalledTimes(1)
+    await wrapper.get('button[aria-label="请求复制 v1 投影片段"]').trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenLastCalledWith(flowProjection.text)
+    expect(wrapper.get('[role="status"]').text()).toBe('已复制 v1 投影片段')
+    expect(loadPreview).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('历史原文')
+    expect(wrapper.text()).toContain('结构化重建，非原始字节流')
+    expect(wrapper.text()).toContain('run-original')
+    expect(wrapper.text()).toContain('部分记录')
+    expect(wrapper.text()).toContain('未记录响应')
+    expect(wrapper.get('[data-testid="evidence-content"]').text()).toContain(flowHeader)
+    await expectOriginalUrl(wrapper, '请求', '/projects/project-a/traffic/flow-a/bodies/request')
+    await click(wrapper, '下一页')
+    expect(mocks.trafficProjection).toHaveBeenLastCalledWith('project-a', 'flow-a', 'request', 65536, 65536, expect.any(AbortSignal))
+    expect(wrapper.text()).toContain('UTF-8 字节 65536–70004 / 70004')
+    await click(wrapper, '上一页')
+    expect(wrapper.text()).toContain('UTF-8 字节 0–65536 / 70004')
+    await click(wrapper, '选段 1 · utf8-bytes=65536:65542')
+    expect(mocks.selectTextRange).toHaveBeenCalledWith(0, 2)
+    expect(wrapper.getComponent(EvidenceReader).props('selectedItemId')).toBe('flow-item')
+  })
+
+  it('flow选段拒绝摘要变化和二进制占位，终态原正文下载仍可达', async () => {
+    mocks.trafficReadable.mockResolvedValue({ ...flowReadable, decode_status: 'non-text', body_text: '', decoded_body_bytes: null })
+    mocks.trafficProjection.mockResolvedValue({ ...flowProjection, body_display: 'binary' })
+    const wrapper = await mountPage(EvidenceReader, { entityKey: 'binary', projectId: 'project-a', items: [flowEvidence], loadPreview: vi.fn(), originalUrl: () => null })
+    expect(mocks.trafficProjection).not.toHaveBeenCalled()
+    await click(wrapper, '投影')
+    expect(wrapper.text()).toContain('二进制正文 · 投影仅含头部与占位')
+    expect(wrapper.findAll('button').some((button) => button.text() === 'Pretty')).toBe(false)
+    await expectOriginalUrl(wrapper, '请求', '/projects/project-a/traffic/flow-a/bodies/request')
+    mocks.trafficProjection.mockResolvedValue({ ...flowProjection, offset: 65536, body_display: 'binary' })
+    await click(wrapper, '选段 1 · utf8-bytes=65536:65542')
+    expect(wrapper.get('[role="alert"]').text()).toContain('二进制占位不是正文证据')
+    expect(mocks.selectTextRange).not.toHaveBeenCalled()
+    mocks.trafficProjection.mockResolvedValue({ ...flowProjection, offset: 65536, sha256: 'c'.repeat(64) })
+    await click(wrapper, '重试')
+    expect(wrapper.get('[role="alert"]').text()).toContain('版本或摘要不匹配')
+    expect(wrapper.find('[data-testid="evidence-content"]').exists()).toBe(false)
+  })
+
+  it('flow尚未终结不读投影，切换条目后迟到投影不覆盖历史Artifact原件', async () => {
+    mocks.trafficFlow.mockResolvedValueOnce({ ...flowDetail, state: 'receiving' })
+    const loadPreview = vi.fn().mockResolvedValue({ artifact_id: 'old-a', project_id: 'project-a', content: '历史原件未改变', size: 24, bytes_read: 24, truncated: false })
+    const wrapper = await mountPage(EvidenceReader, { entityKey: 'pending', projectId: 'project-a', items: [flowEvidence], autoRefresh: false, loadPreview, originalUrl: () => null })
+    expect(mocks.trafficProjection).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('当前预览非稳定证据')
+    expect(mocks.trafficPreview).not.toHaveBeenCalled()
+    expect(mocks.trafficReadable).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="evidence-content"]').text()).toContain(flowHeader.trim())
+    await click(wrapper, '加载请求正文')
+    expect(mocks.trafficPreview).toHaveBeenCalledExactlyOnceWith('project-a', 'flow-a', 'request', 0, expect.any(AbortSignal))
+    expect(wrapper.get('[data-testid="evidence-content"]').text()).toContain('已确认前缀')
+    let resolve!: (value: TrafficProjection) => void
+    mocks.trafficProjection.mockImplementationOnce(() => new Promise<TrafficProjection>((done) => { resolve = done }))
+    await click(wrapper, '刷新状态')
+    expect(mocks.trafficReadable).toHaveBeenCalledOnce()
+    await click(wrapper, '投影')
+    expect(mocks.trafficProjection).toHaveBeenCalledOnce()
+    const projectionSignal = mocks.trafficProjection.mock.calls[0]![5] as AbortSignal
+    await wrapper.setProps({ items: [{ id: 'old', kind: 'artifact', role: 'primary', source: 'historical', title: '旧原件', artifact: { artifact_id: 'old-a' } }] })
+    await flushPromises()
+    expect(projectionSignal.aborted).toBe(true)
+    expect(loadPreview).not.toHaveBeenCalled()
+    await click(wrapper, '加载证据原件内容')
+    expect(loadPreview).toHaveBeenCalledExactlyOnceWith({ artifact_id: 'old-a' }, expect.any(AbortSignal))
+    resolve(flowProjection)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="evidence-content"]').text()).toBe('历史原件未改变')
+    expect(wrapper.text()).not.toContain('GET /中文')
+  })
+
+  it('flow接收时按需读正文，进度未变化不重复读取，终态回到正文且Hex读取真实字节', async () => {
+    mocks.trafficFlow.mockResolvedValueOnce({ ...flowDetail, state: 'receiving' }).mockResolvedValueOnce({ ...flowDetail, state: 'receiving' })
+    const wrapper = await mountPage(EvidenceReader, { entityKey: 'live', projectId: 'project-a', items: [flowEvidence], autoRefresh: false, loadPreview: vi.fn(), originalUrl: () => null })
+    expect(mocks.trafficPreview).not.toHaveBeenCalled()
+    await click(wrapper, '加载请求正文')
+    expect(mocks.trafficPreview).toHaveBeenCalledTimes(1)
+    await wrapper.getComponent(EvidenceReader).vm.refreshFlow()
+    expect(mocks.trafficPreview).toHaveBeenCalledTimes(1)
+    await wrapper.getComponent(EvidenceReader).vm.refreshFlow()
+    await flushPromises()
+    expect(mocks.trafficReadable).toHaveBeenCalledExactlyOnceWith('project-a', 'flow-a', 'request', expect.any(AbortSignal), 'auto')
+    expect(mocks.trafficPreview).toHaveBeenCalledTimes(1)
+    expect(mocks.trafficProjection).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="evidence-content"]').element.textContent).toBe(flowHeader + flowReadable.body_text)
+    await click(wrapper, 'Hex')
+    expect(mocks.trafficBody).toHaveBeenCalledWith('project-a', 'flow-a', 'request', 0, expect.any(AbortSignal))
+    expect(wrapper.get('[data-testid="evidence-content"]').text()).toContain('00000000  00 ff 41 42')
+    expect(wrapper.get('button[aria-label="请求复制当前 Hex 展示"]').exists()).toBe(true)
+    await wrapper.get('button[aria-label="请求更多"]').trigger('click')
+    await flushPromises()
+    expect(document.body.textContent).toContain('正文 Hex / ASCII 显示已保存的正文原字节')
+    await new DOMWrapper(document.body).get('[role="menu"]').trigger('keydown', { key: 'Escape' })
+    await flushPromises()
+    expect(wrapper.findAll('button').some((button) => button.text() === 'Pretty')).toBe(false)
+    await click(wrapper, '选段 1 · utf8-bytes=65536:65542')
+    expect(mocks.trafficProjection).toHaveBeenLastCalledWith('project-a', 'flow-a', 'request', 65536, 65536, expect.any(AbortSignal))
+    expect(mocks.selectTextRange).toHaveBeenCalledWith(0, 2)
+  })
+
+  it('复制失败浮层的稳定关联支持ArrowDown进入恢复并以Escape返回同侧按钮', async () => {
+    const writeText = vi.fn().mockRejectedValue(new DOMException('denied', 'NotAllowedError'))
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    const wrapper = await mountPage(EvidenceReader, {
+      entityKey: 'copy-keyboard', projectId: 'project-a', items: [{ id: 'http-a', kind: 'http', role: 'primary', source: 'manual', request_text: 'GET /sample HTTP/1.1\r\n\r\n', response_text: 'HTTP/1.1 200 OK\r\n\r\n' }], loadPreview: vi.fn(), originalUrl: () => null,
+    })
+    const copyButton = wrapper.get('button[aria-label="响应复制原文"]')
+    ;(copyButton.element as HTMLElement).focus()
+    await copyButton.trigger('click')
+    await flushPromises()
+    expect(copyButton.attributes('aria-expanded')).toBe('true')
+    const controlledId = copyButton.attributes('aria-controls')
+    expect(controlledId).toBeTruthy()
+    const feedbackBody = document.getElementById(controlledId!)
+    expect(feedbackBody).not.toBeNull()
+    expect(feedbackBody!.classList.contains('evidence-reader__copy-body')).toBe(true)
+    expect(wrapper.element.contains(feedbackBody)).toBe(false)
+    expect(feedbackBody!.closest('[role="dialog"]')?.getAttribute('aria-label')).toBe('响应复制反馈')
+    const recovery = feedbackBody!.querySelector<HTMLButtonElement>('button')!
+    expect(recovery.textContent).toBe('选择当前文本手工复制')
+    await copyButton.trigger('keydown', { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(recovery)
+    expect(copyButton.attributes('aria-controls')).toBe(controlledId)
+    recovery.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+    expect(copyButton.attributes('aria-expanded')).toBe('false')
+    expect(copyButton.attributes('aria-controls')).toBeUndefined()
+    expect(document.activeElement).toBe(copyButton.element)
+    expect(document.getElementById(controlledId!)).toBeNull()
   })
 
   it('复制API缺失使用用户触发命令，检查返回值并恢复焦点且不遗留节点', async () => {
@@ -399,21 +771,30 @@ describe('复测收尾交互边界', () => {
       originalUrl: (reference: EvidenceRef) => `/controlled/${reference.artifact_id}`,
     })
     expect(wrapper.find('details.evidence-reader__supporting').exists()).toBe(false)
+    expect(mocks.artifactPreview).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('已保存大小未知')
+    await click(wrapper, '加载请求正文')
+    await click(wrapper, '加载响应正文')
     expect(mocks.artifactPreview).toHaveBeenCalledTimes(2)
     expect(wrapper.text()).toContain('GET /current HTTP/1.1')
     expect(wrapper.text()).toContain('HTTP/1.1 200 OK')
     const interaction = wrapper.get('select[aria-label="选择证据交互"]')
     expect((interaction.element as HTMLSelectElement).value).toBe('http-a')
-    expect(interaction.findAll('option').map((option) => option.text())).toEqual(['关键交互', '补充 · 请求日志', '补充 · 环境记录'])
+    expect(interaction.findAll('option').map((option) => option.text())).toEqual(['主证据 · 关键交互', '补充 · 请求日志', '补充 · 环境记录'])
 
     await interaction.setValue('log-artifact')
     await flushPromises()
+    expect(mocks.artifactPreview).toHaveBeenCalledTimes(2)
+    await click(wrapper, '加载证据原件内容')
     const logSignal = mocks.artifactPreview.mock.calls.find((call) => call[1] === 'log-artifact')![2] as AbortSignal
     const primary = wrapper.get('nav[aria-label="关键交互"]').get('button')
     expect(primary.attributes('aria-pressed')).toBe('false')
     const supporting = wrapper.get('details.evidence-reader__supporting')
     await supporting.get('summary').trigger('click')
     await click(wrapper, '环境记录')
+    expect(mocks.artifactPreview).toHaveBeenCalledTimes(3)
+    await click(wrapper, '加载证据原件内容')
+    expect(mocks.artifactPreview).toHaveBeenCalledTimes(4)
     expect(logSignal.aborted).toBe(true)
     resolveLog(preview('log-artifact', '迟到的旧日志'))
     await flushPromises()
@@ -423,6 +804,10 @@ describe('复测收尾交互边界', () => {
     await primary.trigger('click')
     await flushPromises()
     expect((wrapper.get('select[aria-label="选择证据交互"]').element as HTMLSelectElement).value).toBe('http-a')
+    expect(mocks.artifactPreview).toHaveBeenCalledTimes(4)
+    await click(wrapper, '加载请求正文')
+    await click(wrapper, '加载响应正文')
+    expect(mocks.artifactPreview).toHaveBeenCalledTimes(6)
     expect(wrapper.text()).toContain('GET /current HTTP/1.1')
     expect(wrapper.text()).toContain('HTTP/1.1 200 OK')
     expect(wrapper.text()).not.toContain('当前环境原文')
@@ -573,6 +958,24 @@ describe('复测收尾交互边界', () => {
     mocks.createRequest.mockResolvedValueOnce({ id: 'accepted-b', execution_status: 'queued' })
     await submit(wrapper)
     expect(mocks.createRequest.mock.calls[2]![0].resource_batch_id).toBe('batch-b')
+  })
+
+  it('来源列表刷新移除已选漏洞时清空预览但保留草稿，不自动换来源', async () => {
+    mocks.route.query = { input: 'platform', source_project_id: 'project-a', source_vulnerability_id: 'vuln-a' }
+    const wrapper = await mountPage(NewVerification)
+    await wrapper.get('#new-verification-title').setValue('保留任务名称')
+    await wrapper.get('#new-verification-origin').setValue('保留环境补充')
+    expect(wrapper.findComponent(VerificationSourcePreview).exists()).toBe(true)
+    mocks.listVulnerabilities.mockResolvedValue([{ id: 'other', project_id: 'project-a', project_title: '当前租户项目', title: '另一个漏洞' }])
+    await clients[clients.length - 1]!.invalidateQueries({ queryKey: ['vulnerabilities', 'all'] })
+    await flushPromises()
+    expect(wrapper.findComponent(VerificationSourcePreview).exists()).toBe(false)
+    expect(wrapper.text()).toContain('请重新选择来源')
+    expect((wrapper.get('#new-verification-title').element as HTMLInputElement).value).toBe('保留任务名称')
+    expect((wrapper.get('#new-verification-origin').element as HTMLTextAreaElement).value).toBe('保留环境补充')
+    await submit(wrapper)
+    expect(mocks.createRequest).not.toHaveBeenCalled()
+    expect(mocks.preview).toHaveBeenCalledTimes(1)
   })
 
   it('复测候选明确请求当前租户范围，不复用全局候选缓存', async () => {

@@ -46,7 +46,7 @@ defineOptions({ name: 'UiTooltip' })
 </script>
 
 <style scoped>
-.ui-tooltip {
+:deep(.ui-tooltip) {
   max-width: min(320px, calc(100vw - var(--space-4)));
   border: calc(var(--space-1) / 4) solid var(--border);
   border-radius: var(--radius-md);
@@ -60,8 +60,8 @@ defineOptions({ name: 'UiTooltip' })
   transform-origin: var(--reka-tooltip-content-transform-origin);
 }
 
-.ui-tooltip[data-state='delayed-open'],
-.ui-tooltip[data-state='instant-open'] {
+:deep(.ui-tooltip[data-state='delayed-open']),
+:deep(.ui-tooltip[data-state='instant-open']) {
   animation: ui-tooltip-enter var(--dur-fast) var(--ease-enter);
 }
 
@@ -73,7 +73,7 @@ defineOptions({ name: 'UiTooltip' })
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ui-tooltip {
+  :deep(.ui-tooltip) {
     animation: none;
   }
 }

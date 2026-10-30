@@ -30,10 +30,11 @@ def validate_delivery_registration(conn, project, run, body, snapshot):
     from uuid import UUID
 
     context = parse_scenario_snapshot(run["runtime_context_json"])
+    scoped_report = run["task_type"] == "report" and bool(context.get("report_claim", {}).get("scope_key"))
     if (
         run["status"] != "running"
         or body.status not in {None, "running"}
-        or run["execution_generation"] != project["execution_generation"]
+        or (not scoped_report and run["execution_generation"] != project["execution_generation"])
         or run["pause_requested"]
     ):
         raise HTTPException(409, "execution_delivery_registration_closed")
@@ -110,6 +111,9 @@ def validate_delivery_registration(conn, project, run, body, snapshot):
         or (project_deadline and deadline > project_deadline)
     ):
         raise HTTPException(422, "execution_delivery_invalid")
+    output_retry = context.get("reason_output_retry")
+    if output_retry is not None and deadline > parse_utc_timestamp(output_retry["deadline_at"]):
+        raise HTTPException(422, "execution_delivery_invalid")
     if not isinstance(snapshot["container_id"], str) or not snapshot["container_id"] or snapshot["container_id"] == "unknown" or len(snapshot["container_id"]) > 128:
         raise HTTPException(422, "execution_delivery_invalid")
     for digest_field in ("model_binding_sha256", "result_schema_sha256"):
@@ -134,6 +138,7 @@ def validate_delivery_registration(conn, project, run, body, snapshot):
         },
         "bootstrap": {"assessment_protocol"},
         "external_verify": {"verification_request_id"},
+        "report": {"report_segments"},
     }.get(run["task_type"], set())
     allowed_inputs = {
         "reason": {"open_intent_ids"},
@@ -267,10 +272,10 @@ def validate_delivery_registration(conn, project, run, body, snapshot):
         expiry = parse_utc_timestamp(project["authorization_expires_at"])
         if expiry and deadline > expiry:
             raise HTTPException(422, "execution_delivery_invalid")
-    elif binding is not None:
+    elif run["task_type"] != "report" and binding is not None:
         raise HTTPException(422, "execution_delivery_invalid")
     if run["task_type"] == "report":
-        finalization = conn.execute("SELECT * FROM assessment_report_finalizations WHERE project_id = ?", (project["id"],)).fetchone()
+        finalization = conn.execute("SELECT * FROM assessment_report_finalizations WHERE project_id = ? AND generation_token = ?", (project["id"], inputs.get("generation_token"))).fetchone()
         if (
             set(inputs) != allowed_inputs
             or any(not isinstance(value, str) or not value for value in inputs.values())
@@ -287,7 +292,17 @@ def validate_delivery_registration(conn, project, run, body, snapshot):
             or inputs["generation_token"] != context.get("report_claim", {}).get("generation_token")
             or inputs["input_snapshot_artifact_id"] != finalization["input_snapshot_artifact_id"]
             or inputs["input_snapshot_sha256"] != finalization["input_snapshot_sha256"]
+            or context.get("report_claim", {}).get("claim_sha256") != finalization["claim_sha256"]
         ):
+            raise HTTPException(422, "execution_delivery_invalid")
+        # 登记和候选共享同一冻结分段身份，不接受 null 或调用方另造模板／快照绑定。
+        if binding != {"report_segments": {
+            "project_id": project["id"],
+            "task_run_id": run["id"],
+            "generation_token": finalization["generation_token"],
+            "input_snapshot_sha256": finalization["input_snapshot_sha256"],
+            "report_template_digest_sha256": finalization["template_digest_sha256"],
+        }}:
             raise HTTPException(422, "execution_delivery_invalid")
 
     from cairn.dispatcher.worker_protocol.submission import build_submit_result_schema
@@ -406,8 +421,9 @@ def delivery_retry_routes(conn, project, *, executions=None):
     if executions is None:
         executions = conn.execute("SELECT * FROM task_runs WHERE project_id = ? ORDER BY COALESCE(started_at, ended_at), LENGTH(id), id", (project["id"],)).fetchall()
     phase = parse_scenario_snapshot(project["assessment_progress_json"]).get("phase")
-    report = conn.execute("SELECT generation_token FROM assessment_report_finalizations WHERE project_id = ?", (project["id"],)).fetchone()
-    token = report["generation_token"] if report else None
+    report_tokens = {row["generation_token"] for row in conn.execute(
+        "SELECT generation_token FROM assessment_report_finalizations WHERE project_id = ? AND cancel_requested_at IS NULL AND status != 'cancelled'", (project["id"],),
+    )}
     groups = {}
     latest_by_work = {}
     for run in executions:
@@ -419,18 +435,23 @@ def delivery_retry_routes(conn, project, *, executions=None):
             previous["execution_generation"], len(previous["id"]), previous["id"]
         ):
             latest_by_work[key] = run
-        if run["execution_generation"] != project["execution_generation"] or run["pause_interrupted"]:
-            continue
         context = parse_scenario_snapshot(run["runtime_context_json"])
+        scoped_report = run["task_type"] == "report" and bool(context.get("report_claim", {}).get("scope_key"))
+        if (not scoped_report and run["execution_generation"] != project["execution_generation"]) or run["pause_interrupted"]:
+            continue
+        work_id = run["intent_id"]
         if run["task_type"] == "report":
             claim = context.get("report_claim", {})
-            if not token or not isinstance(claim, dict) or claim.get("generation_token") != token:
+            if not isinstance(claim, dict) or claim.get("generation_token") not in report_tokens:
                 continue
+            work_id = claim["generation_token"]
         elif "assessment_phase" in context and context["assessment_phase"] != phase:
             continue
-        groups.setdefault((run["task_type"], run["intent_id"]), []).append(run)
+        groups.setdefault((run["task_type"], work_id), []).append(run)
     routes = {}
-    for (task_type, intent_id), runs in groups.items():
+    for (task_type, work_id), runs in groups.items():
+        token = work_id if task_type == "report" else None
+        intent_id = None if task_type == "report" else work_id
         runs = _current_execution_chain(conn, project, task_type, runs)
         if not runs:
             continue
@@ -576,6 +597,37 @@ def _current_execution_chain(conn, project, task_type, runs, *, allow_new_decisi
     return runs
 
 
+def _reason_output_failure(run):
+    from cairn.dispatcher.contracts import REASON_OUTPUT_ERRORS
+
+    failure = parse_scenario_snapshot(run["runtime_context_json"]).get("worker_failure")
+    if (
+        run["task_type"] == "reason"
+        and run["status"] == "failed"
+        and run["error_type"] == "business_acceptance"
+        and isinstance(failure, dict)
+        and failure.get("origin") == "dispatcher_validation"
+        and failure.get("phase") == "reason_execute"
+        and failure.get("code") in REASON_OUTPUT_ERRORS
+    ):
+        return failure
+    return None
+
+
+def _reason_output_retry_context(runs):
+    """失败链仍由 TaskRun 计数；这里只传递原期限和最后一次可修正拒绝。"""
+    sources = [(run, _reason_output_failure(run)) for run in runs]
+    sources = [(run, failure) for run, failure in sources if failure is not None]
+    if not sources:
+        return None
+    first_context = parse_scenario_snapshot(sources[0][0]["runtime_context_json"])
+    return {
+        "source_task_run_id": sources[-1][0]["id"],
+        "deadline_at": first_context.get("execution_delivery", {}).get("deadline_at"),
+        "failure": sources[-1][1],
+    }
+
+
 def _is_delivery_execution(run):
     context = parse_scenario_snapshot(run["runtime_context_json"])
     return run["error_type"] in DELIVERY_RETRY_ERROR_TYPES or bool(context.get("delivery_retry"))
@@ -595,12 +647,18 @@ def _delivery_predecessor_matches(runs, run):
         if source["id"] != retry["source_task_run_id"]:
             continue
         previous = parse_scenario_snapshot(source["runtime_context_json"])
+        claim = context.get("report_claim", {})
+        scoped_report = run["task_type"] == "report" and bool(claim.get("scope_key"))
+        same_report = scoped_report and all(
+            claim.get(key) == previous.get("report_claim", {}).get(key)
+            for key in ("scope_key", "generation_token")
+        )
         return bool(
             source["status"] in {"failed", "timed_out"}
             and _is_delivery_execution(source)
+            and (same_report or source["execution_generation"] == run["execution_generation"])
             and all(source[key] == run[key] for key in (
-                "project_id", "execution_generation", "task_type", "intent_id",
-                "assessment_attempt_id", "worker_name", "session_id",
+                "project_id", "task_type", "intent_id", "assessment_attempt_id", "worker_name", "session_id",
             ))
             and previous.get("dispatcher_id") == context.get("dispatcher_id")
             and isinstance(context.get("execution_delivery"), dict)
@@ -613,19 +671,22 @@ def _logical_executions(conn, project, task_type, intent_id, report_generation_t
     phase = parse_scenario_snapshot(project["assessment_progress_json"]).get("phase")
     runs = []
     for run in conn.execute(
-        """SELECT * FROM task_runs WHERE project_id = ? AND execution_generation = ?
-           AND task_type = ? AND pause_interrupted = 0
+        """SELECT * FROM task_runs WHERE project_id = ? AND task_type = ? AND pause_interrupted = 0
            ORDER BY COALESCE(started_at, ended_at), LENGTH(id), id""",
-        (project["id"], project["execution_generation"], task_type),
+        (project["id"], task_type),
     ):
         if run["intent_id"] != intent_id:
             continue
         context = parse_scenario_snapshot(run["runtime_context_json"])
+        scoped_report = False
         if task_type == "report":
             claim = context.get("report_claim", {})
             if not isinstance(claim, dict) or claim.get("generation_token") != report_generation_token:
                 continue
+            scoped_report = bool(claim.get("scope_key"))
         elif "assessment_phase" in context and context["assessment_phase"] != phase:
+            continue
+        if not scoped_report and run["execution_generation"] != project["execution_generation"]:
             continue
         runs.append(run)
     return _current_execution_chain(conn, project, task_type, runs, allow_new_decision=allow_new_decision)
@@ -641,12 +702,15 @@ def _delivery_source_usable(project, run, now):
     # Report 在探索截止后正常 finalization，只受原报告执行 deadline 约束。
     project_deadline = parse_utc_timestamp(project["explore_deadline"]) if run["task_type"] != "report" else None
     current = parse_utc_timestamp(now)
+    scoped_report = run["task_type"] == "report" and bool(context.get("report_claim", {}).get("scope_key"))
+    # 单条整理按自己的报告代际重试，项目暂停/恢复不改变原执行的物理证明。
+    expected_generation = run["execution_generation"] if scoped_report else project["execution_generation"]
     # cleanup 证明不等于 session 保留；本地原 owner 还须验证原容器及 manifest。
     return bool(
         run["status"] in {"failed", "timed_out"}
         and not run["pause_requested"]
         and type(lifecycle.get("generation")) is int
-        and lifecycle["generation"] == project["execution_generation"]
+        and lifecycle["generation"] == expected_generation
         and lifecycle.get("termination_confirmed") is True
         and context.get("dispatcher_id")
         and run["session_id"] and snapshot.get("session_id") == run["session_id"]
@@ -770,6 +834,10 @@ def derive_delivery_retry_context(conn, project, body, *, assessment_attempt_id=
         ).fetchone():
             # fresh 执行不能把历史 session 冒充新会话；delivery 才允许原会话续交付。
             raise HTTPException(409, "execution_delivery_session_already_bound")
+        output_retry = _reason_output_retry_context(runs) if body.task_type == "reason" else None
+        if output_retry is not None:
+            require_execution_retry_eligible(conn, project, body.task_type, intent_id=body.intent_id)
+            return {"reason_output_retry": output_retry}
         return {}
     require_execution_retry_eligible(conn, project, body.task_type, intent_id=body.intent_id, report_generation_token=token)
     if source["assessment_attempt_id"] != assessment_attempt_id:
@@ -860,6 +928,40 @@ def execution_retry_eligibility(
         else REPORT_RETRYABLE_ERROR_TYPES if task_type == "report"
         else PROJECT_RETRYABLE_ERROR_TYPES
     )
+    output_retry = _reason_output_retry_context(runs) if task_type == "reason" else None
+    if output_retry is not None:
+        # Dispatcher 的前置拒绝不是接受证明；原链任何接受/未决候选或未停进程都禁止重新生成。
+        for run in runs:
+            context = parse_scenario_snapshot(run["runtime_context_json"])
+            lifecycle = context.get("execution_lifecycle", {})
+            if (
+                run["status"] not in {"failed", "timed_out"}
+                or run["pause_requested"]
+                or lifecycle.get("generation") != project["execution_generation"]
+                or lifecycle.get("termination_confirmed") is not True
+            ):
+                return {"allowed": False, "reason": "assessment_execution_not_quiescent", "retry_at": None}
+            if (
+                any(context.get(key) for key in ACCEPTED_RESULT_CONTEXT_FIELDS)
+                or conn.execute(
+                    "SELECT 1 FROM facts WHERE project_id = ? AND task_run_id = ? LIMIT 1",
+                    (project["id"], run["id"]),
+                ).fetchone() is not None
+                or conn.execute(
+                    "SELECT 1 FROM task_run_candidates AS c WHERE c.project_id = ? AND c.task_run_id = ? "
+                    "AND NOT EXISTS (SELECT 1 FROM task_run_candidate_outcomes AS o "
+                    "WHERE o.project_id = c.project_id AND o.candidate_id = c.id) LIMIT 1",
+                    (project["id"], run["id"]),
+                ).fetchone() is not None
+            ):
+                return {"allowed": False, "reason": "execution_retry_blocked", "retry_at": None}
+        deadline = parse_utc_timestamp(output_retry["deadline_at"])
+        current = parse_utc_timestamp(now or utcnow())
+        if not deadline or deadline <= current or any(
+            (boundary := parse_utc_timestamp(project[field])) is not None and boundary <= current
+            for field in ("explore_deadline", "authorization_expires_at")
+        ):
+            return {"allowed": False, "reason": "execution_delivery_unavailable", "retry_at": None}
     failures = []
     extended_only = task_type != "report"
     delivery_chain = False
@@ -891,7 +993,7 @@ def execution_retry_eligibility(
             if not isinstance(context.get("execution_delivery"), dict):
                 return {"allowed": False, "reason": "execution_delivery_unavailable", "retry_at": None}
             extended_only = False
-        elif run["error_type"] not in retryable:
+        elif run["error_type"] not in retryable and _reason_output_failure(run) is None:
             return {"allowed": False, "reason": "execution_retry_blocked", "retry_at": None}
         extended_only = extended_only and run["error_type"] in extended
         failures.append(run)

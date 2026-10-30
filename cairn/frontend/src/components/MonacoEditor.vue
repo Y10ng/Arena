@@ -1,6 +1,6 @@
 <template>
   <div class="monaco-reader" :class="{ 'monaco-reader--packet': variant !== 'default', 'monaco-reader--http': variant === 'http' }">
-    <div v-if="readingState?.searchOpen || reserveSearchSpace" class="monaco-reader__search" :class="{ 'monaco-reader__search--placeholder': !readingState?.searchOpen }" :aria-hidden="!readingState?.searchOpen" :inert="!readingState?.searchOpen" role="search" :aria-label="`${ariaLabel}搜索已载入文本`">
+    <div v-if="readingState?.searchOpen" class="monaco-reader__search" role="search" :aria-label="`${ariaLabel}搜索已载入文本`">
       <input ref="searchInput" :value="readingState?.query" :aria-label="`${ariaLabel}搜索已载入文本`" placeholder="搜索已载入文本" @input="setQuery" @keydown.enter.prevent="moveMatch($event.shiftKey ? -1 : 1)" @keydown.esc.prevent="closeSearch" />
       <span class="monaco-reader__matches" role="status">{{ matches.length ? `${(readingState?.matchIndex ?? 0) + 1} / ${matches.length === 10000 ? '≥' : ''}${matches.length}` : readingState?.query ? '无匹配' : '输入关键词' }}</span>
       <Button variant="ghost" size="sm" :disabled="!matches.length" :aria-label="`${ariaLabel}上一处匹配`" title="上一处（Shift+Enter）" @click="moveMatch(-1)"><ChevronUp :size="14" /></Button>
@@ -68,7 +68,7 @@ const props = withDefaults(
     autoFocus?: boolean
     fontSize?: number
     variant?: 'default' | 'packet' | 'http'
-    reserveSearchSpace?: boolean
+    httpDensity?: 'compact'
     readingState?: MonacoReadingState
     readingView?: string
   }>(),
@@ -104,6 +104,10 @@ const renderedContentHeight = shallowRef(0)
 const uiStore = useUIStore()
 
 const isReadOnly = computed(() => props.readOnly || props.disabled)
+// 紧凑密度仅由 HTTP 阅读器显式启用，不改变普通编辑器或其他报文消费者。
+const editorDensity = computed(() => props.variant === 'http' && props.httpDensity === 'compact'
+  ? { fontSize: 13, lineHeight: 20 }
+  : { fontSize: props.fontSize, lineHeight: props.variant === 'http' ? 20 : Math.round(props.fontSize * 1.65) })
 const searchInput = shallowRef<HTMLInputElement | null>(null)
 const matches = shallowRef<monaco.editor.FindMatch[]>([])
 let searchDecorations: monaco.editor.IEditorDecorationsCollection | undefined
@@ -238,8 +242,7 @@ const createEditor = () => {
     minimap: { enabled: false },
     scrollBeyondLastLine: false,
     wordWrap: props.wordWrap,
-    fontSize: props.fontSize,
-    lineHeight: props.variant === 'http' ? 20 : Math.round(props.fontSize * 1.65),
+    ...editorDensity.value,
     fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim(),
     tabSize: 2,
     insertSpaces: true,
@@ -359,7 +362,22 @@ function selectAll() {
   editor.focus()
   editor.setSelection(model.getFullModelRange())
 }
-defineExpose({ selectAll })
+function selectTextRange(start: number, end: number) {
+  const editor = editorInstance.value
+  const model = editor?.getModel()
+  if (!editor || !model) return
+  // 选段偏移来自原文；按原换行计算行列，避免 Monaco 统一 EOL 后累计错位。
+  const sourcePosition = (offset: number) => {
+    const lines = props.modelValue.slice(0, offset).split(/\r\n|\r|\n/)
+    return { lineNumber: lines.length, column: lines[lines.length - 1]!.length + 1 }
+  }
+  const from = sourcePosition(start)
+  const to = sourcePosition(end)
+  const range = new monaco.Range(from.lineNumber, from.column, to.lineNumber, to.column)
+  editor.setSelection(range)
+  editor.revealRangeInCenter(range)
+}
+defineExpose({ selectAll, selectTextRange })
 
 onMounted(createEditor)
 
@@ -370,19 +388,20 @@ onBeforeUnmount(() => {
   changeDisposable?.dispose()
   contentSizeDisposable?.dispose()
   layoutDisposable?.dispose()
+  const model = editorInstance.value?.getModel()
   editorInstance.value?.dispose()
+  model?.dispose()
 })
 </script>
 
 <style scoped>
-.monaco-reader { min-width: 0; }
+.monaco-reader { position: relative; min-width: 0; }
 .monaco-reader--packet { background: var(--surface-inset); }
 .monaco-reader--packet .monaco-editor-host { border: 0; border-radius: 0; }
-.monaco-reader__search { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border-bottom: 1px solid var(--border); }
+.monaco-reader__search { position: absolute; top: 0; right: 0; z-index: 5; display: flex; align-items: center; gap: var(--space-1); width: min(420px, 100%); box-sizing: border-box; padding: var(--space-1) var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--color-surface-inset); box-shadow: var(--shadow-md); }
 .monaco-reader__search input { min-width: 0; flex: 1; padding: var(--space-1) var(--space-2); color: var(--text); background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); font: inherit; font-size: var(--text-sm); }
 .monaco-reader__search input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .monaco-reader__matches { flex-shrink: 0; color: var(--text-muted); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
-.monaco-reader__search--placeholder { visibility: hidden; }
 .monaco-reader--http, .monaco-reader--http :deep(.monaco-editor), .monaco-reader--http :deep(.monaco-editor-background) { background: var(--color-surface); }
 .monaco-reader--http { border-radius: inherit; overflow: clip; }
 .monaco-reader--http .monaco-reader__search { min-height: 41px; background: var(--color-surface-inset); }

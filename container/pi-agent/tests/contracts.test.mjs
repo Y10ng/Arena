@@ -53,24 +53,104 @@ const findingResult = {
   },
 };
 
-test('report schema v2 requires a single ordered markdown or fact layout', () => {
+test('finding reproduction_steps accepts independent exact SDK excerpts with original artifact references', async (t) => {
+  const control = '对照：[owner=甲] 仅返回自己的对象。\r\n';
+  const tail = '尾部已验证：用户甲读取到用户乙的对象 42。\r\n';
+  const original = 'HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n' + control + '无关过程\r\n'.repeat(6000) + tail;
+  const bytes = Buffer.from(original);
+  const chunks = [];
+  let registered;
+  const lastTool = (call) => JSON.parse(call.body.messages.filter((message) => message.role === 'tool').at(-1).content);
+  const { request, cwd } = await fixture(t, 'openai-chat-completions', [
+    { tools: [{ name: 'register_artifact', args: { path: 'response.txt', kind: 'raw_output' } }] },
+    (call) => {
+      registered = lastTool(call);
+      return { tools: [{ name: 'read_evidence', args: { path: registered.path, match: control } }] };
+    },
+    (call) => {
+      chunks.push(lastTool(call));
+      return { tools: [{ name: 'read_evidence', args: { path: registered.path, match: tail } }] };
+    },
+    (call) => {
+      chunks.push(lastTool(call));
+      const result = structuredClone(findingResult);
+      result.data.fact.description = '用户甲在已登录状态越权读取用户乙的对象；已核对正常归属对照。';
+      Object.assign(result.data.fact.vulnerability, {
+        remediation: '读取对象前校验当前主体与对象归属，并用跨用户对象请求验证拒绝行为。',
+        reproduction_steps: [
+          { action: '使用用户甲身份读取其自有对象，保留返回的对象字段作为对照。', observation: control, evidence_item_ids: ['response-long'] },
+          { action: '保持同一身份，将对象参数替换为已有授权测试资料中用户乙的对象 42。', observation: tail, evidence_item_ids: ['response-long'] },
+        ],
+        evidence_items: [{ id: 'response-long', kind: 'http', source: 'capture', response: { artifact_handle: registered.handle },
+          excerpts: chunks.map((chunk) => ({ side: 'response', pointer: chunk.pointer })) }],
+      });
+      result.data.assessment_record.evidence_refs = [{ artifact_id: registered.handle }];
+      return { tools: [{ name: 'submit_result', args: result }] };
+    },
+  ]);
+  await writeFile(join(cwd, 'response.txt'), bytes);
+  Object.assign(request, { phase: 'explore_execute', result_schema: goalSchemas().explore, binding: { assessment_protocol: 'goal-driven-v1' } });
+  const result = await runRequest(request);
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  const finding = result.result.data.fact.vulnerability;
+  assert.equal(finding.schema_version, 2);
+  assert.equal(finding.reproduction_steps.length, 2);
+  assert.deepEqual(finding.reproduction_steps.map((step) => step.evidence_item_ids), [['response-long'], ['response-long']]);
+  assert.deepEqual(finding.evidence_items[0], {
+    id: 'response-long', kind: 'http', source: 'capture', response: { artifact_handle: registered.handle },
+    excerpts: chunks.map((chunk) => ({ side: 'response', pointer: chunk.pointer })),
+  });
+  for (const [index, text] of [control, tail].entries()) {
+    const start = bytes.indexOf(Buffer.from(text));
+    const end = start + Buffer.byteLength(text);
+    assert.deepEqual(chunks[index], { text, byte_start: start, bytes_read: end - start, next_offset: end, total_bytes: bytes.length, eof: end === bytes.length, pointer: `utf8-bytes=${start}:${end}` });
+  }
+  assert.ok(chunks[1].byte_start > 32768);
+  assert.ok(chunks[0].next_offset < chunks[1].byte_start);
+  assert.deepEqual(await readFile(registered.path), bytes);
+  assert.deepEqual(await readFile(join(cwd, 'response.txt')), bytes);
+  assert.equal(result.result.data.artifacts[0].sha256, createHash('sha256').update(bytes).digest('hex'));
+});
+
+test('flow evidence preserves item identity, source and projection excerpts without artifact handles', async (t) => {
+  const schemas = goalSchemas();
+  const validator = Compile(schemas.evidence_item);
+  const current = { id: 'flow-current', kind: 'http', source: 'capture', flow_id: 'flow-1', excerpts: [{ side: 'response', pointer: 'utf8-bytes=0:6', representation: 'http-evidence-v1', sha256: 'a'.repeat(64), revision: 3 }] };
+  const historical = { id: 'flow-baseline', kind: 'http', source: 'historical', flow_id: 'flow-old' };
+  assert.ok(validator.Check(current), JSON.stringify([...validator.Errors(current)]));
+  assert.ok(validator.Check(historical));
+  for (const extra of [{ request: { artifact_id: 'a1' } }, { response_text: 'copied packet' }, { artifact: { artifact_id: 'a1' } }, { text: 'inline' }]) assert.equal(validator.Check({ ...current, ...extra }), false);
+  for (const key of ['representation', 'sha256', 'revision']) {
+    const invalid = structuredClone(current);
+    delete invalid.excerpts[0][key];
+    assert.equal(validator.Check(invalid), false, key);
+  }
+  const submitted = structuredClone(findingResult);
+  submitted.data.fact.vulnerability.evidence_items = [current, historical];
+  submitted.data.fact.vulnerability.reproduction_steps = [{ action: '检查本次结果与已有基线', observation: '保留实际来源', evidence_item_ids: ['flow-current', 'flow-baseline'] }];
+  submitted.data.assessment_record.evidence_refs = [];
+  const { request } = await fixture(t, 'openai-chat-completions', [{ tools: [{ name: 'submit_result', args: submitted }] }]);
+  Object.assign(request, { phase: 'explore_execute', result_schema: schemas.explore, binding: { assessment_protocol: 'goal-driven-v1' } });
+  const result = await runRequest(request);
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  assert.deepEqual(result.result.data.fact.vulnerability.evidence_items, [current, historical]);
+  assert.equal(result.result.data.artifacts, undefined);
+});
+
+test('report schema v5 submits only bounded segment references, never full report bodies', () => {
   const validator = Compile(contracts.submit_result_schemas.report_execute);
-  const result = { accepted: true, data: {
-    schema_version: 2, executive_summary: '仅解释冻结材料', findings: [],
-    layout: [{ type: 'markdown', markdown: '# 合成报告' }, { type: 'fact', ref: 'scope' }],
-  } };
+  const result = { accepted: true, data: { schema_version: 5, segment_refs: [{ artifact_handle: 'local-saved-segment' }] } };
   assert.equal(validator.Check(result), true);
   for (const change of [
     (value) => { delete value.data.schema_version; },
-    (value) => { value.data.schema_version = 1; },
-    (value) => { delete value.data.layout; },
+    (value) => { value.data.schema_version = 4; },
     (value) => { value.data.layout = []; },
     (value) => { value.data.report_markdown = '# 另一份整篇报告'; },
-    (value) => { value.data.layout[0] = { type: 'markdown', markdown: ' ' }; },
-    (value) => { value.data.layout[0] = { type: 'markdown', markdown: '# 报告', ref: 'scope' }; },
-    (value) => { value.data.layout[1] = { type: 'fact', ref: 'scope', markdown: '伪装事实' }; },
-    (value) => { value.data.layout[1] = { type: 'fact' }; },
-    (value) => { value.data.layout[1] = { type: 'template', ref: 'scope' }; },
+    (value) => { value.data.findings = []; },
+    (value) => { value.data.executive_summary = '正文必须单独保存'; },
+    (value) => { value.data.segment_refs = []; },
+    (value) => { value.data.segment_refs = Array.from({ length: 257 }, () => ({ artifact_handle: 'local-segment' })); },
+    (value) => { value.data.segment_refs[0].content = '不能重发正文'; },
   ]) {
     const invalid = structuredClone(result);
     change(invalid);
@@ -333,7 +413,36 @@ test('production Bootstrap submission hides complete.from while Reason retains i
   assert.equal(result.error.code, 'submission_invalid');
   assert.equal(result.error.issue.keyword, 'additionalProperties');
   assert.equal(result.error.issue.path, '/data/complete');
-  assert.ok(contracts.submit_result_schemas.reason_execute.$defs.CompleteResult.properties.from);
+  const complete = contracts.submit_result_schemas.reason_execute.$defs.ReasonCompleteResult;
+  assert.ok(complete.required.includes('from'));
+  assert.equal(complete.properties.from.minItems, 1);
+});
+
+test('Reason completion sources repair locally without changing empty intent semantics', async (t) => {
+  const schema = goalSchemas().reason;
+  const validator = Compile(schema);
+  const valid = { accepted: true, data: { complete: { from: ['f1'], description: 'Synthetic completion' } } };
+  for (const intents of [undefined, null, []]) {
+    const args = structuredClone(valid);
+    if (intents !== undefined) args.data.intents = intents;
+    assert.equal(validator.Check(args), true);
+  }
+  for (const from of [undefined, [], null, ['unknown']]) {
+    const invalid = structuredClone(valid);
+    if (from === undefined) delete invalid.data.complete.from;
+    else invalid.data.complete.from = from;
+    assert.equal(validator.Check(invalid), false);
+  }
+  const missing = structuredClone(valid);
+  delete missing.data.complete.from;
+  const empty = structuredClone(valid);
+  empty.data.complete.from = [];
+  const { request, calls } = await fixture(t, 'openai-chat-completions', [missing, empty, valid].map((args) => ({ tools: [{ name: 'submit_result', args }] })));
+  Object.assign(request, { phase: 'reason_execute', result_schema: schema });
+  const result = await runRequest(request);
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  assert.equal(calls.length, 3);
+  assert.deepEqual(result.result.data.complete.from, ['f1']);
 });
 
 test('production Schema SDK pre-execute rejection has bounded safe diagnostics and normal repair tools', async (t) => {
@@ -659,7 +768,8 @@ for (const tool of [
     max_result_repairs: 0, binding: { allowed_fact_ids: ['fact-1'] } });
   const initial = await runRequest(request);
   assert.equal(initial.error.code, 'submission_missing');
-  const result = await runRequest({ ...request, task_run_id: 'readonly-delivery-run', resume: true, conclude_only: true });
+  const { task_execution, ...readonlyCapabilities } = request.capabilities;
+  const result = await runRequest({ ...request, task_run_id: 'readonly-delivery-run', resume: true, conclude_only: true, capabilities: readonlyCapabilities });
   assert.equal(result.error.code, 'tool_permission', JSON.stringify(result));
   assert.equal(result.error.repair_rounds, 0);
   assert.equal(result.session, request.session);
@@ -668,7 +778,7 @@ for (const tool of [
   assert.deepEqual(calls[1].body.tools.map((entry) => entry.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
   await assert.rejects(access(join(cwd, 'forbidden-delivery-action')));
   assert.equal((await runRequest({ ...request, task_run_id: 'wrong-binding', resume: true, conclude_only: true,
-    binding: { allowed_fact_ids: ['fact-other'] } })).error.code, 'session_ownership');
+    capabilities: readonlyCapabilities, binding: { allowed_fact_ids: ['fact-other'] } })).error.code, 'session_ownership');
   assert.equal(calls.length, 2);
 });
 
@@ -699,6 +809,8 @@ test('runner phase kind map equals the Python generated source contract', () => 
 });
 
 for (const [phase, schema] of Object.entries(contracts.submit_result_schemas)) {
+  // report 的真实 save → refs 通路在 report-segments.test.mjs 验证，不能伪造尚未登记的 handle。
+  if (phase === 'report_execute') continue;
   test(`Python ${phase} schema compiles and submits through actual SDK`, async (t) => {
     const data = sample(schema.properties.data, schema);
     const args = { accepted: true, data };
@@ -710,6 +822,7 @@ for (const [phase, schema] of Object.entries(contracts.submit_result_schemas)) {
     assert.equal(validator.Check({ accepted: 'true', data }), false);
     const { request } = await fixture(t, 'openai-chat-completions', [{ tools: [{ name: 'submit_result', args }] }]);
     request.phase = phase;
+    if (phase.endsWith('_conclude')) delete request.capabilities.task_execution;
     request.result_schema = schema;
     const result = await runRequest(request);
     assert.equal(result.status, 'succeeded', JSON.stringify(result));

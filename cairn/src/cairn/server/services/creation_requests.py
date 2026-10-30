@@ -9,6 +9,7 @@ from fastapi import HTTPException
 
 from cairn.server.db import get_conn, schedule_transaction
 from cairn.server.schemas.projects import CreateProjectRequest
+from cairn.server.schemas.test_egress import egress_request_identity
 
 from .project_records import create_project_record, get_project_detail
 from .time_utils import utcnow
@@ -45,9 +46,13 @@ def create_project_request(body: CreateProjectRequest, *, tenant_id: str, user_i
     with schedule_transaction() as conn:
         replay = None
         if body.request_id is not None:
+            payload = body.model_dump(mode="json", exclude={"request_id", "test_egress"})
+            # 未提交出口的已有请求保持原摘要；显式认证只参与摘要，不持久化明文。
+            if "test_egress" in body.model_fields_set:
+                payload["test_egress"] = egress_request_identity(body.test_egress)
             replay = begin_creation_request(
                 conn, tenant_id=tenant_id, user_id=user_id, operation="project",
-                request_id=str(body.request_id), payload=body.model_dump(mode="json", exclude={"request_id"}),
+                request_id=str(body.request_id), payload=payload,
             )
         if replay is not None and replay["project_id"] is not None:
             project_id = replay["project_id"]

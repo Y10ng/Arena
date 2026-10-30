@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any, NoReturn
 
+from cairn.report_segments import REPORT_MAX_MANIFEST_BYTES, REPORT_SEGMENT_ADAPTER
+from cairn.server.schemas.candidates import CANDIDATE_MAX_MANIFEST_BYTES
 from cairn.dispatcher.config import WorkerConfig, is_sensitive_env_key
 from cairn.dispatcher.worker_protocol.candidate_authority import (
     candidate_authority_sha256,
@@ -74,7 +77,12 @@ class PiDriver:
         conclude_only: bool = False,
         enable_checkpoints: bool = False,
         continuation: dict[str, object] | None = None,
+        task_execution: dict[str, object] | None = None,
+        project_tools_socket_path: str | None = None,
+        project_tools_workspace_path: str | None = None,
+        session_root: str = "/home/kali/workspace/.cairn/pi",
     ) -> DriverResult:
+        chat = phase == "chat_turn"
         request_phase = phase if isinstance(phase, str) and phase else "unknown"
 
         def reject(path: str, message: str, *, code: str = "invalid_request") -> NoReturn:
@@ -140,10 +148,10 @@ class PiDriver:
                 or continuation["execution_generation"] < 0
             ):
                 reject("continuation", "continuation requires a source run and current generation")
-        if phase not in PHASE_DATA_MODELS:
+        if not chat and phase not in PHASE_DATA_MODELS:
             reject("phase", "unsupported result phase", code="phase_unsupported")
         try:
-            result_schema = build_submit_result_schema(phase, binding=binding, inputs=inputs)
+            result_schema = {} if chat else build_submit_result_schema(phase, binding=binding, inputs=inputs)
         except ValueError as exc:
             raise WorkerRequestError(
                 "result_schema",
@@ -175,6 +183,7 @@ class PiDriver:
             capture_id=capture_id,
             binding_sha256=binding_sha256,
             result_schema_sha256=result_schema_sha256,
+            max_manifest_bytes=REPORT_MAX_MANIFEST_BYTES if phase == "report_execute" else CANDIDATE_MAX_MANIFEST_BYTES,
         )
         capabilities: dict[str, object] = {
             "candidate_capture": {
@@ -188,6 +197,58 @@ class PiDriver:
                 "forbidden_literals": _candidate_forbidden_literals(worker, phase),
             }
         }
+        if not chat and not conclude_only and not conclude_phase and phase != "report_execute" and task_execution is None:
+            reject("capabilities.task_execution", "目标执行必须绑定已就绪的测试 scope", code="task_execution_required")
+        if task_execution is not None:
+            if chat or conclude_only or conclude_phase or phase == "report_execute":
+                reject("capabilities.task_execution", "纯材料交付不能创建测试 scope")
+            if task_execution.get("task_run_id") != task_run_id:
+                reject("capabilities.task_execution", "测试 scope 不属于本次 TaskRun")
+            capabilities["task_execution"] = dict(task_execution)
+        if session_root not in {"/home/kali/.cairn/pi", "/home/kali/workspace/.cairn/pi"}:
+            reject("session_root", "session 根目录必须是对应项目的受控路径")
+        if task_execution is not None and session_root != "/home/kali/.cairn/pi":
+            reject("session_root", "测试执行不能共享控制 session 目录")
+        traffic_read_socket_path = None
+        if not chat and phase != "report_execute" and session_root == "/home/kali/.cairn/pi":
+            traffic_read_socket_path = f"/tmp/cairn-prompts/pi-traffic-{capture_id}.sock"
+            capabilities["http_traffic"] = {
+                "protocol": "cairn-traffic-read-v1", "project_id": project_id,
+                "task_run_id": task_run_id, "socket_path": traffic_read_socket_path,
+            }
+        segment_manifest_path = None
+        image_manifest_path = None
+        if phase == "report_execute":
+            segment_binding = binding.get("report_segments") if isinstance(binding, dict) else None
+            if not isinstance(segment_binding, dict):
+                reject("binding", "report execution requires frozen segment authority")
+            segment_manifest_path = f"/tmp/cairn-prompts/pi-report-segments-{capture_id}.json"
+            capabilities["report_segments"] = {
+                "binding": segment_binding,
+                "segment_schema": REPORT_SEGMENT_ADAPTER.json_schema(),
+                "manifest_path": segment_manifest_path,
+            }
+            if inputs and inputs.get("frozen_materials_path"):
+                image_manifest_path = f"/tmp/cairn-prompts/pi-http-evidence-{capture_id}.json"
+                capabilities["http_evidence_render"] = {
+                    "frozen_materials_path": inputs["frozen_materials_path"],
+                    "manifest_path": image_manifest_path,
+                }
+        if chat:
+            if (not isinstance(project_tools_socket_path, str)
+                or not re.fullmatch(r"/tmp/cairn-prompts/pi-project-[0-9a-f]{32}\.sock", project_tools_socket_path)
+                or not isinstance(project_tools_workspace_path, str)
+                or not re.fullmatch(r"/home/kali/workspace/[A-Za-z0-9_-][A-Za-z0-9_.-]{0,199}", project_tools_workspace_path)
+                or session_root != "/home/kali/.cairn/pi"
+                or binding is not None or continuation is not None or conclude_only or enable_checkpoints):
+                reject("capabilities.project_tools", "聊天需要独立私有工具通道与 chat session")
+            capabilities = {"project_tools": {
+                "protocol": "cairn-project-tools-v1", "socket_path": project_tools_socket_path,
+                "workspace_path": project_tools_workspace_path,
+                "forbidden_literals": _candidate_forbidden_literals(worker, phase),
+            }}
+        elif project_tools_socket_path is not None:
+            reject("capabilities.project_tools", "项目工具只能由 chat_turn 装载")
         request = {
             "protocol": "cairn-agent-request-v1",
             "project_id": project_id,
@@ -205,9 +266,10 @@ class PiDriver:
             "binding": binding,
             "timeout_seconds": timeout_seconds,
             "conclude_timeout_seconds": conclude_timeout_seconds,
-            "max_result_repairs": 2,
+            "max_result_repairs": 0 if chat else 2,
             "conclude_only": conclude_only,
             "cwd": "/home/kali/workspace",
+            "session_root": session_root,
             "capabilities": capabilities,
         }
         checkpoint_spool: WorkerCheckpointSpool | None = None
@@ -232,8 +294,12 @@ class PiDriver:
         input_files = [
             WorkerInputFile(path=path, content=json.dumps(request, ensure_ascii=False)),
             # 预创建 0600 regular file，让 runner 只能追加到本次随机 binary spool。
-            WorkerInputFile(path=candidate_spool.path, content=""),
+            *(() if chat else (WorkerInputFile(path=candidate_spool.path, content=""),)),
         ]
+        if segment_manifest_path is not None:
+            input_files.append(WorkerInputFile(path=segment_manifest_path, content=""))
+        if image_manifest_path is not None:
+            input_files.append(WorkerInputFile(path=image_manifest_path, content=""))
         if checkpoint_spool is not None:
             # checkpoint 与 candidate 使用独立 spool，互不改变各自失败语义。
             input_files.append(WorkerInputFile(path=checkpoint_spool.path, content=""))
@@ -242,7 +308,12 @@ class PiDriver:
             session=session,
             input_files=tuple(input_files),
             checkpoint_spool=checkpoint_spool,
-            candidate_spool=candidate_spool,
+            candidate_spool=None if chat else candidate_spool,
+            project_tools_socket_path=project_tools_socket_path,
+            report_segment_manifest_path=segment_manifest_path,
+            http_evidence_manifest_path=image_manifest_path,
+            task_execution_scope_id=task_execution["scope_id"] if task_execution is not None else None,
+            traffic_read_socket_path=traffic_read_socket_path,
         )
 
     def build_conclude(
@@ -256,11 +327,12 @@ class PiDriver:
         task_run_id: str,
         timeout_seconds: int,
         binding: dict[str, Any] | None = None,
+        session_root: str = "/home/kali/workspace/.cairn/pi",
     ) -> DriverResult:
         return self.build_execute(
             worker, prompt, session, phase=phase, project_id=project_id,
             task_run_id=task_run_id, timeout_seconds=timeout_seconds, binding=binding,
-            resume=True, conclude_only=True,
+            resume=True, conclude_only=True, session_root=session_root,
         )
 
     @staticmethod

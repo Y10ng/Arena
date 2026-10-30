@@ -30,7 +30,7 @@
               <div class="config-model">
                 <div class="config-model-heading">
                   <label for="verification-config-model">模型 <span class="config-required" aria-hidden="true">*</span></label>
-                  <RouterLink v-if="managingOwnModels" :to="{ name: 'ConsoleModels' }" class="config-model-link">个人模型管理</RouterLink>
+                  <RouterLink v-if="managingOwnModels" :to="{ name: 'ConsoleWorkers', query: { section: 'models' } }" class="config-model-link">个人模型管理</RouterLink>
                 </div>
                 <FormField for="verification-config-model" required>
                   <Select id="verification-config-model" v-model="configForm.model_id" :options="modelOptions" :disabled="configLoading || configSaving" placeholder="选择模型" required />

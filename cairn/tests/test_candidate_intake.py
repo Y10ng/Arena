@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import base64
+from dataclasses import replace
 from hashlib import sha256
 import json
 from pathlib import Path
 import struct
 
 import pytest
+from fastapi import HTTPException
+from pydantic import ValidationError
 
+from cairn.report_segments import REPORT_MAX_MANIFEST_BYTES, REPORT_MAX_SEGMENTS
+from cairn.server.routers.candidates import _decode_manifest_header
+from cairn.server.schemas.candidates import (
+    CANDIDATE_MAX_ARTIFACT_BYTES, CANDIDATE_MAX_MANIFEST_BYTES, CANDIDATE_MAX_RAW_BYTES,
+    CandidateFrameManifest,
+)
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.tasks.candidate_capture_outbox import (
     CandidateCaptureOutbox,
@@ -110,6 +120,81 @@ def _decode(spool: bytes) -> list[PendingCandidateCapture]:
         phase="explore_execute",
         session=_SESSION,
     )
+
+
+def _report_artifacts(count: int) -> list[dict[str, object]]:
+    return [
+        {"handle": f"local-{index:04d}-" + "a" * 110, "kind": "report",
+         "sha256": "a" * 64, "size_bytes": 0}
+        for index in range(count)
+    ]
+
+
+def test_report_candidate_capacity_survives_header_spool_and_outbox(tmp_path: Path) -> None:
+    raw = b"r" * CANDIDATE_MAX_RAW_BYTES
+    manifest = _candidate_manifest(
+        raw, phase="report_execute", artifacts=_report_artifacts(REPORT_MAX_SEGMENTS),
+    )
+    manifest_bytes = _canonical(manifest)
+    assert CANDIDATE_MAX_MANIFEST_BYTES < len(manifest_bytes) <= REPORT_MAX_MANIFEST_BYTES
+    encoded = base64.urlsafe_b64encode(manifest_bytes).rstrip(b"=").decode("ascii")
+    parsed, received = _decode_manifest_header(encoded)
+    assert len(parsed.artifacts) == REPORT_MAX_SEGMENTS and received == manifest_bytes
+    descriptor = replace(_descriptor(), max_manifest_bytes=REPORT_MAX_MANIFEST_BYTES)
+    frame = _frame(manifest, raw)
+    entries = decode_candidate_spool(
+        frame, descriptor, project_id="project-1", task_run_id="run-1",
+        phase="report_execute", session=_SESSION,
+    )
+    outbox = CandidateCaptureOutbox(tmp_path / "outbox", owner_id="synthetic-dispatcher")
+    outbox.persist(entries[0])
+    restored = CandidateCaptureOutbox(
+        tmp_path / "outbox", owner_id="synthetic-dispatcher",
+    ).entries()
+    assert restored == entries
+    assert restored[0].manifest_bytes == manifest_bytes
+    assert restored[0].raw == raw and restored[0].frame_bytes == frame
+    with pytest.raises(CandidateIntakeError, match="manifest exceeds"):
+        decode_candidate_spool(
+            frame, descriptor, project_id="project-1", task_run_id="run-1",
+            phase="explore_execute", session=_SESSION,
+        )
+
+
+@pytest.mark.parametrize("phase,count", [("explore_execute", 33), ("report_execute", 257)])
+def test_candidate_artifact_count_limits_remain_phase_scoped(phase, count) -> None:
+    raw = b"{}"
+    manifest = _candidate_manifest(raw, phase=phase, artifacts=_report_artifacts(count))
+    descriptor = replace(_descriptor(), max_manifest_bytes=REPORT_MAX_MANIFEST_BYTES)
+    with pytest.raises(ValidationError):
+        CandidateFrameManifest.model_validate(manifest)
+    with pytest.raises(CandidateIntakeError):
+        decode_candidate_spool(
+            _frame(manifest, raw), descriptor, project_id="project-1", task_run_id="run-1",
+            phase=phase, session=_SESSION,
+        )
+
+
+def test_report_candidate_capacity_keeps_total_bytes_and_header_ceiling() -> None:
+    raw = b"{}"
+    artifacts = _report_artifacts(REPORT_MAX_SEGMENTS)
+    artifacts[0]["size_bytes"] = CANDIDATE_MAX_ARTIFACT_BYTES
+    manifest = _candidate_manifest(raw, phase="report_execute", artifacts=artifacts)
+    CandidateFrameManifest.model_validate(manifest)
+    artifacts[0]["size_bytes"] += 1
+    with pytest.raises(ValidationError, match="total byte limit"):
+        CandidateFrameManifest.model_validate(manifest)
+    with pytest.raises(CandidateIntakeError, match="byte limit"):
+        decode_candidate_spool(
+            _frame(manifest, raw),
+            replace(_descriptor(), max_manifest_bytes=REPORT_MAX_MANIFEST_BYTES),
+            project_id="project-1", task_run_id="run-1", phase="report_execute", session=_SESSION,
+        )
+    oversized = b" " * (REPORT_MAX_MANIFEST_BYTES + 1)
+    encoded = base64.urlsafe_b64encode(oversized).rstrip(b"=").decode("ascii")
+    with pytest.raises(HTTPException, match="candidate_manifest_too_large") as error:
+        _decode_manifest_header(encoded)
+    assert error.value.status_code == 413
 
 
 def test_decode_candidate_spool_preserves_exact_raw_and_ordered_outcome() -> None:
@@ -301,6 +386,23 @@ def test_decode_candidate_spool_rejects_invalid_lineage_outcome_and_artifacts() 
     ]
     with pytest.raises(CandidateIntakeError, match="unique and sorted"):
         _decode(_frame(_candidate_manifest(first_raw, artifacts=duplicate_artifacts), first_raw))
+
+
+def test_model_output_limit_candidate_outcome_is_preserved() -> None:
+    from cairn.server.services.candidate_store import _require_safe_outcome_diagnostic
+
+    raw = b'{"accepted":true}'
+    outcome = _outcome_manifest(
+        code="model_output_limit", path=None, keyword=None, count=None,
+    )
+    entries = _decode(_frame(_candidate_manifest(raw), raw) + _frame(outcome, b""))
+    assert len(entries) == 2
+    assert json.loads(entries[1].manifest_bytes)["code"] == "model_output_limit"
+    _require_safe_outcome_diagnostic(
+        code="model_output_limit", path=None, keyword=None, count=None,
+        artifact_status="not_evaluated", binding_status="not_evaluated",
+        allowed_paths=None, status_code=422,
+    )
 
 
 @pytest.mark.parametrize(

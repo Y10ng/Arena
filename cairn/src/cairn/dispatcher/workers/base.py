@@ -11,6 +11,7 @@ from cairn.server.schemas.candidates import (
     CANDIDATE_MAX_CANDIDATES_PER_TASK_RUN as CANDIDATE_MAX_CANDIDATES,
     CANDIDATE_MAX_RAW_BYTES as CANDIDATE_MAX_BYTES,
     CANDIDATE_MAX_MANIFEST_BYTES,
+    REPORT_CANDIDATE_MAX_MANIFEST_BYTES,
     CANDIDATE_MAX_SPOOL_BYTES,
     CANDIDATE_MAX_OUTCOMES_PER_CANDIDATE,
     CANDIDATE_MAX_ARTIFACTS,
@@ -135,7 +136,7 @@ class WorkerCandidateSpool:
         limits = (
             (self.max_candidates, CANDIDATE_MAX_CANDIDATES),
             (self.max_candidate_bytes, CANDIDATE_MAX_BYTES),
-            (self.max_manifest_bytes, CANDIDATE_MAX_MANIFEST_BYTES),
+            (self.max_manifest_bytes, REPORT_CANDIDATE_MAX_MANIFEST_BYTES),
             (self.max_spool_bytes, CANDIDATE_MAX_SPOOL_BYTES),
         )
         if any(
@@ -198,6 +199,11 @@ class DriverResult:
     input_files: tuple[WorkerInputFile, ...] = ()
     checkpoint_spool: WorkerCheckpointSpool | None = None
     candidate_spool: WorkerCandidateSpool | None = None
+    report_segment_manifest_path: str | None = None
+    http_evidence_manifest_path: str | None = None
+    task_execution_scope_id: str | None = None
+    traffic_read_socket_path: str | None = None
+    project_tools_socket_path: str | None = None
 
     def __post_init__(self) -> None:
         if (

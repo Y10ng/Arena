@@ -396,7 +396,7 @@ def project_reauthorization_reason(
         if progress.get("phase") in {"finalizing", "completed"}:
             return "assessment_new_project_required"
     if conn.execute(
-        "SELECT 1 FROM assessment_report_finalizations WHERE project_id = ? LIMIT 1",
+        "SELECT 1 FROM assessment_report_finalizations WHERE project_id = ? AND scope_key = '' LIMIT 1",
         (project["id"],),
     ).fetchone() is not None:
         return "assessment_report_finalization_in_progress"

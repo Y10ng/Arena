@@ -85,6 +85,9 @@ def classify_write_response(
     code = response_detail_code(response)
     if 200 <= status < 300:
         return WriteDisposition("accepted", None, False, code)
+    if status == 409 and code == "traffic_evidence_pending":
+        # 仅重试原交付；预算耗尽仍是材料接受失败，不触发模型或目标重跑。
+        return WriteDisposition("transient", "business_acceptance", True, code)
     if status == 0 or status in {408, 429} or 500 <= status < 600:
         return WriteDisposition("transient", "server_write_failed", True, code)
     if status in {401, 403}:

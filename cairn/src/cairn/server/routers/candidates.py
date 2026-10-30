@@ -19,6 +19,8 @@ from cairn.server.auth import (
 from cairn.server.schemas.candidates import (
     CANDIDATE_MANIFEST_HEADER,
     CANDIDATE_MAX_MANIFEST_BYTES,
+    REPORT_CANDIDATE_MAX_MANIFEST_BYTES,
+    candidate_manifest_byte_limit,
     CandidateCapabilities,
     CandidateFrameManifest,
     CandidateMetadata,
@@ -42,7 +44,7 @@ _PRIVATE_HEADERS = {
     "X-Content-Type-Options": "nosniff",
 }
 _BASE64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-_MAX_ENCODED_MANIFEST_LENGTH = (CANDIDATE_MAX_MANIFEST_BYTES * 4 + 2) // 3
+_MAX_ENCODED_MANIFEST_LENGTH = (REPORT_CANDIDATE_MAX_MANIFEST_BYTES * 4 + 2) // 3
 
 
 def _set_private_headers(response: Response) -> None:
@@ -71,7 +73,7 @@ def _decode_manifest_header(
     )
     if canonical_encoding != encoded:
         raise HTTPException(422, "candidate_manifest_encoding_invalid")
-    if not manifest_bytes or len(manifest_bytes) > CANDIDATE_MAX_MANIFEST_BYTES:
+    if not manifest_bytes or len(manifest_bytes) > REPORT_CANDIDATE_MAX_MANIFEST_BYTES:
         raise HTTPException(413, "candidate_manifest_too_large")
     try:
         manifest_json = manifest_bytes.decode("utf-8", errors="strict")
@@ -96,6 +98,9 @@ def _decode_manifest_header(
             raise HTTPException(422, "candidate_record_kind_invalid")
     except (ValidationError, RecursionError):
         raise HTTPException(422, "candidate_manifest_invalid") from None
+    limit = candidate_manifest_byte_limit(manifest.phase) if isinstance(manifest, CandidateFrameManifest) else CANDIDATE_MAX_MANIFEST_BYTES
+    if len(manifest_bytes) > limit:
+        raise HTTPException(413, "candidate_manifest_too_large")
     return manifest, manifest_bytes
 
 

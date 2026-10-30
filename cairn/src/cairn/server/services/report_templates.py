@@ -9,7 +9,10 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
+from cairn.report_template_contract import parse_report_template, requires_single_vulnerability, supports_single_vulnerability
 from cairn.server.db import PostgresConnection
+from cairn.server.report_template_defaults_v60 import DEFAULT_REPORT_TEMPLATE_KEY_V60
+from cairn.server.report_template_defaults_v69 import DEFAULT_SINGLE_REPORT_TEMPLATE_KEY, SINGLE_REPORT_PROFILE
 from cairn.server.schemas.report_templates import (
     ReportTemplate,
     ReportTemplateCatalogEntry,
@@ -37,13 +40,28 @@ def _template_model(conn: PostgresConnection, row) -> ReportTemplate:
         "SELECT profile_id FROM report_template_profiles WHERE template_key = ? ORDER BY profile_id",
         (row["key"],),
     ).fetchall()
+    content = row["markdown_content"] or ""
+    validation_error = None
+    try:
+        parse_report_template(content)
+    except ValueError as exc:
+        validation_error = str(exc)
     item = ReportTemplate(
         **dict(row),
         compatibility_profiles=[str(profile["profile_id"]) for profile in profiles],
+        is_default=row["key"] == DEFAULT_REPORT_TEMPLATE_KEY_V60,
+        supports_single_vulnerability=validation_error is None and supports_single_vulnerability(content),
+        validation_error=validation_error,
     )
     if item.markdown_content is not None and report_template_digest(item.markdown_content) != item.digest_sha256:
         raise RuntimeError(f"Report template digest mismatch: {item.key}")
     return item
+
+
+def default_single_report_template_key(conn: PostgresConnection) -> str:
+    # 已自定义的旧默认不会生成专用种子；继续尊重该用户模板，不按正文偷偷替换。
+    row = conn.execute("SELECT key FROM report_templates WHERE key = ?", (DEFAULT_SINGLE_REPORT_TEMPLATE_KEY,)).fetchone()
+    return DEFAULT_SINGLE_REPORT_TEMPLATE_KEY if row is not None else DEFAULT_REPORT_TEMPLATE_KEY_V60
 
 
 def list_report_templates(conn: PostgresConnection) -> list[ReportTemplate]:
@@ -133,6 +151,8 @@ def update_report_template(
 
 def delete_report_template(conn: PostgresConnection, key: str) -> None:
     row = _template_row(conn, key, lock="FOR UPDATE")
+    if row["key"] == DEFAULT_REPORT_TEMPLATE_KEY_V60:
+        raise HTTPException(409, "report_template_default_delete_forbidden")
     # finalization 自持冻结输入，不以外键绑定当前模板，也不随删除撤销任务。
     conn.execute("DELETE FROM report_templates WHERE key = ?", (row["key"],))
 
@@ -145,6 +165,9 @@ def list_report_template_catalog(conn: PostgresConnection) -> list[ReportTemplat
             description=item.description,
             digest_sha256=item.digest_sha256,
             compatibility_profiles=item.compatibility_profiles,
+            is_default=item.is_default,
+            supports_single_vulnerability=item.supports_single_vulnerability,
+            validation_error=item.validation_error,
         )
         for item in list_report_templates(conn)
         if item.markdown_content is not None and item.markdown_content.strip()
@@ -160,8 +183,12 @@ def require_report_template_profile(
     template = _template_model(conn, _template_row(conn, template_key, lock="FOR SHARE"))
     if template.markdown_content is None or not template.markdown_content.strip():
         raise HTTPException(409, "assessment_report_template_content_missing")
-    if profile_id not in template.compatibility_profiles:
+    if profile_id not in template.compatibility_profiles or (
+        profile_id != SINGLE_REPORT_PROFILE and requires_single_vulnerability(template.markdown_content)
+    ):
         raise HTTPException(409, "assessment_report_template_incompatible")
+    if template.validation_error is not None:
+        raise HTTPException(409, {"code": "assessment_report_template_invalid", "message": template.validation_error})
     return template
 
 

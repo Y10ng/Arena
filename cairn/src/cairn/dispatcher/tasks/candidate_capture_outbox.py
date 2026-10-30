@@ -17,9 +17,10 @@ import threading
 from typing import Iterator, Mapping
 import uuid
 
+from cairn.server.schemas.candidates import candidate_manifest_byte_limit
 from cairn.dispatcher.workers.base import (
     CANDIDATE_MAX_BYTES,
-    CANDIDATE_MAX_MANIFEST_BYTES,
+    REPORT_CANDIDATE_MAX_MANIFEST_BYTES,
     CANDIDATE_SPOOL_PROTOCOL,
     WorkerCandidateSpool,
 )
@@ -32,13 +33,19 @@ _FENCE_PROTOCOL = "cairn-candidate-execution-fence-v1"
 TERMINATION_ATTEMPT_LIMIT = 3
 _CAPTURE_SUFFIX = ".capture.bin"
 _FENCE_SUFFIX = ".fence.json"
+_REJECTION_SUFFIX = ".rejection.json"
+# 这些拒绝只依赖冻结执行身份；网络、鉴权、未知冲突不在终结范围内。
+PERMANENT_CANDIDATE_REJECTIONS = frozenset({
+    "candidate_phase_mismatch", "candidate_session_mismatch",
+    "candidate_binding_digest_mismatch", "candidate_result_schema_digest_mismatch",
+})
 _SHA256_LENGTH = 64
 _MAX_OUTBOX_METADATA_BYTES = 16 * 1024
 _MAX_CAPTURE_FILE_BYTES = (
     16
     + _MAX_OUTBOX_METADATA_BYTES
     + 16
-    + CANDIDATE_MAX_MANIFEST_BYTES
+    + REPORT_CANDIDATE_MAX_MANIFEST_BYTES
     + CANDIDATE_MAX_BYTES
     + 32
     + 32
@@ -46,7 +53,7 @@ _MAX_CAPTURE_FILE_BYTES = (
 _MAX_FENCE_FILE_BYTES = 64 * 1024
 _CONTROL_PATH_RE = re.compile(r"^/tmp/cairn-exec-[0-9a-f]{32}\.json$")
 _TEMPORARY_LINK_RE = re.compile(
-    r"^\.(?P<target>[a-f0-9]{64}\.(?:capture\.bin|fence\.json))\."
+    r"^\.(?P<target>[a-f0-9]{64}\.(?:capture\.bin|fence\.json|rejection\.json))\."
     r"(?P<nonce>[a-f0-9]{32})\.tmp$"
 )
 
@@ -176,6 +183,8 @@ class PendingCandidateCapture:
             or self.frame_index < 0
         ):
             raise CandidateCaptureOutboxError("invalid candidate frame index")
+        if len(self.manifest_bytes) > candidate_manifest_byte_limit(self.phase) or len(self.raw) > CANDIDATE_MAX_BYTES:
+            raise CandidateCaptureOutboxError("candidate frame exceeds its byte limit")
         if not _is_sha256(self.request_sha256):
             raise CandidateCaptureOutboxError("invalid candidate request digest")
         if self.raw_sha256 is not None and not _is_sha256(self.raw_sha256):
@@ -207,6 +216,43 @@ class PendingCandidateCapture:
             or _canonical_json(_parse_object(self.manifest_bytes)) != self.manifest_bytes
         ):
             raise CandidateCaptureOutboxError("candidate frame bytes are inconsistent")
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateCaptureRejection:
+    """独立保存真实 HTTP 拒绝；原 candidate/outcome frame 不删除、不改写。"""
+
+    project_id: str
+    task_run_id: str
+    capture_id: str
+    producer_candidate_key: str
+    request_sha256: str
+    status_code: int
+    code: str
+    rejected_at: str
+
+    def __post_init__(self) -> None:
+        if (
+            any(not isinstance(value, str) or not value for value in (
+                self.project_id, self.task_run_id, self.capture_id,
+                self.producer_candidate_key, self.rejected_at,
+            ))
+            or not _is_sha256(self.request_sha256)
+            or type(self.status_code) is not int or self.status_code != 409
+            or self.code not in PERMANENT_CANDIDATE_REJECTIONS
+        ):
+            raise CandidateCaptureOutboxError("invalid candidate rejection")
+
+    def matches(self, entry: PendingCandidateCapture) -> bool:
+        if self.producer_candidate_key != entry.producer_candidate_key:
+            return False
+        if (
+            self.project_id != entry.project_id or self.task_run_id != entry.task_run_id
+            or self.capture_id != entry.capture_id
+            or (entry.record_kind == "candidate" and self.request_sha256 != entry.request_sha256)
+        ):
+            raise CandidateCaptureOutboxConflict("candidate rejection identity conflict")
+        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -558,14 +604,63 @@ class CandidateCaptureOutbox:
         with self._locked():
             self._persist_no_replace(path, encoded, conflict_message="candidate delivery conflict")
 
-    def entries(self) -> list[PendingCandidateCapture]:
+    def entries(self, *, include_rejected: bool = False) -> list[PendingCandidateCapture]:
         with self._locked():
             paths = sorted(self.root.glob(f"*{_CAPTURE_SUFFIX}"))
             entries = [self._decode_entry(self._read_private_file(path)) for path in paths]
-            return sorted(
-                entries,
-                key=lambda entry: (entry.capture_id, entry.frame_index),
-            )
+            if not include_rejected:
+                rejections = self._read_rejections()
+                entries = [entry for entry in entries if not any(item.matches(entry) for item in rejections)]
+            return sorted(entries, key=lambda entry: (entry.capture_id, entry.frame_index))
+
+    def rejection(self, entry: PendingCandidateCapture) -> CandidateCaptureRejection | None:
+        with self._locked():
+            return next((item for item in self._read_rejections() if item.matches(entry)), None)
+
+    def rejections(self) -> list[CandidateCaptureRejection]:
+        with self._locked():
+            return self._read_rejections()
+
+    def _read_rejections(self) -> list[CandidateCaptureRejection]:
+        result = []
+        for path in sorted(self.root.glob(f"*{_REJECTION_SUFFIX}")):
+            envelope = _parse_object(self._read_private_file(path))
+            payload = envelope.get("payload")
+            if (
+                set(envelope) != {"payload", "payload_sha256"} or not isinstance(payload, dict)
+                or payload.get("owner_id") != self.owner_id
+                or envelope["payload_sha256"] != sha256(_canonical_json(payload)).hexdigest()
+            ):
+                raise CandidateCaptureOutboxError("invalid candidate rejection envelope")
+            try:
+                result.append(CandidateCaptureRejection(**{key: value for key, value in payload.items() if key != "owner_id"}))
+            except (TypeError, ValueError) as exc:
+                raise CandidateCaptureOutboxError("invalid candidate rejection fields") from exc
+        return result
+
+    def reject(self, entry: PendingCandidateCapture, *, status_code: int, code: str) -> CandidateCaptureRejection:
+        if entry.record_kind != "candidate":
+            raise CandidateCaptureOutboxError("only a candidate can establish terminal rejection")
+        rejection = CandidateCaptureRejection(
+            project_id=entry.project_id, task_run_id=entry.task_run_id, capture_id=entry.capture_id,
+            producer_candidate_key=entry.producer_candidate_key, request_sha256=entry.request_sha256,
+            status_code=status_code, code=code, rejected_at=datetime.now(UTC).isoformat(),
+        )
+        # 使用独立的终态记录，保留 exact frame；同源 outcome 自动继承拒绝而不再发送。
+        path = self.root / (sha256(f"{self.owner_id}\0{entry.producer_candidate_key}".encode()).hexdigest() + _REJECTION_SUFFIX)
+        with self._locked():
+            if self._read_private_file(self._capture_path(entry.delivery_key)) != self._encode_entry(entry):
+                raise CandidateCaptureOutboxConflict("candidate changed before rejection")
+            existing = next((item for item in self._read_rejections() if item.matches(entry)), None)
+            if existing is not None:
+                if existing.status_code != status_code or existing.code != code:
+                    raise CandidateCaptureOutboxConflict("candidate rejection changed")
+                self._fsync_root()
+                return existing
+            payload = {"owner_id": self.owner_id, **asdict(rejection)}
+            encoded = _canonical_json({"payload": payload, "payload_sha256": sha256(_canonical_json(payload)).hexdigest()})
+            self._persist_no_replace(path, encoded, conflict_message="candidate rejection conflict")
+        return rejection
 
     def remove(self, entry: PendingCandidateCapture) -> bool:
         path = self._capture_path(entry.delivery_key)
@@ -1093,7 +1188,7 @@ class CandidateCaptureOutbox:
     def _read_private_file(self, path: Path) -> bytes:
         if path.name.endswith(_CAPTURE_SUFFIX):
             maximum_bytes = _MAX_CAPTURE_FILE_BYTES
-        elif path.name.endswith(_FENCE_SUFFIX):
+        elif path.name.endswith((_FENCE_SUFFIX, _REJECTION_SUFFIX)):
             maximum_bytes = _MAX_FENCE_FILE_BYTES
         else:
             raise CandidateCaptureOutboxError("unknown candidate durable state kind")

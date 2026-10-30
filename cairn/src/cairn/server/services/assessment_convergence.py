@@ -440,7 +440,7 @@ def assessment_execution_view(conn, project) -> dict:
 
 def assessment_has_running_work(conn, project_id: str, *, exclude_task_run_id: str | None = None) -> bool:
     return conn.execute(
-        "SELECT 1 FROM task_runs WHERE project_id = ? AND task_type != 'report' AND status IN ('queued', 'running') AND (CAST(? AS TEXT) IS NULL OR id != ?) LIMIT 1",
+        "SELECT 1 FROM task_runs WHERE project_id = ? AND task_type NOT IN ('report', 'agent_chat') AND status IN ('queued', 'running') AND (CAST(? AS TEXT) IS NULL OR id != ?) LIMIT 1",
         (project_id, exclude_task_run_id, exclude_task_run_id),
     ).fetchone() is not None
 

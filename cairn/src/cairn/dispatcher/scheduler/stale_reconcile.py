@@ -53,6 +53,9 @@ class StaleReconcileMixin:
                 task_run_id = item.get("id")
                 if not isinstance(task_run_id, str) or not task_run_id:
                     continue
+                # 对话由专用持久轮次标记中断；缺失future不构成再次模型执行许可。
+                if item.get("task_type") == "agent_chat":
+                    continue
                 if item.get("status") != "running":
                     continue
                 if task_run_id in current_task_run_ids:

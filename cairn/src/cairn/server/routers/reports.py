@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from cairn.server.auth import (
     RequestPrincipal,
     protect_cookie_request,
+    require_tenant_project,
     write_security_audit,
 )
 from cairn.server.db import get_conn
@@ -75,6 +76,24 @@ def get_reports_route(
                 outcome="success",
             )
         return result
+
+
+@router.get("/projects/{project_id}/reports/{artifact_id}/display-images", dependencies=[Depends(require_tenant_project)])
+def get_report_display_images(project_id: str, artifact_id: str):
+    from cairn.server.services.report_images import report_display_images
+
+    with get_conn() as conn:
+        return report_display_images(conn, project_id, artifact_id)
+
+
+@router.get("/projects/{project_id}/reports/{artifact_id}/images/{image_id}", dependencies=[Depends(require_tenant_project)])
+def get_report_display_image(project_id: str, artifact_id: str, image_id: str):
+    from fastapi.responses import Response
+    from cairn.server.services.report_images import report_display_image_content
+
+    with get_conn() as conn:
+        content = report_display_image_content(conn, project_id, artifact_id, image_id)
+    return Response(content, media_type="image/png", headers={"Cache-Control": "private, no-store"})
 
 
 __all__ = ["router"]

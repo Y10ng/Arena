@@ -47,7 +47,6 @@ export const routePageInventory = [
   { routeName: 'Overview', file: 'src/features/overview/Overview.vue', area: 'front' },
   { routeName: 'Findings', file: 'src/features/findings/FindingsPage.vue', area: 'front' },
   { routeName: 'Reports', file: 'src/features/findings/ReportManagement.vue', area: 'front' },
-  { routeName: 'Provenance', file: 'src/features/provenance/ProvenancePage.vue', area: 'front' },
   { routeName: 'Projects', file: 'src/features/projects/Projects.vue', area: 'front' },
   { routeName: 'WorkspaceGraph', file: 'src/features/graph/GraphPage.vue', area: 'workspace' },
   { routeName: 'WorkspaceRuns', file: 'src/features/runs/RunsPage.vue', area: 'workspace' },
@@ -63,7 +62,6 @@ export const routePageInventory = [
   },
   { routeName: 'WorkspaceHints', file: 'src/features/hints/HintsPage.vue', area: 'workspace' },
   { routeName: 'Monitoring', file: 'src/features/monitoring/Monitoring.vue', area: 'tenant' },
-  { routeName: 'ConsoleModels', file: 'src/features/models/TenantModelsPage.vue', area: 'tenant' },
   {
     routeName: 'ConsoleWorkers',
     file: 'src/features/workers/TenantWorkersPage.vue',
@@ -72,11 +70,6 @@ export const routePageInventory = [
   {
     routeName: 'ConsoleUsers',
     file: 'src/features/settings/UsersSettingsPage.vue',
-    area: 'system',
-  },
-  {
-    routeName: 'ConsoleDispatcher',
-    file: 'src/features/console/WorkersConsole.vue',
     area: 'system',
   },
   {
@@ -99,13 +92,12 @@ export const routePageInventory = [
     file: 'src/features/console/ReportTemplatesConsole.vue',
     area: 'system',
   },
-  { routeName: 'ConsoleTimeout', file: 'src/features/console/TimeoutConsole.vue', area: 'system' },
   { routeName: 'Forbidden', file: 'src/features/status/ForbiddenPage.vue', area: 'status' },
   { routeName: 'NotFound', file: 'src/features/status/NotFoundPage.vue', area: 'status' },
 ] as const satisfies readonly RoutePageInventoryItem[]
 
 const authPages = ['Login', 'ChangePassword'] as const
-const frontPages = ['Overview', 'Findings', 'Reports', 'Provenance', 'Projects'] as const
+const frontPages = ['Overview', 'Findings', 'Reports', 'Projects'] as const
 const workspacePages = [
   'WorkspaceGraph',
   'WorkspaceRuns',
@@ -113,15 +105,13 @@ const workspacePages = [
   'WorkspaceArtifacts',
   'WorkspaceHints',
 ] as const
-const tenantPages = ['Monitoring', 'ConsoleModels', 'ConsoleWorkers'] as const
+const tenantPages = ['Monitoring', 'ConsoleWorkers'] as const
 const systemPages = [
   'ConsoleUsers',
-  'ConsoleDispatcher',
   'ConsoleScenarios',
   'ConsolePrompts',
   'ConsoleKnowledge',
   'ConsoleReportTemplates',
-  'ConsoleTimeout',
 ] as const
 
 export const componentMigrationRecords: readonly ComponentMigrationRecord[] = [
@@ -165,12 +155,12 @@ export const componentMigrationRecords: readonly ComponentMigrationRecord[] = [
     migrationStatus: 'migrating',
     verification: ['component'],
     notes: [
-      'Login、ChangePassword、ConsoleTimeout 与 Overview 已迁移 Button；TenantWorkers 已迁移 Model Select；TenantModels 已迁移 protocol、auth header 与 discovery Select；WorkspaceVulnerabilities 创建弹窗已迁移 Button、FormField、Input、Select 与 Textarea，confidence 因 Cairn Input 的 nullable numeric 契约暂保留原生 number input；Findings 已迁移带可见标签的严重度/状态 Select 与 refresh Button；WorkspaceArtifacts 已迁移带可见标签的 kind Select、刷新、预览、Run 与复制操作；Traffic 已迁移全局项目 FormField/Select、刷新及 Run/evidence/复制 Button，工作区模式继续隐藏项目选择器；WorkspaceHints 已迁移 Button、FormField、Select 与 Textarea，保留项目级/Fact/Intent 锚点、Intent 优先和 Ctrl/Cmd+Enter 合同；其余清单页面控件仍待迁移。',
+      'Login、ChangePassword、Overview 已迁移 Button；TenantWorkers 已迁移 Model Select；TenantModels 已迁移 protocol、auth header 与 discovery Select；WorkspaceVulnerabilities 创建弹窗已迁移 Button、FormField、Input、Select 与 Textarea，confidence 因 Cairn Input 的 nullable numeric 契约暂保留原生 number input；Findings 已迁移带可见标签的严重度/状态 Select 与 refresh Button；WorkspaceArtifacts 已迁移带可见标签的 kind Select、刷新、预览、Run 与复制操作；Traffic 已迁移全局项目 FormField/Select、刷新及 Run/evidence/复制 Button，工作区模式继续隐藏项目选择器；WorkspaceHints 已迁移 Button、FormField、Select 与 Textarea，保留项目级/Fact/Intent 锚点、Intent 优先和 Ctrl/Cmd+Enter 合同；其余清单页面控件仍待迁移。',
       'WorkspaceAudit 已迁移带可见标签的事件类型 FormField/Select，以及 Run、Fact、Artifact 和完整 payload 操作 Button；保留既有 deep-link query 合同。',
       'WorkspaceVulnerabilities 已迁移 FilterBar、带可见标签的严重度/状态 Select 与 refresh/create Button；创建 confidence 继续保留原生 number input。',
       'Projects、NewProject、ProjectWorkspace、WorkspaceRuns、Monitoring、Users、TenantModels 与 TenantWorkers 已采用共享 Button、Input、Select、Textarea、FormField 或 Checkbox；Console 其余旧控件继续按页面迁移。',
       'ScenariosConsole 已迁移 Button、Input、Textarea、FormField、Select、Checkbox、Alert、Spinner 与 EmptyState；场景侧栏保留领域专用选择按钮，并保持完整列表 PUT normalization、preflight、dirty draft ownership、pending 防重复与 query invalidation 合同。',
-      'WorkersConsole 已迁移 Button、IconButton、Input、Select、FormField、Checkbox、Alert 与 Spinner；保留表单/YAML Tabs、dirty confirmation、表单序列化、只读状态与保存禁用合同。',
+      '独立 Dispatcher 页面已退场；Worker 配置的运行设置采用窄字段读写。',
       'KnowledgeConsole 与 PromptGroupsConsole 已迁移外层 Button、IconButton、Input、Select 与 FormField，保留资料库/目录/文件及模板组领域选择按钮、隐藏 file input、路由 focus、dirty confirmation 与异步 selection ownership；WorkerTemplatesPanel 已迁移语义行选择、Button 与 IconButton。',
       '全仓 Vue 模板已无 .btn-primary/.btn-secondary/.btn-success/.btn-danger、.form-input/.form-select/.form-textarea 引用，对应 design-system 兼容层及 Console、Projects、ProjectWorkspace、Monitoring 页面重复 selector 已删除；原生专用控件使用领域 class，不冒充共享 Input。',
     ],
@@ -194,7 +184,7 @@ export const componentMigrationRecords: readonly ComponentMigrationRecord[] = [
     migrationStatus: 'migrating',
     verification: ['component'],
     notes: [
-      'ConsoleTimeout 已迁移 Card，Overview 已迁移 Card、Badge 与 StatusBadge；Findings 成果中心已迁移 KPI、漏洞表格与报告审阅 Card，并使用漏洞严重度/可信度/状态领域 Badge，避免扩大全局 status 语义；Traffic 已迁移 Runs/evidence Card、Run 生命周期 StatusBadge 与 Bash 退出码领域 Badge，退出码不复用 HTTP status 语义；WorkspaceHints 已迁移创建 Card 与 creator/anchor 领域 Badge，保留原始 creator 和 Intent 优先展示；其余清单页面仍待迁移。',
+      'Overview 已迁移 Card、Badge 与 StatusBadge；Findings 成果中心已迁移 KPI、漏洞表格与报告审阅 Card，并使用漏洞严重度/可信度/状态领域 Badge，避免扩大全局 status 语义；Traffic 已迁移 Runs/evidence Card、Run 生命周期 StatusBadge 与 Bash 退出码领域 Badge，退出码不复用 HTTP status 语义；WorkspaceHints 已迁移创建 Card 与 creator/anchor 领域 Badge，保留原始 creator 和 Intent 优先展示；其余清单页面仍待迁移。',
       'WorkspaceAudit 已迁移 KPI、事件、evidence 与完整 payload Card，并使用 event kind、unknown bucket、evidence validity 领域 Badge，未扩大全局状态语义。',
       'WorkspaceVulnerabilities 已迁移列表 Card 与严重度、可信度、状态 Badge，并复用漏洞领域元数据；Drawer 私有徽标保持现有合同。',
       'Projects 系列、WorkspaceRuns、Monitoring、Users、TenantModels 与 TenantWorkers 已采用共享 Card、Badge 或 StatusBadge，并保留各自领域状态语义。',
@@ -260,7 +250,7 @@ export const componentMigrationRecords: readonly ComponentMigrationRecord[] = [
     legacy: {
       label: '页面内 segmented tabs 与手写 tablist',
       files: [
-        'src/features/console/WorkersConsole.vue',
+        'src/features/workers/TenantWorkersPage.vue',
         'src/features/console/PromptGroupsConsole.vue',
         'src/features/runs/RunsPage.vue',
         'src/features/artifacts/ArtifactsPage.vue',
@@ -274,7 +264,7 @@ export const componentMigrationRecords: readonly ComponentMigrationRecord[] = [
     pages: [
       'Reports',
       'ConsoleReportTemplates',
-      'ConsoleDispatcher',
+      'ConsoleWorkers',
       'ConsolePrompts',
       'WorkspaceRuns',
       'WorkspaceArtifacts',
@@ -282,7 +272,7 @@ export const componentMigrationRecords: readonly ComponentMigrationRecord[] = [
     migrationStatus: 'migrated',
     verification: ['component'],
     notes: [
-      'Tabs primitive 已完成组件验证；ConsoleDispatcher 已迁移表单/YAML 模式并保留 dirty confirmation 与序列化行为；PromptGroups 已迁移文件 Tabs，保留未保存确认，并仅在异步读取成功后提交 selection；Runs 已迁移运行详情 Tabs，并完成扁平事件合同、轮询选择保留、project/run/artifact stale response guard、stdout/stderr/diagnostic 选择及 preview/content 下载语义的组件验证；WorkspaceArtifacts 已迁移交付产物/诊断日志本地 Tabs，并保留 category、kind 与 artifactId 深链合同；Findings 仅承载漏洞，Reports 独立为主导航并使用渲染/原文 Tabs；ConsoleReportTemplates 使用编辑/安全模板预览 Tabs；跨路由 ProjectWorkspace tabs 不属于本地状态 Tabs。',
+      'Tabs primitive 已完成组件验证；Worker 配置承载运行设置；PromptGroups 已迁移文件 Tabs，保留未保存确认，并仅在异步读取成功后提交 selection；Runs 已迁移运行详情 Tabs，并完成扁平事件合同、轮询选择保留、project/run/artifact stale response guard、stdout/stderr/diagnostic 选择及 preview/content 下载语义的组件验证；WorkspaceArtifacts 已迁移交付产物/诊断日志本地 Tabs，并保留 category、kind 与 artifactId 深链合同；Findings 仅承载漏洞，Reports 独立为主导航并使用渲染/原文 Tabs；ConsoleReportTemplates 使用编辑/安全模板预览 Tabs；跨路由 ProjectWorkspace tabs 不属于本地状态 Tabs。',
       '本次未执行 E2E、axe 或视觉验证。',
     ],
   },
@@ -316,7 +306,6 @@ export const componentMigrationRecords: readonly ComponentMigrationRecord[] = [
     },
     pages: [
       'Findings',
-      'Provenance',
       'Projects',
       ...workspacePages,
       ...tenantPages,
@@ -352,11 +341,11 @@ export const componentMigrationRecords: readonly ComponentMigrationRecord[] = [
     migrationStatus: 'migrating',
     verification: ['component'],
     notes: [
-      'Skeleton 与 ErrorState 已完成组件验证；Login、ChangePassword 已迁移内联认证错误 Alert，ConsoleTimeout 已迁移加载 Spinner 与错误 Alert，Overview 已迁移加载 Alert/Spinner 与空态 EmptyState；Findings 已迁移 Skeleton、EmptyState、ErrorState/retry，并在后台刷新或失败时保留 stale rows；WorkspaceArtifacts 已区分列表初次/stale 状态、项目/筛选空态与 preview retry，并为项目访问、head/tail preview、截图错误和过期 Toast 增加 identity guard；Traffic 已区分 Projects/Runs/Traffic 三层初次、空态、stale error 与刷新状态，并为 project/run/evidence reconcile 和 clipboard Toast 增加 identity guard；WorkspaceHints 已迁移 EmptyState，并通过 pending token、project visit generation、POST response merge 和 stale Toast/reload 抑制隔离跨项目 mutation；其余异步状态仍待迁移。',
+      'Skeleton 与 ErrorState 已完成组件验证；Login、ChangePassword 已迁移内联认证错误 Alert，Overview 已迁移加载 Alert/Spinner 与空态 EmptyState；Findings 已迁移 Skeleton、EmptyState、ErrorState/retry，并在后台刷新或失败时保留 stale rows；WorkspaceArtifacts 已区分列表初次/stale 状态、项目/筛选空态与 preview retry，并为项目访问、head/tail preview、截图错误和过期 Toast 增加 identity guard；Traffic 已区分 Projects/Runs/Traffic 三层初次、空态、stale error 与刷新状态，并为 project/run/evidence reconcile 和 clipboard Toast 增加 identity guard；WorkspaceHints 已迁移 EmptyState，并通过 pending token、project visit generation、POST response merge 和 stale Toast/reload 抑制隔离跨项目 mutation；其余异步状态仍待迁移。',
       'WorkspaceAudit 已区分 Runs、result events、aggregate evidence 三层初次加载、初次错误、真实空态、筛选空态、部分失败、后台刷新与 stale-data 错误；使用 project visit、parent detail refresh 与 immutable request snapshot 隔离跨项目和重叠 evidence response。',
       'WorkspaceVulnerabilities 已区分初次加载/错误、项目/筛选空态、后台刷新与 stale-data 错误；通过 project visit、immutable query snapshot、AbortSignal 和 captured mutation identity 隔离跨项目响应，并同步 workspace list、badge 与 global Findings。',
       'Projects 系列、WorkspaceRuns、Monitoring、Users、TenantModels 与 TenantWorkers 已采用 Alert、Skeleton、Spinner、EmptyState 或 ErrorState，并保留 mutation pending 与 stale response ownership 合同。',
-      'ScenariosConsole、WorkersConsole、KnowledgeConsole 与 PromptGroupsConsole 已迁移加载/错误 Alert、Spinner 或编辑区 EmptyState；WorkerTemplatesPanel 已区分加载、失败与真实空态，并为删除增加 pending guard。',
+      'ScenariosConsole、KnowledgeConsole 与 PromptGroupsConsole 已迁移加载/错误 Alert、Spinner 或编辑区 EmptyState；WorkerTemplatesPanel 已区分加载、失败与真实空态，并为删除增加 pending guard。',
       'Overview、Findings 与 WorkspaceArtifacts 本次迁移未执行 E2E、axe、360px 实机或视觉验证。',
     ],
   },

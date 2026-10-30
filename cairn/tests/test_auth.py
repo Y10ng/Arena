@@ -1176,12 +1176,6 @@ def test_route_policy_marks_project_and_admin_surfaces() -> None:
     assert require_tenant_project in route_dependencies[("/projects/{project_id}/vulnerabilities/{vuln_id}", "PATCH")]
     assert require_tenant_project in route_dependencies[
         (
-            "/projects/{project_id}/vulnerabilities/{vuln_id}/provenance",
-            "GET",
-        )
-    ]
-    assert require_tenant_project in route_dependencies[
-        (
             "/projects/{project_id}/vulnerability-observations/{observation_id}/verifier-target",
             "GET",
         )

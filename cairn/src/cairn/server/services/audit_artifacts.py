@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from base64 import b64decode
 from dataclasses import dataclass
+from contextlib import asynccontextmanager, nullcontext
 from hashlib import sha256
 import fcntl
 import mimetypes
@@ -56,7 +57,10 @@ class ArtifactContentFile:
     content_disposition_type: str
 
 
-def create_artifact_record(project_id: str, body: CreateArtifactRequest) -> Artifact:
+def create_artifact_record(project_id: str, body: CreateArtifactRequest, *, conn=None) -> Artifact:
+    # 派生图片标识只允许源准出后的专用发布入口生成，普通登记不能自报。
+    if "http_evidence_render" in body.metadata:
+        raise HTTPException(422, "artifact_reserved_metadata")
     # artifact 内容先落磁盘，再写数据库记录；digest/uri 是后续 evidence 绑定的稳定索引。
     if body.content_base64 is not None:
         content = b64decode(body.content_base64)
@@ -64,7 +68,7 @@ def create_artifact_record(project_id: str, body: CreateArtifactRequest) -> Arti
         assert body.content is not None
         content = body.content.encode("utf-8")
     _validate_registered_content(body.metadata, len(content), sha256(content).hexdigest())
-    with get_conn() as conn:
+    with (get_conn() if conn is None else nullcontext(conn)) as conn:
         get_project_or_404(conn, project_id)
         task_row = None
         if body.task_run_id is not None:
@@ -99,20 +103,47 @@ async def create_raw_artifact_record(
     chunks: AsyncIterable[bytes],
 ) -> Artifact:
     """将 raw request body 分块持久化，并在完整落盘后创建审计记录。"""
-    temporary_path: Path | None = None
-    final_path: Path | None = None
-    replaced = False
-    artifact_file = None
-    try:
-        # 在所有者锁内创建可归属临时文件；接收 body 时只保留文件锁，不长期占用 DB 事务。
+    if "http_evidence_render" in body.metadata:
+        raise HTTPException(422, "artifact_reserved_metadata")
+    async with stage_raw_artifact(project_id, body.task_run_id, chunks) as upload:
+        _validate_registered_content(body.metadata, upload.size, upload.digest)
         with get_conn() as conn:
+            return publish_raw_artifact(conn, project_id, body, upload)
+
+
+@dataclass(slots=True)
+class StagedRawArtifact:
+    temporary_path: Path
+    size: int
+    digest: str
+    final_path: Path | None = None
+
+
+@asynccontextmanager
+async def stage_raw_artifact(
+    project_id: str,
+    task_run_id: str | None,
+    chunks: AsyncIterable[bytes],
+    *,
+    expected_size: int | None = None,
+    project_owned: bool = False,
+):
+    """共用有界内存的落盘流程；调用方在同一上下文内完成引用事务。"""
+    temporary_path = None
+    artifact_file = None
+    upload = None
+    try:
+        # 接收期间不持有 DB 锁；临时文件和最终发布都受项目删除边界保护。
+        with get_conn() as conn:
+            if project_owned:
+                conn.execute("SELECT id FROM projects WHERE id = ? FOR UPDATE", (project_id,))
             lock_verification_project_write(conn, project_id)
             get_project_or_404(conn, project_id)
-            if body.task_run_id is not None:
-                validate_task_run_exists(conn, project_id, body.task_run_id)
+            if task_run_id is not None:
+                validate_task_run_exists(conn, project_id, task_run_id)
             is_verification = conn.execute("SELECT 1 FROM verification_requests WHERE project_id = ?", (project_id,)).fetchone()
             upload_dir = (artifact_root() / "projects" / project_id / ".uploads"
-                          if is_verification else artifact_root() / ".uploads")
+                          if project_owned or is_verification else artifact_root() / ".uploads")
             upload_dir.mkdir(parents=True, exist_ok=True)
             artifact_file = NamedTemporaryFile(mode="wb", dir=upload_dir, prefix=".raw-artifact-", suffix=".tmp", delete=False)
             temporary_path = Path(artifact_file.name)
@@ -123,55 +154,62 @@ async def create_raw_artifact_record(
             async for chunk in chunks:
                 if not chunk:
                     continue
+                size += len(chunk)
+                if expected_size is not None and size > expected_size:
+                    raise HTTPException(422, "artifact_content_size_mismatch")
                 artifact_file.write(chunk)
                 digest.update(chunk)
-                size += len(chunk)
             artifact_file.flush()
             os.fsync(artifact_file.fileno())
-
-        _validate_registered_content(body.metadata, size, digest.hexdigest())
-        # 最终发布必须重取同一 Project 锁和删除 fence，不能凭入口检查重建已删目录。
-        with get_conn() as conn:
-            lock_verification_project_write(conn, project_id)
-            get_project_or_404(conn, project_id)
-            task_row = None
-            if body.task_run_id is not None:
-                task_row = validate_task_run_exists(conn, project_id, body.task_run_id)
-            artifact_id = next_artifact_id(conn, project_id)
-            filename = _safe_artifact_filename(body.filename, artifact_id, body.kind)
-            final_path = _artifact_disk_path(project_id, body.task_run_id, filename)
-            final_path.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(temporary_path, final_path)
-            replaced = True
-            temporary_path = None
-
-            return _insert_artifact_record(
-                conn,
-                project_id=project_id,
-                task_run_id=body.task_run_id,
-                task_row=task_row,
-                artifact_id=artifact_id,
-                kind=body.kind,
-                category=body.category,
-                filename=filename,
-                digest=digest.hexdigest(),
-                size=size,
-                metadata=body.metadata,
-                created_at=utcnow(),
-            )
+        if expected_size is not None and size != expected_size:
+            raise HTTPException(422, "artifact_content_size_mismatch")
+        upload = StagedRawArtifact(temporary_path, size, digest.hexdigest())
+        yield upload
     except BaseException:
-        # 先关闭活动句柄再解除目录中的归属，严格清理才能证明没有仍打开的在途文件。
         if artifact_file is not None:
             artifact_file.close()
-        # 客户端断连、磁盘错误或数据库失败都不能留下临时文件或孤立的最终文件。
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
-        if replaced and final_path is not None:
-            final_path.unlink(missing_ok=True)
+        # 事务提交失败也回收最终文件；幂等重传未发布时只删除它自己的临时文件。
+        if upload is not None and upload.final_path is not None:
+            upload.final_path.unlink(missing_ok=True)
         raise
     finally:
         if artifact_file is not None:
             artifact_file.close()
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def publish_raw_artifact(
+    conn,
+    project_id: str,
+    body: CreateRawArtifactRequest,
+    upload: StagedRawArtifact,
+    *,
+    emit_event: bool = True,
+) -> Artifact:
+    """Blob 先发布，Artifact 与调用方的引用在同一事务中登记。"""
+    lock_verification_project_write(conn, project_id)
+    get_project_or_404(conn, project_id)
+    task_row = None
+    if body.task_run_id is not None:
+        task_row = validate_task_run_exists(conn, project_id, body.task_run_id)
+    artifact_id = next_artifact_id(conn, project_id)
+    filename = _safe_artifact_filename(body.filename, artifact_id, body.kind)
+    final_path = _artifact_disk_path(project_id, body.task_run_id, filename)
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(upload.temporary_path, final_path)
+    upload.final_path = final_path
+    descriptor = os.open(final_path.parent, os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return _insert_artifact_record(
+        conn, project_id=project_id, task_run_id=body.task_run_id, task_row=task_row,
+        artifact_id=artifact_id, kind=body.kind, category=body.category,
+        filename=filename, digest=upload.digest, size=upload.size,
+        metadata=body.metadata, created_at=utcnow(), emit_event=emit_event,
+    )
 
 
 def _validate_registered_content(metadata: dict, size: int, digest: str) -> None:
@@ -195,6 +233,7 @@ def _insert_artifact_record(
     size: int,
     metadata: dict,
     created_at: str,
+    emit_event: bool = True,
 ) -> Artifact:
     uri = f"artifact://projects/{project_id}/runs/{task_run_id or 'unscoped'}/{filename}"
     merged_metadata = _artifact_metadata(metadata, task_row)
@@ -218,7 +257,7 @@ def _insert_artifact_record(
             dump_json(merged_metadata),
         ),
     )
-    if task_run_id is not None:
+    if task_run_id is not None and emit_event:
         insert_agent_event(
             conn,
             project_id,

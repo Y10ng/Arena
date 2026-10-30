@@ -42,7 +42,7 @@ SERVER_RESULT_CONTEXT_FIELDS = {
     "accepted_completion_digest", "accepted_completion_intent_id",
     "accepted_intent_submissions", "execution_generation", "pause_requested", "pause_interrupted", "assessment_phase",
     "structured_intent_binding", "structured_explore_binding", "continuation",
-    "completion_rejection", "reason_decision_boundary",
+    "completion_rejection", "reason_decision_boundary", "reason_output_retry",
 }
 
 
@@ -83,7 +83,8 @@ def insert_task_run_record(
     generation = int(project["execution_generation"])
     from .assessment_attempts import derive_delivery_retry_context
 
-    delivery = derive_delivery_retry_context(conn, project, body, assessment_attempt_id=assessment_attempt_id)
+    # 持续会话由消息 claim 保证归属与单写者，不套用探索结果续交付规则。
+    delivery = {} if body.task_type == "agent_chat" else derive_delivery_retry_context(conn, project, body, assessment_attempt_id=assessment_attempt_id)
     if "continuation" in delivery:
         source = validate_task_run_exists(conn, project_id, delivery["continuation"]["source_task_run_id"])
         body = body.model_copy(update={"session_id": source["session_id"]})
@@ -184,6 +185,8 @@ def create_task_run_record(project_id: str, body: CreateTaskRunRequest, *, princ
 
         conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
         project = get_project_or_404(conn, project_id)
+        if body.task_type == "agent_chat":
+            raise HTTPException(409, "agent_conversation_claim_required")
         if body.task_type == "external_verify" or conn.execute("SELECT 1 FROM verification_requests WHERE project_id = ?", (project_id,)).fetchone():
             raise HTTPException(409, "verification_claim_required")
         require_execution_contract(project)

@@ -1,5 +1,8 @@
 <template>
   <section class="report-management" aria-label="报告">
+    <header v-show="!isReading" class="page-header report-page-header">
+      <h1>报告</h1>
+    </header>
     <div v-show="!isReading" class="report-filters">
       <FilterBar label="报告筛选" class="report-filter-bar">
         <FormField v-slot="{ controlAttrs }" label="搜索">
@@ -57,8 +60,10 @@
           />
           <EmptyState
             v-else-if="!reports.length"
-            title="暂无已完成报告"
-            description="项目报告生成完成后会出现在这里。"
+            :title="hasFilters ? '没有匹配的报告' : '暂无已完成报告'"
+            :description="
+              hasFilters ? '请调整或清除筛选条件。' : '项目报告生成完成后会出现在这里。'
+            "
           />
           <template v-else>
             <ErrorState
@@ -67,25 +72,37 @@
               :description="listErrorMessage"
               @retry="refetch()"
             />
-            <ul class="report-directory-list">
-              <li v-for="report in reports" :key="reportRowKey(report)">
-                <button
-                  type="button"
+            <DataTable
+              :rows="reports"
+              :columns="reportColumns"
+              :row-key="reportRowKey"
+              :is-row-active="isSelected"
+              caption="已完成报告"
+            >
+              <template #cell-name="{ row }">
+                <Button
+                  variant="link"
                   class="report-directory-item"
-                  :aria-current="isSelected(report) ? 'true' : undefined"
-                  :aria-label="reportActionLabel(report)"
-                  @click="selectReport(report)"
+                  :aria-current="isSelected(row) ? 'true' : undefined"
+                  :aria-label="reportActionLabel(row)"
+                  @click="selectReport(row)"
                 >
-                  <strong :title="reportFilename(report)">{{ reportFilename(report) }}</strong>
-                  <span class="report-item-project" :title="report.project_title">{{
-                    report.project_title
-                  }}</span>
-                  <time :datetime="report.created_at" :title="report.created_at">{{
-                    formatRelativeTime(report.created_at)
-                  }}</time>
-                </button>
-              </li>
-            </ul>
+                  <strong :title="reportFilename(row)">{{ reportFilename(row) }}</strong>
+                </Button>
+                <Badge v-if="row.source_status === 'deleted'" tone="neutral" size="sm">历史档案 · 来源已删除</Badge>
+                <Badge v-else-if="row.source_status === 'unknown'" tone="neutral" size="sm">历史档案 · 来源状态未知</Badge>
+              </template>
+              <template #cell-project="{ row }">
+                <span class="report-item-project" :title="row.project_title">{{
+                  row.project_title
+                }}</span>
+              </template>
+              <template #cell-created="{ row }">
+                <time :datetime="row.created_at" :title="dateTime(row.created_at)">{{
+                  formatRelativeTime(row.created_at)
+                }}</time>
+              </template>
+            </DataTable>
           </template>
         </div>
         <footer class="report-pagination" aria-label="报告分页">
@@ -117,9 +134,11 @@
         v-show="isReading"
         v-model:mode="previewMode"
         :identity="reportRowKey(selectedReport)"
-        :content="validPreview?.content ?? ''"
+        :content="fullMarkdown ?? validPreview?.content ?? ''"
+        :images="displayImages"
+        :load-image="loadDisplayImage"
         :ready="
-          Boolean(validPreview) && !isPreviewLoading && !isPreviewError && !previewIdentityMismatch
+          fullMarkdown !== null || (Boolean(validPreview) && !isPreviewLoading && !isPreviewError && !previewIdentityMismatch)
         "
       >
         <template #title>
@@ -132,12 +151,18 @@
               ><ArrowLeft :size="16" aria-hidden="true" />返回列表</Button
             >
             <h1 ref="reportHeading" tabindex="-1">{{ reportFilename(selectedReport) }}</h1>
+            <Badge v-if="selectedReport.source_status === 'deleted'" tone="neutral" size="sm">历史档案 · 来源已删除</Badge>
+            <Badge v-else-if="selectedReport.source_status === 'unknown'" tone="neutral" size="sm">历史档案 · 来源状态未知</Badge>
           </div>
         </template>
         <template #actions>
-          <a class="report-download-link" :href="reportContentUrl(selectedReport)" download
-            >下载完整报告</a
-          >
+          <ReportExportMenu
+            :identity="reportRowKey(selectedReport)"
+            :filename="reportFilename(selectedReport).replace(/\.md$/i, '')"
+            :load-markdown="loadReportMarkdown"
+            :load-images="loadDisplayImages"
+            :load-image="loadDisplayImage"
+          />
           <Popover align="end" size="md">
             <template #trigger><Button variant="ghost" size="sm">更多</Button></template>
             <div class="report-file-info">
@@ -172,14 +197,17 @@
         </template>
         <template #notice>
           <Alert
-            v-if="validPreview?.truncated"
+            v-if="validPreview?.truncated && fullMarkdown === null"
             class="report-preview-alert"
             tone="info"
             title="当前仅显示报告开头"
           >
             已读取 {{ bytes(validPreview.bytes_read) }}，完整报告共
-            {{ bytes(validPreview.size) }}。目录仅覆盖已载入部分，请下载原文件获取全部内容。
+            {{ bytes(validPreview.size) }}。目录仅覆盖已载入部分。
+            <Button size="sm" :loading="fullLoading" @click="readFullReport">读取完整报告</Button>
           </Alert>
+          <Alert v-if="imageListError" tone="warning" title="证据图片清单读取失败">正文与原文证据仍可使用。</Alert>
+          <Alert v-if="fullError" tone="warning" title="完整报告读取失败">{{ fullError }}；已读取的正文仍可阅读。</Alert>
         </template>
         <template #state>
           <div v-if="isPreviewLoading" class="report-preview-loading" role="status">
@@ -202,15 +230,18 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@lucide/vue'
 import { useQuery } from '@tanstack/vue-query'
-import { fetchArtifactPreview, listReports, type ArtifactPreview } from '@/api/client'
+import { api, fetchBlob, fetchArtifactPreview, listReports, type ArtifactPreview } from '@/api/client'
+import type { ReportDisplayImage } from '@/features/reports/reportImages'
 import type { ReportInventoryFilters, ReportInventoryItem, ReportInventoryPage } from '@/api/types'
-import { ErrorState, FilterBar } from '@/components/patterns'
+import { DataTable, ErrorState, FilterBar } from '@/components/patterns'
+import type { DataTableColumn } from '@/components/patterns/DataTable.vue'
 import {
   Alert,
+  Badge,
   Button,
   EmptyState,
   FormField,
@@ -221,9 +252,16 @@ import {
   Spinner,
 } from '@/components/ui'
 import ReportReader from '@/features/reports/ReportReader.vue'
+import ReportExportMenu from '@/features/reports/ReportExportMenu.vue'
+import { fetchReportMarkdown } from '@/features/reports/reportExport'
 import { reportKeys } from '@/features/reports/reportQueries'
-import { bytes, formatRelativeTime } from '@/lib/format'
+import { bytes, dateTime, formatRelativeTime } from '@/lib/format'
 
+const reportColumns: DataTableColumn<ReportInventoryItem>[] = [
+  { key: 'name', label: '报告名称' },
+  { key: 'project', label: '所属项目' },
+  { key: 'created', label: '生成时间' },
+]
 const DEFAULT_PAGE_SIZE = 20
 const VALID_PAGE_SIZES = [10, 20, 50] as const
 const route = useRoute()
@@ -417,6 +455,59 @@ function setPage(nextPage: number) {
     reportProjectId: undefined,
   })
 }
+const displayImages = ref<ReportDisplayImage[]>([])
+const imageListError = ref(false)
+const reportImageBase = () => `/projects/${encodeURIComponent(previewProjectId.value)}/reports/${encodeURIComponent(previewArtifactId.value)}`
+function loadDisplayImages(signal: AbortSignal) {
+  return api<ReportDisplayImage[]>('GET', `${reportImageBase()}/display-images`, undefined, signal)
+}
+function loadDisplayImage(image: ReportDisplayImage, signal: AbortSignal) {
+  return fetchBlob(`${reportImageBase()}/images/${encodeURIComponent(image.artifact_id)}`, signal)
+}
+watch([previewProjectId, previewArtifactId], async ([projectId, artifactId], _previous, cleanup) => {
+  displayImages.value = []
+  imageListError.value = false
+  if (!projectId || !artifactId) return
+  const controller = new AbortController()
+  cleanup(() => controller.abort())
+  try {
+    const images = await loadDisplayImages(controller.signal)
+    if (!controller.signal.aborted) displayImages.value = images
+  } catch {
+    if (!controller.signal.aborted) imageListError.value = true
+  }
+}, { immediate: true, flush: 'sync' })
+const fullMarkdown = ref<string | null>(null)
+const fullLoading = ref(false)
+const fullError = ref('')
+let fullController: AbortController | undefined
+function cancelFullReport() {
+  fullController?.abort()
+  fullMarkdown.value = null
+  fullLoading.value = false
+  fullError.value = ''
+}
+async function readFullReport() {
+  if (!selectedReport.value || fullLoading.value) return
+  const identity = reportRowKey(selectedReport.value)
+  fullController = new AbortController()
+  const signal = fullController.signal
+  fullLoading.value = true
+  fullError.value = ''
+  try {
+    const content = await loadReportMarkdown(signal)
+    if (!signal.aborted && selectedReport.value && reportRowKey(selectedReport.value) === identity) fullMarkdown.value = content
+  } catch (error) {
+    if (!signal.aborted) fullError.value = error instanceof Error ? error.message : '请重试。'
+  } finally {
+    if (!signal.aborted) fullLoading.value = false
+  }
+}
+onBeforeUnmount(cancelFullReport)
+function loadReportMarkdown(signal: AbortSignal) {
+  if (!selectedReport.value) return Promise.reject(new Error('请先选择报告。'))
+  return fetchReportMarkdown(reportContentUrl(selectedReport.value), signal)
+}
 function reportContentUrl(item: ReportInventoryItem) {
   return `/projects/${encodeURIComponent(item.project_id)}/artifacts/${encodeURIComponent(item.artifact_id)}/content`
 }
@@ -436,9 +527,10 @@ watch([reports, isFetching], ([items, fetching]) => {
     void replaceQuery({ reportId: undefined, reportProjectId: undefined })
 })
 watch([previewProjectId, previewArtifactId], () => {
+  cancelFullReport()
   previewMode.value = 'rendered'
   directoryVisible.value = false
-})
+}, { flush: 'sync' })
 </script>
 
 <style src="./ReportManagement.css"></style>

@@ -137,7 +137,8 @@ def test_oversized_result_rejected():
 
 @pytest.mark.parametrize("code,error_type", [
     ("provider_auth", "provider_auth"), ("provider_rate_limit", "provider_rate_limit"),
-    ("provider_error", "provider_error"), ("session_corrupt", "session_error"),
+    ("provider_error", "provider_error"), ("model_output_limit", "model_output_limit"),
+    ("session_corrupt", "session_error"),
     ("result_schema", "result_schema"), ("cancelled", "cancelled"),
     ("deadline_exceeded", "worker_timeout"), ("runner_error", "transport_error"),
     ("artifact_unknown", "artifact_error"), ("artifact_changed", "artifact_error"),
@@ -188,6 +189,32 @@ def test_candidate_capture_failure_keeps_specific_code_and_safe_classification(c
     assert failure.origin == "pi_runner"
     assert failure.message == f"Pi 执行失败：{code}"
     assert "private-candidate-content" not in json.dumps(failure.details())
+
+
+def test_model_output_limit_keeps_safe_reason_in_report_and_runtime_context():
+    from cairn.server.schemas.projects import AssessmentReportTaskRunResult
+    from cairn.server.services.runtime_context import (
+        sanitize_task_run_runtime_context, standard_task_run_error_type,
+    )
+
+    item = envelope()
+    item.update(phase="report_execute", status="failed", result=None, submission_id=None,
+                error={"code": "model_output_limit", "message": "private-provider-body"})
+    result = decode_pi_result(
+        json.dumps(item), phase="report_execute", project_id="p1", task_run_id="tr1",
+        session=SESSION, validator=validate_report_payload,
+    )
+    failure = result.failure
+    assert failure.origin == "pi_sdk"
+    assert failure.message == "模型输出达到上限，当前段未完成"
+    assert standard_task_run_error_type("model_output_limit") == "model_output_limit"
+    stored = sanitize_task_run_runtime_context({"worker_failure": failure.details()})
+    terminal = AssessmentReportTaskRunResult(
+        status="failed", error_type="model_output_limit", error_message=failure.message,
+        worker_failure=stored["worker_failure"],
+    )
+    assert terminal.worker_failure.error_type == "model_output_limit"
+    assert "private-provider-body" not in terminal.model_dump_json()
 
 
 def test_unknown_pi_failure_code_remains_fail_closed():
@@ -664,7 +691,7 @@ def test_worker_evidence_v2_is_single_source_and_rejects_legacy_worker_data():
     with pytest.raises(ValidationError):
         FactResult.model_validate({**fact, "vulnerability": {**finding, "repro_request": "invented"}})
     external = {
-        "schema_version": 3, "outcome": "confirmed", "summary": "合成观察",
+        "schema_version": 4, "outcome": "confirmed", "summary": "合成观察", "remediation": "合成材料未确定实际根因。",
         "tested_scope": "本地合成材料", "limitations": [],
         "key_evidence": [{"reason": "原件记录本次观察", "evidence_item_ids": ["req-1"]}],
         "test_steps": [{"action": "登记本地合成原件", "observation": "登记成功", "evidence_item_ids": ["req-1"]}],
@@ -672,7 +699,7 @@ def test_worker_evidence_v2_is_single_source_and_rejects_legacy_worker_data():
     }
     assert validate_phase_data("external_verify_execute", external) == external
     for changes in (
-        {"notes": "退役字段"}, {"schema_version": 2},
+        {"notes": "退役字段"}, {"schema_version": 2}, {"schema_version": 3}, {"remediation": " \n\t"},
         {"evidence_items": [item, item]},
         {"key_evidence": [{"reason": "未知条目", "evidence_item_ids": ["missing"]}]},
         {"test_steps": [{"action": "实际操作", "observation": "实际观察", "evidence_item_ids": ["missing"]}]},
@@ -718,7 +745,7 @@ def test_evidence_kind_slots_agree_across_python_writes(kind, source, content, v
     item = {"id": "synthetic", "kind": kind, "source": source, **content}
     inline = bool({"request_text", "response_text", "text"} & content.keys())
     result = {
-        "schema_version": 3, "outcome": "confirmed", "summary": "合成结果",
+        "schema_version": 4, "outcome": "confirmed", "summary": "合成结果", "remediation": "合成材料未确定实际根因。",
         "tested_scope": "仅隔离合同", "key_evidence": [], "test_steps": [], "limitations": [],
         "evidence_items": [item],
     }
@@ -747,7 +774,9 @@ def test_loaded_explore_guidance_submits_registered_finding(phase, prompt_file, 
 
     monkeypatch.setenv("CAIRN_PROMPTS_ROOT", str(tmp_path))
     instructions = load_prompt("goal-driven-v1", prompt_file)
-    assert "capture_http_evidence" in instructions and "evidence_items" in instructions
+    assert "list_http_flows" in instructions and "read_http_flow" in instructions
+    assert "flow_id" in instructions and "evidence_items" in instructions
+    assert "capture_http_evidence" not in instructions
     assert "packet_artifact_handle" not in instructions
     data = {
         "fact": {"description": "合成观察", "vulnerability": {

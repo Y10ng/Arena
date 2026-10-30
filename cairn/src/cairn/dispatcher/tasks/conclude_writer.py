@@ -78,7 +78,7 @@ def build_vulnerability_for_conclude(
     require_current_run_reproduction: bool = False,
 ) -> dict[str, object] | None:
     """只转换证据条目中的引用，缺失一侧保持缺失，不重新拼接报文。"""
-    from cairn.evidence_contracts import WorkerEvidenceItem, evidence_refs
+    from cairn.evidence_contracts import WorkerEvidenceItem, has_evidence
     from .artifact_records import resolve_declared_evidence_items
     from ..contracts import extract_vulnerability
 
@@ -93,9 +93,9 @@ def build_vulnerability_for_conclude(
         )
     except ValueError as exc:
         raise CoverageEvidenceInsufficientError("finding evidence could not be resolved") from exc
-    if require_current_run_reproduction and not evidence_refs(items):
+    if require_current_run_reproduction and not has_evidence(items, current=True):
         raise CoverageEvidenceInsufficientError(
-            "finding requires evidence artifacts from the current execution"
+            "finding requires evidence from the current execution"
         )
     return {
         "schema_version": 2,
@@ -106,6 +106,7 @@ def build_vulnerability_for_conclude(
         "remediation": vuln["remediation"],
         "confidence": vuln["confidence"],
         "evidence_items": [item.model_dump(exclude_none=True) for item in items],
+        "reproduction_steps": vuln["reproduction_steps"],
         "identity": vuln.get("identity"),
         "slot_key": slot_key,
     }
@@ -424,14 +425,18 @@ def retry_graph_write(operation: Callable[[], ApiResult]) -> ApiResult:
     """仅对支持 Server 收据幂等的写回做有界重试，不重复模型或目标执行。"""
     response = operation()
     attempt = 1
-    while _should_retry_graph_write(response) and attempt < GRAPH_WRITE_RETRY_ATTEMPTS:
-        sleep_seconds = GRAPH_WRITE_RETRY_BASE_SECONDS * (2 ** (attempt - 1))
+    # traffic 同步在原 bridge 中继续；只等待本请求引用的材料，不等待整个 scope drain。
+    from .write_outcomes import response_detail_code
+
+    attempts = 12 if response_detail_code(response) == "traffic_evidence_pending" else GRAPH_WRITE_RETRY_ATTEMPTS
+    while _should_retry_graph_write(response) and attempt < attempts:
+        sleep_seconds = min(2.0, GRAPH_WRITE_RETRY_BASE_SECONDS * (2 ** (attempt - 1)))
         LOG.warning(
             "graph write transient failure status=%s retry_in=%.1fs attempt=%s/%s",
             response.status_code,
             sleep_seconds,
             attempt + 1,
-            GRAPH_WRITE_RETRY_ATTEMPTS,
+            attempts,
         )
         time.sleep(sleep_seconds)
         response = operation()

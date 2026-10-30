@@ -41,6 +41,13 @@ class RunningTask:
     binding_circuit_key: BindingCircuitKey | None = None
     settled_intent_count: int | None = None
     execution_generation: int = 0
+    report_generation_token: str | None = None
+    report_scope_key: str = ""
+    agent_conversation_id: str | None = None
+    agent_message_id: int | None = None
+    agent_finish_attempts: int = 0
+    agent_finish_payload: dict[str, object] | None = None
+    agent_execution_unconfirmed: bool = False
 
 
 @dataclass(slots=True)

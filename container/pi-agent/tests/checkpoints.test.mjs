@@ -4,9 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { access, mkdir, open, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createCheckpointTool, createCheckpointWriter } from '../dist/checkpoints.js';
-import { parseRequest } from '../dist/protocol.js';
 import { runRequest } from '../dist/runner.js';
-import { fixture, ok } from './fixtures.mjs';
+import { fixture, ok, parseFixtureRequest } from './fixtures.mjs';
 
 const spoolRoot = '/tmp/cairn-prompts';
 function spoolPath() { return join(spoolRoot, `pi-checkpoints-${randomUUID()}.jsonl`); }
@@ -25,16 +24,16 @@ async function removeSpool(path) { await rm(path, { force: true }); }
 
 test('checkpoint capability is optional and enforces compiled path and size bounds', async (t) => {
   const { request } = await fixture(t);
-  assert.ok(parseRequest(request).capabilities.candidate_capture);
+  assert.ok(parseFixtureRequest(request).capabilities.candidate_capture);
   const path = spoolPath();
-  const parsed = parseRequest({ ...request, capabilities: { ...request.capabilities, execution_checkpoints: capability(path) } });
+  const parsed = parseFixtureRequest({ ...request, capabilities: { ...request.capabilities, execution_checkpoints: capability(path) } });
   assert.deepEqual(parsed.capabilities.execution_checkpoints, capability(path));
   for (const [field, value] of [['max_events', 65], ['max_event_bytes', 16 * 1024 + 1], ['max_spool_bytes', 512 * 1024 + 1], ['max_events', 0]]) {
-    assert.throws(() => parseRequest({ ...request, capabilities: { ...request.capabilities, execution_checkpoints: capability(path, { [field]: value }) } }), { code: 'invalid_request', path: `capabilities.execution_checkpoints.${field}` });
+    assert.throws(() => parseFixtureRequest({ ...request, capabilities: { ...request.capabilities, execution_checkpoints: capability(path, { [field]: value }) } }), { code: 'invalid_request', path: `capabilities.execution_checkpoints.${field}` });
   }
-  assert.throws(() => parseRequest({ ...request, capabilities: { ...request.capabilities, execution_checkpoints: capability(join(request.cwd, 'checkpoints.jsonl')) } }), { code: 'invalid_request', path: 'capabilities.execution_checkpoints.spool_path' });
-  assert.throws(() => parseRequest({ ...request, capabilities: { ...request.capabilities, execution_checkpoints: capability(path), unknown: true } }), { code: 'invalid_request', path: 'capabilities' });
-  assert.throws(() => parseRequest({ ...request, capabilities: { ...request.capabilities, execution_checkpoints: capability(path, { unknown: true }) } }), { code: 'invalid_request', path: 'capabilities.execution_checkpoints' });
+  assert.throws(() => parseFixtureRequest({ ...request, capabilities: { ...request.capabilities, execution_checkpoints: capability(join(request.cwd, 'checkpoints.jsonl')) } }), { code: 'invalid_request', path: 'capabilities.execution_checkpoints.spool_path' });
+  assert.throws(() => parseFixtureRequest({ ...request, capabilities: { ...request.capabilities, execution_checkpoints: capability(path), unknown: true } }), { code: 'invalid_request', path: 'capabilities' });
+  assert.throws(() => parseFixtureRequest({ ...request, capabilities: { ...request.capabilities, execution_checkpoints: capability(path, { unknown: true }) } }), { code: 'invalid_request', path: 'capabilities.execution_checkpoints' });
 });
 
 test('record_checkpoint is absent by default and capability adds runner-generated JSONL only', async (t) => {
@@ -46,8 +45,9 @@ test('record_checkpoint is absent by default and capability adds runner-generate
   const report = await fixture(t, 'openai-chat-completions', [ok]);
   const unusedPath = spoolPath();
   report.request.phase = 'report_execute';
+  delete report.request.capabilities.task_execution;
   report.request.capabilities = { ...report.request.capabilities, execution_checkpoints: capability(unusedPath) };
-  assert.equal((await runRequest(parseRequest(report.request))).status, 'succeeded');
+  assert.equal((await runRequest(parseFixtureRequest(report.request))).status, 'succeeded');
   assert.ok(!report.calls[0].body.tools.some((tool) => tool.function.name === 'record_checkpoint'));
 
   const canary = 'CHECKPOINT_BODY_CANARY_7db1';
@@ -60,7 +60,7 @@ test('record_checkpoint is absent by default and capability adds runner-generate
   withCheckpoint.request.phase = 'explore_execute';
   withCheckpoint.request.capabilities = { ...withCheckpoint.request.capabilities, execution_checkpoints: capability(path) };
   const audit = [];
-  const result = await runRequest(parseRequest(withCheckpoint.request), { audit: (event) => audit.push(event) });
+  const result = await runRequest(parseFixtureRequest(withCheckpoint.request), { audit: (event) => audit.push(event) });
   assert.equal(result.status, 'succeeded', JSON.stringify(result));
   assert.equal(withCheckpoint.calls.length, 2);
   assert.ok(withCheckpoint.calls[0].body.tools.some((tool) => tool.function.name === 'record_checkpoint'));
@@ -105,7 +105,7 @@ test('automatic completion stays metadata-only, survives cancel-after-completion
   request.model.model_name = modelCanary;
   request.capabilities = { ...request.capabilities, execution_checkpoints: capability(path) };
   const controller = new AbortController();
-  const result = await runRequest(parseRequest(request), {
+  const result = await runRequest(parseFixtureRequest(request), {
     signal: controller.signal,
     audit: (event) => {
       if (event.event === 'tool_execution_end' && event.tool_name === 'bash') controller.abort();

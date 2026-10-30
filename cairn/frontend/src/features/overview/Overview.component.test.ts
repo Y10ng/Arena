@@ -1,210 +1,223 @@
-import { mount } from '@vue/test-utils'
-import { ref, unref } from 'vue'
+import { flushPromises, mount } from '@vue/test-utils'
+import { reactive } from 'vue'
+import { createMemoryHistory, createRouter } from 'vue-router'
+import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { VueWrapper } from '@vue/test-utils'
+import type { OverviewResponse } from '@/api/types/overview'
 
-const mocks = vi.hoisted(() => ({
-  api: vi.fn(),
-  isSuperAdmin: false,
-  queryOptions: [] as Array<{ queryKey: unknown; queryFn?: () => unknown }>,
-  projects: [{ id: 'project-a', status: 'active', title: '项目 A' }],
-  monitoring: {
-    generated_at: '2026-08-23T00:00:00Z',
-    long_running_threshold_seconds: 300,
-    project_count: 1,
-    active_project_count: 1,
-    dispatcher: { status: 'running', stale: false, updated_at: null },
-    queued_tasks: [],
-    running_tasks: [],
-    long_running_tasks: [],
-    recent_failures: [],
-    vulnerabilities: {
-      total: 10,
-      by_severity: { critical: 4, high: 3, medium: 2, info: 1 },
-      by_status: {},
-      per_project: [],
-    },
-  } as any,
-  router: { push: vi.fn() },
-}))
-
+const mocks = vi.hoisted(() => ({ api: vi.fn(), auth: null as any }))
 vi.mock('@/api/client', () => ({ api: mocks.api }))
-
-vi.mock('@/stores/auth', () => ({
-  useAuthStore: () => mocks,
-}))
-
-vi.mock('vue-router', () => ({
-  useRouter: () => mocks.router,
-}))
-
-vi.mock('@tanstack/vue-query', () => ({
-  useQuery: (options: { queryKey: unknown; queryFn?: () => unknown }) => {
-    mocks.queryOptions.push(options)
-    const key = unref(options.queryKey)
-    if (Array.isArray(key) && key[0] === 'projects') {
-      return { data: ref(mocks.projects), isLoading: ref(false) }
-    }
-    return { data: ref(mocks.monitoring), isLoading: ref(false) }
-  },
-}))
+vi.mock('@/stores/auth', () => ({ useAuthStore: () => mocks.auth }))
 
 import Overview from './Overview.vue'
 
+const empty: OverviewResponse = {
+  generated_at: '2026-10-27T02:03:00Z',
+  projects: { total: 0, by_status: {} },
+  vulnerabilities: { total: 0, by_severity: {}, by_status: {} },
+  project_previews: [],
+  vulnerability_previews: [],
+}
+const loaded: OverviewResponse = {
+  ...empty,
+  projects: { total: 1, by_status: { active: 1 } },
+  vulnerabilities: {
+    total: 3,
+    by_severity: { high: 2, info: 1 },
+    by_status: { new: 2, remediated: 1 },
+  },
+  project_previews: [
+    { id: 'p1', title: '合成项目', status: 'active', created_at: empty.generated_at },
+  ],
+  vulnerability_previews: [
+    {
+      id: 'v1',
+      project_id: 'p1',
+      project_title: '合成项目',
+      title: '合成漏洞',
+      severity: 'high',
+      status: 'remediated',
+      created_at: empty.generated_at,
+    },
+  ],
+}
 const wrappers: VueWrapper[] = []
+const clients: QueryClient[] = []
 
-function mountOverview() {
+async function mountOverview() {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+  })
+  clients.push(queryClient)
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/', name: 'Overview', component: Overview },
+      ...[
+        ['/projects', 'Projects'],
+        ['/reports', 'Reports'],
+        ['/findings', 'Findings'],
+        ['/projects/:id', 'WorkspaceGraph'],
+      ].map(([path, name]) => ({ path, name, component: { template: '<div />' } })),
+    ],
+  })
+  await router.push('/')
+  await router.isReady()
   const wrapper = mount(Overview, {
     attachTo: document.body,
     global: {
-      mocks: { $router: mocks.router },
-      stubs: {
-        Alert: { template: '<div><slot /></div>' },
-        Badge: { template: '<span><slot /></span>' },
-        Button: { template: '<button type="button"><slot name="icon" /><slot /></button>' },
-        Card: {
-          props: ['as'],
-          template: '<component :is="as || \'div\'"><slot /></component>',
-        },
-        EmptyState: { template: '<div />' },
-        Spinner: { template: '<span />' },
-        StatusBadge: { template: '<span><slot /></span>' },
-      },
+      plugins: [router, [VueQueryPlugin, { queryClient }]],
+      stubs: { Tooltip: { template: '<slot />' } },
     },
   })
   wrappers.push(wrapper)
-  return wrapper
+  await flushPromises()
+  return { wrapper, queryClient }
 }
 
 beforeEach(() => {
-  mocks.router.push.mockReset()
-  mocks.api.mockReset().mockResolvedValue(undefined)
-  mocks.isSuperAdmin = false
-  mocks.queryOptions.length = 0
-  mocks.monitoring.dispatcher = { status: 'running', stale: false, updated_at: null }
-  mocks.monitoring.vulnerabilities = {
-    total: 10,
-    by_severity: { critical: 4, high: 3, medium: 2, info: 1 },
-    by_status: {},
-    per_project: [],
-  }
+  mocks.api.mockReset()
+  mocks.auth = reactive({
+    isAuthenticated: true,
+    session: { user_id: 'u1', tenant_id: 't1', role: 'user', must_change_password: false },
+  })
+  vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
 })
 
 afterEach(() => {
   wrappers.splice(0).forEach((wrapper) => wrapper.unmount())
+  clients.splice(0).forEach((client) => client.clear())
+  vi.restoreAllMocks()
   document.body.innerHTML = ''
 })
 
-function monitoringQueryOptions() {
-  const options = mocks.queryOptions.find((item) => {
-    const key = unref(item.queryKey)
-    return Array.isArray(key) && key[0] === 'monitoringSummary'
-  })
-  if (!options?.queryFn) throw new Error('找不到概览监控查询')
-  return options as { queryKey: unknown; queryFn: () => unknown }
-}
-
-describe('Overview monitoring scope', () => {
-  it('uses the Tenant monitoring endpoint for ordinary users', async () => {
-    mountOverview()
-    const options = monitoringQueryOptions()
-
-    expect(unref(options.queryKey)).toEqual(['monitoringSummary', 'overview', 'tenant'])
-    await options.queryFn()
-    expect(mocks.api).toHaveBeenCalledWith('GET', '/monitoring/summary')
-  })
-
-  it('uses and normalizes the global overview endpoint for super-admin', async () => {
-    mocks.isSuperAdmin = true
-    mocks.monitoring.dispatcher = {
-      effective_status: 'error',
-      heartbeat_stale: true,
-      updated_at: null,
-    }
-    mocks.monitoring.vulnerabilities = {
-      total: 12,
-      by_severity: { critical: 5, high: 4, medium: 2, low: 1 },
-      by_status: {},
-      per_project: [],
-    }
-
-    const wrapper = mountOverview()
-    const options = monitoringQueryOptions()
-
-    expect(unref(options.queryKey)).toEqual(['monitoringSummary', 'overview', 'admin'])
-    await options.queryFn()
-    expect(mocks.api).toHaveBeenCalledWith('GET', '/admin/monitoring?profile=overview')
-    expect(wrapper.text()).toContain('状态过期')
-    expect(wrapper.get('.vuln-chart-center').text()).toContain('12漏洞总数')
-    expect(wrapper.get('#vuln-chart-desc').text()).toContain('共 12 个漏洞')
-  })
-})
-
-describe('Overview vulnerability severity donut', () => {
-  it('renders dynamic segments with complete keyboard-readable values', () => {
-    const wrapper = mountOverview()
-    const segments = wrapper.findAll('.vuln-segment')
-
-    expect(segments).toHaveLength(4)
-    expect(segments.map((segment) => segment.attributes('aria-label'))).toEqual([
-      '严重：4 个，占 40.0%',
-      '高危：3 个，占 30.0%',
-      '中危：2 个，占 20.0%',
-      '信息：1 个，占 10.0%',
+describe('Overview', () => {
+  it('distinguishes initial loading, failure and a successful real zero; requests only /overview', async () => {
+    let reject!: (reason: Error) => void
+    mocks.api.mockReturnValueOnce(
+      new Promise((_resolve, fail) => {
+        reject = fail
+      }),
+    )
+    const { wrapper } = await mountOverview()
+    expect(wrapper.text()).toContain('正在加载仪表盘')
+    expect(wrapper.find('.overview-stats').exists()).toBe(false)
+    reject(new Error('合成读取失败'))
+    await flushPromises()
+    expect(wrapper.text()).toContain('仪表盘加载失败')
+    expect(wrapper.text()).not.toContain('暂无项目')
+    mocks.api.mockResolvedValueOnce(empty)
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '重试')!
+      .trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.overview-stats dd').map((node) => node.text())).toEqual([
+      '0',
+      '0',
+      '0',
+      '0',
     ])
-    expect(segments.every((segment) => segment.attributes('tabindex') === '0')).toBe(true)
-    expect(wrapper.get('.vuln-chart-center').text()).toContain('10漏洞总数')
-    expect(wrapper.get('#vuln-chart-desc').text()).toContain('共 10 个漏洞')
+    expect(wrapper.text()).toContain('暂无项目')
+    expect(wrapper.text()).toContain('暂无漏洞记录')
+    expect(wrapper.findAll('.overview-severity-table tbody tr')).toHaveLength(5)
+    expect(
+      mocks.api.mock.calls.every(([method, path]) => method === 'GET' && path === '/overview'),
+    ).toBe(true)
   })
 
-  it('previews on hover and focus, pins on click, and clears on Escape', async () => {
-    const wrapper = mountOverview()
-    const critical = wrapper.get('.vuln-segment-critical')
-    const high = wrapper.get('.vuln-segment-high')
-
-    await critical.trigger('mouseenter')
-    expect(wrapper.get('.vuln-chart-tooltip').text()).toContain('4 个严重 · 40.0%')
-    expect(wrapper.get('.vuln-chart-center').text()).toContain('4严重')
-    expect(critical.classes()).toContain('is-active')
-    expect(critical.attributes('style')).toContain('translate(')
-    expect(critical.attributes('style')).toContain('scale(1.025)')
-
-    await wrapper.get('.vuln-chart-graphic').trigger('mouseleave')
-    expect(wrapper.find('.vuln-chart-tooltip').exists()).toBe(false)
-    expect(wrapper.get('.vuln-chart-center').text()).toContain('10漏洞总数')
-
-    await high.trigger('focus')
-    await high.trigger('click')
-    await high.trigger('blur')
-    expect(high.attributes('aria-pressed')).toBe('true')
-    expect(wrapper.get('.vuln-chart-tooltip').text()).toContain('3 个高危 · 30.0%')
-
-    await critical.trigger('mouseenter')
-    expect(wrapper.get('.vuln-chart-tooltip').text()).toContain('4 个严重 · 40.0%')
-    await wrapper.get('.vuln-chart-graphic').trigger('mouseleave')
-    expect(wrapper.get('.vuln-chart-tooltip').text()).toContain('3 个高危 · 30.0%')
-
-    await wrapper.get('.vuln-chart').trigger('keydown', { key: 'Escape' })
-    expect(wrapper.find('.vuln-chart-tooltip').exists()).toBe(false)
-    expect(high.attributes('aria-pressed')).toBe('false')
-    expect(wrapper.get('.vuln-chart-center').text()).toContain('10漏洞总数')
+  it('uses shared status labels, numeric bars and existing keyboard-accessible deep links', async () => {
+    mocks.api.mockResolvedValueOnce(loaded)
+    const { wrapper } = await mountOverview()
+    expect(wrapper.findAll('.overview-stats dd').map((node) => node.text())).toEqual([
+      '1',
+      '0',
+      '3',
+      '2',
+    ])
+    expect(wrapper.text()).toContain('进行中')
+    expect(wrapper.text()).toContain('已修复')
+    expect(wrapper.get('.overview-projects a').attributes('href')).toBe('/projects/p1')
+    expect(wrapper.get('.overview-findings a').attributes('href')).toBe(
+      '/findings?vulnerabilityProjectId=p1&vulnerabilityId=v1',
+    )
+    const rows = wrapper.findAll('.overview-severity-table tbody tr')
+    expect(rows[1].get('a').attributes('href')).toBe('/findings?severity=high')
+    expect(rows[1].get('a').attributes('aria-label')).toContain('高危：2 条，占 66.7%')
+    expect(rows[1].get('.overview-bar').attributes('style')).toContain('width: 100%')
+    expect(rows[4].get('.overview-bar').attributes('style')).toContain('width: 50%')
+    expect(rows[0].get('.overview-bar').attributes('style')).toContain('width: 0%')
+    ;(rows[1].get('a').element as HTMLAnchorElement).focus()
+    expect(document.activeElement).toBe(rows[1].get('a').element)
+    expect(wrapper.text()).not.toMatch(/TaskRuns|任务服务|等待队列|最近失败/)
+    expect(wrapper.find('svg polyline').exists()).toBe(false)
   })
 
-  it('supports keyboard pinning and mirrors interaction in the detail legend', async () => {
-    const wrapper = mountOverview()
-    const mediumSegment = wrapper.get('.vuln-segment-medium')
-    const infoLegend = wrapper.findAll('.vuln-legend-row').at(3)
+  it('retains data and time during background loading and failure, with a working retry', async () => {
+    mocks.api.mockResolvedValueOnce(loaded)
+    const { wrapper } = await mountOverview()
+    let reject!: (reason: Error) => void
+    mocks.api.mockReturnValueOnce(
+      new Promise((_resolve, fail) => {
+        reject = fail
+      }),
+    )
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '刷新')!
+      .trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('合成漏洞')
+    expect(wrapper.find('.overview-loading').exists()).toBe(false)
+    reject(new Error('更新失败'))
+    await flushPromises()
+    expect(wrapper.text()).toContain('更新失败，显示上次数据')
+    expect(wrapper.get('.overview-freshness time').attributes('datetime')).toBe(loaded.generated_at)
+    expect(wrapper.findAll('.overview-stats dd').map((node) => node.text())).toEqual([
+      '1',
+      '0',
+      '3',
+      '2',
+    ])
+    mocks.api.mockResolvedValueOnce(empty)
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '刷新')!
+      .trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('更新失败，显示上次数据')
+    expect(wrapper.text()).toContain('暂无漏洞记录')
+  })
 
-    await mediumSegment.trigger('keydown', { key: 'Enter' })
-    expect(mediumSegment.attributes('aria-pressed')).toBe('true')
-    expect(wrapper.get('.vuln-chart-tooltip').attributes('style')).toContain('left:')
-
-    if (!infoLegend) throw new Error('找不到信息严重度图例')
-    await infoLegend.trigger('focus')
-    expect(wrapper.get('.vuln-chart-center').text()).toContain('1信息')
-    await infoLegend.trigger('click')
-    await infoLegend.trigger('blur')
-    expect(infoLegend.attributes('aria-pressed')).toBe('true')
-    expect(mediumSegment.attributes('aria-pressed')).toBe('false')
+  it('does not carry data across users, tenants or administrator scope and disables hidden-page reads', async () => {
+    mocks.api.mockResolvedValueOnce(loaded)
+    const { wrapper, queryClient } = await mountOverview()
+    mocks.api.mockReturnValue(new Promise(() => {}))
+    mocks.auth.session = {
+      ...mocks.auth.session,
+      user_id: 'u2',
+      tenant_id: 't2',
+      role: 'super_admin',
+    }
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('合成漏洞')
+    expect(wrapper.text()).toContain('正在加载仪表盘')
+    expect(
+      queryClient
+        .getQueryCache()
+        .getAll()
+        .map((query) => query.queryKey),
+    ).toEqual([
+      ['overview', 'u1', 't1', 'user'],
+      ['overview', 'u2', 't2', 'super_admin'],
+    ])
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushPromises()
+    const current = queryClient
+      .getQueryCache()
+      .find({ queryKey: ['overview', 'u2', 't2', 'super_admin'] })!
+    expect(current.isActive()).toBe(false)
   })
 })

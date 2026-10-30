@@ -21,6 +21,8 @@ const finding = (overrides: Partial<VulnerabilityListItem> = {}): VulnerabilityL
     target: 'https://example.test',
     confidence: 0.8,
     status: 'new',
+    can_delete: true,
+    delete_block_reason: null,
     source_fact_id: null,
     remediation: '',
     evidence_items: [],

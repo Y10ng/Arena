@@ -50,10 +50,10 @@ function validateTranscript(raw: string, manifest: Manifest): void {
 }
 export async function acquireSession(request: AgentRequest): Promise<SessionLease> {
   const cwd = await realpath(request.cwd);
-  const phaseFamily = request.phase.replace(/_(execute|conclude)$/, "");
+  const phaseFamily = request.phase === "chat_turn" ? "chat" : request.phase.replace(/_(execute|conclude)$/, "");
   const bindingDigest = digest(JSON.stringify(Object.fromEntries(Object.entries(request.binding ?? {}).sort(([left], [right]) => left.localeCompare(right)))));
   const continuation = request.continuation;
-  if (request.resume && !request.conclude_only && request.phase !== "report_execute" && !continuation) {
+  if (request.resume && !request.conclude_only && request.phase !== "report_execute" && request.phase !== "chat_turn" && !continuation) {
     throw new AgentFailure("invalid_request", "Normal resumed execution requires a verified continuation source", "continuation");
   }
   await mkdir(request.session_root, { recursive: true, mode: 0o700 });

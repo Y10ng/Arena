@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from cairn.dispatcher.runtime.traffic_execution import session_root_for_project
+
 import json
 import logging
 import time
@@ -67,6 +69,8 @@ def _prompt(input_data: dict, instructions: str) -> str:
         "mode": input_data["mode"],
         "title": input_data["title"],
         "source_context": input_data["origin"],
+        "target_url": input_data.get("target_url"),
+        "source_target": input_data.get("source_target"),
         "report": report,
         "materials": resources,
         "previous_request_id": input_data["previous_request_id"],
@@ -87,7 +91,9 @@ def _validate(payload):
 
 def _write_terminal(client, request_id, action, payload) -> ApiResult:
     # 每次回执独立留存，补报和重放不能覆盖首次拒绝；不记录响应正文或 claim_token。
-    for attempt in range(3):
+    from .conclude_writer import retry_graph_write
+
+    def write():
         response = client.finish_verification(request_id, action, payload)
         disposition = classify_write_response(response)
         record_protocol_write(
@@ -101,11 +107,9 @@ def _write_terminal(client, request_id, action, payload) -> ApiResult:
                 payload["project_id"], payload["task_run_id"], action,
                 response.status_code, disposition.disposition, disposition.safe_code,
             )
-        if not disposition.retry_same_write:
-            return response
-        if attempt < 2:
-            time.sleep(attempt + 1)
-    return response
+        return response
+
+    return retry_graph_write(write)
 
 
 def _upload_evidence(client, manager, container, project_id, task_run_id, artifacts):
@@ -196,6 +200,8 @@ def run_external_verification_task(
             "report_resource_id": input_data["report"]["resource_id"],
             "resource_ids": [material["id"] for material in input_data["materials"]],
         }
+        if input_data.get("target_url") is not None:
+            inputs["target_url"] = input_data["target_url"]
         snapshot = register_delivery(
             client, container_manager, container, project, task_run_id, worker,
             phase=PHASE, session=session, timeout_seconds=timeout,
@@ -206,12 +212,17 @@ def run_external_verification_task(
             prompt_group=EXTERNAL_VERIFICATION_PROMPT_GROUP, prompt_name="external_verification",
             prompt=prompt, worker=worker, replacement_keys=["verification_input"],
         )
+        task_execution = container_manager.prepare_task_execution(
+            project.project, task_run_id, cancellation, container_runtime,
+        )
         timeout = remaining_delivery_seconds(snapshot)
         invocation = driver.build_execute(
             worker, prompt, session, phase=PHASE, project_id=project_id,
             task_run_id=task_run_id, timeout_seconds=timeout,
             conclude_timeout_seconds=min(config.tasks.explore.conclude_timeout, timeout),
             binding=request_binding, inputs=inputs, enable_checkpoints=checkpoint_staging,
+            session_root=session_root_for_project(project.project),
+            task_execution=task_execution,
         )
         process_result = run_worker_process(
             container_manager, container, worker, invocation,
@@ -270,6 +281,7 @@ def run_external_verification_task(
     except UnresolvedArtifactEvidenceError:
         return fail("artifact_error")
     finally:
+        container_manager.stop_task_execution(project_id, task_run_id)
         if process_result is not None:
             process_result.cleanup()
         lease.stop()

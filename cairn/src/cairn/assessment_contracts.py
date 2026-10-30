@@ -200,7 +200,7 @@ def validate_goal_driven_experiment(record: ExperimentRecord) -> None:
         raise ValueError("assessment_record.outcome is required")
     if not record.hypothesis.strip():
         raise ValueError("assessment_record.hypothesis is required")
-    if not record.evidence_refs:
+    if not record.evidence_refs and record.outcome != "finding":
         raise ValueError("assessment_record.evidence_refs is required")
     for field in GOAL_DRIVEN_OUTCOME_FIELDS.get(record.outcome, ()):
         value = getattr(record, field)
@@ -212,13 +212,16 @@ def validate_goal_driven_experiment(record: ExperimentRecord) -> None:
 
 def bind_goal_driven_experiment_schema(schema: dict[str, Any]) -> None:
     """从同一组 outcome 字段要求生成本地修正环使用的条件 Schema。"""
-    schema.setdefault("required", []).extend(["outcome", "evidence_refs"])
+    schema.setdefault("required", []).append("outcome")
     schema["properties"]["outcome"] = {"type": "string", "enum": [
         *GOAL_DRIVEN_OUTCOME_FIELDS, "observation",
     ]}
     schema["properties"]["hypothesis"]["pattern"] = r"\S"
-    schema["properties"]["evidence_refs"]["minItems"] = 1
     conditions = schema.setdefault("allOf", [])
+    conditions.append({
+        "if": {"properties": {"outcome": {"const": "finding"}}, "required": ["outcome"]},
+        "else": {"required": ["evidence_refs"], "properties": {"evidence_refs": {"minItems": 1}}},
+    })
     for outcome, fields in GOAL_DRIVEN_OUTCOME_FIELDS.items():
         conditions.append({
             "if": {"properties": {"outcome": {"const": outcome}}, "required": ["outcome"]},

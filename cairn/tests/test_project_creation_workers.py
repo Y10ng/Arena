@@ -1,10 +1,11 @@
-"""项目创建必须绑定同 Tenant 的可用 Worker。"""
+"""普通项目由服务端绑定同 Tenant 的固定三类 Worker。"""
 
 from __future__ import annotations
 
 import asyncio
 import base64
 import json
+import os
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -18,21 +19,17 @@ from cairn.server.auth import RequestPrincipal, create_user_with_personal_tenant
 from cairn.server.models import (
     CreateProjectRequest,
     CreateProjectResourceRequest,
-    UpdateProjectWorkersRequest,
 )
 from cairn.server.routers.projects import (
-    get_project_management_options,
     list_projects,
-    update_project_workers,
 )
 from cairn.server.schemas.models import CreateTenantModelRequest
-from cairn.server.schemas.tenant_workers import CreateTenantWorkerRequest
+from cairn.server.schemas.tenant_workers import UpdateTenantWorkerRequest
 from cairn.server.services import model_credentials
 from cairn.server.services.project_records import (
     create_project_record,
     delete_project_record,
     get_project_detail,
-    update_project_workers_record,
 )
 from cairn.server.services.project_resources import (
     create_project_resource_batch,
@@ -40,14 +37,18 @@ from cairn.server.services.project_resources import (
 )
 from cairn.server.services.scenarios import list_scenarios, replace_scenarios
 from cairn.server.services.tenant_models import create_tenant_model
-from cairn.server.services.tenant_workers import create_tenant_worker
+from cairn.server.services.tenant_workers import list_tenant_workers, update_tenant_worker
 from cairn.server.services import tenant_workers as tenant_workers_service
+from test_postgres_bootstrap import postgres_instance, empty_postgres_url
 
 
 @pytest.fixture(autouse=True)
-def configured_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def configured_database(request, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    if os.environ.get("CAIRN_TEST_POSTGRES_BOOTSTRAP") != "1":
+        pytest.skip("需显式启用本地一次性 PostgreSQL，绝不使用业务库")
     db._reset_for_tests()
-    db.configure(tmp_path / "project-workers.db")
+    url = request.getfixturevalue("empty_postgres_url")
+    db.configure(database_url=url, artifact_path=tmp_path / "artifacts")
     keyring = tmp_path / "keyring.json"
     keyring.write_text(
         json.dumps(
@@ -95,25 +96,31 @@ def _worker(principal: RequestPrincipal, name: str):
         ),
         principal=principal,
     )
-    return create_tenant_worker(
-        CreateTenantWorkerRequest(display_name=name, model_id=model.id),
-        principal=principal,
-    )
+    return [
+        update_tenant_worker(
+            worker.id,
+            UpdateTenantWorkerRequest(
+                model_id=model.id,
+                max_running=worker.max_running, priority=worker.priority,
+                enabled=worker.enabled, expected_revision=worker.revision,
+            ),
+            principal=principal,
+        )
+        for worker in list_tenant_workers(tenant_id=principal.tenant_id)
+    ]
 
 
-def test_admin_foreign_project_uses_target_tenant_options_and_attribution() -> None:
+def test_admin_foreign_project_preserves_target_tenant_bindings_and_attribution() -> None:
     admin = _principal("global-admin", role="super_admin")
     owner = _principal("foreign-owner")
     admin_worker = _worker(admin, "Admin Worker")
     owner_worker = _worker(owner, "Owner Worker")
-    owner_worker_two = _worker(owner, "Owner Worker Two")
     detail = create_project_record(
         CreateProjectRequest(
             title="Foreign project",
             origin="https://foreign.example.test",
             goal="Audit foreign tenant",
-            scenario="default",
-            tenant_worker_ids=[owner_worker.id],
+            scenario="goal-driven-v1",
             authorization_expires_at=None,
         ),
         tenant_id=owner.tenant_id,
@@ -124,15 +131,14 @@ def test_admin_foreign_project_uses_target_tenant_options_and_attribution() -> N
             title="Admin project",
             origin="https://admin.example.test",
             goal="Audit admin tenant",
-            scenario="default",
-            tenant_worker_ids=[admin_worker.id],
+            scenario="goal-driven-v1",
             authorization_expires_at=None,
         ),
         tenant_id=admin.tenant_id,
         creator=admin.subject_id,
     )
 
-    assert detail.project.scenario_snapshot["key"] == "default"
+    assert detail.project.scenario_snapshot["key"] == "goal-driven-v1"
     assert detail.project.scenario_snapshot["prompt_group"] == "goal-driven-v1"
     assert (
         detail.project.scenario_snapshot["features"]["assessment_protocol"]
@@ -154,72 +160,34 @@ def test_admin_foreign_project_uses_target_tenant_options_and_attribution() -> N
     assert "group_id" not in summary.model_dump()
     assert "group_name" not in summary.model_dump()
 
-    options = get_project_management_options(detail.project.id)
-    assert set(options.model_dump()) == {"tenant_workers"}
-    assert {worker.id for worker in options.tenant_workers} == {
-        owner_worker.id,
-        owner_worker_two.id,
-    }
-    assert admin_worker.id not in {worker.id for worker in options.tenant_workers}
-
-    rebound = update_project_workers(
-        detail.project.id,
-        UpdateProjectWorkersRequest(tenant_worker_ids=[owner_worker_two.id]),
-        admin,
-    )
-    assert [worker.id for worker in rebound.tenant_workers] == [owner_worker_two.id]
-
-    with pytest.raises(HTTPException):
-        update_project_workers(
-            detail.project.id,
-            UpdateProjectWorkersRequest(tenant_worker_ids=[admin_worker.id]),
-            admin,
-        )
+    assert {worker.id for worker in detail.project.tenant_workers} == {worker.id for worker in owner_worker}
+    assert {worker.id for worker in admin_detail.project.tenant_workers} == {worker.id for worker in admin_worker}
+    assert not {worker.id for worker in owner_worker} & {worker.id for worker in admin_worker}
 
 
 def test_project_creation_requires_durable_worker_binding() -> None:
     principal = _principal("project-owner")
-    first = _worker(principal, "First")
-    second = _worker(principal, "Second")
-
+    workers = _worker(principal, "Configured")
     project = create_project_record(
         CreateProjectRequest(
-            title="Bound project",
-            origin="https://example.com",
-            goal="Audit the target",
-            scenario="default",
-            tenant_worker_ids=[first.id, first.id, second.id],
-            authorization_expires_at=None,
+            title="Bound project", origin="https://example.com", goal="Audit the target",
+            scenario="goal-driven-v1", authorization_expires_at=None,
         ),
         tenant_id=principal.tenant_id,
     )
-
     assert project.project.status == "active"
-    assert [item.id for item in project.project.tenant_workers] == [first.id, second.id]
+    assert [item.id for item in project.project.tenant_workers] == [item.id for item in workers]
     assert project.project.preferred_workers == []
     with db.get_conn() as conn:
         rows = conn.execute(
-            """
-            SELECT tenant_id, tenant_worker_id, tenant_worker_revision, position
-            FROM project_tenant_workers
-            WHERE project_id = ?
-            ORDER BY position
-            """,
+            "SELECT tenant_id, tenant_worker_id, tenant_worker_revision, position "
+            "FROM project_tenant_workers WHERE project_id = ? ORDER BY position",
             (project.project.id,),
         ).fetchall()
         assert [dict(row) for row in rows] == [
-            {
-                "tenant_id": principal.tenant_id,
-                "tenant_worker_id": first.id,
-                "tenant_worker_revision": first.revision,
-                "position": 0,
-            },
-            {
-                "tenant_id": principal.tenant_id,
-                "tenant_worker_id": second.id,
-                "tenant_worker_revision": second.revision,
-                "position": 1,
-            },
+            {"tenant_id": principal.tenant_id, "tenant_worker_id": worker.id,
+             "tenant_worker_revision": worker.revision, "position": position}
+            for position, worker in enumerate(workers)
         ]
         assert conn.execute(
             "SELECT preferred_workers_json FROM projects WHERE id = ?",
@@ -239,8 +207,7 @@ def test_project_creation_includes_resources_in_detail_and_deletion_cleans_files
             title="Resource project",
             origin="https://example.com",
             goal="Audit the target",
-            scenario="default-copy-v2",
-            tenant_worker_ids=[worker.id],
+            scenario="goal-driven-v1",
             authorization_expires_at=None,
             resources=[
                 CreateProjectResourceRequest(
@@ -297,8 +264,7 @@ def test_project_creation_consumes_binary_resource_batch(tmp_path: Path) -> None
             title="Batch resource project",
             origin="https://example.com",
             goal="Audit the target",
-            scenario="default-copy-v2",
-            tenant_worker_ids=[worker.id],
+            scenario="goal-driven-v1",
             authorization_expires_at=None,
             resource_batch_id=batch.id,
         ),
@@ -334,7 +300,6 @@ def test_create_project_rejects_removed_budget_fields_with_422(monkeypatch, fiel
     monkeypatch.setitem(app.dependency_overrides, protect_cookie_request, lambda: principal)
     response = TestClient(app).post("/projects", json={
         "title": "Removed budget request", "origin": "授权本地测试", "goal": "验证创建边界",
-        "tenant_worker_ids": ["fixture-worker"],
         "authorization_expires_at": None, field: value,
     })
     assert response.status_code == 422
@@ -352,8 +317,7 @@ def test_project_creation_requires_explicit_authorization_expiry_choice() -> Non
             title="Missing authorization choice",
             origin="https://example.com",
             goal="Audit the target",
-            scenario="default-copy-v2",
-            tenant_worker_ids=["worker"],
+            scenario="goal-driven-v1",
         )
 
     assert exc.value.errors()[0]["loc"] == ("authorization_expires_at",)
@@ -370,8 +334,7 @@ def test_project_creation_rejects_expired_authorization() -> None:
                 title="Expired authorization project",
                 origin="https://example.com",
                 goal="Audit the target",
-                scenario="default-copy-v2",
-                tenant_worker_ids=[worker.id],
+                scenario="goal-driven-v1",
                 authorization_expires_at="2000-01-01T00:00:00Z",
             ),
             tenant_id=principal.tenant_id,
@@ -399,7 +362,6 @@ def test_goal_driven_project_freezes_scenario_without_budget_and_keeps_optional_
             goal="检查普通用户之间的数据隔离及审批流程",
             scenario="goal-driven-v1",
             **({"explore_deadline": deadline} if deadline is not None else {}),
-            tenant_worker_ids=[worker.id],
             authorization_expires_at=None,
         ),
         tenant_id=principal.tenant_id,
@@ -459,116 +421,17 @@ def test_goal_driven_project_freezes_scenario_without_budget_and_keeps_optional_
     assert reloaded.project.assessment_quality is None
 
 
-def test_super_admin_project_uses_only_personal_tenant_workers() -> None:
+def test_project_creation_does_not_borrow_other_tenant_configuration() -> None:
     admin = _principal("project-admin", role="super_admin")
     other = _principal("project-other")
-    owned = _worker(admin, "Admin Worker")
-    foreign = _worker(other, "Other Worker")
-
-    project = create_project_record(
-        CreateProjectRequest(
-            title="Admin personal project",
-            origin="https://example.com",
-            goal="Audit the target",
-            scenario="default",
-            tenant_worker_ids=[owned.id],
-            authorization_expires_at=None,
-        ),
-        tenant_id=admin.tenant_id,
-    )
-    assert [item.id for item in project.project.tenant_workers] == [owned.id]
-
-    with pytest.raises(HTTPException) as hidden:
+    _worker(other, "Other Worker")
+    with pytest.raises(HTTPException) as unavailable:
         create_project_record(
-            CreateProjectRequest(
-                title="No global fallback",
-                origin="https://example.com",
-                goal="Audit the target",
-                scenario="default",
-                tenant_worker_ids=[foreign.id],
-                authorization_expires_at=None,
-            ),
+            CreateProjectRequest(title="No global fallback", origin="https://example.com",
+                                 goal="Audit the target", authorization_expires_at=None),
             tenant_id=admin.tenant_id,
         )
-    assert hidden.value.status_code == 404
-
-
-def test_project_worker_rebinding_refreshes_order_and_revision() -> None:
-    principal = _principal("project-rebind")
-    first = _worker(principal, "First")
-    second = _worker(principal, "Second")
-    project = create_project_record(
-        CreateProjectRequest(
-            title="Rebind project",
-            origin="https://example.com",
-            goal="Audit the target",
-            scenario="default",
-            tenant_worker_ids=[first.id],
-            authorization_expires_at=None,
-        ),
-        tenant_id=principal.tenant_id,
-    )
-
-    rebound = update_project_workers_record(
-        project.project.id,
-        UpdateProjectWorkersRequest(tenant_worker_ids=[second.id, first.id]),
-        tenant_id=principal.tenant_id,
-    )
-
-    assert [item.id for item in rebound.tenant_workers] == [second.id, first.id]
-    assert [item.revision_at_bind for item in rebound.tenant_workers] == [second.revision, first.revision]
-
-
-def test_project_rebinding_hides_cross_tenant_worker() -> None:
-    tenant_a = _principal("rebind-a")
-    tenant_b = _principal("rebind-b")
-    owned = _worker(tenant_a, "Owned")
-    foreign = _worker(tenant_b, "Foreign")
-    project = create_project_record(
-        CreateProjectRequest(
-            title="Rebind protected",
-            origin="https://example.com",
-            goal="Audit the target",
-            scenario="default",
-            tenant_worker_ids=[owned.id],
-            authorization_expires_at=None,
-        ),
-        tenant_id=tenant_a.tenant_id,
-    )
-
-    with pytest.raises(HTTPException) as hidden:
-        update_project_workers_record(
-            project.project.id,
-            UpdateProjectWorkersRequest(tenant_worker_ids=[foreign.id]),
-            tenant_id=tenant_a.tenant_id,
-        )
-    assert hidden.value.status_code == 404
-    with db.get_conn() as conn:
-        rows = conn.execute(
-            "SELECT tenant_worker_id FROM project_tenant_workers WHERE project_id = ?",
-            (project.project.id,),
-        ).fetchall()
-        assert [row["tenant_worker_id"] for row in rows] == [owned.id]
-
-
-def test_project_creation_hides_cross_tenant_worker() -> None:
-    tenant_a = _principal("project-a")
-    tenant_b = _principal("project-b")
-    foreign = _worker(tenant_b, "Foreign")
-
-    with pytest.raises(HTTPException) as hidden:
-        create_project_record(
-            CreateProjectRequest(
-                title="Cross tenant",
-                origin="https://example.com",
-                goal="Audit the target",
-                scenario="default",
-                tenant_worker_ids=[foreign.id],
-                authorization_expires_at=None,
-            ),
-            tenant_id=tenant_a.tenant_id,
-        )
-    assert hidden.value.status_code == 404
+    assert unavailable.value.status_code == 422
     with db.get_conn() as conn:
         assert conn.execute("SELECT COUNT(*) AS count FROM projects").fetchone()["count"] == 0
 
@@ -584,8 +447,7 @@ def test_project_creation_allows_configured_worker_without_dispatcher_heartbeat(
                 title="Configured while offline",
                 origin="https://example.com",
                 goal="Audit the target",
-                scenario="default",
-                tenant_worker_ids=[worker.id],
+                scenario="goal-driven-v1",
                 authorization_expires_at=None,
             ),
             tenant_id=principal.tenant_id,
@@ -593,13 +455,13 @@ def test_project_creation_allows_configured_worker_without_dispatcher_heartbeat(
     finally:
         monkey.undo()
 
-    assert [item.id for item in project.project.tenant_workers] == [worker.id]
+    assert [item.id for item in project.project.tenant_workers] == [item.id for item in worker]
     with db.get_conn() as conn:
         binding = conn.execute(
             "SELECT tenant_worker_id FROM project_tenant_workers WHERE project_id = ?",
             (project.project.id,),
         ).fetchone()
-    assert binding["tenant_worker_id"] == worker.id
+    assert binding["tenant_worker_id"] in {item.id for item in worker}
 
 
 def test_incomplete_worker_fails_before_project_insert() -> None:
@@ -613,9 +475,13 @@ def test_incomplete_worker_fails_before_project_insert() -> None:
         ),
         principal=principal,
     )
-    worker = create_tenant_worker(
-        CreateTenantWorkerRequest(display_name="Missing key", model_id=model.id),
-        principal=principal,
+    worker = list_tenant_workers(tenant_id=principal.tenant_id)[0]
+    update_tenant_worker(
+        worker.id, UpdateTenantWorkerRequest(
+            model_id=model.id,
+            max_running=worker.max_running, priority=worker.priority, enabled=worker.enabled,
+            expected_revision=worker.revision,
+        ), principal=principal,
     )
 
     with pytest.raises(HTTPException) as unavailable:
@@ -624,25 +490,24 @@ def test_incomplete_worker_fails_before_project_insert() -> None:
                 title="Unavailable",
                 origin="https://example.com",
                 goal="Audit the target",
-                scenario="default",
-                tenant_worker_ids=[worker.id],
+                scenario="goal-driven-v1",
                 authorization_expires_at=None,
             ),
             tenant_id=principal.tenant_id,
         )
     assert unavailable.value.status_code == 422
-    assert unavailable.value.detail == "Worker is unavailable: credential_missing"
+    assert "credential_missing" in unavailable.value.detail
     with db.get_conn() as conn:
         assert conn.execute("SELECT COUNT(*) AS count FROM projects").fetchone()["count"] == 0
 
 
 def test_new_database_omits_scenario_admission_columns_but_keeps_connectivity_table() -> None:
     with db.get_conn() as conn:
-        columns = {row["name"] for row in conn.execute("PRAGMA table_info(scenarios)").fetchall()}
+        columns = {row["column_name"] for row in conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'scenarios'").fetchall()}
         assert "required_task_types_json" not in columns
         assert "worker_preflight_json" not in columns
         assert conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'dispatcher_connectivity_tests'"
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = 'dispatcher_connectivity_tests'"
         ).fetchone() is not None
 
 
@@ -655,12 +520,12 @@ def test_existing_extra_scenario_columns_are_ignored_without_being_dropped() -> 
         conn.execute("ALTER TABLE scenarios ADD COLUMN worker_preflight_json TEXT NOT NULL DEFAULT '{}'")
         conn.execute(
             "UPDATE scenarios SET required_task_types_json = '[\"reason\"]', "
-            "worker_preflight_json = '{\"min_candidates\":3}' WHERE key = 'default'"
+            "worker_preflight_json = '{\"min_candidates\":3}' WHERE key = 'goal-driven-v1'"
         )
         scenarios = list_scenarios(conn)
         updated = [
             scenario.model_copy(update={"label": "更新后的默认探索"})
-            if scenario.key == "default"
+            if scenario.key == "goal-driven-v1"
             else scenario
             for scenario in scenarios
         ]
@@ -668,13 +533,46 @@ def test_existing_extra_scenario_columns_are_ignored_without_being_dropped() -> 
 
         row = conn.execute(
             "SELECT label, required_task_types_json, worker_preflight_json "
-            "FROM scenarios WHERE key = 'default'"
+            "FROM scenarios WHERE key = 'goal-driven-v1'"
         ).fetchone()
         assert row["label"] == "更新后的默认探索"
         assert row["required_task_types_json"] == '["reason"]'
         assert row["worker_preflight_json"] == '{"min_candidates":3}'
-        columns = {item["name"] for item in conn.execute("PRAGMA table_info(scenarios)").fetchall()}
+        columns = {item["column_name"] for item in conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'scenarios'").fetchall()}
         assert {"required_task_types_json", "worker_preflight_json"} <= columns
+
+
+def test_internal_verification_project_keeps_single_dedicated_worker() -> None:
+    from cairn.server.schemas.verification_requests import UpdateVerificationConfiguration
+    from cairn.server.services.project_records import _VerificationProjectRequest, create_verification_project_record
+    from cairn.server.services.verification_configuration import update_verification_configuration
+
+    principal = _principal("verification-only")
+    model = create_tenant_model(
+        CreateTenantModelRequest(
+            display_name="Verification Model", protocol="anthropic-messages",
+            base_url="https://api.example.test", model_name="fixture-model", api_key="fixture-key",
+        ), principal=principal,
+    )
+    configuration = update_verification_configuration(
+        UpdateVerificationConfiguration(model_id=model.id), principal,
+    )
+    worker_id = configuration["tenant_worker_id"]
+    with pytest.raises(ValidationError):
+        _VerificationProjectRequest(title="Invalid", origin="授权复测", authorization_expires_at=None,
+                                    tenant_worker_ids=[worker_id, worker_id])
+    # 普通三类仍无模型；内部复测不能依赖普通配置，也不能被替换为三条普通绑定。
+    with db.get_conn() as conn:
+        detail = create_verification_project_record(
+            conn, title="Dedicated verification", origin="仅验证来源主张",
+            tenant_id=principal.tenant_id, tenant_worker_id=worker_id, creator=principal.subject_id,
+            actor_type="user", execution_deadline=None, authorization_expires_at=None,
+        )
+        bindings = conn.execute(
+            "SELECT tenant_worker_id FROM project_tenant_workers WHERE project_id=?", (detail.project.id,),
+        ).fetchall()
+    assert detail.project.status == "pending"
+    assert [binding["tenant_worker_id"] for binding in bindings] == [worker_id]
 
 
 def test_legacy_scenario_admission_api_is_not_exposed() -> None:

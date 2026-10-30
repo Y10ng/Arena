@@ -5,14 +5,42 @@ import { join } from 'node:path';
 import { createRequestBashToolDefinition, runRequest } from '../dist/runner.js';
 import { parseRequest, PHASE_RESULT_KINDS } from '../dist/protocol.js';
 import { acquireSession } from '../dist/session.js';
-import { fixture, ok, submissionSchema } from './fixtures.mjs';
+import { createLocalBashOperations } from '@mariozechner/pi-coding-agent';
+import { canonicalFixtureRequest, fixture, ok, parseFixtureRequest, submissionSchema } from './fixtures.mjs';
+
+function reportCapability(request) {
+  // 此处只验证工具权限，不调用 save_report_segment，也不伪造已保存分段。
+  return {
+    binding: { project_id: request.project_id, task_run_id: request.task_run_id, generation_token: 'fixture-generation', input_snapshot_sha256: 'a'.repeat(64), report_template_digest_sha256: 'b'.repeat(64) },
+    segment_schema: { type: 'object' },
+    manifest_path: `/tmp/cairn-prompts/pi-report-segments-${request.capabilities.candidate_capture.capture_id}.json`,
+  };
+}
+
+test('task execution parser requires a bound capability and private sessions but permits capability-free readonly delivery', async (t) => {
+  const { request } = await fixture(t);
+  const canonical = canonicalFixtureRequest(request);
+  assert.deepEqual(parseRequest(canonical).capabilities.task_execution, canonical.capabilities.task_execution);
+  assert.throws(() => parseRequest(request), { code: 'invalid_request', path: 'capabilities.task_execution.socket_path' });
+  const { task_execution, ...readonlyCapabilities } = request.capabilities;
+  assert.throws(() => parseRequest({ ...canonical, capabilities: readonlyCapabilities }), { code: 'invalid_request', path: 'capabilities.task_execution' });
+  assert.throws(() => parseRequest({ ...canonical, capabilities: { ...canonical.capabilities, task_execution: { ...task_execution, socket_path: canonical.capabilities.task_execution.socket_path, task_run_id: 'other-run' } } }), { code: 'invalid_request', path: 'capabilities.task_execution.task_run_id' });
+  for (const session_root of [request.cwd, join(request.cwd, '.cairn', 'pi')]) {
+    assert.throws(() => parseRequest({ ...canonical, session_root }), { code: 'invalid_request', path: 'session_root' });
+  }
+  for (const overrides of [{ conclude_only: true }, { phase: 'explore_conclude' }, { phase: 'report_execute' }]) {
+    const readonly = { ...request, ...overrides, capabilities: { ...readonlyCapabilities } };
+    if (readonly.phase === 'report_execute') readonly.capabilities.report_segments = reportCapability(readonly);
+    assert.equal(parseRequest(readonly).capabilities.task_execution, undefined);
+  }
+});
 
 for (const protocol of ['anthropic-messages', 'openai-chat-completions', 'openai-responses']) {
   for (const auth of ['authorization-bearer', 'x-api-key']) test(`published SDK ${protocol}: exact endpoint, ${auth}, submit and audit`, async (t) => {
     const { request, calls, suffix } = await fixture(t, protocol);
     request.model.auth_header = auth;
     const audit = [];
-    const result = await runRequest(parseRequest(request), { audit: (event) => audit.push(event) });
+    const result = await runRequest(parseFixtureRequest(request), { audit: (event) => audit.push(event) });
     assert.equal(result.status, 'succeeded', JSON.stringify(result));
     assert.deepEqual(result.result, { protocol: 'cairn-assessment-v2', accepted: true, kind: 'explore_result', data: { status: 'ok' } });
     assert.match(result.submission_id, /^[a-f0-9]{64}$/);
@@ -85,7 +113,7 @@ test('thinking-only length continues the same session to tools and synthetic evi
     ok,
   ]);
   const audit = [];
-  const result = await runRequest(parseRequest(request), { audit: (event) => audit.push(event) });
+  const result = await runRequest(parseFixtureRequest(request), { audit: (event) => audit.push(event) });
   assert.equal(result.status, 'succeeded', JSON.stringify(result));
   assert.equal(calls.length, 5);
   assert.equal(await readFile(join(cwd, 'actions.txt'), 'utf8'), 'beforeafter');
@@ -106,7 +134,7 @@ test('consecutive thinking-only length has a finite endpoint without result repa
   const audit = [];
   const result = await runRequest(request, { audit: (event) => audit.push(event) });
   assert.equal(result.status, 'failed', JSON.stringify(result));
-  assert.equal(result.error.code, 'submission_missing');
+  assert.equal(result.error.code, 'model_output_limit');
   assert.match(result.error.message, /truncation continuation limit/);
   assert.equal(result.error.submission_attempts, 0);
   assert.equal(result.error.repair_rounds, 0);
@@ -146,6 +174,7 @@ test('length during correction preserves normal execution or explicit delivery-o
       ok,
     ]);
     request.conclude_only = concludeOnly;
+    if (concludeOnly) delete request.capabilities.task_execution;
     const audit = [];
     const result = await runRequest(request, { audit: (event) => audit.push(event) });
     assert.equal(result.status, concludeOnly ? 'failed' : 'succeeded', JSON.stringify(result));
@@ -183,7 +212,7 @@ test('length with partial tool arguments fails without execution continuation or
   const audit = [];
   const result = await runRequest(request, { audit: (event) => audit.push(event) });
   assert.equal(result.status, 'failed', JSON.stringify(result));
-  assert.equal(result.error.code, 'provider_error');
+  assert.equal(result.error.code, 'model_output_limit');
   assert.equal(calls.length, 1);
   assert.equal(audit.some((event) => event.event === 'output_continuation' || event.event === 'result_repair'), false);
   await assert.rejects(access(join(cwd, 'forbidden-partial')));
@@ -203,7 +232,7 @@ test('source growth delivers the fixed registered bytes without another repair',
   cwd = workspace;
   await writeFile(join(cwd, 'evidence.txt'), 'original synthetic evidence');
   const audit = [];
-  const result = await runRequest(parseRequest(request), { audit: (event) => audit.push(event) });
+  const result = await runRequest(parseFixtureRequest(request), { audit: (event) => audit.push(event) });
   assert.equal(result.status, 'succeeded', JSON.stringify(result));
   assert.equal(calls.length, 2);
   assert.deepEqual(result.result.data.artifacts, [registered]);
@@ -227,7 +256,7 @@ test('artifact_changed repair never extends the original deadline', async (t) =>
   cwd = workspace;
   await writeFile(join(cwd, 'evidence.txt'), 'before');
   request.timeout_seconds = 0.8;
-  const result = await runRequest(parseRequest(request));
+  const result = await runRequest(parseFixtureRequest(request));
   assert.equal(result.status, 'cancelled', JSON.stringify(result));
   assert.equal(result.error.code, 'deadline_exceeded');
   assert.equal(result.error.repair_rounds, 1);
@@ -316,9 +345,9 @@ test('deadline aborts without a repair or success', async (t) => {
 
 test('bash timeout cap defaults strictly and effective timeout uses every finite minimum', async (t) => {
   const { request, cwd } = await fixture(t);
-  assert.equal(parseRequest(request).bash_tool_timeout_seconds, 120);
+  assert.equal(parseFixtureRequest(request).bash_tool_timeout_seconds, 120);
   for (const value of [0, -1, 1.5, 3601, Number.POSITIVE_INFINITY, '120']) {
-    assert.throws(() => parseRequest({ ...request, bash_tool_timeout_seconds: value }), { code: 'invalid_request', path: 'bash_tool_timeout_seconds' });
+    assert.throws(() => parseFixtureRequest({ ...request, bash_tool_timeout_seconds: value }), { code: 'invalid_request', path: 'bash_tool_timeout_seconds' });
   }
 
   const observedTimeout = async ({ timeout, cap = 120, remaining = 300 }) => {
@@ -341,16 +370,17 @@ test('bash timeout cap defaults strictly and effective timeout uses every finite
   assert.equal(await observedTimeout({ timeout: 0, cap: 9, remaining: 20 }), 9);
 });
 
-test('local bash timeout is returned to the model so it can submit a bounded result', async (t) => {
-  const { request, calls } = await fixture(t, 'openai-chat-completions', [
+test('task-bound bash fixture timeout is returned to the model so it can submit a bounded result', async (t) => {
+  const { request, calls, executionErrors } = await fixture(t, 'openai-chat-completions', [
     { tools: [{ name: 'bash', args: { command: 'node -e "setTimeout(() => {}, 1000)"', timeout: 0.05 } }] },
     ok,
   ]);
   request.phase = 'explore_execute';
-  const result = await runRequest(parseRequest(request));
+  const result = await runRequest(parseFixtureRequest(request));
   assert.equal(result.status, 'succeeded', JSON.stringify(result));
   assert.equal(calls.length, 2);
-  assert.match(JSON.stringify(calls[1].body), /Command timed out after 0\.05 seconds/);
+  assert.match(JSON.stringify(calls[1].body), /Task-bound test execution did not complete/);
+  assert.deepEqual(executionErrors, ['execution_timeout']);
 });
 
 test('remaining-time notice never aborts a provider stream or extends the hard deadline', async (t) => {
@@ -359,7 +389,7 @@ test('remaining-time notice never aborts a provider stream or extends the hard d
   request.conclude_timeout_seconds = 0.6;
   const audit = [];
   const started = performance.now();
-  const result = await runRequest(parseRequest(request), { audit: (event) => audit.push(event) });
+  const result = await runRequest(parseFixtureRequest(request), { audit: (event) => audit.push(event) });
   const elapsed = performance.now() - started;
   assert.equal(result.status, 'cancelled', JSON.stringify(result));
   assert.equal(result.error.code, 'deadline_exceeded');
@@ -378,7 +408,7 @@ test('authorized bash crosses the former soft deadline and completes before norm
   request.timeout_seconds = 2;
   request.conclude_timeout_seconds = 1.8;
   const audit = [];
-  const result = await runRequest(parseRequest(request), { audit: (event) => audit.push(event) });
+  const result = await runRequest(parseFixtureRequest(request), { audit: (event) => audit.push(event) });
   assert.equal(result.status, 'succeeded', JSON.stringify(result));
   assert.equal(calls.length, 2);
   assert.ok(calls[1].body.tools.some((tool) => tool.function.name === 'bash'));
@@ -401,7 +431,7 @@ test('new authorized action after the former soft deadline remains available in 
   request.timeout_seconds = 2;
   request.conclude_timeout_seconds = 1.8;
   const audit = [];
-  const result = await runRequest(parseRequest(request), { audit: (event) => audit.push(event) });
+  const result = await runRequest(parseFixtureRequest(request), { audit: (event) => audit.push(event) });
   assert.equal(result.status, 'succeeded', JSON.stringify(result));
   assert.equal(calls.length, 2);
   assert.equal(await readFile(join(cwd, 'after-soft-deadline'), 'utf8'), 'verified');
@@ -409,9 +439,9 @@ test('new authorized action after the former soft deadline remains available in 
   assert.ok(calls[1].body.tools.some((tool) => tool.function.name === 'bash'));
 });
 
-test('hard deadline and user cancellation stop an in-flight local process before return', async (t) => {
+test('hard deadline and user cancellation disconnect and stop the fixture execution process', async (t) => {
   for (const cancelled of [false, true]) await t.test(cancelled ? 'user_cancel' : 'hard_deadline', async (t) => {
-    const { request, cwd, calls } = await fixture(t, 'openai-chat-completions', [
+    const { request, cwd, calls, waitForExecutions } = await fixture(t, 'openai-chat-completions', [
       { tools: [{ name: 'bash', args: { command: `printf '%s' "$$" > active.pid; exec node -e 'setInterval(()=>{},1000)'` } }] },
       ok,
     ]);
@@ -420,7 +450,7 @@ test('hard deadline and user cancellation stop an in-flight local process before
     const controller = new AbortController();
     let cancelTimer;
     t.after(() => clearTimeout(cancelTimer));
-    const result = await runRequest(parseRequest(request), {
+    const result = await runRequest(parseFixtureRequest(request), {
       signal: controller.signal,
       audit: (event) => {
         if (cancelled && event.event === 'tool_execution_start' && event.tool_name === 'bash') cancelTimer = setTimeout(() => controller.abort(), 150);
@@ -431,6 +461,8 @@ test('hard deadline and user cancellation stop an in-flight local process before
     assert.equal(calls.length, 1);
     const pid = Number(await readFile(join(cwd, 'active.pid'), 'utf8'));
     t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
+    // 客户端取消只确认断开；等待替身处理连接关闭，不能冒充真实执行端的退出确认。
+    await waitForExecutions();
     assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
   });
 });
@@ -441,10 +473,13 @@ test('explicit conclude and report requests never gain normal execution tools', 
       { tools: [{ name: 'bash', args: { command: 'touch forbidden-delivery-action' } }] },
     ]);
     request.phase = phase;
-    const result = await runRequest(parseRequest(request));
+    delete request.capabilities.task_execution;
+    if (phase === 'report_execute') request.capabilities.report_segments = reportCapability(request);
+    const result = await runRequest(parseFixtureRequest(request));
     assert.equal(result.status, 'failed', JSON.stringify(result));
     assert.equal(result.error.code, 'tool_permission');
-    assert.deepEqual(calls[0].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
+    const tools = ['read_evidence', 'register_artifact', 'submit_result', ...(phase === 'report_execute' ? ['save_report_segment'] : [])];
+    assert.deepEqual(calls[0].body.tools.map((tool) => tool.function.name).sort(), tools.sort());
     await assert.rejects(access(join(cwd, 'forbidden-delivery-action')));
   });
 });
@@ -454,7 +489,7 @@ test('bounded SDK bash timeout terminates the spawned process group', async (t) 
   const pidPath = join(cwd, 'bash-descendant.pid');
   const script = "setInterval(()=>{},1000)";
   const command = `node -e ${JSON.stringify(script)} & child=$!; printf '%s' "$child" > bash-descendant.pid; wait "$child"`;
-  const tool = createRequestBashToolDefinition(cwd, 0.2, () => 10);
+  const tool = createRequestBashToolDefinition(cwd, 0.2, () => 10, createLocalBashOperations());
   await assert.rejects(tool.execute('bash-process-group', { command }), /Command timed out after 0\.2 seconds/);
   const pid = Number(await readFile(pidPath, 'utf8'));
   t.after(() => { try { process.kill(pid, 'SIGKILL'); } catch {} });
@@ -467,10 +502,11 @@ test('bounded SDK bash timeout terminates the spawned process group', async (t) 
 });
 
 test('single writer, explicit resume, project ownership and corrupt transcript fail closed', async (t) => {
-  const { request, calls, freshCandidateCapture } = await fixture(t);
-  const physical = (overrides = {}) => ({ ...request, ...overrides, capabilities: { ...request.capabilities, candidate_capture: freshCandidateCapture() } });
+  const { request, calls, freshCandidateCapture, freshTaskExecution } = await fixture(t);
+  const physical = (overrides = {}) => ({ ...request, ...overrides, capabilities: { ...request.capabilities,
+    candidate_capture: freshCandidateCapture(), task_execution: freshTaskExecution(overrides.task_run_id ?? request.task_run_id) } });
   const lease = await acquireSession(request);
-  await assert.rejects(acquireSession({ ...request, resume: true, task_run_id: 'task-next', continuation: { source_task_run_id: 'task-test', execution_generation: 1 } }), { code: 'session_locked' });
+  await assert.rejects(acquireSession(physical({ resume: true, task_run_id: 'task-next', continuation: { source_task_run_id: 'task-test', execution_generation: 1 } })), { code: 'session_locked' });
   await lease.finish();
   request.session = `pi:${crypto.randomUUID()}`;
   let result = await runRequest(request);
@@ -494,7 +530,8 @@ test('resume verifies phase family and original execution binding without new ex
   request.phase = 'explore_execute';
   request.binding = { slot_key: 'cell-1', surface_key: 'surface-1', test_family: 'authorization' };
   assert.equal((await runRequest(request)).status, 'succeeded');
-  const delivery = { ...request, resume: true, conclude_only: true, task_run_id: 'delivery-run' };
+  const delivery = { ...request, resume: true, conclude_only: true, task_run_id: 'delivery-run', capabilities: { ...request.capabilities } };
+  delete delivery.capabilities.task_execution;
   assert.equal((await runRequest(physical(delivery))).status, 'succeeded');
   assert.deepEqual(calls[1].body.tools.map((tool) => tool.function.name).sort(), ['read_evidence', 'register_artifact', 'submit_result']);
   assert.equal((await runRequest(physical({ ...delivery, phase: 'report_execute' }))).error?.code, 'session_ownership');
@@ -510,21 +547,22 @@ test('resume verifies phase family and original execution binding without new ex
 });
 
 test('missing and legacy sessions never reopen as new', async (t) => {
-  const { request, calls } = await fixture(t);
-  const result = await runRequest({ ...request, resume: true, task_run_id: 'task-next', continuation: { source_task_run_id: 'task-test', execution_generation: 1 } });
+  const { request, calls, freshTaskExecution } = await fixture(t);
+  const result = await runRequest({ ...request, resume: true, task_run_id: 'task-next', continuation: { source_task_run_id: 'task-test', execution_generation: 1 },
+    capabilities: { ...request.capabilities, task_execution: freshTaskExecution('task-next') } });
   assert.equal(result.error.code, 'session_corrupt');
   assert.equal(calls.length, 0);
-  assert.throws(() => parseRequest({ ...request, session: 'claude-old' }), { code: 'invalid_request' });
+  assert.throws(() => parseFixtureRequest({ ...request, session: 'claude-old' }), { code: 'invalid_request' });
 });
 
 test('cooperative abort preserves original conversation for a new Run and binding', async (t) => {
   const prior = 'Prior observation from the original assistant turn';
-  const { request, calls, freshCandidateCapture } = await fixture(t, 'openai-chat-completions', [
+  const { request, calls, freshCandidateCapture, freshTaskExecution } = await fixture(t, 'openai-chat-completions', [
     { text: prior }, { hang: true }, ok, ok,
   ]);
   request.binding = { allowed_fact_ids: ['origin'] };
   const controller = new AbortController();
-  const interrupted = await runRequest(parseRequest(request), {
+  const interrupted = await runRequest(parseFixtureRequest(request), {
     signal: controller.signal,
     audit: (event) => { if (event.event === 'result_repair') setTimeout(() => controller.abort(), 60); },
   });
@@ -538,17 +576,18 @@ test('cooperative abort preserves original conversation for a new Run and bindin
     ...request, task_run_id: 'task-next', resume: true, prompt: 'Continue the unfinished work.',
     binding: { allowed_fact_ids: ['origin', 'accepted-new-fact'] },
     continuation: { source_task_run_id: 'task-test', execution_generation: 1 },
-    capabilities: { ...request.capabilities, candidate_capture: freshCandidateCapture() },
+    capabilities: { ...request.capabilities, candidate_capture: freshCandidateCapture(), task_execution: freshTaskExecution('task-next') },
   };
-  assert.throws(() => parseRequest({ ...continuation, continuation: undefined }), { code: 'invalid_request', path: 'continuation' });
-  assert.throws(() => parseRequest({ ...continuation, continuation: { source_task_run_id: 'task-next', execution_generation: 1 } }), { code: 'invalid_request', path: 'continuation.source_task_run_id' });
-  assert.throws(() => parseRequest({ ...continuation, continuation: { source_task_run_id: 'task-test', execution_generation: -1 } }), { code: 'invalid_request', path: 'continuation.execution_generation' });
-  assert.throws(() => parseRequest({ ...continuation, conclude_only: true }), { code: 'invalid_request', path: 'continuation' });
+  assert.throws(() => parseFixtureRequest({ ...continuation, continuation: undefined }), { code: 'invalid_request', path: 'continuation' });
+  assert.throws(() => parseFixtureRequest({ ...continuation, continuation: { source_task_run_id: 'task-next', execution_generation: 1 } }), { code: 'invalid_request', path: 'continuation.source_task_run_id' });
+  assert.throws(() => parseFixtureRequest({ ...continuation, continuation: { source_task_run_id: 'task-test', execution_generation: -1 } }), { code: 'invalid_request', path: 'continuation.execution_generation' });
+  assert.throws(() => parseFixtureRequest({ ...continuation, conclude_only: true }), { code: 'invalid_request', path: 'continuation' });
   assert.equal((await runRequest({ ...continuation, continuation: { source_task_run_id: 'wrong-run', execution_generation: 1 } })).error?.code, 'session_ownership');
-  const writer = await acquireSession({ ...request, resume: true, conclude_only: true });
+  const { task_execution, ...readonlyCapabilities } = request.capabilities;
+  const writer = await acquireSession({ ...request, resume: true, conclude_only: true, capabilities: readonlyCapabilities });
   assert.equal((await runRequest(continuation)).error?.code, 'session_locked');
   await writer.finish();
-  const next = await runRequest(parseRequest(continuation));
+  const next = await runRequest(parseFixtureRequest(continuation));
   assert.equal(next.status, 'succeeded', JSON.stringify(next));
   assert.equal(next.task_run_id, 'task-next');
   assert.equal(calls.length, 3);
@@ -563,9 +602,9 @@ test('cooperative abort preserves original conversation for a new Run and bindin
   assert.ok(transcript.startsWith(originalTranscript));
   assert.match(transcript, /cairn_execution_segment_v1/);
   assert.match(transcript, /"source_task_run_id":"task-test"/);
-  assert.equal((await runRequest({ ...continuation, task_run_id: 'task-third', continuation: { source_task_run_id: 'wrong-run', execution_generation: 2 }, capabilities: { ...continuation.capabilities, candidate_capture: freshCandidateCapture() } })).error?.code, 'session_ownership');
+  assert.equal((await runRequest({ ...continuation, task_run_id: 'task-third', continuation: { source_task_run_id: 'wrong-run', execution_generation: 2 }, capabilities: { ...continuation.capabilities, candidate_capture: freshCandidateCapture(), task_execution: freshTaskExecution('task-third') } })).error?.code, 'session_ownership');
   await writeFile(join(directory, 'session.jsonl'), transcript + '{bad');
-  assert.equal((await runRequest({ ...continuation, task_run_id: 'task-third', continuation: { source_task_run_id: 'task-next', execution_generation: 2 }, capabilities: { ...continuation.capabilities, candidate_capture: freshCandidateCapture() } })).error?.code, 'session_corrupt');
+  assert.equal((await runRequest({ ...continuation, task_run_id: 'task-third', continuation: { source_task_run_id: 'task-next', execution_generation: 2 }, capabilities: { ...continuation.capabilities, candidate_capture: freshCandidateCapture(), task_execution: freshTaskExecution('task-third') } })).error?.code, 'session_corrupt');
   assert.equal(calls.length, 3);
 });
 
@@ -578,7 +617,7 @@ test('structured Reason binding crosses the request parser as an opaque object',
     eligible_cells: [{ slot_key: 'cell:authorization', strategy: { mode: 'any' } }],
     digest: 'a'.repeat(64),
   };
-  const parsed = parseRequest({
+  const parsed = parseFixtureRequest({
     ...request,
     phase: 'reason_execute',
     binding: { max_intents: 1, structured_intent_binding: structured },
@@ -586,7 +625,7 @@ test('structured Reason binding crosses the request parser as an opaque object',
   assert.deepEqual(parsed.binding.structured_intent_binding, structured);
   for (const invalid of [null, [], 'invalid', 42, false]) {
     assert.throws(
-      () => parseRequest({ ...request, binding: { structured_intent_binding: invalid } }),
+      () => parseFixtureRequest({ ...request, binding: { structured_intent_binding: invalid } }),
       { code: 'invalid_request', path: 'binding.structured_intent_binding' },
     );
   }
@@ -614,8 +653,8 @@ test('unsupported endpoint and unknown phase are rejected without a request', as
   const result = await runRequest(request);
   assert.equal(result.error.code, 'unsupported_model_config');
   assert.equal(calls.length, 0);
-  assert.throws(() => parseRequest({ ...request, phase: 'explore' }), { code: 'invalid_request', path: 'phase' });
-  assert.throws(() => parseRequest({ ...request, phase: 'healthcheck' }), { code: 'invalid_request', path: 'phase' });
+  assert.throws(() => parseFixtureRequest({ ...request, phase: 'explore' }), { code: 'invalid_request', path: 'phase' });
+  assert.throws(() => parseFixtureRequest({ ...request, phase: 'healthcheck' }), { code: 'invalid_request', path: 'phase' });
 });
 
 for (const status of [401, 429, 503]) test(`provider ${status} has bounded retries and no result repair`, async (t) => {

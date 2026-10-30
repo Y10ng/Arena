@@ -15,11 +15,19 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from cairn.server import db, migrations
+from cairn.server.db_defaults import DEFAULT_REPORT_TEMPLATES
+from cairn.server.report_template_defaults_v60 import (
+    DEFAULT_REPORT_TEMPLATE_KEY_V60,
+    DEFAULT_REPORT_TEMPLATE_MARKDOWN_V60,
+)
+from cairn.server.report_template_defaults_v62 import DEFAULT_REPORT_TEMPLATE_MARKDOWN_V62
 from cairn.server.auth import RequestPrincipal
 from cairn.server.schemas.projects import AssessmentReportGenerationRequest
 from cairn.server.services import assessment_attempts, assessment_reports, report_templates
 from cairn.server.services.report_inventory import list_report_inventory
 from cairn.server.services.report_policy import parse_report_execution_plan
+from test_assessment_migration_v34 import private_postgres
+from test_report_frozen_rendering import TEMPLATE, _data, _expected_markdown, _packet
 
 
 @pytest.fixture
@@ -114,7 +122,7 @@ def test_migration_keeps_latest_content_profiles_and_empty_editable_record(pg_co
     assert "empty" not in {item.key for item in report_templates.list_report_template_catalog(conn)}
     with pytest.raises(HTTPException, match="content_missing"):
         report_templates.require_report_template_profile(conn, "empty", "assessment-report-packet-v1")
-    report_templates.update_report_template(conn, "empty", "可编辑", "", "# 补充正文")
+    report_templates.update_report_template(conn, "empty", "可编辑", "", TEMPLATE)
     assert "empty" in {item.key for item in report_templates.list_report_template_catalog(conn)}
 
 
@@ -233,19 +241,20 @@ def test_migration_blocks_only_recoverable_failed_report_generation(pg_conn, cas
 def test_current_template_crud_preserves_markdown_and_profile_checks(pg_conn):
     conn = pg_conn
     _migrate(conn)
-    content = "  # 原文  \n\n    缩进内容\n"
+    content = TEMPLATE.replace("## 1. 漏洞成果汇总", "## 1. 原文  \n\n    缩进内容")
     item = report_templates.create_report_template(conn, None, "自定义", "说明", content)
     assert item.key.startswith("report-")
     assert item.markdown_content == content
     assert item.digest_sha256 == sha256(content.encode()).hexdigest()
+    changed = TEMPLATE.replace("## 1. 漏洞成果汇总", "## 1. 新正文")
     updated = report_templates.update_report_template(
-        conn, item.key, "改名", "新说明", "# 新正文", compatibility_profiles=["another-profile"]
+        conn, item.key, "改名", "新说明", changed, compatibility_profiles=["another-profile"]
     )
-    assert (updated.name, updated.description, updated.markdown_content) == ("改名", "新说明", "# 新正文")
+    assert (updated.name, updated.description, updated.markdown_content) == ("改名", "新说明", changed)
     assert updated.created_at == item.created_at
     with pytest.raises(HTTPException, match="incompatible"):
         report_templates.require_report_template_profile(conn, item.key, "assessment-report-packet-v1")
-    report_templates.update_report_template(conn, "standard-pentest", "内置也可改", "", "# 新内置正文")
+    report_templates.update_report_template(conn, "standard-pentest", "内置也可改", "", TEMPLATE)
     report_templates.delete_report_template(conn, item.key)
     assert conn.execute("SELECT 1 FROM report_template_profiles WHERE template_key = ?", (item.key,)).fetchone() is None
     with pytest.raises(HTTPException) as deleted:
@@ -259,21 +268,22 @@ def test_request_freezes_content_profiles_and_serializes_edit_delete(pg_conn):
     conn = pg_conn
     _migrate(conn)
     _seed_project(conn)
+    report_templates.update_report_template(conn, "standard-pentest", "冻结模板", "", TEMPLATE)
     conn.commit()
     first = _request(conn)
     frozen = dict(conn.execute("SELECT * FROM assessment_report_finalizations").fetchone())
     assert frozen["template_version"] is None
     assert json.loads(frozen["template_profiles_json"]) == ["assessment-report-packet-v1"]
     plan = parse_report_execution_plan(frozen["report_execution_plan_json"])
-    assert (plan.packet_version, plan.output_contract_version) == (2, 3)
+    assert (plan.packet_version, plan.output_contract_version) == (2, 4)
     with psycopg.connect(conn._connection.info.dsn, row_factory=dict_row) as raw:
         other = db.PostgresConnection(raw)
         other.execute("SET lock_timeout = '100ms'")
         with pytest.raises(psycopg.errors.LockNotAvailable):
-            report_templates.update_report_template(other, "standard-pentest", "变更", "", "# 后来内容")
+            report_templates.update_report_template(other, "standard-pentest", "变更", "", TEMPLATE.replace("漏洞成果汇总", "后来内容"))
         other.rollback()
         conn.commit()
-        report_templates.update_report_template(other, "standard-pentest", "变更", "", "# 后来内容")
+        report_templates.update_report_template(other, "standard-pentest", "变更", "", TEMPLATE.replace("漏洞成果汇总", "后来内容"))
         other.commit()
         assert _request(conn).generation_token == first.generation_token
         conn.commit()
@@ -291,6 +301,7 @@ def test_current_finish_and_inventory_keep_historic_metadata_unchanged(pg_conn, 
     conn = pg_conn
     _migrate(conn)
     _seed_project(conn)
+    report_templates.update_report_template(conn, "standard-pentest", "冻结模板", "", TEMPLATE)
     requested = _request(conn)
 
     @contextmanager
@@ -311,7 +322,7 @@ def test_current_finish_and_inventory_keep_historic_metadata_unchanged(pg_conn, 
     }
     snapshot = {
         "version": 1, "graph_yaml": "project: p1\n",
-        "report_packet": {"version": 2, "project": {"id": "p1"}}, "report_template": template,
+        "report_packet": _packet(empty=True), "report_template": template,
     }
     common = {
         "source": "report_task", "report_generation_token": claim.generation_token,
@@ -319,7 +330,7 @@ def test_current_finish_and_inventory_keep_historic_metadata_unchanged(pg_conn, 
         "report_execution_plan_sha256": claim.report_execution_plan_sha256,
         "report_prompt_digest_sha256": claim.report_prompt_digest_sha256,
         "report_policy_version": claim.report_policy_version,
-        "packet_version": 2, "output_contract_version": 3, "report_data_schema_version": 2,
+        "packet_version": 2, "output_contract_version": 4, "report_data_schema_version": 3,
         "runtime_context": {},
     }
 
@@ -385,25 +396,26 @@ def test_current_finish_and_inventory_keep_historic_metadata_unchanged(pg_conn, 
     artifact("old", "vulnerability-report.md", b"# historic\n", old_metadata)
     before = conn.execute("SELECT metadata_json FROM artifacts WHERE id = 'old'").fetchone()["metadata_json"]
     inventory = list_report_inventory(conn, tenant_id=None, template_key="standard-pentest")
-    assert {item.artifact_id: item.template_version for item in inventory.items} == {"new": None, "old": 3}
+    # 额外上传没有独立成功接受事实，不得因历史 metadata 完整而进入成果清单。
+    assert {item.artifact_id: item.template_version for item in inventory.items} == {"new": None}
     assert conn.execute("SELECT metadata_json FROM artifacts WHERE id = 'old'").fetchone()["metadata_json"] == before
 
 
 def test_two_template_rendered_artifacts_finish_and_enter_inventory_with_historic_v3(pg_conn, monkeypatch, tmp_path):
-    from copy import deepcopy
-
     from cairn.dispatcher.protocol.client import ApiResult
     from cairn.dispatcher.tasks import report
     from cairn.server.schemas.artifacts import CreateArtifactRequest
     from cairn.server.services import audit_artifacts
-    from test_report_frozen_rendering import V3_TEMPLATE, _data, _packet
 
     conn = pg_conn
     _migrate(conn)
     _seed_project(conn)
     conn.execute("UPDATE projects SET status = 'stopped' WHERE id = 'p1'")
-    report_templates.update_report_template(conn, "standard-pentest", "四章模板", "", V3_TEMPLATE)
-    alternate = "# 冻结材料交付\n\n## 事实及发现\n\n## 修复路线与附件\n"
+    report_templates.update_report_template(conn, "standard-pentest", "四章模板", "", TEMPLATE)
+    alternate = TEMPLATE.replace("## 2. 漏洞详情", "## 2. 冻结发现").replace(
+        "#### 漏洞描述\n\n{{ finding.description }}\n\n{{ finding.impact }}",
+        "#### 简述\n\n- {{ finding.impact }}\n- {{ finding.description }}",
+    ).replace("**{{ evidence.title }}**", "##### 交互：{{ evidence.title }}")
     report_templates.create_report_template(conn, "alternative", "另一布局", "", alternate)
 
     @contextmanager
@@ -420,19 +432,22 @@ def test_two_template_rendered_artifacts_finish_and_enter_inventory_with_histori
             return ApiResult(status_code=201, data={"id": artifact.id, "sha256": artifact.sha256})
 
     client = Client()
-    packet_json = json.dumps(_packet(), ensure_ascii=False)
+    packet = _packet()
+    packet_json = json.dumps(packet, ensure_ascii=False)
     data = _data("v1", "v2")
-    alternate_data = deepcopy(data)
-    alternate_data["layout"] = [
-        {"type": "markdown", "markdown": "# 冻结材料交付\n\n## 事实及发现"},
-        *(item for item in data["layout"] if item["type"] == "fact" and item["ref"] not in {"limitations", "evidence_index"}),
-        {"type": "markdown", "markdown": "## 修复路线与附件\n\n建议先修复授权边界，再记录回归证据。"},
-        {"type": "fact", "ref": "limitations"}, {"type": "fact", "ref": "evidence_index"},
-    ]
+    expected = _expected_markdown(packet)
+    alternate_expected = expected.replace("## 2. 漏洞详情", "## 2. 冻结发现")
+    for suffix in ("一", "二"):
+        alternate_expected = alternate_expected.replace(
+            f"#### 漏洞描述\n\n第{suffix}漏洞的来源描述。\n\n影响解释{suffix}。",
+            f"#### 简述\n\n- 影响解释{suffix}。\n- 第{suffix}漏洞的来源描述。",
+        )
+    for title in ("第一观察交互", "第二观察交互"):
+        alternate_expected = alternate_expected.replace(f"**{title}**", f"##### 交互：{title}")
     principal = RequestPrincipal(kind="machine", subject_id="synthetic-dispatcher")
     registered = []
     outputs = []
-    for key, result_data in (("standard-pentest", data), ("alternative", alternate_data)):
+    for key, expected_markdown in (("standard-pentest", expected), ("alternative", alternate_expected)):
         requested = _request(conn, key)
         claim = assessment_reports.claim_assessment_report_finalization("p1", "worker", principal=principal)
         assert claim.generation_token == requested.generation_token
@@ -452,7 +467,7 @@ def test_two_template_rendered_artifacts_finish_and_enter_inventory_with_histori
             "report_execution_plan_sha256": claim.report_execution_plan_sha256,
             "report_prompt_digest_sha256": claim.report_prompt_digest_sha256,
             "report_policy_version": plan["report_policy_version"],
-            "packet_version": 2, "output_contract_version": 3, "report_data_schema_version": 2,
+            "packet_version": 2, "output_contract_version": 4, "report_data_schema_version": 3,
         }
         snapshot_result = client.create_artifact(
             "p1", task_run_id=claim.task_run_id, kind="report", category="deliverable",
@@ -465,7 +480,7 @@ def test_two_template_rendered_artifacts_finish_and_enter_inventory_with_histori
             digest_sha256=snapshot_digest, principal=principal,
         )
         identity = report._write_report_results(
-            client, "p1", claim.task_run_id, data=result_data, report_packet_json=packet_json,
+            client, "p1", claim.task_run_id, data=data, report_packet_json=packet_json,
             report_template_markdown=claim.template_markdown,
             report_generation_token=claim.generation_token, report_template_key=claim.template_key,
             report_template_digest_sha256=claim.template_digest_sha256,
@@ -484,13 +499,9 @@ def test_two_template_rendered_artifacts_finish_and_enter_inventory_with_histori
             task_run_result={"status": "succeeded", "exit_code": 0},
         )
         assert assessment_reports.finish_assessment_report_finalization("p1", body, principal=principal).status == "ready"
-        persisted = audit_artifacts.artifact_content_file("p1", identity.artifact_id).disk_path.read_text()
+        persisted = audit_artifacts.artifact_content_file("p1", identity.artifact_id).disk_path.read_bytes().decode("utf-8")
         assert sha256(persisted.encode()).hexdigest() == identity.sha256
-        assert report._report_main_headings(persisted) == report._report_main_headings(
-            claim.template_markdown.replace("{{ report_title }}", "安全评估部分报告")
-        )
-        for text in ("Canonical 漏洞记录数：2；Observation 数：3", "conflicting", "run_failed", "not_run", "缺少第二身份", "/evidence/request", "漏洞 v1", "漏洞 v2"):
-            assert text in persisted
+        assert persisted == expected_markdown
         registered.append(identity.artifact_id)
         outputs.append(persisted)
     assert outputs[0] != outputs[1]
@@ -506,9 +517,164 @@ def test_two_template_rendered_artifacts_finish_and_enter_inventory_with_histori
     before = dict(conn.execute("SELECT * FROM artifacts WHERE id = ?", (historic,)).fetchone())
     inventory = list_report_inventory(conn, tenant_id=None)
     items = {item.artifact_id: item for item in inventory.items}
-    assert set(items) == {*registered, historic}
-    assert {key: items[key].template_version for key in items} == {**dict.fromkeys(registered), historic: 3}
+    # 已接受的两份成品保留；同一任务额外上传的旧格式文件并不因此获得接受。
+    assert set(items) == set(registered)
+    assert {key: items[key].template_version for key in items} == dict.fromkeys(registered)
     for artifact_id in registered:
-        assert (items[artifact_id].packet_version, items[artifact_id].output_contract_version, items[artifact_id].report_data_schema_version) == (2, 3, 2)
+        assert (items[artifact_id].packet_version, items[artifact_id].output_contract_version, items[artifact_id].report_data_schema_version) == (2, 4, 3)
     assert [items[artifact_id].template_key for artifact_id in registered] == ["standard-pentest", "alternative"]
     assert dict(conn.execute("SELECT * FROM artifacts WHERE id = ?", (historic,)).fetchone()) == before
+
+
+@pytest.fixture
+def defaults_v60_conn(private_postgres):
+    # 只在既有 fixture 自建的临时集群内建 schema，不接受应用 DSN。
+    name = f"report_defaults_{uuid4().hex}"
+    with psycopg.connect(**private_postgres, autocommit=True, row_factory=dict_row) as raw:
+        raw.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(name)))
+        raw.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(name)))
+        raw.autocommit = False
+        conn = db.PostgresConnection(raw)
+        try:
+            yield conn
+        finally:
+            conn.rollback()
+            raw.autocommit = True
+            raw.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(name)))
+
+
+def _migrate_defaults_v60(conn, *, max_version=60):
+    migrations.ensure_registry(conn)
+    for migration in migrations.POSTGRES_MIGRATIONS:
+        if migration.version <= max_version:
+            migrations.verify_or_apply(conn, migration, lambda _conn: None)
+
+
+def test_defaults_v60_fresh_install_api_identity_and_table_authority(defaults_v60_conn):
+    conn = defaults_v60_conn
+    db.run_migrations(conn, "postgresql")
+    assert migrations.POSTGRES_MANUAL_REPORTS.checksum == "7274e6b676e1889e5be733b87313a0f95a080c502a4dad4021f41cb34532f58f"
+    registered = conn.execute("SELECT checksum FROM schema_migrations WHERE version = 25").fetchone()
+    assert registered["checksum"] == migrations.POSTGRES_MANUAL_REPORTS.checksum
+    templates = report_templates.list_report_templates(conn)
+    defaults = [item for item in templates if item.is_default]
+    assert len(defaults) == 1
+    default = defaults[0]
+    assert default.key == DEFAULT_REPORT_TEMPLATE_KEY_V60
+    assert default.markdown_content == DEFAULT_REPORT_TEMPLATE_MARKDOWN_V62
+    for item in templates:
+        assert item.digest_sha256 == sha256(item.markdown_content.encode()).hexdigest()
+        assert item.supports_single_vulnerability and item.validation_error is None
+        if item.key == "single-vulnerability-report":
+            assert item.compatibility_profiles == ["single-vulnerability-export-v1"]
+            with pytest.raises(HTTPException, match="assessment_report_template_incompatible"):
+                report_templates.require_report_template_profile(conn, item.key, "assessment-report-packet-v1")
+        else:
+            assert item.markdown_content == default.markdown_content
+            assert report_templates.require_report_template_profile(conn, item.key, "assessment-report-packet-v1") == item
+    catalog = report_templates.list_report_template_catalog(conn)
+    assert [item.key for item in catalog if item.is_default] == [default.key]
+    assert all(item.supports_single_vulnerability and item.validation_error is None for item in catalog)
+
+    changed = default.markdown_content.replace("### 漏洞说明", "### 问题说明")
+    edited = report_templates.update_report_template(conn, default.key, "已编辑默认", "保留修改", changed)
+    draft = report_templates.create_report_template(conn, None, "从默认新建", "", edited.markdown_content)
+    assert draft.markdown_content == changed and not draft.is_default
+    assert draft.supports_single_vulnerability and draft.validation_error is None
+    assert report_templates.get_report_template(conn, default.key).markdown_content == changed
+    with pytest.raises(HTTPException, match="default_delete_forbidden") as protected:
+        report_templates.delete_report_template(conn, default.key)
+    assert protected.value.status_code == 409
+    report_templates.delete_report_template(conn, draft.key)
+
+    overall = report_templates.create_report_template(
+        conn, "overall-only", "整体专用", "", changed + "\n{{ executive_summary }}\n"
+    )
+    assert not overall.supports_single_vulnerability and overall.validation_error is None
+    assert report_templates.require_report_template_profile(conn, overall.key, "assessment-report-packet-v1") == overall
+    db.run_migrations(conn, "postgresql")
+    assert report_templates.get_report_template(conn, default.key).markdown_content == changed
+
+
+@pytest.mark.parametrize("edited_seed", [False, True])
+def test_defaults_v60_upgrade_compares_actual_seed_bytes_and_preserves_history(defaults_v60_conn, edited_seed):
+    conn = defaults_v60_conn
+    _migrate_defaults_v60(conn, max_version=59)
+    original = {row["key"]: dict(row) for row in conn.execute("SELECT * FROM report_templates").fetchall()}
+    historical = {item["key"]: item["markdown"].strip() for item in DEFAULT_REPORT_TEMPLATES}
+    assert {key: row["markdown_content"] for key, row in original.items()} == historical
+    # digest 不同但正文未变仍应升级；不能把摘要当作正文身份。
+    conn.execute("UPDATE report_templates SET digest_sha256 = 'changed-digest' WHERE key = 'management-summary'")
+    if edited_seed:
+        conn.execute(
+            "UPDATE report_templates SET markdown_content = ? WHERE key = 'standard-pentest'",
+            (historical["standard-pentest"] + "\n用户编辑的正文。",),
+        )
+        whitespace_edit = historical["full-technical"] + "\n"
+        conn.execute(
+            "UPDATE report_templates SET markdown_content = ?, digest_sha256 = ? WHERE key = 'full-technical'",
+            (whitespace_edit, report_templates.report_template_digest(whitespace_edit)),
+        )
+    conn.execute(
+        """INSERT INTO report_templates
+           (key, name, description, markdown_content, digest_sha256, created_at, updated_at)
+           VALUES ('custom-copy', '用户自定义', '正文恰好与旧种子相同', ?, ?, 'custom-created', 'custom-updated')""",
+        (historical["standard-pentest"], report_templates.report_template_digest(historical["standard-pentest"])),
+    )
+    conn.execute("INSERT INTO report_template_profiles VALUES ('custom-copy', 'custom-profile')")
+    _seed_project(conn)
+    conn.execute(
+        """INSERT INTO assessment_report_finalizations
+           (project_id, status, generation_started_at, generation_token, template_key,
+            template_markdown, created_at, updated_at)
+           VALUES ('p1', 'ready', 'historic', 'historic', 'standard-pentest', ?, 'historic', 'historic')""",
+        (historical["standard-pentest"],),
+    )
+    before = {row["key"]: dict(row) for row in conn.execute("SELECT * FROM report_templates").fetchall()}
+    frozen_before = dict(conn.execute("SELECT * FROM assessment_report_finalizations").fetchone())
+    profiles_before = conn.execute("SELECT * FROM report_template_profiles ORDER BY template_key, profile_id").fetchall()
+    registry_before = conn.execute("SELECT * FROM schema_migrations ORDER BY version").fetchall()
+    conn.commit()
+    _migrate_defaults_v60(conn)
+    preserved = {"custom-copy", *(('standard-pentest', 'full-technical') if edited_seed else ())}
+    for key, previous in before.items():
+        current = dict(conn.execute("SELECT * FROM report_templates WHERE key = ?", (key,)).fetchone())
+        if key in preserved:
+            assert current == previous
+        else:
+            assert current == {
+                **previous,
+                "markdown_content": DEFAULT_REPORT_TEMPLATE_MARKDOWN_V60,
+                "digest_sha256": report_templates.report_template_digest(DEFAULT_REPORT_TEMPLATE_MARKDOWN_V60),
+                "updated_at": "2026-10-20T00:00:00Z",
+            }
+    assert dict(conn.execute("SELECT * FROM assessment_report_finalizations").fetchone()) == frozen_before
+    assert conn.execute("SELECT * FROM schema_migrations WHERE version < 60 ORDER BY version").fetchall() == registry_before
+    assert conn.execute(
+        "SELECT * FROM report_template_profiles WHERE template_key <> ? ORDER BY template_key, profile_id",
+        (DEFAULT_REPORT_TEMPLATE_KEY_V60,),
+    ).fetchall() == profiles_before
+    default = report_templates.get_report_template(conn, DEFAULT_REPORT_TEMPLATE_KEY_V60)
+    assert default.is_default and default.supports_single_vulnerability and default.validation_error is None
+    custom = report_templates.get_report_template(conn, "custom-copy")
+    assert not custom.is_default and not custom.supports_single_vulnerability
+    assert custom.validation_error
+
+
+@pytest.mark.parametrize("conflicting_body", ["用户的原有正文", DEFAULT_REPORT_TEMPLATE_MARKDOWN_V60])
+def test_defaults_v60_default_key_conflict_never_overwrites_existing_template(defaults_v60_conn, conflicting_body):
+    conn = defaults_v60_conn
+    _migrate_defaults_v60(conn, max_version=59)
+    conn.execute(
+        """INSERT INTO report_templates
+           (key, name, markdown_content, digest_sha256, created_at, updated_at)
+           VALUES (?, '用户现有同名模板', ?, ?, 'original', 'original')""",
+        (DEFAULT_REPORT_TEMPLATE_KEY_V60, conflicting_body, report_templates.report_template_digest(conflicting_body)),
+    )
+    before = conn.execute("SELECT * FROM report_templates ORDER BY key").fetchall()
+    conn.commit()
+    with pytest.raises(psycopg.errors.RaiseException, match="report_template_default_key_conflict"):
+        _migrate_defaults_v60(conn)
+    conn.rollback()
+    assert conn.execute("SELECT * FROM report_templates ORDER BY key").fetchall() == before
+    assert conn.execute("SELECT 1 FROM schema_migrations WHERE version = 60").fetchone() is None

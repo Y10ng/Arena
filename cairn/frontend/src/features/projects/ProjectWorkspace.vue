@@ -1,5 +1,5 @@
 <template>
-  <div class="workspace-layout">
+  <div class="workspace-layout" :class="{ 'workspace-layout--agent': isAgentView }">
     <Card
       v-if="workspaceStore.isLoading && !workspaceStore.projectDetail"
       class="loading-state"
@@ -24,7 +24,8 @@
 
     <!-- Main Workspace Content -->
     <template v-else-if="project">
-      <header class="workspace-header">
+      <Teleport :to="compactHeaderTarget || 'body'" :disabled="!compactHeaderTarget">
+      <header class="workspace-header" :class="{ 'workspace-header--agent': isAgentView }">
         <div class="header-left">
           <IconButton label="返回项目列表" size="sm" variant="secondary" @click="goBackToList">
             <ArrowLeft :size="16" />
@@ -61,6 +62,14 @@
           <Badge v-if="projectStatus" :tone="projectStatus.tone" size="sm" aria-label="项目状态">{{
             projectStatus.label
           }}</Badge>
+          <Popover v-if="isAgentView" v-model:open="researchNavigationOpen" align="start">
+            <template #trigger><Button variant="ghost" aria-label="切换研究视图">研究视图<ChevronDown :size="14" /></Button></template>
+            <nav class="workspace-research-navigation" aria-label="项目页面">
+              <router-link v-for="tab in tabs" :key="tab.routeName" :to="{ name: tab.routeName, params: { id: project.id } }" exact-active-class="active" @click="researchNavigationOpen = false">
+                {{ tab.label }}<span v-if="tab.badgeCount && tab.badgeCount.value > 0">{{ tab.badgeCount.value }}</span>
+              </router-link>
+            </nav>
+          </Popover>
         </div>
 
         <div class="header-right">
@@ -154,7 +163,6 @@
             <template #icon="{ item }">
               <Trash2 v-if="item.value === 'delete-project'" :size="12" />
               <Download v-else-if="item.value.startsWith('export-')" :size="12" />
-              <UsersRound v-else-if="item.value === 'workers'" :size="12" />
               <FolderOpen v-else :size="12" />
             </template>
           </DropdownMenu>
@@ -166,6 +174,7 @@
           </span>
         </div>
       </header>
+      </Teleport>
       <Alert v-if="pendingSchedule?.block_reason || pendingScheduleError" tone="warning">
         {{ pendingSchedule?.block_reason || '启动计划查询失败，可进入计划任务视图重试。' }}
       </Alert>
@@ -316,7 +325,7 @@
         <Alert v-if="actionError" tone="danger" title="项目操作失败">{{ actionError }}</Alert>
       </ConfirmAction>
 
-      <nav class="workspace-tabs" aria-label="项目页面">
+      <nav v-if="!isAgentView" class="workspace-tabs" aria-label="项目页面">
         <router-link
           v-for="tab in tabs"
           :key="tab.routeName"
@@ -335,61 +344,6 @@
       <main class="workspace-viewport">
         <router-view></router-view>
       </main>
-
-      <!-- 项目 Worker 重绑：只允许选择当前 Tenant 的可用 Worker。 -->
-      <Dialog
-        :open="showWorkersDialog"
-        title="更新项目 Workers"
-        description="保存后刷新 durable binding 和 Worker revision；项目不会回退到全局 Worker。"
-        :dismissible="!workersSaving"
-        @update:open="handleWorkersDialogOpenChange"
-      >
-        <div v-if="workersLoading" class="project-worker-options" role="status" aria-live="polite">
-          <p class="worker-loading-message">正在加载可用 Worker...</p>
-          <Skeleton v-for="i in 2" :key="i" class="worker-dialog-skeleton" />
-        </div>
-        <EmptyState v-else-if="availableWorkers.length === 0" title="暂无可用 Worker">
-          <template #description>
-            请先前往 <router-link to="/console/workers">Workers</router-link> 完成配置。
-          </template>
-        </EmptyState>
-        <div v-else class="project-worker-options">
-          <div
-            v-for="worker in availableWorkers"
-            :key="worker.id"
-            class="project-worker-option"
-            :class="{ disabled: workersSaving }"
-          >
-            <Checkbox
-              :id="`workspace-worker-${worker.id}`"
-              :model-value="selectedWorkerIds.includes(worker.id)"
-              :disabled="workersSaving"
-              :aria-label="`选择 Worker ${worker.display_name}`"
-              @update:model-value="setWorkerSelection(worker.id, $event)"
-            />
-            <label class="project-worker-option-content" :for="`workspace-worker-${worker.id}`">
-              <strong>{{ worker.display_name }}</strong>
-              <small
-                >{{ worker.model_display_name || worker.model_id }} ·
-                {{ worker.task_types.join('/') }}</small
-              >
-            </label>
-          </div>
-        </div>
-
-        <template #footer>
-          <Button variant="secondary" :disabled="workersSaving" @click="showWorkersDialog = false">
-            取消
-          </Button>
-          <Button
-            :loading="workersSaving"
-            :disabled="selectedWorkerIds.length === 0"
-            @click="saveProjectWorkers"
-          >
-            保存绑定
-          </Button>
-        </template>
-      </Dialog>
 
       <Dialog
         :open="showResourcesDialog"
@@ -511,6 +465,8 @@
         </template>
       </Dialog>
 
+      <ProjectTestEgressDialog v-if="testEgressOpen" :key="project.id" :project-id="project.id" :value="project.test_egress" @close="testEgressOpen = false" @saved="project.test_egress = $event" />
+
       <ProjectReportDialog
         v-model:open="reportDialogOpen"
         :project-id="project.id"
@@ -534,10 +490,11 @@
 
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useQuery } from '@tanstack/vue-query'
 import {
   ArrowLeft,
+  ChevronDown,
   Download,
   FolderOpen,
   MoreHorizontal,
@@ -547,11 +504,11 @@ import {
   RotateCcw,
   ShieldCheck,
   Trash2,
-  UsersRound,
 } from '@lucide/vue'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { useUIStore } from '@/stores/ui'
+import { navigationRegistry } from '@/router/navigationRegistry'
 import {
   Alert,
   Badge,
@@ -560,10 +517,10 @@ import {
   Checkbox,
   Dialog,
   DropdownMenu,
-  EmptyState,
   FormField,
   IconButton,
   Input,
+  Popover,
   Skeleton,
   Textarea,
   type DropdownMenuOption,
@@ -574,9 +531,7 @@ import {
   commitProjectResourceBatch,
   deactivateProjectResource,
   fetchText,
-  getProjectManagementOptions,
   listVulnerabilities,
-  updateProjectWorkers,
   type Vulnerability,
 } from '@/api/client'
 import type {
@@ -584,7 +539,6 @@ import type {
   ProjectResourceBatch,
   ReauthorizeProjectRequest,
   Scenario,
-  TenantWorker,
 } from '@/api/types'
 import ProjectReportDialog from '@/features/reports/ProjectReportDialog.vue'
 import { vulnerabilityKeys } from '@/features/vulnerabilities/vulnerabilityQueries'
@@ -594,6 +548,7 @@ import {
   projectResourceKindLabel,
 } from './projectResources'
 import ProjectResourceBatchUploader from './ProjectResourceBatchUploader.vue'
+import ProjectTestEgressDialog from './ProjectTestEgressDialog.vue'
 import { resolveProjectStatus } from './workspaceStatus'
 import {
   useProjectRuntime,
@@ -615,6 +570,10 @@ const authStore = useAuthStore()
 const workspaceStore = useWorkspaceStore()
 const uiStore = useUIStore()
 const router = useRouter()
+const route = useRoute()
+const isAgentView = computed(() => route.name === 'WorkspaceAgent')
+const researchNavigationOpen = ref(false)
+const compactHeaderTarget = computed(() => isAgentView.value ? document.getElementById('workbench-project-header') : null)
 
 const project = computed(() => workspaceStore.projectDetail?.project || null)
 const hints = computed(() => workspaceStore.projectDetail?.hints || [])
@@ -702,13 +661,15 @@ const { data: vulnerabilitiesData } = useQuery<Vulnerability[]>({
   refetchInterval: 10000,
 })
 const vulnsCount = computed(() => (vulnerabilitiesData.value || []).length)
-const tabs = [
-  { label: '图谱', routeName: 'WorkspaceGraph' },
-  { label: '运行', routeName: 'WorkspaceRuns', badgeCount: workingIntentsCount },
-  { label: '漏洞', routeName: 'WorkspaceVulnerabilities', badgeCount: vulnsCount },
-  { label: '产物', routeName: 'WorkspaceArtifacts' },
-  { label: '提示', routeName: 'WorkspaceHints', badgeCount: hintsCount },
-]
+const tabBadges = { WorkspaceRuns: workingIntentsCount, WorkspaceVulnerabilities: vulnsCount, WorkspaceHints: hintsCount }
+const tabs = navigationRegistry
+  .filter((item) => item.workspace)
+  .sort((left, right) => left.workspace!.order - right.workspace!.order)
+  .map((item) => ({
+    label: item.label,
+    routeName: item.routeName,
+    badgeCount: tabBadges[item.routeName as keyof typeof tabBadges],
+  }))
 
 // Inline title edit state
 const isEditingTitle = ref(false)
@@ -934,60 +895,6 @@ watch(projectId, () => {
   reauthorizationUnlimited.value = false
 })
 
-// 历史项目显式重绑 Worker；选项由目标项目 Tenant 决定。
-const showWorkersDialog = ref(false)
-const workersLoading = ref(false)
-const workersSaving = ref(false)
-const availableWorkers = ref<TenantWorker[]>([])
-const selectedWorkerIds = ref<string[]>([])
-
-const handleWorkersDialogOpenChange = (open: boolean) => {
-  if (!open && !workersSaving.value) showWorkersDialog.value = false
-}
-
-const setWorkerSelection = (workerId: string, selected: boolean) => {
-  const index = selectedWorkerIds.value.indexOf(workerId)
-  if (selected && index < 0) selectedWorkerIds.value.push(workerId)
-  if (!selected && index >= 0) selectedWorkerIds.value.splice(index, 1)
-}
-
-const openWorkersDialog = async () => {
-  if (!project.value) return
-  showWorkersDialog.value = true
-  workersLoading.value = true
-  availableWorkers.value = []
-  selectedWorkerIds.value = []
-  try {
-    const options = await getProjectManagementOptions(project.value.id)
-    availableWorkers.value = options.tenant_workers.filter((worker) => worker.available)
-    const availableIds = new Set(availableWorkers.value.map((worker) => worker.id))
-    selectedWorkerIds.value = project.value.tenant_workers
-      .map((worker) => worker.id)
-      .filter((workerId) => availableIds.has(workerId))
-  } catch (err: any) {
-    showWorkersDialog.value = false
-    uiStore.showToast(err.message || '加载 Worker 失败', 'danger')
-  } finally {
-    workersLoading.value = false
-  }
-}
-
-const saveProjectWorkers = async () => {
-  if (!project.value || selectedWorkerIds.value.length === 0 || workersSaving.value) return
-  const id = project.value.id
-  workersSaving.value = true
-  try {
-    await updateProjectWorkers(id, { tenant_worker_ids: selectedWorkerIds.value })
-    showWorkersDialog.value = false
-    uiStore.showToast('项目 Worker 绑定已更新', 'success')
-    await workspaceStore.loadProject(id)
-  } catch (err: any) {
-    uiStore.showToast(err.message || '更新 Worker 绑定失败', 'danger')
-  } finally {
-    workersSaving.value = false
-  }
-}
-
 const showResourcesDialog = ref(false)
 const resourceBatch = ref<ProjectResourceBatch | null>(null)
 const resourceUploadBusy = ref(false)
@@ -1096,9 +1003,10 @@ const saveReopen = async () => {
 
 const isMoreOpen = ref(false)
 const projectInfoOpen = ref(false)
+const testEgressOpen = ref(false)
 const moreMenuItems = computed<readonly DropdownMenuOption[]>(() => [
   { value: 'project-info', label: '项目信息' },
-  { value: 'workers', label: 'Workers' },
+  { value: 'test-egress', label: '代理设置' },
   {
     value: 'resources',
     label: `资料${projectResources.value.length ? ` (${projectResources.value.length})` : ''}`,
@@ -1111,7 +1019,7 @@ const moreMenuItems = computed<readonly DropdownMenuOption[]>(() => [
 function handleMoreMenuSelect(value: string) {
   isMoreOpen.value = false
   if (value === 'project-info') projectInfoOpen.value = true
-  else if (value === 'workers') void openWorkersDialog()
+  else if (value === 'test-egress') testEgressOpen.value = true
   else if (value === 'resources') void openResourcesDialog()
   else if (value === 'export-project-yaml') void exportProjectYaml()
   else if (value === 'export-vulnerability-evidence-archive') downloadVulnerabilityEvidenceArchive()

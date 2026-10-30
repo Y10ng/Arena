@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { copyFile, mkdir, open, readFile, unlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { Compile } from "typebox/compile";
@@ -11,7 +11,6 @@ import {
   createAgentSession,
   createBashToolDefinition,
   createExtensionRuntime,
-  createLocalBashOperations,
   ModelRegistry,
   SettingsManager,
   type AgentSession,
@@ -20,17 +19,23 @@ import {
   type ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
 import { preserveAnthropicSubmissionSchema } from "./anthropic-schema.js";
-import { ArtifactRegistry, ARTIFACT_KINDS, evidencePath, evidenceFailure } from "./artifacts.js";
+import { ArtifactRegistry, ARTIFACT_KINDS, evidencePath, evidenceFailure, readEvidence } from "./artifacts.js";
 import { createCheckpointTool } from "./checkpoints.js";
-import { captureHttpEvidence, HTTP_EVIDENCE_PARAMETERS, type HttpEvidenceInput } from "./http-evidence.js";
+import { readHttpTraffic, LIST_HTTP_FLOWS_PARAMETERS, READ_HTTP_FLOW_PARAMETERS } from "./http-flows.js";
+import { HttpEvidenceRenderer, RENDER_HTTP_EVIDENCE_PARAMETERS } from "./http-evidence-render.js";
 import { CandidateSpool, type CandidateAttempt, type CandidateOutcome } from "./candidate-spool.js";
 import { SubmissionState, safeSchemaIssue } from "./submission.js";
-import { AgentFailure, envelope, object, PHASE_RESULT_KINDS, type AgentEnvelope, type AgentRequest, type JsonObject } from "./protocol.js";
+import { ReportSegments } from "./report-segments.js";
+import { AgentFailure, candidateLimits, envelope, object, PHASE_RESULT_KINDS, type AgentEnvelope, type AgentRequest, type JsonObject } from "./protocol.js";
 import { acquireSession, type SessionLease } from "./session.js";
+import { createTaskBashOperations } from "./task-execution.js";
 import { requestModel, REQUEST_PROVIDER, SDK_AUTH_PLACEHOLDER } from "./model.js";
 
+import { assertPublicText, CHAT_SYSTEM_PROMPT, createProjectTools, PROJECT_TOOL_NAMES } from "./project-tools.js";
+import { CHAT_FILE_TOOLS, createChatBashOperations, createChatFileTools } from "./chat-workspace.js";
+
 const SAFE_TOOLS = ["read_evidence", "register_artifact", "submit_result"];
-const BASE_EXECUTION_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls", "capture_http_evidence", ...SAFE_TOOLS];
+const BASE_EXECUTION_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls", ...SAFE_TOOLS];
 const MAX_RESULT_BYTES = 1024 * 1024;
 // deadline 限制总时长但不限制快速重复的截断请求；每个 Run 只提供两次续行，不借用结果修正额度。
 const MAX_OUTPUT_CONTINUATIONS = 2;
@@ -48,7 +53,7 @@ export function createRequestBashToolDefinition(
   cwd: string,
   maxTimeoutSeconds: number,
   remainingSeconds: () => number,
-  operations: BashOperations = createLocalBashOperations(),
+  operations: BashOperations,
 ): ReturnType<typeof createBashToolDefinition> {
   const boundedOperations: BashOperations = {
     async exec(command, commandCwd, options) {
@@ -144,16 +149,24 @@ export interface RunnerOptions {
 }
 export async function runRequest(request: AgentRequest, options: RunnerOptions = {}): Promise<AgentEnvelope> {
   const result = envelope(request);
+  const chat = request.phase === "chat_turn";
+  const chatForbidden = chat ? [request.model.api_key, ...request.model.custom_headers.map(({ value }) => value), ...request.capabilities.project_tools!.forbidden_literals, request.capabilities.project_tools!.socket_path, CHAT_SYSTEM_PROMPT] : [];
+  const toolCwd = chat ? request.capabilities.project_tools!.workspace_path : request.cwd;
+  let finalText: string | undefined;
   const deadline = performance.now() + request.timeout_seconds * 1000;
-  const readonly = request.conclude_only || request.phase.endsWith("_conclude") || request.phase === "report_execute";
+  const readonly = chat || request.conclude_only || request.phase.endsWith("_conclude") || request.phase === "report_execute";
   const concludeTimeoutSeconds = readonly ? 0 : (request.conclude_timeout_seconds ?? 0);
   const remainingTimeNoticeAt = deadline - Math.min(request.timeout_seconds, concludeTimeoutSeconds) * 1000;
-  const safeTools = SAFE_TOOLS;
+  const reportCapability = request.capabilities.report_segments;
+  const trafficCapability = request.phase === "report_execute" ? undefined : request.capabilities.http_traffic;
+  const trafficTools = trafficCapability ? ["list_http_flows", "read_http_flow"] : [];
+  const renderTools = trafficCapability || request.capabilities.http_evidence_render ? ["render_http_evidence"] : [];
+  const safeTools = chat ? [...PROJECT_TOOL_NAMES, ...CHAT_FILE_TOOLS] : reportCapability ? [...SAFE_TOOLS, "save_report_segment", ...renderTools] : [...SAFE_TOOLS, ...trafficTools, ...renderTools];
   let session: AgentSession | undefined;
   let lease: SessionLease | undefined;
   let cancelled: "cancelled" | "deadline_exceeded" | undefined;
   const checkpointCapability = request.capabilities?.execution_checkpoints;
-  const executionTools = checkpointCapability && !readonly ? [...BASE_EXECUTION_TOOLS, "record_checkpoint"] : BASE_EXECUTION_TOOLS;
+  const executionTools = chat ? PROJECT_TOOL_NAMES : reportCapability ? safeTools : [...BASE_EXECUTION_TOOLS, ...trafficTools, ...renderTools, ...(checkpointCapability && !readonly ? ["record_checkpoint"] : [])];
   let candidate: JsonObject | null = null;
   let candidateDigest: string | null = null;
   let conflict = false;
@@ -166,11 +179,16 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
   const candidateOutcomeCalls = new Set<string>();
   let assistantTurn = 0;
   let outputContinuations = 0;
+  let reportOutputRecoveries = 0;
+  let truncatedReportUnit = false;
   let truncatedWithoutToolCalls = false;
+  const savedSegmentCalls = new Map<string, { key: string; artifact_handle: string }>();
+  const rejectedReportCalls = new Set<string>();
   let currentToolCallId = "";
   const submission = new SubmissionState(request.max_result_repairs);
   let candidateCaptureError: AgentFailure | undefined;
   let providerError: AgentFailure | undefined;
+  let outputLimitReached = false;
   let usageKnown = true;
   let usageSeen = false;
   const usage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 };
@@ -193,6 +211,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
   };
   try {
     ensureActive();
+    if (!readonly && !request.capabilities.task_execution) throw new AgentFailure("execution_binding_missing", "Task-bound test execution is required");
     const model = requestModel(request);
     let validator;
     let diagnosticValidators;
@@ -227,8 +246,9 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
     };
     const submissionMessage = () => JSON.stringify({ code: submission.code, ...(submission.message ? { message: submission.message } : {}), ...submission.diagnostics() });
     lease = await acquireSession(request);
-    const artifacts = new ArtifactRegistry(request.cwd, request.session_root);
-    const candidateSpool = new CandidateSpool(request);
+    const artifacts = new ArtifactRegistry(request.cwd, request.session_root, undefined, candidateLimits(request).max_artifacts);
+    const candidateSpool = chat ? undefined : new CandidateSpool(request);
+    const reportSegments = reportCapability ? new ReportSegments(reportCapability, request.cwd, request.capabilities.candidate_capture!.capture_id, artifacts, ensureActive, (raw) => candidateSpool!.admitRaw(raw)) : undefined;
     const artifactIdentities = () => artifacts.items.map(({ handle, kind, sha256, size_bytes }) => ({ handle, kind, sha256, size_bytes }));
     const durableCapture = async <T>(operation: Promise<T>): Promise<T> => {
       try { return await operation; }
@@ -243,7 +263,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
         candidateCaptureError = new AgentFailure("candidate_spool_invalid", "Candidate outcome has no durable attempt");
         throw candidateCaptureError;
       }
-      await durableCapture(candidateSpool.appendOutcome(attempt.producer_candidate_key, outcome));
+      await durableCapture(candidateSpool!.appendOutcome(attempt.producer_candidate_key, outcome));
       candidateOutcomeCalls.add(toolCallId);
     };
     const notifyRemainingTime = () => {
@@ -255,28 +275,19 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
     };
     const bashToolTimeoutSeconds = request.bash_tool_timeout_seconds ?? DEFAULT_BASH_TOOL_TIMEOUT_SECONDS;
     const bashTool = createRequestBashToolDefinition(
-      request.cwd,
+      toolCwd,
       bashToolTimeoutSeconds,
       () => Math.max(0, (deadline - performance.now()) / 1000),
-    );
-    const customTools: ToolDefinition[] = [
-      bashTool as unknown as ToolDefinition,
-      {
-        name: "capture_http_evidence", label: "Capture HTTP evidence",
-        description: "Actually send one HTTP/1.1 request using curl and register the captured request/response bytes plus trace and capture status. Returns evidence_items ready for finding or external verification submission. These are application-layer/tool bytes, not network frames. Redirects are NOT followed; capture each authorized Location separately. Partial responses and missing sides remain truthful on timeout/failure. Optional body_path reads an existing authorized evidence file. No response body is copied into the tool reply. Request body limit 1 MiB, response limit 4 MiB; larger transfers stop and retain actual partial evidence. Use other existing tools for larger or specialized captures.",
-        parameters: HTTP_EVIDENCE_PARAMETERS, executionMode: "sequential",
-        async execute(_id, args, signal) {
-          ensureActive();
-          try {
-            const capture = await captureHttpEvidence(args as HttpEvidenceInput, {
-              cwd: request.cwd, sessionRoot: request.session_root, artifacts,
-              remainingSeconds: () => Math.max(0, (deadline - performance.now()) / 1000), signal,
-            });
-            audit("http_evidence_captured", { exit_code: capture.exit_code, interrupted: capture.interrupted, artifact_count: capture.artifacts.length });
-            return toolResult(capture);
-          } catch (error) { throw evidenceFailure(error); }
-        },
+      chat ? createChatBashOperations({ ...request.capabilities.project_tools!, forbidden_literals: chatForbidden }, () => currentToolCallId) : request.capabilities.task_execution ? createTaskBashOperations(request.capabilities.task_execution) : {
+        async exec() { throw new AgentFailure("execution_binding_missing", "Read-only delivery cannot execute target tools"); },
       },
+    );
+    const customTools: ToolDefinition[] = chat ? [
+      ...createProjectTools({ ...request.capabilities.project_tools!, forbidden_literals: chatForbidden }, ensureActive),
+      ...createChatFileTools(toolCwd, { ...request.capabilities.project_tools!, forbidden_literals: chatForbidden }, ensureActive),
+      bashTool as unknown as ToolDefinition,
+    ] : [
+      bashTool as unknown as ToolDefinition,
       {
         name: "submit_result", label: "Submit result",
         description: "Submit the typed business result. Wrapper identity and registered artifacts are added by the runner. This is a local candidate, not Server acceptance. Do not perform more target actions after submitting.",
@@ -308,7 +319,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
                 if (object(value.data.depth_review) && request.binding.review_input_digest !== undefined) value.data.depth_review.input_digest = request.binding.review_input_digest;
                 bindingStatus = "injected";
               } else bindingStatus = "not_required";
-              submitted = { protocol: "cairn-assessment-v2", accepted: true, kind: PHASE_RESULT_KINDS[request.phase], data: value.data };
+              submitted = { protocol: "cairn-assessment-v2", accepted: true, kind: PHASE_RESULT_KINDS[request.phase as keyof typeof PHASE_RESULT_KINDS], data: value.data };
               if ("reason" in value) submitted.reason = value.reason;
             } else {
               if (typeof value.reason !== "string" || !value.reason.trim()) throw new AgentFailure("result_schema", "reason must be nonempty");
@@ -357,7 +368,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
       },
       {
         name: "register_artifact", label: "Register artifact",
-        description: "Preserve the observed bytes of an existing workspace evidence file as a fixed content version. Returns handle, delivery path, source_path, SHA256 and size. Source changes do not change previous versions. At most 32 versions and 32 MiB total, including Harness output; oversized files are rejected, not truncated. Registration is not upload or Server acceptance.",
+        description: `Preserve the observed bytes of an existing workspace evidence file as a fixed content version. Returns handle, delivery path, source_path, SHA256 and size. Source changes do not change previous versions. At most ${candidateLimits(request).max_artifacts} versions and 32 MiB total, including Harness output; oversized files are rejected, not truncated. Registration is not upload or Server acceptance.`,
         parameters: { type: "object", properties: { path: { type: "string", minLength: 1 }, kind: { type: "string", enum: [...ARTIFACT_KINDS] } }, required: ["path", "kind"], additionalProperties: false } as TSchema,
         executionMode: "sequential",
         async execute(_id, args, signal) {
@@ -375,20 +386,15 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
       },
       {
         name: "read_evidence", label: "Read evidence",
-        description: "Read existing local workspace evidence or Dispatcher-managed read-only input without network access or shell execution. Output is bounded to 32768 bytes; use offset to continue.",
-        parameters: { type: "object", properties: { path: { type: "string", minLength: 1 }, offset: { type: "integer", minimum: 0 } }, required: ["path"], additionalProperties: false } as TSchema,
+        description: "Read one existing local evidence file or Dispatcher-managed read-only input without network or shell. offset is an original UTF-8 byte start; length caps returned text bytes (default/max 32768). Without match, read a UTF-8-safe chunk and use next_offset to continue. Optional match is nonempty exact original text, not a regex: return only that text and its tool-computed pointer if it occurs uniquely at or after offset; missing or repeated matches fail explicitly. Matching scans only the requested file within 32 MiB. For finding evidence_items[].excerpts, copy the returned utf8-bytes=START:END pointer with the appropriate side; do not calculate UTF-8 boundaries. Read registered delivery paths for registered evidence. Select relevant material on demand, including tails and counterevidence; do not load all attachments or mechanically select their first N bytes.",
+        parameters: { type: "object", properties: { path: { type: "string", minLength: 1 }, offset: { type: "integer", minimum: 0 }, length: { type: "integer", minimum: 1, maximum: 32768 }, match: { type: "string", minLength: 1 } }, required: ["path"], additionalProperties: false } as TSchema,
         executionMode: "sequential",
         async execute(_id, args) {
           ensureActive();
-          const input = args as { path: string; offset?: number };
+          const input = args as { path: string; offset?: number; length?: number; match?: string };
           try {
             const path = await evidencePath(request.cwd, input.path, request.session_root);
-            const file = await open(path, "r");
-            try {
-              const buffer = Buffer.alloc(32768);
-              const { bytesRead } = await file.read(buffer, 0, buffer.length, input.offset ?? 0);
-              return toolResult({ text: buffer.subarray(0, bytesRead).toString("utf8"), bytes_read: bytesRead, next_offset: (input.offset ?? 0) + bytesRead });
-            } finally { await file.close(); }
+            return toolResult(await readEvidence(path, input));
           } catch (error) {
             // 辅助工具失败由工具回执和执行事件保留，不覆盖提交诊断或消耗修正机会。
             throw evidenceFailure(error);
@@ -396,19 +402,60 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
         },
       },
     ];
+    if (trafficCapability) for (const [name, parameters, description] of [
+      ["list_http_flows", LIST_HTTP_FLOWS_PARAMETERS, "List bounded HTTP flow summaries automatically captured for this project and current TaskRun (default limit 20, max 50). Follow next_cursor while has_more. No headers or bodies are returned. historical=true explicitly permits same-project existing material, optionally narrowed by task_run_id. Flows are not automatically assigned to the most recent tool call."],
+      ["read_http_flow", READ_HTTP_FLOW_PARAMETERS, "Read one captured flow without sending a target request. Default side=metadata returns source and sync state; request/response returns the Server's http-evidence-v1 structured reconstruction (not original wire bytes), bounded to 32768 UTF-8 bytes, with absolute offset, next_offset, revision and SHA256. Receiving flows return only an explicitly marked body-preview-base64 prefix (body byte offsets, excerpt_eligible=false), never a stable HTTP projection or excerpt pointer. Continue only as needed. historical=true is required for another TaskRun in this project. Preserve missing sides and receiving/partial/failed states. Cite flow_id in an HTTP evidence item, source=capture for this run or historical for earlier runs; do not copy packets to Artifacts. For excerpts use returned side/pointer/representation/sha256/revision; binary/compressed display placeholders are not evidence text."],
+    ] as const) customTools.push({
+      name, label: name, description, parameters, executionMode: "sequential",
+      async execute(_id, args, signal) {
+        ensureActive();
+        return toolResult(await readHttpTraffic(trafficCapability, name, args as JsonObject, signal));
+      },
+    });
+    if (renderTools.length) {
+      const renderer = new HttpEvidenceRenderer(trafficCapability, request.capabilities.http_evidence_render, request.capabilities.http_evidence_render ? "/tmp/cairn-prompts" : lease.directory);
+      customTools.push({
+        name: "render_http_evidence", label: "Render HTTP evidence",
+        description: "Optionally render one existing HTTP interaction offline as PNG. Server source-delivery approval is required before rendering. Ordinary tasks pass source identity and verified excerpts (historical=true for earlier runs); report tasks pass only source_key from frozen http_evidence_render_sources. No URL, HTML, arbitrary file path or new target request is accepted. Images are optional presentation derivatives, never current-run evidence: do not put them in evidence_items, artifact declarations or the final required artifact set. Missing screenshots never prevent submitting valid text and original evidence. Rendering and publication failures return local status; do not repeat target requests to obtain an image.",
+        parameters: RENDER_HTTP_EVIDENCE_PARAMETERS, executionMode: "sequential",
+        async execute(_id, args, signal) {
+          ensureActive();
+          const rendered = await renderer.render(args as JsonObject, signal);
+          audit("http_evidence_rendered", { status: rendered.status, optional: true });
+          return toolResult(rendered);
+        },
+      });
+    }
+    if (reportSegments) customTools.push({
+      name: "save_report_segment", label: "Save report segment",
+      description: "Durably save one bounded structural report content unit against the frozen binding. key is idempotent within this execution: identical content returns its existing handle, different content is rejected. Use reuse_source (description, steps, remediation) to explicitly reuse available fields from the selected frozen Observation; the program resolves recorded evidence and excerpts without copying them through the model. Evidence-based rewrites remain allowed. Split long findings by their natural fields or ordered steps, never truncate content. At most 256 artifacts and 32 MiB total; each segment at most 1 MiB. Saved segments are local material, not accepted reports. Returns only artifact_handle and key. Final submit_result must reference saved handles, never resend their body.",
+      parameters: reportSegments.parameters, executionMode: "sequential",
+      prepareArguments(args) {
+        if (invalidArgumentCalls.has(currentToolCallId) || truncatedReportUnit) throw new AgentFailure("report_segment_invalid", "Report segment requires complete strict JSON from a completed tool response");
+        reportSegments.validate(args);
+        return args as never;
+      },
+      async execute(id, args) {
+        const saved = await reportSegments.save(args);
+        savedSegmentCalls.set(id, saved);
+        audit("report_segment_saved", { artifact_handle: saved.artifact_handle, saved_segments: reportSegments.references().length, server_accepted: false });
+        ensureActive();
+        return toolResult(saved);
+      },
+    });
     if (checkpointCapability && executionTools.includes("record_checkpoint")) customTools.push(createCheckpointTool(checkpointCapability, request.phase, ensureActive));
     const authStorage = AuthStorage.inMemory();
     authStorage.setRuntimeApiKey(REQUEST_PROVIDER, SDK_AUTH_PLACEHOLDER);
     const registry = ModelRegistry.inMemory(authStorage);
     let instructions = "";
-    try { instructions = await readFile("/opt/cairn/AGENTS.md", "utf8"); }
+    try { if (!chat) instructions = await readFile("/opt/cairn/AGENTS.md", "utf8"); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
     // 在加载点记录实际使用版本的内容身份，不读取宿主版本，也不向审计复制指引正文。
     if (instructions) audit("instructions_loaded", {
       prompt_name: "AGENTS.md", prompt_hash: createHash("sha256").update(instructions).digest("hex"),
       prompt_bytes: Buffer.byteLength(instructions),
     });
-    const systemPrompt = `${instructions}\nYou are Cairn's pi agent. Follow the authorized task scope. Use submit_result for the final business result; prose/JSON text is never a submission. Register evidence files before using their handles; capture_http_evidence already registers its actual captures and returns evidence_items ready for schema_version 2 findings or schema_version 3 external verification. External verification reasons and test steps reference those original item IDs via evidence_item_ids, not artifact handles. Use the same items, not separately authored evidence_refs or inline HTTP text. Do not write wrapper protocol, kind, project or task identity. Explicit delivery-only requests may only read existing evidence, register it and submit; normal execution keeps its authorized tools during result correction. After a valid submission, do not perform further target actions. Local submission is not Server acceptance.`;
+    const systemPrompt = chat ? CHAT_SYSTEM_PROMPT : `${instructions}\nYou are Cairn's pi agent. Follow the authorized task scope. Use submit_result for the final business result; prose/JSON text is never a submission. HTTP is automatically recorded. Query and read actual flows on demand, then explicitly cite flow_id in evidence_items without duplicate request/response Artifacts or inline packets; never fabricate missing captures. Preserve item IDs and actual source (capture for this TaskRun, historical for same-project prior material). Register other evidence files before using their handles. Finding fact.description states necessary preconditions and verified impact; vulnerability.reproduction_steps records the complete ordered actions, parameter sources, dependencies, observations and original item IDs via evidence_item_ids; vulnerability.remediation addresses the actual defect. No fixed word count, step count or HTTP-per-step requirement applies. Excerpts are optional. For flow excerpts copy read_http_flow side/pointer/representation/sha256/revision from the exact projection; for historical Artifact excerpts use read_evidence side/pointer only. Preserve independent fragments separately; never substitute display coordinates or copy evidence text. Reports consume only their frozen Packet, not live flows. External verification reasons and test steps reference those original item IDs via evidence_item_ids, not artifact handles. Use the same items, not separately authored evidence_refs or inline HTTP text. Do not write wrapper protocol, kind, project or task identity. Explicit delivery-only requests may only read existing evidence, register it and submit; normal execution keeps its authorized tools during result correction. After a valid submission, do not perform further target actions. Local submission is not Server acceptance.`;
     const created = await createAgentSession({
       cwd: request.cwd, agentDir: lease.directory, authStorage, modelRegistry: registry, model,
       thinkingLevel: "off", sessionManager: lease.manager,
@@ -419,7 +466,30 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
       resourceLoader: loader(systemPrompt), tools: readonly ? safeTools : executionTools, customTools,
     });
     session = created.session;
-    if (request.model.protocol === "anthropic-messages") preserveAnthropicSubmissionSchema(session.agent, request.result_schema);
+    if (reportSegments) {
+      const originalStream = session.agent.streamFn;
+      // 报告显式传递实际输出预算；普通探索保留原 SDK 选值，避免静默扩大原有费用范围。
+      session.agent.streamFn = (streamModel, context, streamOptions) => originalStream(streamModel, context, { ...streamOptions, maxTokens: request.model.max_output_tokens });
+    }
+    if (!chat && request.model.protocol === "anthropic-messages") preserveAnthropicSubmissionSchema(session.agent, request.result_schema, reportSegments?.parameters);
+    if (reportSegments) {
+      const originalTransform = session.agent.transformContext;
+      session.agent.transformContext = async (messages, signal) => {
+        const original = await originalTransform?.(messages, signal) ?? messages;
+        // 仅投影模型工作上下文；原始 SDK transcript 不变，保存正文与已拒绝半参数不重新回灌。
+        const omittedCall = (id: string) => savedSegmentCalls.has(id) || rejectedReportCalls.has(id);
+        const projected: typeof original = [];
+        for (const message of original) {
+          if (message.role === "toolResult" && omittedCall(message.toolCallId)) continue;
+          if (message.role !== "assistant") { projected.push(message); continue; }
+          const content = message.content.filter((block) => block.type !== "toolCall" || !omittedCall(block.id));
+          if (content.length) projected.push({ ...message, content });
+        }
+        const refs = reportSegments.references();
+        if (refs.length) projected.push({ role: "user", content: `Durably saved report segments (local material, not Server acceptance): ${JSON.stringify(refs)}. Do not recreate their content. Continue only unfinished units and submit these handles in the final manifest.`, timestamp: Date.now() });
+        return projected;
+      };
+    }
     session.agent.toolExecution = "sequential";
     const originalBefore = session.agent.beforeToolCall;
     session.agent.beforeToolCall = async (context, signal) => {
@@ -451,6 +521,12 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
       if (context.toolCall.name === "bash" && object(details) && typeof details.fullOutputPath === "string") {
         const source = details.fullOutputPath;
         if (join(tmpdir(), basename(source)) !== source || !/^pi-bash-[0-9a-f]{16}\.log$/.test(basename(source))) throw new AgentFailure("artifact_invalid", "Unexpected SDK output spill path");
+        if (chat) {
+          const path = join(toolCwd, basename(source));
+          await copyFile(source, path, constants.COPYFILE_EXCL);
+          await unlink(source);
+          return { ...inherited, content: [...(inherited?.content ?? context.result.content), { type: "text", text: `完整命令输出已保存到当前工作区：${path}` }], details: { ...details, fullOutputPath: path } };
+        }
         // SDK溢出输出转入工作区并登记，收尾阶段无需bash搬运才能读取已有证据。
         const directory = join(request.cwd, ".cairn", "artifacts", request.session.slice(3));
         await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -467,6 +543,8 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
     session.agent.subscribe(async (event) => {
       if (event.type === "message_start" && event.message.role === "assistant") {
         assistantTurn += 1;
+        outputLimitReached = false;
+        truncatedReportUnit = false;
         rawArguments.clear();
         oversizedArgumentIndexes.clear();
         invalidArgumentCalls.clear();
@@ -474,7 +552,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
         const delta = event.assistantMessageEvent;
         if (!oversizedArgumentIndexes.has(delta.contentIndex)) {
           const next = (rawArguments.get(delta.contentIndex) ?? "") + delta.delta;
-          if (Buffer.byteLength(next) > request.capabilities.candidate_capture.max_candidate_bytes) {
+          if (Buffer.byteLength(next) > (request.capabilities.candidate_capture?.max_candidate_bytes ?? MAX_RESULT_BYTES)) {
             rawArguments.delete(delta.contentIndex);
             oversizedArgumentIndexes.add(delta.contentIndex);
           } else rawArguments.set(delta.contentIndex, next);
@@ -484,6 +562,9 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
         if (event.toolName === "submit_result") attempted = true;
         audit(event.type, { tool_name: executionTools.includes(event.toolName) ? event.toolName : "unknown", tool_call_id: event.toolCallId, input_bytes: Buffer.byteLength(JSON.stringify(event.args)) });
       } else if (event.type === "tool_execution_end") {
+        // SDK 先 await message_end 再准备／执行工具，但 length 本身不停止 batch。
+        // 已阻断调用的结果使用 SDK terminate 标记，避免 abort 后额外的 aborted 消息覆盖恢复依据。
+        if (reportSegments && providerError?.code === "model_output_limit" && object(event.result)) event.result.terminate = true;
         const authorizedAtEntry = authorizedToolCalls.delete(event.toolCallId);
         if (!candidate && !authorizedAtEntry && readonly && !safeTools.includes(event.toolName)) {
           attempted = true;
@@ -492,6 +573,19 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
         audit(event.type, { tool_name: executionTools.includes(event.toolName) ? event.toolName : "unknown", tool_call_id: event.toolCallId, is_error: event.isError, output_bytes: Buffer.byteLength(JSON.stringify(event.result)) });
       } else if (event.type === "message_end" && event.message.role === "assistant") {
         const message = event.message;
+        outputLimitReached = message.stopReason === "length";
+        const toolCalls = message.content.filter((block) => block.type === "toolCall");
+        if (chat) {
+          // 只接受自然终止的最后一条公开 text；工具前的旁白和 thinking 不进入用户消息。
+          finalText = message.stopReason === "stop" && toolCalls.length === 0
+            ? message.content.filter((block) => block.type === "text").map((block) => block.text).join("\n")
+            : undefined;
+          if (message.stopReason === "aborted" && !cancelled) providerError = new AgentFailure("provider_error", "Provider response was interrupted");
+        }
+        truncatedReportUnit = !!reportSegments && outputLimitReached && toolCalls.every((block) => ["save_report_segment", "submit_result"].includes(block.name));
+        if (outputLimitReached && (reportSegments || toolCalls.length > 0 || rawArguments.size > 0 || oversizedArgumentIndexes.size > 0)) {
+          providerError = new AgentFailure("model_output_limit", "Model output reached its token limit; the current content unit is incomplete");
+        }
         // 部分参数即使未成为 toolCall 也不能走正常执行续行，避免把截断工具当成可重放动作。
         truncatedWithoutToolCalls = message.stopReason === "length"
           && !message.content.some((block) => block.type === "toolCall")
@@ -505,14 +599,19 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
               if (canonicalJson(JSON.parse(rawText)) !== canonicalJson(block.arguments)) invalidArgumentCalls.add(block.id);
             } catch { invalidArgumentCalls.add(block.id); }
           }
-          if (block.name === "submit_result") {
+          if (reportSegments && ["save_report_segment", "submit_result"].includes(block.name) && (invalidArgumentCalls.has(block.id) || outputLimitReached)) rejectedReportCalls.add(block.id);
+          if (block.name === "save_report_segment" && (invalidArgumentCalls.has(block.id) || outputLimitReached)) {
+            audit("report_segment_rejected", { code: outputLimitReached ? "model_output_limit" : "report_segment_invalid", keyword: invalidArgumentCalls.has(block.id) ? "strict_json" : "stop_reason", raw_sha256: createHash("sha256").update(rawText).digest("hex"), raw_size_bytes: Buffer.byteLength(rawText) });
+            if (!outputLimitReached) { attempted = true; submission.reject("submission_invalid", { keyword: "strict_json", path: "$" }); }
+          }
+          if (!chat && block.name === "submit_result") {
             submission.attempts += 1;
             attempted = true;
             if (oversizedArgumentIndexes.has(index)) {
               candidateCaptureError = new AgentFailure("candidate_spool_limit", "Candidate raw bytes exceed the byte limit");
               throw candidateCaptureError;
             }
-            const attempt = await durableCapture(candidateSpool.appendCandidate(assistantTurn, index, Buffer.from(rawText, "utf8"), artifactIdentities()));
+            const attempt = await durableCapture(candidateSpool!.appendCandidate(assistantTurn, index, Buffer.from(rawText, "utf8"), artifactIdentities()));
             candidateAttempts.set(block.id, attempt);
             audit("candidate_spooled", { producer_candidate_key: attempt.producer_candidate_key, raw_sha256: attempt.raw_sha256, raw_size_bytes: attempt.raw_size_bytes });
             if (submission.repairable()) {
@@ -530,8 +629,9 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
               await appendOutcome(block.id, { code: submission.code, count: 1, artifact_status: "not_evaluated", binding_status: "not_evaluated" });
             }
           }
-          if (!["toolUse", "error", "aborted"].includes(message.stopReason)) providerError = new AgentFailure("provider_error", "Provider tool stream did not finish normally");
+          if (!["toolUse", "error", "aborted", "length"].includes(message.stopReason)) providerError = new AgentFailure("provider_error", "Provider tool stream did not finish normally");
         }
+        if (outputLimitReached) audit("model_output_limit", { stop_reason: "length", max_output_tokens: request.model.max_output_tokens, saved_segments: reportSegments?.references().length ?? 0 });
         if (message.stopReason === "error") providerError = providerFailure(message.errorMessage ?? "");
         if (message.stopReason !== "aborted") {
           const u = message.usage;
@@ -539,6 +639,8 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
           else { usageSeen = true; usage.input_tokens += u.input; usage.output_tokens += u.output; usage.cache_read_tokens += u.cacheRead; usage.cache_write_tokens += u.cacheWrite; }
         }
       } else if (event.type === "turn_end" && (attempted || providerError || candidateCaptureError)) {
+        // 报告 length 的阻断 batch 已用 terminate 收束；不生成多余的 aborted 响应。
+        if (reportSegments && providerError?.code === "model_output_limit") return;
         // 提交及不完整工具流不能进入 SDK 自动续轮；结果修正只走统一有界入口。
         session?.agent.abort();
       }
@@ -549,14 +651,25 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
       else remainingTimeTimer = setTimeout(notifyRemainingTime, delay);
     }
     ensureActive();
-    audit("session_start", { resume: request.resume, conclude_only: readonly });
-    await session.prompt(request.prompt, { expandPromptTemplates: false });
+    audit("session_start", { resume: request.resume, conclude_only: readonly, max_output_tokens: request.model.max_output_tokens });
+    const promptWithReportRecovery = async (prompt: string) => {
+      await session!.prompt(prompt, { expandPromptTemplates: false });
+      while (!candidate && truncatedReportUnit && providerError?.code === "model_output_limit" && !candidateCaptureError && !conflict && reportOutputRecoveries < 2) {
+        ensureActive();
+        reportOutputRecoveries += 1;
+        audit("report_output_recovery", { recovery_round: reportOutputRecoveries, max_recovery_rounds: 2, saved_segments: reportSegments!.references().length, remaining_execution_seconds: Math.max(0, (deadline - performance.now()) / 1000) });
+        providerError = undefined;
+        attempted = false;
+        await session!.prompt("The current unfinished report content unit reached the model output limit and was NOT saved or accepted. Recover only that unfinished unit: make it structurally smaller (one field, a shorter coherent paragraph, or fewer ordered steps per save_report_segment call). Do not repeat or overwrite already saved segment keys or their content. Do not resend the whole report or increase the output budget. Final submit_result contains only schema_version 5 and segment_refs. The original deadline and read-only authorization still apply.", { expandPromptTemplates: false });
+      }
+    };
+    await promptWithReportRecovery(request.prompt);
     while (truncatedWithoutToolCalls && !readonly && !attempted && !candidate
       && !candidateCaptureError && !providerError && !conflict) {
       ensureActive();
       if (outputContinuations >= MAX_OUTPUT_CONTINUATIONS) {
         audit("output_truncation_limit", { stop_reason: "length", output_continuations: outputContinuations });
-        throw new AgentFailure("submission_missing", `Model output truncation continuation limit reached after ${outputContinuations} continuations without a submission`);
+        throw new AgentFailure("model_output_limit", `Model output truncation continuation limit reached after ${outputContinuations} continuations without a submission`);
       }
       outputContinuations += 1;
       audit("output_continuation", {
@@ -566,17 +679,25 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
       ensureActive();
       await session.prompt(OUTPUT_CONTINUATION_PROMPT, { expandPromptTemplates: false });
     }
-    while (!candidate && !candidateCaptureError && !providerError && !conflict && submission.repairable() && submission.repairs < request.max_result_repairs) {
+    while (!chat && !candidate && !candidateCaptureError && !providerError && !conflict && submission.repairable() && submission.repairs < request.max_result_repairs) {
       ensureActive();
       submission.repairs += 1;
       attempted = false;
       audit("result_repair", { code: submission.code, ...submission.diagnostics() });
-      await session.prompt(`Your previous response was not accepted locally: ${submissionMessage()}. Correct the result in this session and use submit_result; do not replay completed actions. ${readonly ? "Only read existing evidence, register artifacts and submit; target actions remain disabled." : "Authorized tools remain available within the original deadline."}`, { expandPromptTemplates: false });
+      await promptWithReportRecovery(`Your previous response was not accepted locally: ${submissionMessage()}. Correct the result in this session and use submit_result; do not replay completed actions. ${readonly ? "Only read existing evidence, save report segments when available, register artifacts and submit; target actions remain disabled." : "Authorized tools remain available within the original deadline."}`);
     }
     ensureActive();
     if (candidateCaptureError) throw candidateCaptureError;
     if (conflict) throw new AgentFailure("submission_conflict", "Conflicting local submissions");
     if (providerError) throw providerError;
+    if (!candidate && outputLimitReached) throw new AgentFailure("model_output_limit", "Model output reached its token limit without a complete submission");
+    if (chat) {
+      if (finalText === undefined || !finalText.trim()) throw new AgentFailure("chat_response_missing", "Chat did not complete a public answer");
+      assertPublicText(finalText, chatForbidden);
+      result.status = "succeeded";
+      result.result = { text: finalText };
+      return result;
+    }
     if (!candidate || !submission.repairable()) throw new AgentFailure(submission.code, "Local result submission did not complete");
     result.status = "succeeded";
     result.result = candidate;

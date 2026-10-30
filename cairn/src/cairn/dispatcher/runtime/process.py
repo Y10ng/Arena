@@ -104,6 +104,7 @@ class ProcessResult:
     candidate_capture_pending: bool = False
     candidate_capture_frames: int = 0
     candidate_capture_integrity_error: str | None = None
+    candidate_capture_http_status: int | None = None
     _stdout_path: str | None = field(default=None, repr=False, compare=False, kw_only=True)
     _stderr_path: str | None = field(default=None, repr=False, compare=False, kw_only=True)
     _cleanup_callbacks: list[Callable[[], None]] = field(

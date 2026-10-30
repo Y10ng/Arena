@@ -19,6 +19,12 @@
         </FilterBar>
       </div>
 
+      <Alert v-if="chatRunNotice" class="runs-stale-error" tone="info">
+        此记录属于 Agent 对话，请在项目 Agent 中查看。
+        <template #actions>
+          <Button variant="secondary" size="sm" @click="openProjectAgent">打开项目 Agent</Button>
+        </template>
+      </Alert>
       <ErrorState
         v-if="runsInitialError"
         class="runs-list-state"
@@ -172,6 +178,18 @@
         <summary>运行错误 · {{ selectedRun.error_type || '未知类型' }}（查看原文）</summary>
         <p class="error-msg pre-wrap">{{ selectedRun.error_message || selectedRun.error_type }}</p>
       </details>
+
+      <Alert
+        v-if="runTrafficMessage || trafficStatusError"
+        class="run-detail-state"
+        :tone="trafficStatusError ? 'warning' : 'info'"
+        aria-label="本次运行流量状态"
+      >
+        {{ runTrafficMessage }}<template v-if="trafficStatusError">{{ runTrafficMessage ? ' · 状态刷新失败，显示上次观测' : '流量状态查询失败，当前状态未知' }}</template>
+        <template v-if="trafficStatusError" #actions>
+          <Button variant="secondary" size="sm" @click="refetchTrafficScopes">重试</Button>
+        </template>
+      </Alert>
 
       <Alert
         v-if="linkedIntentOutcomeText(selectedRun)"
@@ -392,6 +410,9 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { useQuery } from '@tanstack/vue-query'
+import { getTrafficScopes } from '@/api/traffic'
+import { trafficScopeLabel } from '@/features/traffic/trafficStatus'
 import { DataTable, ErrorState, FilterBar, type DataTableColumn } from '@/components/patterns'
 import {
   Alert,
@@ -457,6 +478,7 @@ const {
   artifacts,
   autoScrollTerminal,
   captureTruncationMessage,
+  chatRunNotice,
   commandEvents,
   detailTabs,
   filteredRuns,
@@ -467,6 +489,7 @@ const {
   isLoadingRuns,
   isLoadingTerminalPreview,
   linkedIntentOutcomeText,
+  openProjectAgent,
   previewArtifact,
   previewTruncationMessage,
   refetchRuns,
@@ -500,6 +523,23 @@ const {
   terminalRecovered,
   terminalScreen,
 } = useRunsPage()
+
+const { data: trafficScopes, isError: trafficStatusError, refetch: refetchTrafficScopes } = useQuery({
+  queryKey: computed(() => ['runTrafficScopes', selectedRun.value?.project_id, selectedRun.value?.id]),
+  queryFn: ({ signal }) => getTrafficScopes(selectedRun.value!.project_id, signal, selectedRun.value!.id),
+  enabled: computed(() => Boolean(selectedRun.value?.project_id)),
+  refetchInterval: (query) => {
+    if (query.state.status === 'error') return false
+    const scope = query.state.data?.items.find((item) => item.task_run_id === selectedRun.value?.id)
+    if (!scope) return ['queued', 'running'].includes(selectedRun.value?.status ?? '') ? 3000 : false
+    return scope.status?.upload_complete === true && scope.status.control_stopped === true
+      && scope.status.test_stopped === true && scope.status.collector_stopped === true ? false : 3000
+  },
+})
+const runTrafficScope = computed(() => trafficScopes.value?.items.find(
+  (scope) => scope.task_run_id === selectedRun.value?.id,
+))
+const runTrafficMessage = computed(() => runTrafficScope.value ? trafficScopeLabel(runTrafficScope.value) : '')
 
 const showDetail = ref(false)
 const openRun = (id: string) => {

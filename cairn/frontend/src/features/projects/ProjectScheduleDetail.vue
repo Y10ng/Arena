@@ -37,7 +37,7 @@
             size="sm"
             :disabled="operationBusy || operationUnknown"
             @click="openReschedule"
-            >改期</Button
+            >改期与代理设置</Button
           >
           <Button
             size="sm"
@@ -149,7 +149,6 @@
         <h3>Goal</h3>
         <pre>{{ schedule.project.goal }}</pre>
         <p>场景：{{ schedule.project.scenario }}</p>
-        <p>Worker：{{ schedule.project.tenant_worker_ids.join('、') }}</p>
         <p>
           授权到期：{{ schedule.project.authorization_expires_at || '不限' }} · 执行停止：{{
             schedule.project.explore_deadline || '不限'
@@ -245,13 +244,15 @@
       >
       <Dialog
         :open="rescheduleOpen"
-        title="调整单次启动时间"
+        title="调整单次启动时间与代理设置"
         description="不替换项目输入；改期不会取消或延长已有授权期限。"
         :dismissible="!operationBusy"
-        @update:open="rescheduleOpen = $event"
+        :close-on-outside="false"
+        @update:open="!$event && closeReschedule()"
       >
         <fieldset :disabled="operationBusy" class="reschedule-fields">
           <ScheduleTiming ref="rescheduleTiming" v-model="timingDraft" locked-mode editing />
+          <TestEgressFields v-model="rescheduleEgress" :auth-configured="rescheduleEgressPublic?.auth_configured" :disabled="operationBusy || operationUnknown" :error="rescheduleEgressError" @update:model-value="rescheduleEgressDirty = true" />
         </fieldset>
         <p class="schedule-muted">
           已有授权到期：{{ rescheduleAuthorization ? `${scheduleLocalTime(rescheduleAuthorization, schedule.timezone)} ${schedule.timezone}` : '不设到期' }}。
@@ -259,10 +260,10 @@
         </p>
         <Alert v-if="operationError" tone="danger" title="改期未完成">{{ operationError }}</Alert>
         <template #footer
-          ><Button variant="secondary" :disabled="operationBusy" @click="rescheduleOpen = false"
+          ><Button variant="secondary" :disabled="operationBusy" @click="closeReschedule"
             >取消</Button
           ><Button :loading="operationBusy" :disabled="operationUnknown" @click="saveReschedule"
-            >保存改期</Button
+            >保存改期与代理设置</Button
           ></template
         >
       </Dialog>
@@ -283,8 +284,9 @@
   </div>
 </template>
 <script setup lang="ts">
-import { computed, ref, shallowRef, toRaw, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, onBeforeUnmount, ref, shallowRef, toRaw, watch } from 'vue'
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
+import type { TestEgressPublic } from '@/api/testEgress'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { ArrowLeft } from '@lucide/vue'
 import {
@@ -312,6 +314,8 @@ import {
 import { bytes } from '@/lib/format'
 import NewProject from './NewProject.vue'
 import ScheduleTiming from './ScheduleTiming.vue'
+import TestEgressFields from '@/components/patterns/TestEgressFields.vue'
+import { testEgressDraft, testEgressError, testEgressInput } from './testEgressForm'
 import { newScheduleDraft, draftFromSchedule } from './scheduleTiming'
 const route = useRoute()
 const router = useRouter()
@@ -350,6 +354,24 @@ const editOpen = ref(false)
 const editTrigger = shallowRef<HTMLElement | null>(null)
 const rescheduleOpen = ref(false)
 const rescheduleVersion = ref(0)
+const rescheduleEgress = ref(testEgressDraft())
+const rescheduleEgressPublic = ref<TestEgressPublic>()
+const rescheduleEgressDirty = ref(false)
+const rescheduleEgressError = ref('')
+function canLeaveReschedule() {
+  return !rescheduleOpen.value || (!operationBusy.value && (!rescheduleEgressDirty.value || window.confirm('放弃未保存的代理设置？')))
+}
+function closeReschedule() {
+  if (!canLeaveReschedule()) return
+  rescheduleOpen.value = false; rescheduleEgress.value = testEgressDraft(); rescheduleEgressDirty.value = false
+}
+onBeforeRouteLeave(canLeaveReschedule)
+onBeforeRouteUpdate(canLeaveReschedule)
+function beforeUnload(event: BeforeUnloadEvent) {
+  if (rescheduleOpen.value && (operationBusy.value || rescheduleEgressDirty.value)) { event.preventDefault(); event.returnValue = '' }
+}
+window.addEventListener('beforeunload', beforeUnload)
+onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload))
 const originalDeadline = ref<string | null>(null)
 const rescheduleAuthorization = ref<string | null>(null)
 const rescheduleTiming = ref<InstanceType<typeof ScheduleTiming> | null>(null)
@@ -441,6 +463,9 @@ function onSaved(value: ProjectSchedule) {
 function openReschedule() {
   if (!schedule.value) return
   timingDraft.value = draftFromSchedule(schedule.value)
+  rescheduleEgressPublic.value = schedule.value.test_egress
+  rescheduleEgress.value = testEgressDraft(schedule.value.test_egress)
+  rescheduleEgressDirty.value = false; rescheduleEgressError.value = ''
   rescheduleVersion.value = schedule.value.version
   originalDeadline.value = schedule.value.explore_deadline || null
   rescheduleAuthorization.value = schedule.value.authorization_expires_at || null
@@ -451,7 +476,8 @@ async function saveReschedule() {
   if (operationBusy.value || operationUnknown.value) return
   operationError.value = ''
   const timing = rescheduleTiming.value!.validate()
-  if (!timing) return
+  rescheduleEgressError.value = testEgressError(rescheduleEgress.value)
+  if (!timing || rescheduleEgressError.value) return
   const { rules, deadline } = timing
   if (rescheduleAuthorization.value && Date.parse(rules.start_at) >= Date.parse(rescheduleAuthorization.value)) {
     operationError.value = '启动时间必须早于已有授权到期时间；改期不会自动续期，请在关联项目中重新授权。'
@@ -463,11 +489,13 @@ async function saveReschedule() {
     applySchedule(
       await updateProjectSchedule(id.value, {
         ...rules,
+        ...(rescheduleEgressDirty.value ? { test_egress: testEgressInput(rescheduleEgress.value) } : {}),
         ...(deadline !== originalDeadline.value ? { explore_deadline: deadline } : {}),
         version: rescheduleVersion.value,
       }),
     )
     rescheduleOpen.value = false
+    rescheduleEgress.value = testEgressDraft(); rescheduleEgressDirty.value = false
   } catch (error) {
     reportError(error)
   } finally {

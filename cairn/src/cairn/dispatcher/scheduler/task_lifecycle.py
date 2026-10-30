@@ -689,6 +689,9 @@ class TaskLifecycleMixin(TaskRunFinishMixin, DispatchDecisionsMixin):
         ]
         for future in done:
             task = self.futures[future]
+            if task.task_type == "agent_chat":
+                self._reap_agent_turn(future, task)
+                continue
             if task.task_run_id is None:
                 self.futures.pop(future)
             cancellation = getattr(task, "cancellation", None)
@@ -871,6 +874,7 @@ class TaskLifecycleMixin(TaskRunFinishMixin, DispatchDecisionsMixin):
                 for key in (
                     "structured_intent_binding",
                     "structured_explore_binding",
+                    "reason_output_retry",
                 )
                 if key in context
             }

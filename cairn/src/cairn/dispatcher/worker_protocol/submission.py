@@ -19,9 +19,13 @@ from cairn.assessment_contracts import (
     Text,
 )
 from cairn.evidence_contracts import (
-    VerificationKeyEvidence, VerificationTestStep, WorkerEvidenceItem, evidence_refs,
+    VerificationKeyEvidence, VerificationTestStep, WorkerEvidenceItem, evidence_refs, has_evidence,
     validate_verification_evidence_links,
 )
+from cairn.report_readable import (
+    REPORT_DATA_SCHEMA_VERSION, ReportFinding, ReportReadableData, ReportStep,
+)
+from cairn.report_segments import REPORT_MAX_SEGMENTS, SegmentReference
 from cairn.server.schemas.candidates import CANDIDATE_MAX_ARTIFACT_BYTES
 from cairn.server.schemas.projects import VulnerabilityIdentityInput
 from .envelope import ASSESSMENT_PROTOCOL_ID, PHASE_RESULT_KINDS, validate_result_envelope
@@ -63,6 +67,12 @@ class Finding(ResultModel):
     remediation: str = ""
     identity: VulnerabilityIdentityInput
     evidence_items: list[WorkerEvidenceItem]
+    reproduction_steps: list[VerificationTestStep] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_step_evidence(self) -> Finding:
+        validate_verification_evidence_links(self.evidence_items, [], self.reproduction_steps)
+        return self
 
 
 class FactResult(ResultModel):
@@ -88,6 +98,11 @@ class CompleteResult(ResultModel):
     description: Text
     from_: list[Text] = Field(default_factory=list, alias="from")
     evidence_refs: list[AssessmentEvidenceRef] = Field(default_factory=list)
+
+
+class ReasonCompleteResult(CompleteResult):
+    # Reason 引用已有事实；Bootstrap 的来源仍由系统在写回后确定。
+    from_: list[Text] = Field(alias="from", min_length=1)
 
 
 class ApplicableTest(ResultModel):
@@ -222,14 +237,17 @@ class ExternalVerificationData(ResultModel):
                 "contains": {"anyOf": [
                     {"required": [name], "properties": {name: {"type": "object"}}}
                     for name in ("request", "response", "artifact")
-                ]},
+                ] + [{"required": ["flow_id", "source"], "properties": {
+                    "flow_id": {"type": "string"}, "source": {"const": "capture"},
+                }}]},
             }}},
         }],
     })
 
-    schema_version: Literal[3]
+    schema_version: Literal[4]
     outcome: Literal["confirmed", "not_reproduced", "environment_changed", "insufficient_evidence"]
     summary: Text
+    remediation: str = Field(min_length=1, pattern=r"\S")
     tested_scope: Text
     limitations: list[Text]
     reason_code: Text | None = None
@@ -243,7 +261,7 @@ class ExternalVerificationData(ResultModel):
         if self.outcome == "insufficient_evidence":
             if not self.limitations:
                 raise ValueError("insufficient_evidence requires explicit limitations")
-        elif not evidence_refs(self.evidence_items):
+        elif not has_evidence(self.evidence_items, current=True):
             raise ValueError("tested outcomes require current execution evidence")
         validate_verification_evidence_links(self.evidence_items, self.key_evidence, self.test_steps)
         return self
@@ -277,7 +295,7 @@ class ReasonData(ResultModel):
     })
 
     intents: list[IntentDecision] | None = None
-    complete: CompleteResult | None = None
+    complete: ReasonCompleteResult | None = None
     depth_review: DepthReviewDecision | None = None
     abandon: list[Text] = Field(default_factory=list)
     discovered_surfaces: list[SurfaceResult] = Field(default_factory=list)
@@ -304,39 +322,14 @@ class ReasonData(ResultModel):
         return self
 
 
-class ReportFinding(ResultModel):
-    vulnerability_id: Text
-    impact: str = ""
-    root_cause: str = ""
-    repro_steps: Text
-    remediation: Text
-    regression_steps: Text
-    limitations: str = ""
-
-
-REPORT_DATA_SCHEMA_VERSION = 2
-REPORT_FACT_REFS = (
-    "scope", "counts", "work_results", "execution_status", "limitations", "evidence_index",
-)
-
-
-class ReportMarkdownFragment(ResultModel):
-    type: Literal["markdown"]
-    markdown: Annotated[str, Field(min_length=1, pattern=r"\S")]
-
-
-class ReportFactReference(ResultModel):
-    type: Literal["fact"]
-    ref: Text
-
-
-class ReportData(ResultModel):
-    schema_version: Literal[2]
-    executive_summary: Annotated[str, Field(min_length=1, max_length=20000, pattern=r"\S")]
-    findings: list[ReportFinding]
-    layout: list[ReportMarkdownFragment | ReportFactReference] = Field(min_length=1)
-    limitations: str = ""
+class ReportData(ReportReadableData):
     artifacts: list[ArtifactDeclaration] = Field(default_factory=list)
+
+
+class ReportSegmentSubmission(ResultModel):
+    schema_version: Literal[5]
+    segment_refs: list[SegmentReference] = Field(min_length=1, max_length=REPORT_MAX_SEGMENTS)
+    artifacts: list[ArtifactDeclaration] = Field(default_factory=list, max_length=REPORT_MAX_SEGMENTS)
 
 
 class HealthcheckData(ResultModel):
@@ -352,7 +345,7 @@ PHASE_DATA_MODELS: dict[str, type[ResultModel]] = {
     "verifier_execute": VerifierData,
     "verifier_conclude": VerifierData,
     "external_verify_execute": ExternalVerificationData,
-    "report_execute": ReportData,
+    "report_execute": ReportSegmentSubmission,
 }
 _RESULT_DATA_MODELS: dict[str, type[ResultModel]] = {
     **PHASE_DATA_MODELS,
@@ -541,7 +534,7 @@ def _build_submit_result_schema(
         _hide_fields(definitions["DepthReviewDecision"], ["input_digest"])
     allowed_facts = binding.get("allowed_fact_ids")
     if isinstance(allowed_facts, list):
-        for name in ("IntentDecision", "CompleteResult", "DepthSelection"):
+        for name in ("IntentDecision", "ReasonCompleteResult", "DepthSelection"):
             node = definitions.get(name, {}).get("properties", {}).get("from")
             if node is not None:
                 node["items"] = {"type": "string", "enum": allowed_facts}
@@ -561,7 +554,7 @@ def _build_submit_result_schema(
             if not open_intent_ids:
                 data_schema["anyOf"] = [
                     {"required": ["intents"], "properties": {"intents": {"type": "array", "minItems": 1}}},
-                    {"required": ["complete"], "properties": {"complete": {"$ref": "#/$defs/CompleteResult"}}},
+                    {"required": ["complete"], "properties": {"complete": {"$ref": "#/$defs/ReasonCompleteResult"}}},
                     {"required": ["abandon"], "properties": {"abandon": {"type": "array", "minItems": 1}}},
                 ]
         _bind_structured_reason_intents(data_schema, definitions, binding)
@@ -635,7 +628,7 @@ CANDIDATE_OUTCOME_CODES = SUBMISSION_FAILURE_CODES | frozenset({
     "candidate_admission_rejected", "candidate_manifest_invalid",
     "candidate_outcome_invalid", "candidate_spool_conflict",
     "candidate_spool_invalid", "candidate_spool_limit",
-    "candidate_spool_unavailable", "locally_validated", "provider_auth",
+    "candidate_spool_unavailable", "locally_validated", "model_output_limit", "provider_auth",
     "provider_error", "provider_rate_limit", "result_schema", "runner_error",
 })
 SUBMISSION_ISSUE_KEYWORDS = frozenset({

@@ -3,7 +3,10 @@ from __future__ import annotations
 from hashlib import sha256
 from pathlib import Path
 
-from cairn.dispatcher.config import DispatchConfig
+import pytest
+from pydantic import ValidationError
+
+from cairn.dispatcher.config import DispatchConfig, ModelConfig, PiModelConfig, ReportTaskConfig
 from cairn.dispatcher.scheduler.loop import DispatcherBootstrap, DispatcherLoop
 
 
@@ -58,6 +61,68 @@ workers: []
 """,
         encoding="utf-8",
     )
+
+
+def test_output_budget_defaults_and_static_model_binding_dump(tmp_path: Path) -> None:
+    config_path = tmp_path / "dispatch.yaml"
+    write_dispatch_yaml(config_path)
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            'prompt_group: "default"', 'prompt_group: "goal-driven-v1"',
+        ), encoding="utf-8",
+    )
+    assert DispatchConfig.load(config_path).tasks.report.max_output_tokens == 16384
+    model = ModelConfig(id="model-a", provider_id="provider-a", upstream_model="synthetic")
+    assert model.max_output_tokens == 16384
+    binding = {
+        "protocol": "openai-chat-completions", "model_name": "synthetic",
+        "inference_endpoint": "http://127.0.0.1:1/chat/completions",
+        "base_url": "http://127.0.0.1:1", "auth_header": "Authorization",
+        "api_key": "synthetic-private-key",
+    }
+    assert PiModelConfig(**binding).model_dump()["max_output_tokens"] == 16384
+    content = config_path.read_text(encoding="utf-8").replace(
+        "tasks:\n", "tasks:\n  report:\n    max_output_tokens: 32768\n",
+    ).replace(
+        "common_env: {}", "common_env: {SYNTHETIC_BUDGET_KEY: synthetic-private-key}",
+    ).replace("workers: []", """providers:
+  - id: provider-a
+    base_url: "http://127.0.0.1:1"
+    inference_endpoint: "http://127.0.0.1:1/chat/completions"
+    credential_ref: SYNTHETIC_BUDGET_KEY
+models:
+  - id: model-a
+    provider_id: provider-a
+    upstream_model: synthetic
+    max_output_tokens: 24576
+workers:
+  - id: worker-a
+    engine: pi
+    model_id: model-a
+    task_types: [explore]
+    concurrency: 1
+    priority: 0""")
+    config_path.write_text(content, encoding="utf-8")
+    config = DispatchConfig.load(config_path)
+    assert config.tasks.report.max_output_tokens == 32768
+    assert config.workers[0].model_binding.model_dump()["max_output_tokens"] == 24576
+    assert config.workers[0].model_binding.custom_headers == []
+
+
+@pytest.mark.parametrize("budget", [0, -1, True, "32768", 1.5])
+def test_output_budget_rejects_nonpositive_or_noninteger_values(budget) -> None:
+    with pytest.raises(ValidationError):
+        ReportTaskConfig(max_output_tokens=budget)
+    with pytest.raises(ValidationError):
+        ModelConfig(id="model-a", provider_id="provider-a", upstream_model="synthetic",
+                    max_output_tokens=budget)
+    with pytest.raises(ValidationError):
+        PiModelConfig(
+            protocol="openai-chat-completions", model_name="synthetic",
+            inference_endpoint="http://127.0.0.1:1/chat/completions",
+            base_url="http://127.0.0.1:1", auth_header="Authorization",
+            api_key="synthetic-private-key", max_output_tokens=budget,
+        )
 
 
 def make_reload_loop(config_path: Path) -> DispatcherLoop:

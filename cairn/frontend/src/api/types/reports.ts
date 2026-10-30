@@ -2,6 +2,7 @@ export interface ReportInventoryItem {
   artifact_id: string
   project_id: string
   project_title: string
+  source_status: 'available' | 'deleted' | 'unknown'
   task_run_id: string
   artifact_uri: string
   artifact_sha256: string

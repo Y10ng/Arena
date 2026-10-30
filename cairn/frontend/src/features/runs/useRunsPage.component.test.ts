@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { defineComponent, h, reactive, ref, unref } from 'vue'
+import { computed, defineComponent, h, reactive, ref, unref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ArtifactPreview } from '@/api/client'
 import type { ProjectDetail } from '@/api/types'
@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
 }))
 
 const runsData = ref<TaskRun[]>([])
+const runsStatus = ref<'pending' | 'success' | 'error'>('success')
 
 vi.mock('@/api/client', () => ({
   api: mocks.api,
@@ -44,7 +45,8 @@ vi.mock('@tanstack/vue-query', () => ({
       : {
           data: runsData,
           error: ref<unknown>(null),
-          isError: ref(false),
+          isError: computed(() => runsStatus.value === 'error'),
+          isSuccess: computed(() => runsStatus.value === 'success'),
           isFetching: ref(false),
           isLoading: ref(false),
           refetch: mocks.refetchRuns,
@@ -191,12 +193,100 @@ beforeEach(() => {
   mocks.router.push.mockReset()
   mocks.router.replace.mockReset()
   runsData.value = [run('run-a'), run('run-b')]
+  runsStatus.value = 'success'
 })
 
 afterEach(() => {
   wrapper?.unmount()
   wrapper = null
   vi.useRealTimers()
+})
+
+describe('useRunsPage chat exclusion', () => {
+  it('uses the same non-chat collection for filtering, selection and refresh without changing API data', async () => {
+    routeState.query = {}
+    runsData.value = [
+      { ...run('chat'), task_type: 'agent_chat' },
+      { ...run('report'), task_type: 'report' },
+      { ...run('verification'), task_type: 'external_verify' },
+      run('exploration'),
+    ]
+    mocks.router.replace.mockImplementation(({ query }) => { routeState.query = query })
+    mocks.api.mockImplementation((_method: string, path: string) =>
+      Promise.resolve(emptyDetailResponse(path)),
+    )
+    mountComposable()
+    await flushPromises()
+
+    expect(page.filteredRuns.value.map((item) => item.id)).toEqual(['report', 'verification', 'exploration'])
+    expect(page.selectedRun.value).toBeNull()
+    page.searchQuery.value = 'agent_chat'
+    expect(page.filteredRuns.value).toEqual([])
+    page.searchQuery.value = ''
+    page.statusFilter.value = 'running'
+    expect(page.filteredRuns.value).toHaveLength(3)
+    page.selectRun('chat')
+    expect(page.selectedRunId.value).toBeNull()
+    expect(mocks.api).not.toHaveBeenCalled()
+
+    for (const id of ['report', 'verification']) {
+      page.selectRun(id)
+      await flushPromises()
+      expect(page.selectedRun.value?.id).toBe(id)
+      expect(mocks.api).toHaveBeenCalledWith('GET', `/projects/project-a/artifacts?task_run_id=${id}`)
+    }
+    mocks.refetchRuns.mockImplementation(() => {
+      runsData.value = [...runsData.value, { ...run('new-chat'), task_type: 'agent_chat' }]
+      return Promise.resolve()
+    })
+    uiState.globalRefreshKey += 1
+    await flushPromises()
+    expect(page.selectedRun.value?.id).toBe('verification')
+    expect(page.filteredRuns.value.map((item) => item.id)).toEqual(['report', 'verification', 'exploration'])
+    expect(runsData.value.filter((item) => item.task_type === 'agent_chat')).toHaveLength(2)
+    expect(mocks.api.mock.calls.every(([, path]) => !String(path).includes('task_run_id=chat'))).toBe(true)
+  })
+
+  it('clears an old chat link only after successful type confirmation and never substitutes another run', async () => {
+    routeState.query = { runId: 'chat', keep: 'value' }
+    runsData.value = []
+    runsStatus.value = 'pending'
+    mocks.router.replace.mockImplementation(({ query }) => { routeState.query = query })
+    mountComposable()
+    await flushPromises()
+    expect(page.selectedRun.value).toBeNull()
+    expect(mocks.router.replace).not.toHaveBeenCalled()
+
+    runsStatus.value = 'error'
+    await flushPromises()
+    expect(routeState.query.runId).toBe('chat')
+    expect(page.chatRunNotice.value).toBe(false)
+    expect(page.runsInitialError.value).toBe(true)
+    runsData.value = [{ ...run('chat'), task_type: 'agent_chat' }, run('other')]
+    await flushPromises()
+    expect(mocks.router.replace).not.toHaveBeenCalled()
+    expect(page.chatRunNotice.value).toBe(false)
+
+    runsStatus.value = 'success'
+    await flushPromises()
+    expect(routeState.query).toEqual({ keep: 'value' })
+    expect(page.chatRunNotice.value).toBe(true)
+    expect(page.selectedRunId.value).toBeNull()
+    expect(page.selectedRun.value).toBeNull()
+    expect(mocks.api).not.toHaveBeenCalled()
+    uiState.globalRefreshKey += 1
+    await flushPromises()
+    expect(page.selectedRun.value).toBeNull()
+    expect(page.chatRunNotice.value).toBe(true)
+    page.openProjectAgent()
+    expect(mocks.router.push).toHaveBeenCalledWith('/projects/project-a/agent')
+
+    routeState.query.runId = 'unknown'
+    await flushPromises()
+    expect(routeState.query.runId).toBe('unknown')
+    expect(page.chatRunNotice.value).toBe(false)
+    expect(page.selectedRun.value).toBeNull()
+  })
 })
 
 describe('useRunsPage request ownership', () => {

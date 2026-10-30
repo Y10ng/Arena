@@ -9,6 +9,11 @@
   gap: var(--space-3);
   container: reports / inline-size;
 }
+.report-page-header.page-header {
+  margin: 0;
+  padding: 0;
+  flex: 0 0 auto;
+}
 .report-filters {
   flex: 0 0 auto;
 }
@@ -44,61 +49,51 @@
 .report-workspace {
   min-width: 0;
   min-height: 0;
-  flex: 1 1 0;
+  flex: 0 1 auto;
   display: flex;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--bg-surface);
 }
+.report-workspace--reading {
+  flex: 1 1 0;
+}
 .report-directory {
   min-width: 0;
   min-height: 0;
-  flex: 1 1 0;
+  width: 100%;
   display: flex;
   flex-direction: column;
 }
 .report-directory-scroll {
   min-height: 0;
-  flex: 1 1 0;
+  flex: 0 1 auto;
   overflow-y: auto;
+}
+.report-directory .data-table__scroll {
+  border: 0;
+}
+.report-directory .data-table {
+  min-width: 480px;
+  table-layout: fixed;
+}
+.report-directory th:first-child {
+  width: 48%;
+}
+.report-directory th:nth-child(2) {
+  width: 30%;
 }
 .report-list-loading {
   padding: var(--space-4);
   display: grid;
   gap: var(--space-3);
 }
-.report-directory-list {
-  margin: 0;
-  padding: var(--space-2);
-  list-style: none;
-}
-.report-directory-item {
+.report-directory-item.ui-button {
   width: 100%;
   min-width: 0;
-  min-height: 52px;
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-3);
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--text);
+  justify-content: flex-start;
+  padding-inline: 0;
   text-align: left;
-  cursor: pointer;
-  font-size: var(--text-md);
-  line-height: var(--leading-normal);
-  transition:
-    background-color var(--dur-fast) var(--ease),
-    border-color var(--dur-fast) var(--ease);
-}
-.report-directory-item:hover {
-  background: var(--surface-hover);
-}
-.report-directory-item[aria-current='true'] {
-  background: var(--surface-selected);
-  border-color: var(--border-strong);
 }
 .report-directory-item[aria-current='true'] strong {
   color: var(--accent);
@@ -124,9 +119,10 @@
   color: var(--text-muted);
   font-size: var(--text-sm);
 }
-.report-directory-item time {
-  color: var(--text-faint);
-  font-size: var(--text-xs);
+.report-directory time {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  white-space: nowrap;
 }
 .report-pagination,
 .report-page-controls,
@@ -209,13 +205,6 @@
   color: var(--text-muted);
 }
 @container reports (max-width: 600px) {
-  .report-directory-item {
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: var(--space-1) var(--space-2);
-  }
-  .report-directory-item strong {
-    grid-column: 1 / -1;
-  }
   .report-extra-filter-fields {
     grid-template-columns: minmax(0, 1fr);
   }

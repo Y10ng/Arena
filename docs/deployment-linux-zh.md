@@ -39,27 +39,33 @@ cd "$UNPACK_DIR"/arena-*-linux-code-only
 
 后续 `./deploy/...` 命令均在这个应用根目录执行。安装位置可自行选择，不必使用示例目录。
 
-**2. 准备 Worker 镜像，以下二选一。** 镜像引用和 tar 路径都是待替换参数，不是已发布地址。
+**2. 准备三个配套镜像，以下二选一。** 当前任务除了主 Worker，还需要流量网关和执行器；只准备主 Worker 可能导致服务启动后任务仍无法执行。镜像引用和 tar 路径都是待替换参数，不是已发布地址。
 
-从实际仓库拉取：
-
-```bash
-WORKER_IMAGE='替换为实际仓库/镜像名:配套版本'
-docker pull "$WORKER_IMAGE"
-```
-
-或导入可信镜像 tar：
+从实际仓库拉取，任一步失败时先处理，不继续启动：
 
 ```bash
-WORKER_TAR='/绝对路径/worker-image.tar'
-docker load --input "$WORKER_TAR"
+WORKER_IMAGE='替换为实际仓库/worker:配套版本'
+GATEWAY_IMAGE='替换为实际仓库/traffic-gateway:配套版本'
+EXECUTOR_IMAGE='替换为实际仓库/task-executor:配套版本'
+docker pull "$WORKER_IMAGE" &&
+  docker pull "$GATEWAY_IMAGE" &&
+  docker pull "$EXECUTOR_IMAGE"
 ```
 
-**3. 在 `runtime/dispatch.yaml` 中修改现有 `container.image` 为拉取或导入后的实际镜像名。** 默认 `images: []` 会自动引用它，不必再填一套映射。以下只展示待修改字段，不要覆盖完整文件：
+或逐个导入可信镜像 tar；分发方提供的单个 tar 也可以包含全部三个镜像：
+
+```bash
+IMAGE_TAR='/绝对路径/配套镜像.tar'
+docker load --input "$IMAGE_TAR"
+```
+
+**3. 在 `runtime/dispatch.yaml` 中将下列字段设置为拉取或导入后的实际镜像名。** 默认 `images: []` 自动注册主 Worker，不必再填一套映射。网关不是 pi Worker，不要把它加入 Worker 注册列表。以下只展示待修改字段，不要覆盖完整文件：
 
 ```yaml
 container:
-  image: "替换为实际镜像名:版本"
+  image: "替换为实际Worker镜像名:版本"
+  traffic_gateway_image: "替换为实际网关镜像名:版本"
+  task_executor_image: "替换为实际执行器镜像名:版本"
 ```
 
 也可在新安装中将镜像标为默认名以省去 YAML 修改：`docker tag "$WORKER_IMAGE" arena-worker:local`；导入 tar 后先将 `WORKER_IMAGE` 设为其实际镜像名。改名不是必需步骤，已有默认 tag 时不要无意覆盖。已有显式镜像注册的配置见后面的按需说明。
@@ -76,14 +82,17 @@ cd Arena
 ./deploy/install.sh
 npm --prefix cairn/frontend ci
 npm --prefix cairn/frontend run build:server
-docker build -t arena-worker:local container/
+docker build -t arena-worker:local container/ &&
+  docker build -t arena-traffic-gateway:local container/traffic-gateway/ &&
+  docker build --build-arg WORKER_IMAGE=arena-worker:local \
+    -t arena-task-executor:local container/task-executor/
 ```
 
 - `install.sh` 用 `uv sync --frozen --no-dev` 安装 Python 依赖，只创建缺失配置，不启动服务、不构建前端或镜像。
 - `build:server` 包含类型检查，生成由 Server 提供的正式前端；会清空 `cairn/src/cairn/server/static/`，不要在其中存放私有文件。无需启动 Vite 开发服务，`build:verify` 不能代替正式构建。
-- Docker 构建上下文为 `container/`。`arena-worker:local` 是建议名；使用其他 tag 时同步修改 `runtime/dispatch.yaml` 的 `container.image`。
+- 三个构建上下文分别为 `container/`、`container/traffic-gateway/`、`container/task-executor/`。执行器继承主 Worker，因此先构建主 Worker；网关独立构建。使用自定义 tag 时同步修改配置中的三个镜像字段，以及执行器构建的 `WORKER_IMAGE` 参数。
 
-`start.sh` 也会构建缺失的默认镜像，但**不会重建已经存在的同名镜像**；自定义镜像需先自行 build、pull 或 load。完成后使用下面的共用配置与启动步骤。
+`start.sh` 只会构建缺失的默认主 Worker，**不会重建已有的同名镜像，也不会准备或检查网关、执行器**；不要省略上述步骤。自定义镜像需先自行 build、pull 或 load。完成后使用下面的共用配置与启动步骤。
 
 ## 修改端口和常用配置
 
@@ -242,25 +251,38 @@ PostgreSQL 备份不包含这些文件；资料库定义在数据库、正文在
 
 ### 源码更新
 
-保留本地修改，按自己的分支更新源码；以下 `git pull --ff-only` 适用于已配置远端跟踪的工作区，从原应用根目录执行：
+当前没有从 GitHub 获取代码并完成整套升级的源码一键更新器。先在原应用根目录执行 `git status --short` 和 `git branch --show-current`，保留并处理本地修改；不要用 `reset --hard` 或清理工作区代替处理。以下示例适用于**当前已在 `main`、工作区无待保护改动，且 `origin` 指向预期仓库**的安装；开发分支按自己的目标更新，不直接套用。
+
+确认相关任务已经退出后执行；任一步失败即停止，不继续启动半套环境：
 
 ```bash
-./deploy/stop.sh
-git pull --ff-only
-./deploy/install.sh
-npm --prefix cairn/frontend ci
-npm --prefix cairn/frontend run build:server
-# container/ 有变化时执行；若使用自定义镜像名，替换构建 tag。
-docker build -t arena-worker:local container/
-./deploy/start.sh
-./deploy/status.sh
+(
+  set -e
+  ./deploy/stop.sh
+  git pull --ff-only origin main
+  ./deploy/install.sh
+  npm --prefix cairn/frontend ci
+  npm --prefix cairn/frontend run build:server
+  # 自定义镜像需同步替换三个 tag 和 WORKER_IMAGE，保留原配置。
+  docker build -t arena-worker:local container/
+  docker build -t arena-traffic-gateway:local container/traffic-gateway/
+  docker build --build-arg WORKER_IMAGE=arena-worker:local \
+    -t arena-task-executor:local container/task-executor/
+  ./deploy/start.sh
+  ./deploy/status.sh
+)
 ```
 
-已有同名镜像不会被 `start.sh` 自动刷新。重建或拉取同名 tag 也不会改变已经创建的容器；不要将删容器作为默认升级步骤，运行边界不匹配时见排障，先保留项目工作区。
+这是可复制的更新步骤，不是已实现的自动更新脚本。Docker 会复用可用构建缓存；不要添加 `--no-cache` 或清理缓存来完成普通更新。已有同名镜像不会被 `start.sh` 自动刷新。重建或拉取同名 tag 也不会改变已经创建的容器；不要将删容器作为默认升级步骤，运行边界不匹配时见排障，先保留项目工作区。
 
 ### 部署包更新
 
-取得配套新包，像路径 A 一样解压到**原安装目录之外的新空目录**。运行新包的更新器，替换下例两个绝对路径：
+取得配套新包，像路径 A 一样解压到**原安装目录之外的新空目录**。**当前更新器只自动准备主 Worker，尚未接入网关和执行器；运行更新器前必须先准备这两个与新版本配套的镜像，不能把下面一条命令当作完整执行环境的一键升级。**
+
+- 使用预构建镜像：按路径 A 拉取或导入三个配套镜像，确认原安装配置的三个镜像引用对应本次版本。新 tag 需要显式更新引用；仅发布或拉取新 tag 不会自动修改配置。
+- 使用默认本地镜像：确认旧任务已退出并停止原宿主应用，再从新包根目录按路径 B 的三个 Docker 命令构建。此时更新器仍会检查并缓存重建主 Worker；相同输入且缓存有效时复用已有层。网关和执行器须自行确认构建成功，更新器目前不会替它们检查。
+
+准备完成后运行**新包中的**更新器，替换下例两个绝对路径：
 
 ```bash
 /新包解压目录/arena-实际版本-linux-code-only/deploy/update.sh --target /现有应用根目录
@@ -277,7 +299,20 @@ docker build -t arena-worker:local container/
 
 失败时按输出检查，修复后**重新运行新包的完整 `update.sh --target ...` 命令并保留原参数**，不要直接 start 而漏掉 Worker 准备。迁移阻断按原错误处理，不删除项目、报告、归档材料或改 SQL 绕过。旧程序临时备份只覆盖程序文件，不含数据库 / runtime，也不保证依赖、配置、镜像或数据库整体回滚；install 可能已改变依赖或 legacy 私有配置，start 可能已执行迁移。升级前按需备份数据库、数据目录、私有配置、完整 keyring（含历史版本）和 token，外置文件一起保留。
 
-如需自行生成部署包，在完整源码根目录安装好依赖并完成 `build:server` 后执行 `python3 deploy/package_release.py`，默认产物为 `dist/arena-<version>-linux-code-only.zip`。这是可选分发操作，不是使用已有包的前置步骤，也不包含 Worker 镜像。
+如需自行生成部署包，在完整源码根目录安装好依赖并完成 `build:server` 后执行 `python3 deploy/package_release.py`，默认产物为 `dist/arena-<version>-linux-code-only.zip`。这是可选分发操作，不是使用已有包的前置步骤，也不包含 Worker 镜像。当前仓库没有随 push 自动打包、发布镜像的 workflow；更新器也不从 GitHub 下载新版本，不存在默认跟随 `main` 的远端 ref。
+
+### 增量下载的实际边界
+
+- **拉取预构建镜像：** Docker 按内容寻址的镜像层下载，本机已有的相同层会复用。它不是按单个文件打补丁；某层变化，需要下载新的整层。把稳定工具层放在应用层之前、发布时保留构建缓存，才能让只改应用的版本继续共享大工具层。
+- **本地构建：** 主 Worker 已把工具安装放在应用和指引 COPY 之前；仅应用或指引变化、基础镜像及安装输入不变且缓存仍有效时，可复用已有工具层。工具版本、依赖输入、基础镜像或架构变化，以及缓存缺失，仍会重新下载相应层；新增工具也不保证只下载新增那个文件。
+- **当前执行器的例外：** `container/task-executor/Dockerfile` 在主 Worker 之上安装 `libnss3-tools`。主 Worker 镜像变化时，该 apt 层会失效并重新执行安装；它复用主 Worker 的扫描器等大层，但还不满足“应用更新完全不重新安装工具”。这项依赖分层收敛仍待实施，不以历史主 Worker 缓存验证冒充已经解决。
+- 不默认运行 Docker prune，不删除旧工具缓存，不把最终镜像的 `load` 当成导入了完整多阶段构建缓存。首次安装或缓存不存在时仍需完整准备相关依赖。
+
+### 本次跨版本升级注意
+
+本次包含 PostgreSQL v60–v75 迁移和新的执行合同，Server、Dispatcher、正式前端与执行镜像应配套升级。v61 要求没有 pending / running 报告；v71 要求旧普通 Worker 可明确映射到 bootstrap / reason / explore 三种单角色，重复或歧义配置会明确阻断，补建的 Worker 需要配置模型。默认报告模板键冲突也可能阻断迁移；不得靠清库或改写已应用迁移绕过。更早版本还须遵守其原有迁移前置条件。
+
+升级后普通项目不再手选 Worker 组合；模型、Worker 及执行参数集中在 Worker 配置，项目 Agent 单独配置默认模型。新复测结果使用 v4、报告分段提交使用 v5，历史已接受材料保留，不承诺旧冻结执行可直接续跑。完整用户可见变化见根目录 `CHANGELOG.md`。
 
 ## 排障
 

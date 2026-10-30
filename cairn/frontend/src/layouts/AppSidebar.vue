@@ -124,7 +124,7 @@
         <div v-if="dispatcherSummary" class="dispatcher-sub">
           最近循环 {{ lastLoopTimeText }} · {{ dispatcherSummary.last_loop_duration_ms || 0 }}ms
         </div>
-        <div v-else class="dispatcher-sub">未连接</div>
+        <div v-else class="dispatcher-sub">{{ route.name === 'ConsoleWorkers' ? '运行设置可查看配置加载状态' : '未连接' }}</div>
       </div>
     </button>
   </aside>
@@ -132,13 +132,10 @@
 
 <script setup lang="ts">
 import {
-  Activity,
   AlertTriangle,
-  Boxes,
   Box,
   ChevronDown,
   CirclePlus,
-  Clock3,
   FileArchive,
   Folder,
   Gauge,
@@ -151,7 +148,6 @@ import {
   Settings,
   ShieldAlert,
   Users,
-  Workflow,
   X,
   type LucideIcon,
 } from '@lucide/vue'
@@ -179,7 +175,6 @@ const systemItems = computed(() => sidebarNavigation('system', authStore.isSuper
 const iconMap: Record<NavigationIcon, LucideIcon> = {
   dashboard: Gauge,
   finding: AlertTriangle,
-  provenance: Activity,
   projects: Folder,
   add: CirclePlus,
   graph: GitBranch,
@@ -188,14 +183,11 @@ const iconMap: Record<NavigationIcon, LucideIcon> = {
   artifacts: FileArchive,
   vulnerabilities: ShieldAlert,
   monitoring: RadioTower,
-  models: Boxes,
   workers: Box,
   users: Users,
-  dispatcher: Workflow,
   scenarios: Layers3,
   prompts: ScrollText,
   knowledge: FileArchive,
-  timeout: Clock3,
   status: ShieldAlert,
   auth: KeyRound,
 }
@@ -245,15 +237,15 @@ const toggleSysMgmt = () => {
 const { data: monitoringSummary } = useQuery<MonitoringSummary>({
   queryKey: ['monitoringSummary', 'dispatcher'],
   queryFn: () => api<MonitoringSummary>('GET', '/admin/monitoring?profile=dispatcher'),
-  enabled: computed(() => authStore.isSuperAdmin),
+  enabled: computed(() => authStore.isSuperAdmin && route.name !== 'ConsoleWorkers'),
   refetchInterval: 10000,
 })
-const dispatcherSummary = computed(() => monitoringSummary.value?.dispatcher || null)
+const dispatcherSummary = computed(() => route.name === 'ConsoleWorkers' ? null : monitoringSummary.value?.dispatcher || null)
 const dispatcherStatus = computed(() => dispatcherEffectiveStatus(dispatcherSummary.value))
 const dispatcherStatusText = computed(
-  () =>
-    ({ running: '正常', idle: '空闲', stale: '过期', error: '异常' })[dispatcherStatus.value] ||
-    '未连接',
+  () => route.name === 'ConsoleWorkers'
+    ? '未查询'
+    : ({ running: '正常', idle: '空闲', stale: '过期', error: '异常' })[dispatcherStatus.value] || '未连接',
 )
 const dispatcherColorClass = computed(() =>
   dispatcherStatus.value === 'running'

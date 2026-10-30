@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from cairn.dispatcher.runtime.traffic_execution import session_root_for_project
+
 from dataclasses import replace
 import logging
 import time
@@ -162,6 +164,9 @@ def run_bootstrap_task(
                 replacement_keys=list(prompt_replacements),
             )
 
+        task_execution = None if delivery_context is not None else container_manager.prepare_task_execution(
+            project.project, task_run_id, cancellation, container_runtime,
+        )
         execution_timeout = remaining_delivery_seconds(frozen_delivery)
         execute = driver.build_execute(
             worker, prompt, session, phase="bootstrap_execute",
@@ -177,6 +182,8 @@ def run_bootstrap_task(
             conclude_only=delivery_context is not None,
             continuation=continuation_context,
             enable_checkpoints=checkpoint_staging,
+            session_root=session_root_for_project(project.project),
+            task_execution=task_execution,
         )
         session = execute.session
         # 结果修正仅在 SDK 的同一会话与原截止内进行。
@@ -464,6 +471,7 @@ def run_bootstrap_task(
         best_effort_release(client, project.project.id, intent.id, worker.name, task_run_id=task_run_id)
         return "container_failed"
     finally:
+        container_manager.stop_task_execution(project.project.id, task_run_id)
         # ProcessResult 持有临时输出文件，所有返回和异常路径都必须显式回收。
         if execute_result is not None:
             execute_result.cleanup()

@@ -162,3 +162,12 @@ LABEL io.cairn.agent.engine="pi" \
 # runner显式加载工具说明，不使用旧CLI自动发现、hooks或配置注入。
 COPY ./AGENTS.md /opt/cairn/AGENTS.md
 WORKDIR /home/kali/workspace
+
+# 中文截图资源独立追加，不使未变化的工具安装层失效。
+USER root
+COPY fonts/ /usr/local/share/fonts/arena-noto-sans-cjk/
+RUN cd /usr/local/share/fonts/arena-noto-sans-cjk && \
+    sha256sum -c SHA256SUMS && \
+    fc-cache -f /usr/local/share/fonts/arena-noto-sans-cjk && \
+    test -n "$(fc-list :lang=zh family)"
+USER kali

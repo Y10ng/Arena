@@ -8,6 +8,7 @@ from cairn.dispatcher.tasks.candidate_capture_outbox import (
     CandidateCaptureOutboxError,
     CandidateExecutionFence,
     TERMINATION_ATTEMPT_LIMIT,
+    PERMANENT_CANDIDATE_REJECTIONS,
 )
 from cairn.dispatcher.tasks.candidate_intake import (
     intake_worker_candidates,
@@ -21,6 +22,8 @@ from cairn.dispatcher.tasks.report_finish_outbox import (
     failed_finish_for_recovery,
 )
 from cairn.server.schemas.common import TaskRunErrorType
+from cairn.server.schemas.projects import AssessmentReportFinishReceiptView
+from pydantic import ValidationError
 
 
 _CANDIDATE_RECOVERY_FENCE_LIMIT = 4
@@ -220,10 +223,17 @@ class CandidateRecoveryMixin:
             self._observe_candidate_recovery(fence, check)
             self._record_candidate_recovery(fence, check, container_spool_recovered=False)
             return
-        if not self._candidate_recovery_due(fence):
-            return
         stop_futures = getattr(self, "_candidate_stop_futures", {})
         stop_future = stop_futures.get(fence.capture_id)
+        retry = getattr(self, "_candidate_recovery_retry_states", {}).get(fence.capture_id)
+        proof_arrived = (
+            fence.terminal_proof_version == 2 and isinstance(retry, tuple)
+            and retry[0] in {"termination_proof_unavailable", "task_termination_unconfirmed",
+                             "task_termination_control_unavailable", "exec_missing_process_unconfirmed"}
+        )
+        # 新证明或已完成的停止操作不再等待旧的物理检查退避；未知仍沿原 fence 处理。
+        if not proof_arrived and not (stop_future is not None and stop_future.done()) and not self._candidate_recovery_due(fence):
+            return
         if stop_future is not None and not stop_future.done():
             self._observe_candidate_recovery(
                 fence, CandidateExecutionCheck("running", "task_termination_pending"),
@@ -344,7 +354,10 @@ class CandidateRecoveryMixin:
                 "candidate_spool_read_failed",
             )
             return
-        if not summary.host_durable or summary.integrity_error is not None:
+        if not summary.host_durable or (
+            summary.integrity_error is not None
+            and summary.integrity_error not in PERMANENT_CANDIDATE_REJECTIONS
+        ):
             self._log_candidate_recovery_deferred(
                 fence,
                 summary.integrity_error or "candidate_capture_incomplete",
@@ -543,6 +556,9 @@ class CandidateRecoveryMixin:
             return False
         context = task_run.get("runtime_context")
         context = context if isinstance(context, dict) else {}
+        if context.get("dispatcher_id") != fence.owner_id or self.dispatcher_id != fence.owner_id:
+            self._log_candidate_recovery_deferred(fence, "task_run_owner_mismatch")
+            return False
         prior_lifecycle = context.get("execution_lifecycle")
         prior_lifecycle = prior_lifecycle if isinstance(prior_lifecycle, dict) else {}
         if prior_lifecycle.get("generation") != generation:
@@ -581,7 +597,8 @@ class CandidateRecoveryMixin:
             "generation": generation,
             "process_started": process_started is True,
             "termination_confirmed": True,
-            "cleanup_confirmed": True,
+            # v2 只证明执行停止；容器保留时，清理由原有暂停/结束清理链确认。
+            "cleanup_confirmed": prior_lifecycle.get("cleanup_confirmed") is True or check.status == "gone",
         }
         recovery_context: dict[str, object] = {
             "status": check.status,
@@ -599,6 +616,17 @@ class CandidateRecoveryMixin:
         ):
             # 首轮 v2 ACK 成功后只释放部分 fence，重放时保留完整恢复审计。
             recovery_context = prior_recovery
+        try:
+            rejections = [item for item in self.candidate_capture_outbox.rejections()
+                          if item.project_id == fence.project_id and item.task_run_id == fence.task_run_id]
+        except CandidateCaptureOutboxError:
+            self._log_candidate_recovery_deferred(fence, "candidate_outbox_invalid")
+            return False
+        if rejections:
+            recovery_context = {**recovery_context, "delivery_rejection": {
+                "code": rejections[0].code, "http_status": rejections[0].status_code,
+                "rejected_at": rejections[0].rejected_at,
+            }}
         runtime_context: dict[str, object] = {
             "execution_lifecycle": lifecycle,
             "candidate_recovery": recovery_context,
@@ -612,6 +640,9 @@ class CandidateRecoveryMixin:
             check,
             process_started=process_started,
         )
+        if rejections:
+            error_type = "candidate_integrity"
+            error_message = f"执行身份不一致，候选未被接受（HTTP {rejections[0].status_code}；{rejections[0].code}）；原件已保留"
         update_kwargs: dict[str, object] = {"runtime_context": runtime_context}
         if not terminal and task_type != "report":
             update_kwargs.update(
@@ -705,6 +736,29 @@ class CandidateRecoveryMixin:
                 "report_finish_outbox_owner_mismatch",
             )
             return False
+
+        if task_run.get("status") in _TERMINAL_TASK_STATUSES:
+            try:
+                response = self.client.get_assessment_report_finish_receipt(fence.project_id, fence.task_run_id)
+            except requests.RequestException:
+                self._log_candidate_recovery_deferred(fence, "report_finish_receipt_unavailable")
+                return False
+            if response.status_code != 404:
+                try:
+                    receipt = AssessmentReportFinishReceiptView.model_validate(response.data) if response.ok else None
+                except ValidationError:
+                    receipt = None
+                context = task_run.get("runtime_context") or {}
+                claim = context.get("report_claim") or {}
+                expected_status = "ready" if task_run["status"] == "succeeded" else "failed"
+                if (receipt is not None and receipt.project_id == fence.project_id
+                        and receipt.task_run_id == fence.task_run_id
+                        and receipt.generation_token == claim.get("generation_token")
+                        and receipt.status == expected_status):
+                    # 只确认该 Run 的业务终局；不把可能不同摘要的本地 journal 当作 accepted 或删除。
+                    return True
+                self._log_candidate_recovery_deferred(fence, "report_finish_receipt_unconfirmed")
+                return False
 
         try:
             if isinstance(entry, PendingReportOutput):

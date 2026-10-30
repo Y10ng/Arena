@@ -195,6 +195,38 @@ class ContainerManager:
         self.browser_sessions = BrowserSessions()
         self._browser_session_policy = "legacy"
         self._browser_helper_slots = threading.BoundedSemaphore(4)
+        self.traffic_execution = None
+
+    def configure_traffic_execution(
+        self, client, *, root: Path, dispatcher_id: str,
+        isolated: bool = False, upstream_ca: Path | None = None,
+    ) -> None:
+        from cairn.dispatcher.runtime.traffic_execution import TrafficExecutionBridge
+
+        if self.traffic_execution is None:
+            self.traffic_execution = TrafficExecutionBridge(
+                self._client, client, root=root, dispatcher_id=dispatcher_id, config=self._config,
+                isolated=isolated, upstream_ca=upstream_ca,
+            )
+
+    def prepare_task_execution(self, project, task_run_id: str, cancellation, options=None) -> dict:
+        from cairn.dispatcher.worker_result_gateway import WorkerRequestError
+
+        if options is None or not options.traffic_execution_enabled:
+            raise WorkerRequestError(
+                "capabilities.task_execution", code="http_traffic_execution_required",
+                message="项目未绑定新测试拓扑，不能继续目标执行；已有材料仍可读取和交付。",
+            )
+        if self.traffic_execution is None:
+            raise RuntimeError("traffic_execution_not_configured")
+        return self.traffic_execution.prepare_task(
+            project, task_run_id, cancellation,
+            isolated=options is not None and options.network_mode == "none",
+        )
+
+    def stop_task_execution(self, project_id: str, task_run_id: str) -> None:
+        if self.traffic_execution is not None:
+            self.traffic_execution.stop_task(project_id, task_run_id)
 
     def configure_browser_sessions(self, policy: str) -> None:
         if policy not in ("legacy", "task"):
@@ -588,8 +620,12 @@ class ContainerManager:
 
     def update_config(self, config: ContainerConfig) -> None:
         self._config = config
+        if self.traffic_execution is not None:
+            self.traffic_execution.config = config
 
     def close(self) -> None:
+        if self.traffic_execution is not None:
+            self.traffic_execution.close()
         self._client.close()
 
     def container_name(self, project_id: str) -> str:
@@ -597,6 +633,9 @@ class ContainerManager:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", sanitized):
             raise ValueError("invalid project container identity")
         return f"{self._project_prefix}{sanitized}"
+
+    def chat_container_name(self, project_id: str) -> str:
+        return self.container_name(project_id) + "-chat"
 
     def project_id_from_container_name(self, name: str) -> str | None:
         # 归属校验后返回原始项目标签，避免名称转义导致orphan误判。
@@ -617,6 +656,21 @@ class ContainerManager:
                 name,
                 options=runtime_options,
             )
+
+    def chat_directory(self, project_id: str) -> Path:
+        # 与研究 runtime 分开，不能为只读聊天调用会启动 gateway 的 control_volumes。
+        self.container_name(project_id)
+        if self.traffic_execution is None:
+            raise RuntimeError("chat_runtime_not_configured")
+        root = self.traffic_execution.root
+        return root.with_name(root.name + "-chat") / project_id
+
+    def ensure_chat_running(self, project_id: str, options: ContainerRuntimeOptions) -> str:
+        if options.features != {"project_chat": 1} or options.scenario_key != "project-chat":
+            raise ValueError("chat_runtime_options_invalid")
+        name = self.chat_container_name(project_id)
+        with self._ensure_running_lock(name):
+            return self._ensure_running_locked(project_id, name, options=options)
 
     def activate_for_readiness(
         self,
@@ -731,6 +785,24 @@ class ContainerManager:
             list(options.cap_add),
             list(options.dns) or "docker-default",
         )
+        volumes = self._advisory_volume_bind(options) or {}
+        if options.features.get("project_chat") == 1:
+            root = self.chat_directory(project_id)
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            for child, target in (("workspace", "/home/kali/workspace"), ("control", "/home/kali/.cairn"), ("prompts", "/tmp/cairn-prompts")):
+                directory = root / child
+                directory.mkdir(mode=0o700, exist_ok=True)
+                if directory.is_symlink() or root.is_symlink():
+                    raise RuntimeError("chat_runtime_directory_invalid")
+                os.chmod(directory, 0o700)
+                os.chown(directory, 1000, 1000)
+                volumes[str(directory)] = {"bind": target, "mode": "rw"}
+        if options.traffic_execution_enabled:
+            if self.traffic_execution is None:
+                raise RuntimeError("traffic_execution_not_configured")
+            volumes.update(self.traffic_execution.control_volumes(
+                project_id, isolated=options.network_mode == "none",
+            ))
         try:
             self._client.containers.run(
                 options.image,
@@ -744,7 +816,7 @@ class ContainerManager:
                 mem_limit=options.mem_limit,
                 memswap_limit=options.memswap_limit,
                 pids_limit=options.pids_limit,
-                volumes=self._advisory_volume_bind(options),
+                volumes=volumes or None,
                 labels=self._container_labels(project_id, options),
             )
             self._require_created_running_container(
@@ -949,6 +1021,8 @@ class ContainerManager:
         return snapshot
 
     def cleanup_completed(self, project_id: str) -> bool:
+        if self.traffic_execution is not None and not self.traffic_execution.cleanup_project(project_id):
+            return False
         ok = True
         for name in self._project_container_names(project_id):
             state = self.inspect_state(name)
@@ -1003,7 +1077,8 @@ class ContainerManager:
             token, registered_id = claim(current_id, daemon_id)
             if token is None:
                 # 已确认的代次不得再对恢复后重新运行的同名资源执行 stop。
-                return current is None or self._container_state(current) in {"exited", "created"}
+                stopped = current is None or self._container_state(current) in {"exited", "created"}
+                return stopped and (self.traffic_execution is None or self.traffic_execution.cleanup_project(project_id))
             if current_id is not None and current_id != registered_id:
                 return False
             if current_id is None and registered_id is not None and self._get_container(registered_id) is not None:
@@ -1016,6 +1091,8 @@ class ContainerManager:
             return confirm(token, registered_id, daemon_id)
 
     def _cleanup_paused_locked(self, project_id: str, name: str, container_ids: list[str]) -> bool:
+        if self.traffic_execution is not None and not self.traffic_execution.cleanup_project(project_id):
+            return False
         current = self._get_container(name)
         if current is not None:
             self._assert_owned(current, project_id=project_id)
@@ -1048,6 +1125,8 @@ class ContainerManager:
         """人工结束及已停止项目仍按原策略删除精确归属资源。"""
         name = self.container_name(project_id)
         with self._ensure_running_lock(name):
+            if self.traffic_execution is not None and not self.traffic_execution.cleanup_project(project_id):
+                return False
             identities = list(dict.fromkeys([*container_ids, name]))
             owned = {}
             for identity in identities:
@@ -1067,6 +1146,8 @@ class ContainerManager:
             return all(self._get_container(identity) is None for identity in identities)
 
     def cleanup_stopped(self, project_id: str) -> bool:
+        if self.traffic_execution is not None and not self.traffic_execution.cleanup_project(project_id):
+            return False
         ok = True
         for name in self._project_container_names(project_id):
             state = self.inspect_state(name)
@@ -1091,6 +1172,9 @@ class ContainerManager:
             return True
         LOG.info("removing orphan project container container=%s state=%s", name, state)
         container = self._require_container(name)
+        project_id = container.attrs["Config"]["Labels"][self._LABEL_PROJECT_ID]
+        if self.traffic_execution is not None and not self.traffic_execution.cleanup_project(project_id):
+            return False
         try:
             container.remove(force=True)
         except NotFound:
@@ -1116,6 +1200,8 @@ class ContainerManager:
         )
 
     def needs_completed_cleanup(self, project_id: str) -> bool:
+        if self.traffic_execution is not None and project_id in self.traffic_execution.pending_cleanup_projects():
+            return True
         for name in self._project_container_names(project_id):
             state = self.inspect_state(name)
             if state is None:
@@ -1128,6 +1214,8 @@ class ContainerManager:
         return self.inspect_state(name) is not None
 
     def needs_stopped_cleanup(self, project_id: str) -> bool:
+        if self.traffic_execution is not None and project_id in self.traffic_execution.pending_cleanup_projects():
+            return True
         return any(self.inspect_state(name) == "running" for name in self._project_container_names(project_id))
 
     def _project_container_names(self, project_id: str) -> list[str]:
@@ -1468,7 +1556,13 @@ os.rmdir(child)
         if not name.startswith(self._project_prefix) or not isinstance(project_id, str):
             return False
         try:
-            return name == self.container_name(project_id)
+            # 用原场景标签区分研究与聊天身份，不能仅凭同前缀或 -chat 后缀认领。
+            expected_name = (
+                self.chat_container_name(project_id)
+                if labels.get(self._LABEL_SCENARIO_KEY) == "project-chat"
+                else self.container_name(project_id)
+            )
+            return name == expected_name
         except ValueError:
             return False
 

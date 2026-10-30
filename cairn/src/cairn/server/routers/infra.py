@@ -42,6 +42,12 @@ from cairn.server.services import (
     write_dispatcher_config,
     write_dispatcher_yaml,
 )
+from cairn.server.schemas.dispatcher_runtime_settings import (
+    DispatcherRuntimeSettingsDocument,
+    DispatcherRuntimeSettingsUpdate,
+)
+from cairn.server.services.dispatcher_runtime_settings import read_runtime_settings, write_runtime_settings
+
 router = APIRouter(tags=["infrastructure"], dependencies=[Depends(require_super_admin)])
 catalog_router = APIRouter(tags=["infrastructure"])
 
@@ -116,6 +122,18 @@ def get_dispatcher_config():
 def put_dispatcher_config(body: DispatcherConfigUpdate):
     with get_conn() as conn:
         return write_dispatcher_config(conn, body.config, expected_revision=body.revision)
+
+
+@router.get("/dispatcher/runtime-settings", response_model=DispatcherRuntimeSettingsDocument)
+def get_dispatcher_runtime_settings():
+    with get_conn() as conn:
+        return read_runtime_settings(conn)
+
+
+@router.patch("/dispatcher/runtime-settings", response_model=DispatcherRuntimeSettingsDocument)
+def patch_dispatcher_runtime_settings(body: DispatcherRuntimeSettingsUpdate):
+    with get_conn() as conn:
+        return write_runtime_settings(conn, body)
 
 
 def _control_collection(collection: str) -> DispatcherControlCollection | DispatcherProviderCollection:

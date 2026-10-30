@@ -11,6 +11,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from cairn.report_segments import REPORT_MAX_MANIFEST_BYTES, REPORT_MAX_SEGMENTS
+
 CANDIDATE_SPOOL_PROTOCOL = "cairn-candidate-spool-v1"
 CANDIDATE_FRAME_PROTOCOL = "cairn-candidate-frame-v1"
 CANDIDATE_RECEIPT_PROTOCOL = "cairn-candidate-capture-receipt-v1"
@@ -22,6 +24,8 @@ CANDIDATE_MAX_RAW_BYTES = 2 * 1024 * 1024
 # 32 个最长合法材料身份加执行身份可在 16 KiB 内编码，原文及 spool 总预算不变。
 CANDIDATE_MAX_MANIFEST_BYTES = 16 * 1024
 CANDIDATE_MAX_ARTIFACTS = 32
+REPORT_CANDIDATE_MAX_MANIFEST_BYTES = REPORT_MAX_MANIFEST_BYTES
+REPORT_CANDIDATE_MAX_ARTIFACTS = REPORT_MAX_SEGMENTS
 CANDIDATE_MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 CANDIDATE_MAX_SPOOL_BYTES = 34 * 1024 * 1024
 CANDIDATE_MAX_OUTCOMES_PER_CANDIDATE = 64
@@ -133,6 +137,14 @@ def _validate_hex64(value: str) -> str:
     return value
 
 
+def candidate_manifest_byte_limit(phase: str) -> int:
+    return REPORT_CANDIDATE_MAX_MANIFEST_BYTES if phase == "report_execute" else CANDIDATE_MAX_MANIFEST_BYTES
+
+
+def candidate_artifact_limit(phase: str) -> int:
+    return REPORT_CANDIDATE_MAX_ARTIFACTS if phase == "report_execute" else CANDIDATE_MAX_ARTIFACTS
+
+
 class CandidateArtifactIdentity(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -172,7 +184,7 @@ class CandidateFrameManifest(BaseModel):
     result_schema_sha256: str = Field(min_length=64, max_length=64)
     raw_sha256: str = Field(min_length=64, max_length=64)
     raw_size_bytes: int = Field(ge=0, le=CANDIDATE_MAX_RAW_BYTES)
-    artifacts: list[CandidateArtifactIdentity] = Field(max_length=CANDIDATE_MAX_ARTIFACTS)
+    artifacts: list[CandidateArtifactIdentity] = Field(max_length=REPORT_CANDIDATE_MAX_ARTIFACTS)
 
     @field_validator("capture_id")
     @classmethod
@@ -231,6 +243,8 @@ class CandidateFrameManifest(BaseModel):
             raise ValueError("producer_candidate_key does not match capture coordinates")
         if self.parent_producer_candidate_key == self.producer_candidate_key:
             raise ValueError("candidate cannot be its own parent")
+        if len(self.artifacts) > candidate_artifact_limit(self.phase):
+            raise ValueError("registered content exceeds the artifact count limit")
         if sum(artifact.size_bytes for artifact in self.artifacts) > CANDIDATE_MAX_ARTIFACT_BYTES:
             raise ValueError("registered content exceeds the total byte limit")
         handles = [artifact.handle for artifact in self.artifacts]

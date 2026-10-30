@@ -76,10 +76,14 @@ def _report_provenance(metadata_json: object) -> dict[str, Any] | None:
         # 历史成品沿用原有修订身份；不能把损坏版本或新合同伪装成旧报告。
         if template_version is None or any(key in metadata for key in protocol_versions):
             return None
-    elif protocol_versions != {
-        "packet_version": REPORT_PACKET_VERSION,
-        "output_contract_version": REPORT_OUTPUT_CONTRACT_VERSION,
-        "report_data_schema_version": REPORT_DATA_SCHEMA_VERSION,
+    elif (
+        protocol_versions["packet_version"], protocol_versions["output_contract_version"],
+        protocol_versions["report_data_schema_version"],
+    ) not in {
+        # 历史已接受原件只读识别，不能因新生成合同升级从清单消失。
+        (2, 3, 2),
+        (2, 4, 3),
+        (REPORT_PACKET_VERSION, REPORT_OUTPUT_CONTRACT_VERSION, REPORT_DATA_SCHEMA_VERSION),
     }:
         return None
     template_digest = _digest(metadata.get("report_template_digest_sha256"))
@@ -105,8 +109,9 @@ def _report_provenance(metadata_json: object) -> dict[str, Any] | None:
     ):
         return None
 
-    # generation token 只参与分类，绝不进入返回模型。
+    # generation token 仅供接受事实校验，组装返回模型前必须移除。
     return {
+        "report_generation_token": generation_token,
         "template_key": template_key,
         "template_version": template_version,
         **protocol_versions,
@@ -118,6 +123,67 @@ def _report_provenance(metadata_json: object) -> dict[str, Any] | None:
         "input_snapshot_sha256": snapshot_digest,
         "completeness_rule_version": completeness_version,
     }
+
+
+def _report_is_accepted(row: Any, provenance: dict[str, Any], generation_token: str) -> bool:
+    if row["finish_response_json"] is None:
+        # 旧成品可能早于 receipt；只认显式 accepted 身份，不认当前状态或关联 Artifact。
+        return (
+            row["accepted_generation_token"] == generation_token
+            and row["accepted_input_sha256"] == provenance["input_snapshot_sha256"]
+        )
+    try:
+        response = json.loads(row["finish_response_json"])
+    except (TypeError, ValueError):
+        return False
+    # accepted/recovered 也可能是失败收尾；只有 ready 且原件身份全部相符才是成品。
+    return (
+        isinstance(response, dict)
+        and response.get("status") == "ready"
+        and response.get("finish_disposition") in {"accepted", "recovered"}
+        and row["finish_generation_token"] == generation_token
+        and row["finish_artifact_id"] == row["artifact_id"]
+        and row["finish_artifact_sha256"] == row["artifact_sha256"]
+        and row["finish_snapshot_artifact_id"] == provenance["input_snapshot_artifact_id"]
+        and row["finish_snapshot_sha256"] == provenance["input_snapshot_sha256"]
+    )
+
+
+def _archived_source_status(conn, item: ReportInventoryItem) -> str:
+    """仅按接受时摘要绑定的冻结来源投影，不让缺失快照使已有原件从清单消失。"""
+    from fastapi import HTTPException
+    from .assessment_reports import _artifact_content_bytes
+
+    snapshot = conn.execute(
+        "SELECT * FROM artifacts WHERE project_id = ? AND id = ?",
+        (item.project_id, item.input_snapshot_artifact_id),
+    ).fetchone()
+    if snapshot is None or snapshot["sha256"] != item.input_snapshot_sha256:
+        return "unknown"
+    try:
+        packet = json.loads(_artifact_content_bytes(snapshot, error_code="report_inventory_snapshot_unavailable"))["report_packet"]
+    except (HTTPException, ValueError, KeyError, TypeError):
+        # 这里只声明来源状态未知，原件下载仍走原有权限与读取路径。
+        return "unknown"
+    if not isinstance(packet, dict) or not isinstance(packet.get("project"), dict) or packet["project"].get("id") != item.project_id:
+        return "unknown"
+    vulnerability_id = packet.get("vulnerability_id")
+    if vulnerability_id is not None:
+        if not isinstance(vulnerability_id, str) or not vulnerability_id:
+            return "unknown"
+        source_ids = {vulnerability_id}
+    else:
+        sources = packet.get("vulnerabilities")
+        if not isinstance(sources, list) or any(
+            not isinstance(source, dict) or not isinstance(source.get("id"), str) or not source["id"]
+            for source in sources
+        ):
+            return "unknown"
+        source_ids = {source["id"] for source in sources}
+    current_ids = {row["id"] for row in conn.execute(
+        "SELECT id FROM vulnerabilities WHERE project_id = ?", (item.project_id,),
+    ).fetchall()}
+    return "deleted" if source_ids - current_ids else "available"
 
 
 def list_report_inventory(
@@ -158,9 +224,22 @@ def list_report_inventory(
                artifact.sha256 AS artifact_sha256,
                artifact.size AS artifact_size,
                artifact.created_at,
-               artifact.metadata_json
+               artifact.metadata_json,
+               receipt.generation_token AS finish_generation_token,
+               receipt.artifact_id AS finish_artifact_id,
+               receipt.artifact_sha256 AS finish_artifact_sha256,
+               receipt.input_snapshot_artifact_id AS finish_snapshot_artifact_id,
+               receipt.input_snapshot_sha256 AS finish_snapshot_sha256,
+               receipt.response_json AS finish_response_json,
+               finalization.accepted_generation_token,
+               finalization.accepted_input_sha256
         FROM artifacts artifact
         JOIN projects project ON project.id = artifact.project_id
+        LEFT JOIN assessment_report_finish_receipts receipt
+          ON receipt.project_id = artifact.project_id AND receipt.task_run_id = artifact.task_run_id
+        LEFT JOIN assessment_report_finalizations finalization
+          ON finalization.project_id = artifact.project_id AND finalization.scope_key = ''
+         AND finalization.accepted_artifact_id = artifact.id
         WHERE {' AND '.join(clauses)}
         ORDER BY artifact.created_at DESC, artifact.id DESC
         """,
@@ -179,6 +258,9 @@ def list_report_inventory(
             continue
         provenance = _report_provenance(row["metadata_json"])
         if provenance is None:
+            continue
+        generation_token = provenance.pop("report_generation_token")
+        if not _report_is_accepted(row, provenance, generation_token):
             continue
         if template_key is not None and provenance["template_key"] != template_key:
             continue
@@ -210,7 +292,8 @@ def list_report_inventory(
     total = len(items)
     start = (page - 1) * page_size
     return ReportInventoryPage(
-        items=items[start : start + page_size],
+        items=[item.model_copy(update={"source_status": _archived_source_status(conn, item)})
+               for item in items[start : start + page_size]],
         total=total,
         page=page,
         page_size=page_size,
