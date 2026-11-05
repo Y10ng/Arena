@@ -11,7 +11,7 @@ import { requestModel } from '../dist/model.js';
 import { fixture, ok, parseFixtureRequest } from './fixtures.mjs';
 
 const contracts = JSON.parse(await readFile(new URL('../contracts/submission-v1.json', import.meta.url), 'utf8'));
-const segmentSchema = JSON.parse(execFileSync(process.env.PYTHON_BIN || 'python3', ['-c', 'import json; from cairn.report_segments import REPORT_SEGMENT_ADAPTER; print(json.dumps(REPORT_SEGMENT_ADAPTER.json_schema()))'], {
+const { segmentSchema, markdownSegmentSchema } = JSON.parse(execFileSync(process.env.PYTHON_BIN || 'python3', ['-c', 'import json; from cairn.report_segments import REPORT_SEGMENT_ADAPTER, MARKDOWN_SEGMENT_ADAPTER; print(json.dumps({"segmentSchema": REPORT_SEGMENT_ADAPTER.json_schema(), "markdownSegmentSchema": MARKDOWN_SEGMENT_ADAPTER.json_schema()}))'], {
   encoding: 'utf8', env: { ...process.env, PYTHONPATH: fileURLToPath(new URL('../../../cairn/src/', import.meta.url)) },
 }));
 const save = (key, content) => ({ name: 'save_report_segment', args: { key, content } });
@@ -124,6 +124,39 @@ test('15 long findings save 47 bounded structural segments through the SDK and s
     await copyFile(candidateSpoolPath, join(directory, 'candidate-spool.bin'));
     await writeFile(join(directory, 'bundle.json'), JSON.stringify({ result, manifest, records, artifact_files, packet, audit, total_content_bytes: totalContentBytes, sdk_calls: calls.length }));
   }
+});
+
+test('Markdown writer can reread saved prose and select a revision without overwriting the original', async (t) => {
+  const saved = [];
+  const first = { kind: 'markdown', markdown: '# 合成报告\n\n## 概述\n\n待修订的原文。', sources: [] };
+  const revised = { ...first, markdown: '# 合成报告\n\n## 概述\n\n修订后的连续正文。' };
+  let originalPath;
+  const { request, manifestPath } = await reportFixture(t, [
+    { tools: [save('draft', first)] },
+    (call) => {
+      const navigation = call.body.messages.filter((message) => message.role === 'user').at(-1).content;
+      const refs = JSON.parse(navigation.match(/\[.*\]/s)[0]);
+      assert.equal(refs[0].artifact_handle, saved[0]);
+      originalPath = refs[0].path;
+      return { tools: [{ name: 'read_evidence', args: { path: originalPath } }] };
+    },
+    (call) => {
+      const result = JSON.parse(call.body.messages.filter((message) => message.role === 'tool').at(-1).content);
+      assert.equal(JSON.parse(result.text).content.markdown, first.markdown);
+      return { tools: [save('revised', revised)] };
+    },
+    () => finish([saved[1]]),
+  ]);
+  request.capabilities.report_segments.segment_schema = markdownSegmentSchema;
+  const result = await runRequest(parseRequest(request), { audit: (event) => {
+    if (event.event === 'report_segment_saved') saved.push(event.artifact_handle);
+  } });
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  assert.deepEqual(result.result.data.segment_refs, [{ artifact_handle: saved[1] }]);
+  const manifest = JSON.parse(await readFile(manifestPath));
+  assert.equal(manifest.artifacts.length, 2);
+  assert.deepEqual(JSON.parse(await readFile(originalPath)).content, first);
+  assert.deepEqual(JSON.parse(await readFile(manifest.artifacts[1].path)).content, revised);
 });
 
 test('finding segment explicitly reuses frozen steps without restating actions or original ranges', async (t) => {

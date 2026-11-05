@@ -120,7 +120,6 @@
     <Dialog
       :open="hintDialogOpen"
       title="添加项目提示"
-      description="添加项目级提示，并在下一轮 reason 时注入探索上下文。"
       size="sm"
       portal-disabled
       close-label="关闭添加项目提示"
@@ -132,7 +131,7 @@
         ref="hintTextarea"
         v-model="hintDialogContent"
         aria-label="项目提示内容"
-        placeholder="输入提示内容... 该提示会随图谱快照注入下一轮 reason，引导探索方向"
+        placeholder="输入提示内容…"
         :rows="4"
         @keydown.meta.enter="submitHintDialog"
         @keydown.ctrl.enter="submitHintDialog"
@@ -692,7 +691,7 @@ const getEdgeJoinBadgeText = (edge: GraphEdge) => {
 }
 
 const getEdgeJoinBadgeWidth = (edge: GraphEdge) => {
-  return Math.max(24, getEdgeJoinBadgeText(edge).length * 7 + 10)
+  return Math.max(32, getEdgeJoinBadgeText(edge).length * 10 + 14)
 }
 
 const getEdgeColor = (edge: GraphEdge) => {

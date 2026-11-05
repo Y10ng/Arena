@@ -128,7 +128,7 @@ def test_real_tool_traffic_scopes_and_coverage(monkeypatch, traffic_api):
         (site / "server.py").write_text(SITE)
         runtime = ProjectTrafficRuntime(
             client, project_id=traffic_api.project_id, root=root / "project",
-            gateway_image="arena-traffic-gateway:s1-a", executor_image="arena-task-executor:s0-b", isolated=True,
+            gateway_image="arena-traffic-gateway:local", executor_image="arena-worker:local", isolated=True,
         )
         sync = None
         api = traffic_api.user

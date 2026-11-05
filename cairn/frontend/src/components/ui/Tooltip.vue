@@ -45,35 +45,37 @@ withDefaults(
 defineOptions({ name: 'UiTooltip' })
 </script>
 
-<style scoped>
-:deep(.ui-tooltip) {
-  max-width: min(320px, calc(100vw - var(--space-4)));
+<style>
+.ui-tooltip {
+  max-width: min(320px, calc(100 * var(--ui-vw) - var(--space-4)));
   border: calc(var(--space-1) / 4) solid var(--border);
   border-radius: var(--radius-md);
-  padding: var(--space-1) var(--space-2);
-  z-index: var(--z-popover);
+  padding: var(--space-2) var(--space-3);
+  z-index: var(--z-overlay-child);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-pop);
   color: var(--text);
+  font-family: var(--font-sans);
   font-size: var(--text-sm);
+  overflow-wrap: anywhere;
   line-height: var(--leading-snug);
   transform-origin: var(--reka-tooltip-content-transform-origin);
 }
 
-:deep(.ui-tooltip[data-state='delayed-open']),
-:deep(.ui-tooltip[data-state='instant-open']) {
+.ui-tooltip[data-state='delayed-open'],
+.ui-tooltip[data-state='instant-open'] {
   animation: ui-tooltip-enter var(--dur-fast) var(--ease-enter);
 }
 
 @keyframes ui-tooltip-enter {
   from {
     opacity: 0;
-    transform: scale(0.98);
+    transform: translateY(var(--space-1));
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :deep(.ui-tooltip) {
+  .ui-tooltip {
     animation: none;
   }
 }

@@ -13,6 +13,7 @@ const finding = (overrides: Partial<VulnerabilityListItem> = {}): VulnerabilityL
   findingSequence += 1
   return {
     id: `finding-${findingSequence}`,
+    number: `${overrides.project_id ?? 'project-a'}/${overrides.id ?? `finding-${findingSequence}`}`,
     project_id: 'project-a',
     project_title: '项目 A',
     title: `漏洞 ${findingSequence}`,

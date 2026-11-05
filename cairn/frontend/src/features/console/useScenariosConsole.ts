@@ -1,4 +1,5 @@
 import { computed, ref, watch } from 'vue'
+import { useDraftDiscardConfirm } from './useDraftDiscardConfirm'
 import { useRouter } from 'vue-router'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { api, listPromptGroups } from '@/api/client'
@@ -93,20 +94,21 @@ export const useScenariosConsole = () => {
         savedDraftSnapshot.value,
     ),
   )
+  const { discardConfirmationOpen, requestDiscard, resolveDiscard } = useDraftDiscardConfirm()
   const confirmDiscardScenarioChanges = () => {
     if (isScenarioMutationPending.value) return false
-    return !isScenarioDirty.value || window.confirm('当前场景有未保存修改，确定放弃这些修改吗？')
+    return !isScenarioDirty.value || requestDiscard()
   }
-  const closeScenarioEditor = () => {
-    if (!confirmDiscardScenarioChanges()) return
+  const closeScenarioEditor = async () => {
+    if (!(await confirmDiscardScenarioChanges())) return
     scenarioDraft.value = null
     saveError.value = ''
   }
   const handleEditorOpenChange = (open: boolean) => {
     if (!open) closeScenarioEditor()
   }
-  const openScenarioEditor = (scenario: Scenario, mode: 'create' | 'edit') => {
-    if (isScenarioMutationPending.value || !confirmDiscardScenarioChanges()) return
+  const openScenarioEditor = async (scenario: Scenario, mode: 'create' | 'edit') => {
+    if (isScenarioMutationPending.value || !(await confirmDiscardScenarioChanges())) return
     scenarioDraft.value = normalizeScenarioForm(clonePlain(scenario))
     draftMode.value = mode
     savedDraftSnapshot.value = scenarioSnapshot(scenarioDraft.value, scenarioDraft.value.features)
@@ -231,9 +233,9 @@ export const useScenariosConsole = () => {
       return `当前有 ${selectedScenarioUsageCount.value} 个项目使用该场景，无法删除。`
     return ''
   })
-  const openPromptManagerForScenario = () => {
+  const openPromptManagerForScenario = async () => {
     const key = scenarioDraft.value?.prompt_group || selectedScenario.value?.prompt_group
-    if (!confirmDiscardScenarioChanges()) return
+    if (!(await confirmDiscardScenarioChanges())) return
     scenarioDraft.value = null
     void router.push({ name: 'ConsolePrompts', query: key ? { focus: key } : undefined })
   }
@@ -340,6 +342,8 @@ export const useScenariosConsole = () => {
   )
 
   return {
+    discardConfirmationOpen,
+    resolveDiscard,
     addNewScenario,
     availableProfileOptions,
     canDeleteSelectedScenario,
@@ -361,6 +365,7 @@ export const useScenariosConsole = () => {
     isLoadingScenarios,
     isPromptGroupsError,
     isScenarioEditorOpen,
+    isScenarioDirty,
     isScenarioMutationPending,
     isSavingScenarios,
     isScenarioOptionsError,

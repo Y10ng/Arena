@@ -94,7 +94,7 @@ class HeartbeatReporterMixin:
             reverse=True,
         )[:256]
         return {
-            "runtime_capabilities": ["project_pause_v1", "project_runtime_v1"],
+            "runtime_capabilities": ["project_hot_pause_v1", "project_runtime_v1"],
             "project_decisions": list(getattr(self, "_project_decisions", {}).values()),
             "candidate_recovery": candidate_recovery,
             "startup_check": getattr(self, "_startup_check", {"status": "unknown"}),

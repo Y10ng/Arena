@@ -10,7 +10,9 @@ const mocks = vi.hoisted(() => ({
   invalidateQueries: vi.fn(),
   listVulnerabilities: vi.fn(),
   refetch: vi.fn(),
-  route: undefined as unknown as { params: { id: string } },
+  route: undefined as unknown as { params: { id: string }; query: Record<string, string | undefined> },
+  replace: vi.fn(),
+  leave: vi.fn(),
   showToast: vi.fn(),
   useQuery: vi.fn(),
   workspace: {
@@ -35,8 +37,8 @@ vi.mock('@tanstack/vue-query', () => ({
 
 vi.mock('vue-router', async () => {
   const { reactive } = await import('vue')
-  mocks.route = reactive({ params: { id: 'project-a' } })
-  return { useRoute: () => mocks.route, onBeforeRouteLeave: vi.fn(), onBeforeRouteUpdate: vi.fn() }
+  mocks.route = reactive({ params: { id: 'project-a' }, query: {} })
+  return { useRoute: () => mocks.route, useRouter: () => ({ replace: mocks.replace }), onBeforeRouteLeave: mocks.leave, onBeforeRouteUpdate: vi.fn() }
 })
 
 vi.mock('@/stores/ui', () => ({
@@ -69,6 +71,7 @@ vi.mock('./VulnerabilityDetail.vue', () => ({
 
 const vulnerability: Vulnerability = {
   id: 'vuln-a',
+  number: 'project-a/vuln-a',
   project_id: 'project-a',
   title: 'Authorization: Bearer full-token <script>alert(1)</script>',
   severity: 'high',
@@ -161,6 +164,9 @@ function deferred<T>() {
 
 beforeEach(() => {
   mocks.route.params.id = 'project-a'
+  mocks.route.query = {}
+  mocks.replace.mockReset().mockImplementation(async ({ query }) => { mocks.route.query = query })
+  mocks.leave.mockReset()
   mocks.workspace.currentProjectId = 'project-a'
   mocks.workspace.projectDetail = {
     project: {
@@ -256,7 +262,7 @@ describe('VulnerabilitiesPage migration', () => {
     )
   })
 
-  it('isolates A→B→A visits and clears the local inline selection', async () => {
+  it('isolates A→B→A visits and follows route selection rather than stale rows', async () => {
     setQueryState({
       data: {
         projectId: 'project-a',
@@ -300,6 +306,24 @@ describe('VulnerabilitiesPage migration', () => {
       2,
     ])
     expect(document.body.textContent).not.toContain(vulnerability.title)
+    expect(wrapper.text()).toContain('当前定位漏洞（不在当前列表结果中）')
+    mocks.route.query = {}
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'VulnerabilityDetail' }).exists()).toBe(false)
+  })
+
+  it('opens a deep-linked item outside the list and clears its observation only on close', async () => {
+    mocks.route.query = { vulnerabilityProjectId: 'project-a', vulnerabilityId: 'vuln-deep', vulnerabilityObservationId: 'obs-deep', keep: 'yes' }
+    const wrapper = mountPage()
+    await flushPromises()
+    expect(wrapper.getComponent({ name: 'VulnerabilityDetail' }).props('vulnId')).toBe('vuln-deep')
+    expect(mocks.route.query.vulnerabilityObservationId).toBe('obs-deep')
+    expect(wrapper.text()).toContain('当前定位漏洞（不在当前列表结果中）')
+    expect(wrapper.text()).toContain('筛选命中 0 条')
+    wrapper.getComponent({ name: 'VulnerabilityDetail' }).vm.$emit('close')
+    await flushPromises()
+    expect(mocks.route.query).toMatchObject({ keep: 'yes', vulnerabilityId: undefined, vulnerabilityObservationId: undefined })
+    expect(wrapper.findComponent({ name: 'VulnerabilityDetail' }).exists()).toBe(false)
   })
 
   it('renders canonical filters and an accessible table without truncating sensitive text', async () => {
@@ -319,7 +343,7 @@ describe('VulnerabilitiesPage migration', () => {
     expect(document.body.textContent).toContain('全部状态')
     expect(document.body.textContent).toContain(vulnerability.title)
     expect(document.body.textContent).toContain(vulnerability.vuln_type)
-    expect(document.body.textContent).not.toContain(vulnerability.target)
+    expect(document.body.textContent).toContain(vulnerability.target)
     expect(document.body.querySelector('script')).toBeNull()
     expect(document.body.querySelector('caption')?.textContent).toContain('项目漏洞列表')
     expect(document.body.querySelectorAll('th[scope="col"]')).toHaveLength(5)
@@ -394,7 +418,8 @@ describe('VulnerabilitiesPage migration', () => {
       },
     })
     mountPage()
-    expect(document.body.textContent).toContain('当前项目暂无漏洞记录')
+    expect(document.body.textContent).toContain('暂无漏洞')
+    expect(document.body.textContent).not.toContain('worker 可自动登记')
   })
 
   it('opens an accessible Dialog, focuses the title, and restores trigger focus', async () => {
@@ -408,8 +433,8 @@ describe('VulnerabilitiesPage migration', () => {
     const titleInput = controlByLabel<HTMLInputElement>('漏洞名称')
     expect(dialog).not.toBeNull()
     expect(dialog?.getAttribute('aria-labelledby')).toBeTruthy()
-    expect(dialog?.getAttribute('aria-describedby')).toBeTruthy()
-    expect(dialog?.textContent).toContain('人工录入项目漏洞、影响范围、修复建议与复现证据。')
+    expect(dialog?.hasAttribute('aria-describedby')).toBe(false)
+    expect(dialog?.querySelector('.ui-dialog__description')).toBeNull()
     expect(document.activeElement).toBe(titleInput)
 
     buttonByText('取消').click()
@@ -422,6 +447,28 @@ describe('VulnerabilitiesPage migration', () => {
     pressEscape()
     await flushPromises()
     expect(document.body.querySelector('[role="dialog"]')).toBeNull()
+  })
+
+  it('keeps unsaved HTTP text when closing is canceled and awaits the route discard decision', async () => {
+    mountPage()
+    buttonByText('录入漏洞').click()
+    await flushPromises()
+    const request = controlByLabel<HTMLTextAreaElement>('复现请求')
+    const original = 'GET /check HTTP/1.1\nX-Example: first\nX-Example: second\n\n'
+    setValue(request, original)
+    buttonByText('取消').click()
+    await flushPromises()
+    expect(document.body.querySelector('[role="alertdialog"]')?.textContent).toContain('HTTP 原文将丢失')
+    buttonByText('继续编辑').click()
+    await flushPromises()
+    expect(request.value).toBe(original)
+    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull()
+    const leave = mocks.leave.mock.calls[0]![0]()
+    expect(leave).toBeInstanceOf(Promise)
+    await flushPromises()
+    buttonByText('放弃录入').click()
+    await expect(leave).resolves.toBe(true)
+    expect(mocks.createVulnerability).not.toHaveBeenCalled()
   })
 
   it('submits the default payload without legacy HTTP fields and preserves query invalidation', async () => {
@@ -470,7 +517,7 @@ describe('VulnerabilitiesPage migration', () => {
     setValue(controlByLabel<HTMLInputElement>('漏洞名称'), '水平越权')
     setValue(controlByLabel<HTMLInputElement>('类型'), 'IDOR')
     setValue(controlByLabel<HTMLInputElement>('影响目标'), 'GET /api/users/2')
-    setValue(controlByLabel<HTMLTextAreaElement>('修复建议'), '校验资源所有者。')
+    setValue(controlByLabel<HTMLTextAreaElement>('建议内容'), '校验资源所有者。')
     setValue(
       controlByLabel<HTMLTextAreaElement>('复现请求'),
       'GET /api/users/2 HTTP/1.1\nHost: example.test',
@@ -586,13 +633,13 @@ describe('VulnerabilitiesPage migration', () => {
     expect(mocks.createVulnerability).not.toHaveBeenCalled()
 
     setValue(title, '保留失败输入')
-    setValue(controlByLabel<HTMLTextAreaElement>('修复建议'), '保留这段建议')
+    setValue(controlByLabel<HTMLTextAreaElement>('建议内容'), '保留这段建议')
     submitCreateForm()
     await flushPromises()
 
     expect(document.body.querySelector('[role="dialog"]')).not.toBeNull()
     expect(title.value).toBe('保留失败输入')
-    expect(controlByLabel<HTMLTextAreaElement>('修复建议').value).toBe('保留这段建议')
+    expect(controlByLabel<HTMLTextAreaElement>('建议内容').value).toBe('保留这段建议')
     expect(buttonByText('创建').disabled).toBe(false)
     expect(mocks.showToast).toHaveBeenCalledWith('漏洞写入失败', 'danger')
   })

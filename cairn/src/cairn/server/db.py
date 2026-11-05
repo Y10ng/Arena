@@ -1220,7 +1220,9 @@ def run_migrations(conn: Any, backend: str, *, initialize_runtime: bool = False)
         )
     _seed_default_scenarios(conn)
     if initialize_runtime:
-        _ensure_knowledge_root()
+        from cairn.server.services.libraries import initialize_root_library
+
+        initialize_root_library(conn)
 
 
 def register_after_commit(conn, callback: Callable[[], None]) -> None:

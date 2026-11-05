@@ -1,8 +1,15 @@
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery } from '@tanstack/vue-query'
-import { api, type ArtifactPreview } from '@/api/client'
-import type { Intent } from '@/api/types'
+import { api, ApiError, type ArtifactPreview } from '@/api/client'
+import type { Intent, ReportInventoryItem, ReportInventoryPage } from '@/api/types'
+import {
+  buildWorkTimeline,
+  isActiveRun,
+  pairToolCalls,
+  resultsForRun,
+  type WorkNode,
+} from './runTimelineModel'
 import { bytes, formatRelativeTime, statusText } from '@/lib/format'
 import { useUIStore } from '@/stores/ui'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -14,7 +21,13 @@ import {
   selectRetainedTerminalOutput,
   type TerminalOutput,
 } from './runTerminalModel'
-import type { RunArtifact, TaskRun, TaskRunCommandEvent, TaskRunEventGroup } from './runTypes'
+import type {
+  RunArtifact,
+  TaskRun,
+  TaskRunCommandEvent,
+  TaskRunEventGroup,
+  TaskRunHookEvent,
+} from './runTypes'
 
 const detailTabs = [
   { label: '终端视图', value: 'terminal' },
@@ -22,10 +35,18 @@ const detailTabs = [
   { label: '产物证据', value: 'artifacts' },
 ]
 
-const errorMessage = (error: unknown): string => {
-  if (error instanceof Error && error.message) return error.message
-  return String(error || '未知错误')
+// 读取反馈只展示稳定状态，不把服务端异常正文或运行材料带入提示。
+const readErrorMessage = (error: unknown): string => {
+  if (error instanceof ApiError) return `HTTP ${error.status}`
+  return '网络或响应读取异常'
 }
+
+const stopsAutomaticRead = (error: unknown): boolean =>
+  error instanceof ApiError &&
+  error.status >= 400 &&
+  error.status < 500 &&
+  error.status !== 408 &&
+  error.status !== 429
 
 const eventsForRun = <TEvent>(groups: TaskRunEventGroup<TEvent>[], runId: string): TEvent[] => {
   return groups.find((group) => group.task_run_id === runId)?.events || []
@@ -55,25 +76,71 @@ export const useRunsPage = () => {
   } | null>(null)
   const terminalRecovered = ref(false)
   const terminalScreen = ref<HTMLElement | null>(null)
-  const isLoadingRunDetails = ref(false)
-  const runDetailsError = ref('')
+  const isLoadingCommands = ref(false)
+  const commandsLoaded = ref(false)
+  const commandsFailure = shallowRef<unknown>(null)
+  const commandsError = computed(() =>
+    commandsFailure.value ? `读取命令审计失败：${readErrorMessage(commandsFailure.value)}` : '',
+  )
+  const isLoadingArtifacts = ref(false)
+  const artifactsLoaded = ref(false)
+  const artifactsFailure = shallowRef<unknown>(null)
+  const artifactsError = computed(() =>
+    artifactsFailure.value ? `读取关联资产失败：${readErrorMessage(artifactsFailure.value)}` : '',
+  )
+  const isLoadingRunDetails = computed(
+    () =>
+      (isLoadingCommands.value && !commandsLoaded.value) ||
+      (isLoadingArtifacts.value && !artifactsLoaded.value),
+  )
   const isLoadingTerminalPreview = ref(false)
-  const terminalPreviewError = ref('')
+  const terminalPreviewFailure = shallowRef<unknown>(null)
+  const terminalPreviewError = computed(() =>
+    terminalPreviewFailure.value
+      ? `载入终端日志失败：${readErrorMessage(terminalPreviewFailure.value)}`
+      : '',
+  )
+  const terminalPreviewLoaded = computed(() => terminalPreview.value !== null)
   let detailRequestGeneration = 0
-  let detailRequestInFlight: { projectId: string; runId: string; generation: number } | null = null
   let terminalPreviewRequestGeneration = 0
+  let terminalPreviewRequest: { projectId: string; runId: string; artifactId: string } | null = null
 
   const currentProjectId = computed(() => workspaceStore.currentProjectId)
   const projectDetail = computed(() => {
     const detail = workspaceStore.projectDetail
     return detail?.project.id === currentProjectId.value ? detail : null
   })
+  const resultReadState = computed(() =>
+    workspaceStore.error
+      ? projectDetail.value
+        ? '工作与接受结果刷新失败，显示上次读取内容。'
+        : '工作与接受结果读取失败，当前结果未知。'
+      : !projectDetail.value
+        ? '工作与接受结果尚未读到。'
+        : '',
+  )
   const intentById = computed(
     () => new Map((projectDetail.value?.intents || []).map((intent) => [intent.id, intent])),
   )
-  const factById = computed(
-    () => new Map((projectDetail.value?.facts || []).map((fact) => [fact.id, fact])),
+  const reports = ref<ReportInventoryItem[]>([])
+  const reportsLoaded = ref(false)
+  const reportsFailure = shallowRef<unknown>(null)
+  const reportsError = computed(() =>
+    reportsFailure.value ? `已接受报告读取失败：${readErrorMessage(reportsFailure.value)}` : '',
   )
+  let reportsRequest: object | null = null
+  let reportsReadAgain = false
+
+  interface HookRead {
+    events: TaskRunHookEvent[]
+    loaded: boolean
+    loading: boolean
+    failure: unknown
+    readAgain: boolean
+  }
+  const hookReads = ref<Record<string, HookRead>>({})
+  const expandedTools = ref(new Set<string>())
+  let timelineGeneration = 0
 
   const {
     data: runsData,
@@ -92,7 +159,11 @@ export const useRunsPage = () => {
     enabled: computed(() => Boolean(currentProjectId.value)),
   })
 
-  const runs = computed(() => (runsData.value || []).filter((run) => run.task_type !== 'agent_chat'))
+  const runs = computed(() =>
+    (runsData.value || []).filter(
+      (run) => run.project_id === currentProjectId.value && run.task_type !== 'agent_chat',
+    ),
+  )
   const runsInitialError = computed(() => isRunsError.value && runs.value.length === 0)
   const runsStaleError = computed(() => isRunsError.value && runs.value.length > 0)
 
@@ -143,44 +214,26 @@ export const useRunsPage = () => {
       return intent.conclusion_reason ? `工作已停止：${intent.conclusion_reason}` : '工作已停止'
     }
     if (intent?.conclusion === 'failed') {
-      return intent.conclusion_reason ? `结果未接受：${intent.conclusion_reason}` : '结果未接受'
+      return intent.conclusion_reason ? `工作未完成：${intent.conclusion_reason}` : '工作未完成'
     }
     return ''
   }
 
-  const runCardDiagnostic = (run: TaskRun): string => {
-    if (run.error_message || run.error_type) return run.error_message || run.error_type || ''
-    if (run.status === 'succeeded') return ''
-    return statusText(run.status)
-  }
+  const linkedIntentOutcomeText = (run: TaskRun): string => intentDiagnosticText(runIntent(run))
 
-  const linkedIntentOutcomeText = (run: TaskRun): string =>
-    intentDiagnosticText(runIntent(run))
-
-  const acceptedFactForRun = (run: TaskRun) => {
-    const intent = runIntent(run)
-    const fact = intent?.to ? factById.value.get(intent.to) : null
-    return fact?.task_run_id === run.id ? fact : null
-  }
-
+  const runResults = (run: TaskRun) =>
+    resultsForRun(
+      run,
+      projectDetail.value?.facts || [],
+      projectDetail.value?.intents || [],
+      reports.value,
+    )
   const runResultText = (run: TaskRun): string => {
-    const intent = runIntent(run)
-    const fact = acceptedFactForRun(run)
-    if (fact?.description) return fact.description
-    if (run.status === 'failed' || run.status === 'timed_out' || run.status === 'cancelled') {
-      return run.error_message || run.error_type || statusText(run.status)
-    }
-    if (run.status === 'succeeded') {
-      if (intent?.conclusion === 'completed') {
-        return intent.to
-          ? '执行成功；已接受结果属于关联运行'
-          : '执行成功，未返回可展示的接受结果'
-      }
-      return intent ? '执行成功，等待结果接受' : '执行成功'
-    }
+    const results = runResults(run)
+    if (results.length) return results.map((result) => result.text).join('\n\n')
     if (run.status === 'running') return '正在执行'
     if (run.status === 'queued') return '等待执行'
-    return statusText(run.status)
+    return run.status === 'succeeded' ? '执行结束，结果未确认' : '本次执行未完成，结果未确认'
   }
 
   const filteredRuns = computed(() => {
@@ -223,6 +276,133 @@ export const useRunsPage = () => {
 
     return list
   })
+
+  const workTimeline = computed(() =>
+    buildWorkTimeline(
+      runs.value,
+      projectDetail.value?.intents || [],
+      projectDetail.value?.facts || [],
+      new Set(filteredRuns.value.map((run) => run.id)),
+      reports.value,
+    ),
+  )
+  const workTitle = (work: WorkNode) => work.intent?.description || runBusinessTitle(work.runs[0]!)
+  const toolCalls = (run: TaskRun) => pairToolCalls(run, hookReads.value[run.id]?.events || [])
+  const workActivity = (work: WorkNode) => {
+    const calls = work.runs.filter(isActiveRun).flatMap(toolCalls)
+    const active = calls.filter((call) => call.active)
+    if (active.length) return active
+    const latest = calls
+      .filter((call) => call.endedAt)
+      .sort((a, b) => Date.parse(b.endedAt!) - Date.parse(a.endedAt!))[0]
+    return latest ? [latest] : []
+  }
+  const hookReadError = (runId: string) => {
+    const read = hookReads.value[runId]
+    return read?.failure
+      ? `${read.loaded ? '工具过程刷新失败，显示上次观测' : '工具过程读取失败'}：${readErrorMessage(read.failure)}`
+      : ''
+  }
+  const hookObservationIncomplete = (runId: string) =>
+    hookReads.value[runId]?.events.some(
+      (event) => event.hook_event_name === 'observation_incomplete',
+    ) || false
+
+  const loadHooks = async (runId: string, background = false, finalRead = false) => {
+    const projectId = currentProjectId.value
+    if (!projectId) return
+    const generation = timelineGeneration
+    hookReads.value[runId] ||= {
+      events: [],
+      loaded: false,
+      loading: false,
+      failure: null,
+      readAgain: false,
+    }
+    const read = hookReads.value[runId]!
+    if (read.loading) {
+      if (finalRead) read.readAgain = true
+      return
+    }
+    if (background && stopsAutomaticRead(read.failure)) return
+    read.loading = true
+    const ownsRead = () => generation === timelineGeneration && currentProjectId.value === projectId
+    try {
+      const groups = await api<TaskRunEventGroup<TaskRunHookEvent>[]>(
+        'GET',
+        `/projects/${encodeURIComponent(projectId)}/task-runs/hook-events?task_run_id=${encodeURIComponent(runId)}`,
+      )
+      if (!ownsRead()) return
+      read.events = eventsForRun(groups, runId)
+      read.loaded = true
+      read.failure = null
+    } catch (error: unknown) {
+      if (ownsRead()) read.failure = error
+    } finally {
+      if (ownsRead()) {
+        read.loading = false
+        if (read.readAgain) {
+          read.readAgain = false
+          void loadHooks(runId, true)
+        }
+      }
+    }
+  }
+  const toggleTools = (work: WorkNode) => {
+    if (expandedTools.value.has(work.key)) expandedTools.value.delete(work.key)
+    else {
+      expandedTools.value.add(work.key)
+      for (const run of work.runs) void loadHooks(run.id)
+    }
+  }
+  const refetchHooks = (runId: string) => {
+    void loadHooks(runId)
+  }
+  const loadReports = async (finalRead = false) => {
+    const projectId = currentProjectId.value
+    if (!projectId || !runs.value.some((run) => run.task_type === 'report')) return
+    if (reportsRequest) {
+      if (finalRead) reportsReadAgain = true
+      return
+    }
+    const request = {}
+    reportsRequest = request
+    const items: ReportInventoryItem[] = []
+    try {
+      let page = 1
+      while (true) {
+        const result = await api<ReportInventoryPage>(
+          'GET',
+          `/reports?project_id=${encodeURIComponent(projectId)}&page=${page}&page_size=100`,
+        )
+        if (reportsRequest !== request || currentProjectId.value !== projectId) return
+        items.push(...result.items)
+        if (page * result.page_size >= result.total) break
+        page += 1
+      }
+      reports.value = items
+      reportsLoaded.value = true
+      reportsFailure.value = null
+    } catch (error: unknown) {
+      if (reportsRequest === request) reportsFailure.value = error
+    } finally {
+      if (reportsRequest === request) {
+        reportsRequest = null
+        if (reportsReadAgain) {
+          reportsReadAgain = false
+          void loadReports()
+        }
+      }
+    }
+  }
+  const refreshTimeline = () => {
+    void refetchRuns()
+    if (currentProjectId.value) void workspaceStore.loadProject(currentProjectId.value)
+    void loadReports()
+    for (const run of runs.value) {
+      if (isActiveRun(run) || hookReads.value[run.id]) void loadHooks(run.id)
+    }
+  }
 
   const filtersActive = computed(
     () => statusFilter.value !== 'all' || Boolean(searchQuery.value.trim()),
@@ -271,7 +451,7 @@ export const useRunsPage = () => {
 
   const openProjectAgent = () => {
     const projectId = currentProjectId.value
-    if (projectId) void router.push(`/projects/${encodeURIComponent(projectId)}/agent`)
+    if (projectId) void router.push({ path: '/agent', query: { project: projectId } })
   }
 
   const scrollToBottom = () => {
@@ -282,46 +462,59 @@ export const useRunsPage = () => {
 
   const invalidateTerminalPreview = () => {
     terminalPreviewRequestGeneration += 1
+    terminalPreviewRequest = null
     terminalPreview.value = null
     terminalPreviewSource.value = null
     isLoadingTerminalPreview.value = false
-    terminalPreviewError.value = ''
+    terminalPreviewFailure.value = null
   }
 
   const clearRunDetails = () => {
     detailRequestGeneration += 1
-    detailRequestInFlight = null
-    terminalPreviewRequestGeneration += 1
     commandEvents.value = []
+    commandsLoaded.value = false
+    commandsFailure.value = null
+    isLoadingCommands.value = false
     artifacts.value = []
+    artifactsLoaded.value = false
+    artifactsFailure.value = null
+    isLoadingArtifacts.value = false
     terminalOutputs.value = []
     stdoutArtifactId.value = null
-    terminalPreview.value = null
-    terminalPreviewSource.value = null
     terminalRecovered.value = false
-    isLoadingRunDetails.value = false
-    runDetailsError.value = ''
-    isLoadingTerminalPreview.value = false
-    terminalPreviewError.value = ''
+    invalidateTerminalPreview()
   }
 
   const loadTerminalOutput = async (
     artifactId: string,
-    options: { projectId?: string; runId?: string; preservePreview?: boolean } = {},
+    options: { projectId?: string; runId?: string; background?: boolean } = {},
   ) => {
     const projectId = options.projectId || currentProjectId.value
     const runId = options.runId || selectedRun.value?.id
     if (!projectId || !runId) return
+    if (
+      terminalPreviewRequest?.projectId === projectId &&
+      terminalPreviewRequest.runId === runId &&
+      terminalPreviewRequest.artifactId === artifactId
+    )
+      return
+    if (
+      options.background &&
+      stdoutArtifactId.value === artifactId &&
+      stopsAutomaticRead(terminalPreviewFailure.value)
+    )
+      return
 
     const requestGeneration = ++terminalPreviewRequestGeneration
+    const activeAtRead = selectedRun.value ? isActiveRun(selectedRun.value) : false
     const preservePreview =
-      options.preservePreview === true &&
       terminalPreviewSource.value?.projectId === projectId &&
       terminalPreviewSource.value?.runId === runId &&
       terminalPreviewSource.value?.artifactId === artifactId
 
+    if (stdoutArtifactId.value !== artifactId) terminalPreviewFailure.value = null
     stdoutArtifactId.value = artifactId
-    terminalPreviewError.value = ''
+    terminalPreviewRequest = { projectId, runId, artifactId }
     isLoadingTerminalPreview.value = true
     if (!preservePreview) {
       terminalPreview.value = null
@@ -343,6 +536,7 @@ export const useRunsPage = () => {
       }
       terminalPreview.value = preview
       terminalPreviewSource.value = { projectId, runId, artifactId }
+      terminalPreviewFailure.value = null
       if (autoScrollTerminal.value) await nextTick(scrollToBottom)
     } catch (error: unknown) {
       if (
@@ -351,13 +545,15 @@ export const useRunsPage = () => {
         selectedRun.value?.id === runId &&
         stdoutArtifactId.value === artifactId
       ) {
-        terminalPreview.value = null
-        terminalPreviewSource.value = null
-        terminalPreviewError.value = `载入终端日志失败：${errorMessage(error)}`
+        terminalPreviewFailure.value = error
       }
     } finally {
       if (requestGeneration === terminalPreviewRequestGeneration) {
+        terminalPreviewRequest = null
         isLoadingTerminalPreview.value = false
+        if (activeAtRead && selectedRun.value && !isActiveRun(selectedRun.value)) {
+          void loadTerminalOutput(artifactId, { projectId, runId, background: true })
+        }
       }
     }
   }
@@ -366,88 +562,97 @@ export const useRunsPage = () => {
     void loadTerminalOutput(artifactId)
   }
 
-  const loadRunDetails = async (
-    runId: string,
-    options: { skipIfInFlight?: boolean; background?: boolean } = {},
-  ) => {
+  const ownsDetails = (generation: number, projectId: string, runId: string) =>
+    generation === detailRequestGeneration &&
+    currentProjectId.value === projectId &&
+    selectedRun.value?.id === runId
+
+  const loadCommands = async (runId: string, background = false) => {
     const projectId = currentProjectId.value
-    if (!projectId || selectedRun.value?.id !== runId) return
-    if (
-      options.skipIfInFlight &&
-      detailRequestInFlight?.projectId === projectId &&
-      detailRequestInFlight.runId === runId
-    ) {
-      return
-    }
-
-    const requestGeneration = ++detailRequestGeneration
-    detailRequestInFlight = { projectId, runId, generation: requestGeneration }
-    if (!options.background) isLoadingRunDetails.value = true
-
+    if (!projectId || selectedRun.value?.id !== runId || isLoadingCommands.value) return
+    if (background && stopsAutomaticRead(commandsFailure.value)) return
+    const generation = detailRequestGeneration
+    const activeAtRead = isActiveRun(selectedRun.value)
+    isLoadingCommands.value = true
     try {
-      const encodedProjectId = encodeURIComponent(projectId)
-      const encodedRunId = encodeURIComponent(runId)
-      const [commandGroups, runArtifacts] = await Promise.all([
-        api<TaskRunEventGroup<TaskRunCommandEvent>[]>(
-          'GET',
-          `/projects/${encodedProjectId}/task-runs/command-events?task_run_id=${encodedRunId}`,
-        ),
-        api<RunArtifact[]>(
-          'GET',
-          `/projects/${encodedProjectId}/artifacts?task_run_id=${encodedRunId}`,
-        ),
-      ])
-
-      if (
-        requestGeneration !== detailRequestGeneration ||
-        currentProjectId.value !== projectId ||
-        selectedRun.value?.id !== runId
-      ) {
-        return
+      const groups = await api<TaskRunEventGroup<TaskRunCommandEvent>[]>(
+        'GET',
+        `/projects/${encodeURIComponent(projectId)}/task-runs/command-events?task_run_id=${encodeURIComponent(runId)}`,
+      )
+      if (!ownsDetails(generation, projectId, runId)) return
+      commandEvents.value = eventsForRun(groups, runId)
+      commandsLoaded.value = true
+      commandsFailure.value = null
+    } catch (error: unknown) {
+      if (ownsDetails(generation, projectId, runId)) {
+        commandsFailure.value = error
       }
+    } finally {
+      if (ownsDetails(generation, projectId, runId)) {
+        isLoadingCommands.value = false
+        if (activeAtRead && selectedRun.value && !isActiveRun(selectedRun.value))
+          void loadCommands(runId, true)
+      }
+    }
+  }
 
-      commandEvents.value = eventsForRun(commandGroups, runId)
+  const loadArtifacts = async (runId: string, background = false) => {
+    const projectId = currentProjectId.value
+    if (!projectId || selectedRun.value?.id !== runId || isLoadingArtifacts.value) return
+    if (background && stopsAutomaticRead(artifactsFailure.value)) return
+    const generation = detailRequestGeneration
+    const activeAtRead = isActiveRun(selectedRun.value)
+    isLoadingArtifacts.value = true
+    try {
+      const runArtifacts = await api<RunArtifact[]>(
+        'GET',
+        `/projects/${encodeURIComponent(projectId)}/artifacts?task_run_id=${encodeURIComponent(runId)}`,
+      )
+      if (!ownsDetails(generation, projectId, runId)) return
       artifacts.value = runArtifacts
-      runDetailsError.value = ''
+      artifactsLoaded.value = true
+      artifactsFailure.value = null
 
       const outputs = buildTerminalOutputs(runArtifacts)
       const retainedOutput = selectRetainedTerminalOutput(outputs, stdoutArtifactId.value)
-      const previousArtifactId = stdoutArtifactId.value
       terminalOutputs.value = outputs
       terminalRecovered.value = isConcludeRecovery(outputs)
-
       if (retainedOutput) {
-        await loadTerminalOutput(retainedOutput.id, {
-          projectId,
-          runId,
-          preservePreview: retainedOutput.id === previousArtifactId,
-        })
+        if (retainedOutput.id !== stdoutArtifactId.value) {
+          void loadTerminalOutput(retainedOutput.id, { projectId, runId, background })
+        }
       } else {
         stdoutArtifactId.value = null
         invalidateTerminalPreview()
       }
     } catch (error: unknown) {
-      if (
-        requestGeneration === detailRequestGeneration &&
-        currentProjectId.value === projectId &&
-        selectedRun.value?.id === runId
-      ) {
-        runDetailsError.value = `载入运行详情失败：${errorMessage(error)}`
+      if (ownsDetails(generation, projectId, runId)) {
+        artifactsFailure.value = error
       }
     } finally {
-      if (detailRequestInFlight?.generation === requestGeneration) {
-        detailRequestInFlight = null
-      }
-      if (requestGeneration === detailRequestGeneration) {
-        isLoadingRunDetails.value = false
+      if (ownsDetails(generation, projectId, runId)) {
+        isLoadingArtifacts.value = false
+        if (activeAtRead && selectedRun.value && !isActiveRun(selectedRun.value))
+          void loadArtifacts(runId, true)
       }
     }
   }
 
+  const loadRunDetails = (runId: string, background = false) => {
+    // 各来源独立提交、独立去重；瞬时故障沿用刷新节奏，明确拒绝留给手动重读。
+    void loadCommands(runId, background)
+    void loadArtifacts(runId, background)
+    if (stdoutArtifactId.value) void loadTerminalOutput(stdoutArtifactId.value, { background })
+  }
+  const refetchCommands = () => {
+    if (selectedRun.value) void loadCommands(selectedRun.value.id)
+  }
+  const refetchArtifacts = () => {
+    if (selectedRun.value) void loadArtifacts(selectedRun.value.id)
+  }
   const refetchTerminal = () => {
-    if (selectedRun.value) {
-      void loadRunDetails(selectedRun.value.id)
-    }
+    if (stdoutArtifactId.value) void loadTerminalOutput(stdoutArtifactId.value)
+    else refetchArtifacts()
   }
 
   const previewArtifact = (artifactId: string) => {
@@ -501,14 +706,60 @@ export const useRunsPage = () => {
     { immediate: true },
   )
 
+  watch(
+    currentProjectId,
+    () => {
+      timelineGeneration += 1
+      hookReads.value = {}
+      expandedTools.value = new Set()
+      reportsRequest = null
+      reportsReadAgain = false
+      reports.value = []
+      reportsLoaded.value = false
+      reportsFailure.value = null
+    },
+    { flush: 'sync' },
+  )
+
+  watch(
+    runs,
+    (current, previous) => {
+      const before = new Map(
+        (previous || [])
+          .filter((run) => run.project_id === currentProjectId.value)
+          .map((run) => [run.id, run]),
+      )
+      let terminalChanged = false
+      for (const run of current) {
+        const old = before.get(run.id)
+        if (old && isActiveRun(old) && !isActiveRun(run)) {
+          terminalChanged = true
+          void loadHooks(run.id, true, true)
+          if (selectedRun.value?.id === run.id) loadRunDetails(run.id, true)
+        } else if (isActiveRun(run) && !old) void loadHooks(run.id, true)
+      }
+      if (terminalChanged && currentProjectId.value)
+        void workspaceStore.loadProject(currentProjectId.value)
+      if (
+        terminalChanged ||
+        current.some((run) => run.task_type === 'report' && !before.has(run.id))
+      )
+        void loadReports(terminalChanged)
+    },
+    { immediate: true },
+  )
+
   let pollTimer: number | null = null
   onMounted(() => {
     pollTimer = window.setInterval(() => {
       if (currentProjectId.value) {
         void refetchRuns()
       }
-      if (selectedRun.value && ['running', 'queued'].includes(selectedRun.value.status)) {
-        void loadRunDetails(selectedRun.value.id, { skipIfInFlight: true, background: true })
+      for (const run of runs.value) {
+        if (isActiveRun(run)) void loadHooks(run.id, true)
+      }
+      if (selectedRun.value && isActiveRun(selectedRun.value)) {
+        loadRunDetails(selectedRun.value.id, true)
       }
     }, 4000)
   })
@@ -516,14 +767,16 @@ export const useRunsPage = () => {
   onUnmounted(() => {
     if (pollTimer !== null) window.clearInterval(pollTimer)
     detailRequestGeneration += 1
-    detailRequestInFlight = null
+    terminalPreviewRequest = null
     terminalPreviewRequestGeneration += 1
+    timelineGeneration += 1
+    reportsRequest = null
   })
 
   watch(
     () => uiStore.globalRefreshKey,
     () => {
-      void refetchRuns()
+      refreshTimeline()
       if (selectedRun.value) {
         void loadRunDetails(selectedRun.value.id)
       }
@@ -552,8 +805,30 @@ export const useRunsPage = () => {
     refetchRuns,
     refetchTerminal,
     runBusinessTitle,
-    runCardDiagnostic,
-    runDetailsError,
+    workTimeline,
+    workTitle,
+    workActivity,
+    toolCalls,
+    hookReads,
+    hookReadError,
+    hookObservationIncomplete,
+    expandedTools,
+    toggleTools,
+    refetchHooks,
+    refreshTimeline,
+    reportsLoaded,
+    resultReadState,
+    reportsError,
+    loadReports,
+    commandsLoaded,
+    commandsError,
+    isLoadingCommands,
+    artifactsLoaded,
+    artifactsError,
+    isLoadingArtifacts,
+    refetchCommands,
+    refetchArtifacts,
+    terminalPreviewLoaded,
     runDurationText,
     runIntent,
     runPriorityLabel,

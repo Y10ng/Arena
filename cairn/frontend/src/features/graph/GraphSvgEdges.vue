@@ -27,6 +27,7 @@
       class="edge-group"
       :class="[getEdgeGroupClasses(edge), `edge-semantic-${getGraphEdgePresentation(edge).key}`]"
     >
+      <title>{{ getGraphEdgePresentation(edge).label }}：{{ edge.data?.label || edge.id }}</title>
       <template v-if="edgeCoordsMap[edge.id]">
         <line
           class="edge-hit-area"
@@ -63,12 +64,12 @@
         >
           <rect
             :x="-(getEdgeJoinBadgeWidth(edge) / 2)"
-            y="-9"
+            y="-14"
             :width="getEdgeJoinBadgeWidth(edge)"
-            height="16"
+            height="26"
             rx="4"
           />
-          <text y="2" text-anchor="middle">{{ getEdgeJoinBadgeText(edge) }}</text>
+          <text y="5" text-anchor="middle">{{ getEdgeJoinBadgeText(edge) }}</text>
         </g>
         <template v-if="showEdgeLabels && edge.data?.label">
           <text

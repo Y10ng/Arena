@@ -1,58 +1,11 @@
 <template>
-  <div
-    class="viewport-container"
-    :class="{ 'is-panning': isPanning, 'is-zooming': isZooming }"
-    ref="viewportElement"
-    @pointerdown="$emit('panStart', $event)"
-    @pointermove="$emit('panMove', $event)"
-    @pointerup="$emit('panEnd', $event)"
-    @pointercancel="$emit('panEnd', $event)"
-    @wheel="$emit('zoom', $event)"
-  >
-    <div class="zoom-pan-container" :style="zoomPanStyle">
-      <GraphSvgEdges
-        :canvas-size="graphCanvasSize"
-        :edges="laidOutEdges"
-        :edge-coords-map="edgeCoordsMap"
-        :show-join-badges="shouldShowJoinBadges"
-        :show-edge-labels="shouldShowEdgeLabels"
-        :get-edge-group-classes="getEdgeGroupClasses"
-        :get-edge-color="getEdgeColor"
-        :get-edge-stroke-width="getEdgeStrokeWidth"
-        :get-edge-marker="getEdgeMarker"
-        :get-edge-join-badge-width="getEdgeJoinBadgeWidth"
-        :get-edge-join-badge-text="getEdgeJoinBadgeText"
-        :truncate-text="truncateText"
-        @select-edge="$emit('selectEdge', $event)"
-      />
-
-      <div class="nodes-container">
-        <GraphNodeCard
-          v-for="node in laidOutNodes"
-          :key="node.id"
-          :node="node"
-          :selected="selectedNodeId === node.id"
-          :dragging="draggingNodeId === node.id"
-          :is-collapsed="manuallyCollapsedNodeIds.has(node.id)"
-          :get-node-type-label="getNodeTypeLabel"
-          :truncate-text="truncateText"
-          @select-click="$emit('selectNodeClick', $event, node)"
-          @drag-start="$emit('nodeDragStart', $event, node)"
-          @drag-move="$emit('nodeDragMove', $event, node)"
-          @drag-end="$emit('nodeDragEnd', $event, node)"
-          @drag-cancel="$emit('nodeDragCancel', $event, node)"
-          @select="$emit('selectNode', $event)"
-          @toggle-collapse="$emit('toggleNodeCollapse', $event)"
-        />
-      </div>
-    </div>
-
+  <section class="graph-stage" aria-label="关系画布">
     <aside class="graph-legend" aria-label="探索图谱图例">
       <div class="graph-legend-group">
         <span class="graph-legend-heading">节点</span>
         <span v-for="item in nodeLegend" :key="item.kind" class="graph-legend-item">
           <span class="graph-legend-mark" :class="`node-kind-${item.tone}`">
-            <component :is="item.icon" :size="11" :stroke-width="2" aria-hidden="true" />
+            <component :is="item.icon" :size="14" :stroke-width="2" aria-hidden="true" />
           </span>
           {{ item.shortLabel }}
         </span>
@@ -67,30 +20,79 @@
       </div>
     </aside>
 
-    <div class="graph-controls" aria-label="图谱缩放控件" @pointerdown.stop @wheel.stop>
-      <IconButton label="放大图谱" variant="secondary" size="sm" @click="$emit('zoomIn')">
-        <Plus :size="15" :stroke-width="2" />
-      </IconButton>
-      <span class="graph-zoom-value" aria-live="polite">{{ Math.round(zoom * 100) }}%</span>
-      <IconButton label="缩小图谱" variant="secondary" size="sm" @click="$emit('zoomOut')">
-        <Minus :size="15" :stroke-width="2" />
-      </IconButton>
-      <IconButton label="适应视口" variant="secondary" size="sm" @click="$emit('fitViewport')">
-        <Scan :size="15" :stroke-width="2" />
-      </IconButton>
-    </div>
+    <div
+      class="viewport-container"
+      :class="{ 'is-panning': isPanning, 'is-zooming': isZooming }"
+      ref="viewportElement"
+      @pointerdown="$emit('panStart', $event)"
+      @pointermove="$emit('panMove', $event)"
+      @pointerup="$emit('panEnd', $event)"
+      @pointercancel="$emit('panEnd', $event)"
+      @wheel="$emit('zoom', $event)"
+    >
+      <div class="zoom-pan-container" :style="zoomPanStyle">
+        <GraphSvgEdges
+          :canvas-size="graphCanvasSize"
+          :edges="laidOutEdges"
+          :edge-coords-map="edgeCoordsMap"
+          :show-join-badges="shouldShowJoinBadges"
+          :show-edge-labels="shouldShowEdgeLabels"
+          :get-edge-group-classes="getEdgeGroupClasses"
+          :get-edge-color="getEdgeColor"
+          :get-edge-stroke-width="getEdgeStrokeWidth"
+          :get-edge-marker="getEdgeMarker"
+          :get-edge-join-badge-width="getEdgeJoinBadgeWidth"
+          :get-edge-join-badge-text="getEdgeJoinBadgeText"
+          :truncate-text="truncateText"
+          @select-edge="$emit('selectEdge', $event)"
+        />
 
-    <GraphMiniMap
-      v-if="laidOutNodes.length"
-      :nodes="laidOutNodes"
-      :graph-bounds="graphBounds"
-      :pan="pan"
-      :zoom="zoom"
-      :viewport-size="viewportSize"
-      :selected-node-id="selectedNodeId"
-      @center-world-point="(x, y) => $emit('centerWorldPoint', x, y)"
-    />
-  </div>
+        <div class="nodes-container">
+          <GraphNodeCard
+            v-for="node in laidOutNodes"
+            :key="node.id"
+            :node="node"
+            :selected="selectedNodeId === node.id"
+            :dragging="draggingNodeId === node.id"
+            :is-collapsed="manuallyCollapsedNodeIds.has(node.id)"
+            :get-node-type-label="getNodeTypeLabel"
+            :truncate-text="truncateText"
+            @select-click="$emit('selectNodeClick', $event, node)"
+            @drag-start="$emit('nodeDragStart', $event, node)"
+            @drag-move="$emit('nodeDragMove', $event, node)"
+            @drag-end="$emit('nodeDragEnd', $event, node)"
+            @drag-cancel="$emit('nodeDragCancel', $event, node)"
+            @select="$emit('selectNode', $event)"
+            @toggle-collapse="$emit('toggleNodeCollapse', $event)"
+          />
+        </div>
+      </div>
+
+      <div class="graph-controls" aria-label="图谱缩放控件" @pointerdown.stop @wheel.stop>
+        <IconButton label="放大图谱" variant="secondary" size="sm" @click="$emit('zoomIn')">
+          <Plus :size="15" :stroke-width="2" />
+        </IconButton>
+        <span class="graph-zoom-value" aria-live="polite">{{ Math.round(zoom * 100) }}%</span>
+        <IconButton label="缩小图谱" variant="secondary" size="sm" @click="$emit('zoomOut')">
+          <Minus :size="15" :stroke-width="2" />
+        </IconButton>
+        <IconButton label="适应视口" variant="secondary" size="sm" @click="$emit('fitViewport')">
+          <Scan :size="15" :stroke-width="2" />
+        </IconButton>
+      </div>
+
+      <GraphMiniMap
+        v-if="laidOutNodes.length"
+        :nodes="laidOutNodes"
+        :graph-bounds="graphBounds"
+        :pan="pan"
+        :zoom="zoom"
+        :viewport-size="viewportSize"
+        :selected-node-id="selectedNodeId"
+        @center-world-point="(x, y) => $emit('centerWorldPoint', x, y)"
+      />
+    </div>
+  </section>
 </template>
 
 <script setup lang="ts">

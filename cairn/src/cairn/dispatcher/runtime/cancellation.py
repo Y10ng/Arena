@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import threading
 
 from cairn.dispatcher.runtime.process import ManagedProcess
+from cairn.dispatcher.runtime.pause_clock import PauseClock
 
 
 @dataclass(slots=True)
@@ -48,6 +49,7 @@ class TaskCancellation:
         self.generation = generation
         self._executions: dict[int, _ExecutionRecord] = {}
         self._resources: list[object] = []
+        self.pause_clock = PauseClock()
 
     def register_resource(self, resource) -> None:
         """独立测试资源也参与终止证明，取消先于准备完成时仍立即生效。"""
@@ -77,6 +79,16 @@ class TaskCancellation:
             record.started |= _true_property(process, "execution_started")
             record.completed = _true_property(process, "execution_completed")
             record.finished = True
+
+    def confirm_stopped_containers(self, container_ids: set[str]) -> None:
+        """调用方已核验精确容器停止，容器边界替代容器内 supervisor 退出证明。"""
+        with self._lock:
+            for record in self._executions.values():
+                identity = record.identity if record.finished else _execution_identity(record.process)
+                if identity is not None and identity[0] in container_ids:
+                    record.process.confirm_container_stopped(identity[0])
+                    if record.finished:
+                        record.completed = True
 
     def execution_container_ids(self) -> list[str]:
         with self._lock:
@@ -112,6 +124,8 @@ class TaskCancellation:
         with self._lock:
             self._process = process
             reason = self._reason
+        if isinstance(process, ManagedProcess):
+            process.pause_clock = self.pause_clock
         if process is not None and reason is not None:
             # 如果取消先于进程启动发生，进程一附着就立即取消。
             process.cancel(reason)
@@ -129,6 +143,10 @@ class TaskCancellation:
         if process is not None and not already_cancelled:
             process.cancel(self._reason)
         return not already_cancelled
+
+    @property
+    def detached(self) -> bool:
+        return self.pause_clock.detached
 
     @property
     def is_cancelled(self) -> bool:

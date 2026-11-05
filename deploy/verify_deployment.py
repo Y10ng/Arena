@@ -126,7 +126,45 @@ def verify_image(image: str, expected_version: str, expected_sdk_version: str) -
         or check.get("offline") is not True
     ):
         raise RuntimeError("cairn-agent 离线自检契约不匹配")
+    executor = run_command(
+        ["docker", "run", "--rm", "--network", "none", "--entrypoint", "python3", image, "-c",
+         "import runpy, shutil; "
+         "service = runpy.run_path('/opt/cairn/task-executor/server.py'); "
+         "assert callable(service['Handler']) and callable(service['Server']); "
+         "assert shutil.which('certutil')"],
+        timeout=30,
+    )
+    if executor.returncode != 0:
+        raise RuntimeError("研究镜像缺少可用 executor 服务或 certutil；请提供配套研究镜像")
     return {"id": parts[0], "os": parts[1], "architecture": parts[2], "agent_version": expected_output}
+
+
+def verify_gateway_image(image: str) -> None:
+    inspect = run_command(
+        ["docker", "image", "inspect", image, "--format", "{{json .Config.Entrypoint}}"],
+        timeout=30,
+    )
+    if inspect.returncode != 0:
+        raise RuntimeError(f"采集镜像不存在或不可读: {image}")
+    try:
+        entrypoint = json.loads(inspect.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("采集镜像入口不是有效 JSON") from exc
+    if (not isinstance(entrypoint, list) or not entrypoint or entrypoint[0] != "mitmdump"
+            or "/opt/cairn/traffic/ingress.py" not in entrypoint
+            or "/opt/cairn/traffic/capture.py" not in entrypoint):
+        raise RuntimeError("采集镜像入口不匹配；请提供配套采集镜像")
+    # 只导入依赖并编译脚本，不启动代理、访问目标或写入采集数据。
+    result = run_command(
+        ["docker", "run", "--rm", "--network", "none", "--entrypoint", "python", image, "-c",
+         "import mitmproxy, pproxy, shutil; from pathlib import Path; "
+         "assert all(shutil.which(name) for name in ('mitmdump', 'ip', 'iptables')); "
+         "scripts = [Path('/opt/cairn/traffic') / name for name in ('capture.py', 'ingress.py', 'egress.py')]; "
+         "[compile(path.read_bytes(), str(path), 'exec') for path in scripts]"],
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("采集镜像离线检查失败：请检查 mitmproxy、pproxy、网络工具及采集脚本")
 
 
 def verify_runtime(root: Path, manifest: dict[str, Any], *, full: bool) -> None:
@@ -177,10 +215,12 @@ def verify_runtime(root: Path, manifest: dict[str, Any], *, full: bool) -> None:
 
     expected_version = str(manifest.get("expected_cairn_agent_version") or EXPECTED_CAIRN_AGENT_VERSION)
     expected_sdk_version = str(manifest.get("expected_pi_sdk_version") or EXPECTED_PI_SDK_VERSION)
-    images = sorted({entry.image for entry in config.images} | {config.container.image})
+    images = sorted({entry.image for entry in config.images} | {config.container.image} | set(config.container.allowed_images))
     image_info = {image: verify_image(image, expected_version, expected_sdk_version) for image in images}
     for image, info in image_info.items():
         print(f"worker_image={image} id={info['id']} arch={info['architecture']} agent={info['agent_version']}")
+    verify_gateway_image(config.container.traffic_gateway_image)
+    print(f"gateway_image={config.container.traffic_gateway_image} offline_check=ok")
     print("offline_self_check=ok；未验证真实模型调用或 Worker 在线可用性")
 
 
@@ -188,7 +228,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--manifest-only", action="store_true")
-    parser.add_argument("--full", action="store_true", help="验证 Worker 镜像及 cairn-agent/pi SDK 离线自检，不调用模型")
+    parser.add_argument("--full", action="store_true", help="离线检查研究镜像的 cairn-agent/pi SDK、executor 及独立采集镜像，不调用模型")
     args = parser.parse_args()
     root = args.root.resolve()
     try:

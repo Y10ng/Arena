@@ -216,7 +216,8 @@ def test_formal_runner_streaming_cancellation_and_recovery(monkeypatch, traffic_
                 cancellation = TaskCancellation(generation=run['execution_generation'])
                 cancellations.append(cancellation)
                 capability = manager.prepare_task_execution(project, run['id'], cancellation, options)
-                scopes.append(bridge.task(project.id, run['id']).scope)
+                scope_id = bridge.task(project.id, run['id']).scope_id
+                scopes.append(next(scope for scope in runtime.scopes if scope.id == scope_id))
                 model_name = ('one', 'two')[index]
                 worker = WorkerConfig(id=f'traffic-source-{index+1}', engine='pi', task_types=['explore'], concurrency=2, priority=0,
                     env={'S1B_CONTROL_SECRET':'synthetic-private-control-value'},

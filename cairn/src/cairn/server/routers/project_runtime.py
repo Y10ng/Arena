@@ -1,12 +1,17 @@
 """项目运行诊断的单项与批量只读入口。"""
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
+from cairn.server.services.project_execution_control import confirm_execution_control
 
 from cairn.server.auth import RequestPrincipal, protect_cookie_request, require_dispatcher, require_user_tenant_project
 from cairn.server.db import get_conn
 from cairn.server.schemas.project_runtime import ProjectRuntimeBatch, ProjectRuntimeResponse
 from cairn.server.services.project_runtime_diagnostics import build_project_runtime, build_project_runtimes
 from cairn.server.services.project_container_pause import (
+    abort_container_activation,
     adopt_container_pause,
     claim_container_pause,
     confirm_container_pause,
@@ -18,6 +23,31 @@ from cairn.server.services.project_container_pause import (
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 
+@router.post("/pause-timeouts/expire")
+def expire_pause_timeouts(_principal: RequestPrincipal = Depends(require_dispatcher)):
+    from cairn.server.services.project_records import expire_paused_projects
+
+    return expire_paused_projects()
+
+
+class ExecutionControlConfirmationRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=128)
+    state: Literal["paused", "running", "stopped", "failed", "lost"]
+    resources: list[dict[str, str]] = Field(default_factory=list, max_length=1024)
+    error: str | None = Field(default=None, max_length=128)
+
+
+@router.post("/{project_id}/execution-control/confirm")
+def confirm_execution(
+    project_id: str, body: ExecutionControlConfirmationRequest,
+    principal: RequestPrincipal = Depends(require_dispatcher),
+):
+    return confirm_execution_control(
+        project_id, principal.subject_id, request_id=body.request_id,
+        state=body.state, resources=body.resources, error=body.error,
+    )
+
+
 class ContainerActivationRequest(BaseModel):
     generation: int
     docker_daemon_id: str
@@ -25,7 +55,12 @@ class ContainerActivationRequest(BaseModel):
 
 class ContainerActivationFinishRequest(BaseModel):
     activation_token: str
-    container_id: str | None
+    container_id: str = Field(min_length=1)
+
+
+class ContainerActivationAbortRequest(BaseModel):
+    activation_token: str = Field(min_length=1)
+    docker_daemon_id: str = Field(min_length=1)
 
 
 class ContainerPauseRequest(BaseModel):
@@ -112,6 +147,14 @@ def finish_activation(
     principal: RequestPrincipal = Depends(require_dispatcher),
 ):
     return finish_container_activation(project_id, principal.subject_id, body.activation_token, body.container_id)
+
+
+@router.post("/{project_id}/container-activation/abort")
+def abort_activation(
+    project_id: str, body: ContainerActivationAbortRequest,
+    principal: RequestPrincipal = Depends(require_dispatcher),
+):
+    return abort_container_activation(project_id, principal.subject_id, body.activation_token, body.docker_daemon_id)
 
 
 @router.post("/{project_id}/container-pause/adopt")

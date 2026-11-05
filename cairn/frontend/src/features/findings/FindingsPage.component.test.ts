@@ -27,7 +27,7 @@ describe('FindingsPage 漏洞入口', () => {
   it('only mounts vulnerability management without business-switching tabs', () => {
     const wrapper = mount(FindingsPage)
 
-    expect(wrapper.get('h1').text()).toBe('漏洞')
+    expect(wrapper.get('h1').text()).toBe('漏洞成果')
     expect(wrapper.find('[data-testid="vulnerability-management"]').exists()).toBe(true)
     expect(wrapper.find('[role="tablist"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('报告管理')

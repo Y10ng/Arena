@@ -38,6 +38,26 @@ def test_address_forms_preserve_original(changes, expected):
     assert value == original
 
 
+@pytest.mark.parametrize("changes,host,target", [
+    ({"method": "POST", "target": "/A%2fb?x=1&x=&plus=+&space=%20&mark=%25"},
+     "http://example.invalid:8080", "/A%2fb?x=1&x=&plus=+&space=%20&mark=%25"),
+    ({"target": "/tail?"}, "http://example.invalid:8080", "/tail?"),
+    ({"target": "https://absolute.invalid?x=+&x=%2f", "host": "absolute.invalid"},
+     "https://absolute.invalid", "/?x=+&x=%2f"),
+    ({"method": "OPTIONS", "target": "*"}, "http://example.invalid:8080", "*"),
+    ({"method": "CONNECT", "target": "[2001:db8::2]:443", "host": "[2001:db8::2]:443"},
+     "http://[2001:db8::2]:443", "[2001:db8::2]:443"),
+    ({"host": None}, "", "/a%2Fb?q=x%20y"),
+])
+def test_display_projection_preserves_request_target(changes, host, target):
+    value = request(**changes)
+    original = deepcopy(value)
+    result = traffic_request_address(value)
+    assert result["display_host"] == host
+    assert result["display_target"] == target
+    assert value == original
+
+
 def test_conflicting_host_headers_do_not_silently_choose_a_domain():
     value = request()
     value["headers_base64"].append([b64("hOsT"), b64("other.invalid")])

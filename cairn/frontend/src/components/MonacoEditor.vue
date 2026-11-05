@@ -1,7 +1,7 @@
 <template>
   <div class="monaco-reader" :class="{ 'monaco-reader--packet': variant !== 'default', 'monaco-reader--http': variant === 'http' }">
     <div v-if="readingState?.searchOpen" class="monaco-reader__search" role="search" :aria-label="`${ariaLabel}搜索已载入文本`">
-      <input ref="searchInput" :value="readingState?.query" :aria-label="`${ariaLabel}搜索已载入文本`" placeholder="搜索已载入文本" @input="setQuery" @keydown.enter.prevent="moveMatch($event.shiftKey ? -1 : 1)" @keydown.esc.prevent="closeSearch" />
+      <input ref="searchInput" :value="readingState?.query" :aria-label="`${ariaLabel}搜索已载入文本`" placeholder="搜索已载入文本" @input="setQuery" @keydown.enter.prevent="moveMatch($event.shiftKey ? -1 : 1)" @keydown.esc.prevent.stop="closeSearch" />
       <span class="monaco-reader__matches" role="status">{{ matches.length ? `${(readingState?.matchIndex ?? 0) + 1} / ${matches.length === 10000 ? '≥' : ''}${matches.length}` : readingState?.query ? '无匹配' : '输入关键词' }}</span>
       <Button variant="ghost" size="sm" :disabled="!matches.length" :aria-label="`${ariaLabel}上一处匹配`" title="上一处（Shift+Enter）" @click="moveMatch(-1)"><ChevronUp :size="14" /></Button>
       <Button variant="ghost" size="sm" :disabled="!matches.length" :aria-label="`${ariaLabel}下一处匹配`" title="下一处（Enter）" @click="moveMatch(1)"><ChevronDown :size="14" /></Button>
@@ -68,7 +68,6 @@ const props = withDefaults(
     autoFocus?: boolean
     fontSize?: number
     variant?: 'default' | 'packet' | 'http'
-    httpDensity?: 'compact'
     readingState?: MonacoReadingState
     readingView?: string
   }>(),
@@ -81,7 +80,6 @@ const props = withDefaults(
     wordWrap: 'on',
     ariaLabel: '文本编辑器',
     autoFocus: false,
-    fontSize: 14,
     variant: 'default',
     readingView: 'raw',
   },
@@ -104,10 +102,16 @@ const renderedContentHeight = shallowRef(0)
 const uiStore = useUIStore()
 
 const isReadOnly = computed(() => props.readOnly || props.disabled)
-// 紧凑密度仅由 HTTP 阅读器显式启用，不改变普通编辑器或其他报文消费者。
-const editorDensity = computed(() => props.variant === 'http' && props.httpDensity === 'compact'
-  ? { fontSize: 13, lineHeight: 20 }
-  : { fontSize: props.fontSize, lineHeight: props.variant === 'http' ? 20 : Math.round(props.fontSize * 1.65) })
+// Monaco 不继承 CSS 字号；默认读取共享正文字阶，显式字号仍由调用方控制，HTTP 保留阅读字阶。
+const editorDensity = computed(() => {
+  const styles = getComputedStyle(document.documentElement)
+  if (props.variant !== 'http') {
+    const fontSize = props.fontSize ?? parseFloat(styles.getPropertyValue('--text-body'))
+    return { fontSize, lineHeight: Math.round(fontSize * 1.7) }
+  }
+  const fontSize = parseFloat(styles.getPropertyValue('--text-reading'))
+  return { fontSize, lineHeight: Math.round(fontSize * parseFloat(styles.getPropertyValue('--leading-reading'))) }
+})
 const searchInput = shallowRef<HTMLInputElement | null>(null)
 const matches = shallowRef<monaco.editor.FindMatch[]>([])
 let searchDecorations: monaco.editor.IEditorDecorationsCollection | undefined
@@ -211,15 +215,40 @@ const defineTheme = () => {
       'editorLineNumber.activeForeground': color('text-secondary'),
       'editor.selectionBackground': `${color('accent')}38`,
       'editor.inactiveSelectionBackground': `${color('accent')}20`,
+      'editor.findMatchBackground': `${color('warning')}32`,
+      'editor.findMatchBorder': color('warning'),
+      'editor.findMatchHighlightBackground': `${color('warning')}20`,
       'editor.lineHighlightBackground': color('surface-hover'),
       'editorCursor.foreground': color('accent'),
       'editorWidget.background': color('surface-raised'),
+      'editorWidget.foreground': color('text'),
       'editorWidget.border': color('border-strong'),
+      'editorHoverWidget.background': color('surface-raised'),
+      'editorHoverWidget.foreground': color('text'),
+      'editorHoverWidget.border': color('border-strong'),
       'editorSuggestWidget.background': color('surface-raised'),
+      'editorSuggestWidget.foreground': color('text'),
       'editorSuggestWidget.border': color('border-strong'),
       'editorSuggestWidget.selectedBackground': color('surface-selected'),
+      'editorSuggestWidget.selectedForeground': color('text'),
+      'editorSuggestWidget.highlightForeground': color('accent'),
+      'editorSuggestWidget.focusHighlightForeground': color('accent'),
       'input.background': color('surface-inset'),
       'input.foreground': color('text'),
+      'input.border': color('control-border'),
+      'input.placeholderForeground': color('text-tertiary'),
+      'list.hoverBackground': color('surface-hover'),
+      'list.hoverForeground': color('text'),
+      'list.focusBackground': color('surface-selected'),
+      'list.focusForeground': color('text'),
+      'list.focusOutline': color('accent'),
+      'menu.background': color('surface-raised'),
+      'menu.foreground': color('text'),
+      'menu.border': color('border-strong'),
+      'menu.selectionBackground': color('surface-selected'),
+      'menu.selectionForeground': color('text'),
+      'menu.selectionBorder': color('accent'),
+      'menu.separatorBackground': color('border'),
       'focusBorder': color('accent'),
       'scrollbarSlider.background': `${color('border-strong')}66`,
       'scrollbarSlider.hoverBackground': `${color('text-tertiary')}80`,
@@ -396,16 +425,18 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .monaco-reader { position: relative; min-width: 0; }
-.monaco-reader--packet { background: var(--surface-inset); }
+.monaco-reader--packet { background: var(--color-surface-inset); }
 .monaco-reader--packet .monaco-editor-host { border: 0; border-radius: 0; }
-.monaco-reader__search { position: absolute; top: 0; right: 0; z-index: 5; display: flex; align-items: center; gap: var(--space-1); width: min(420px, 100%); box-sizing: border-box; padding: var(--space-1) var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--color-surface-inset); box-shadow: var(--shadow-md); }
-.monaco-reader__search input { min-width: 0; flex: 1; padding: var(--space-1) var(--space-2); color: var(--text); background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius-sm); font: inherit; font-size: var(--text-sm); }
+.monaco-reader__search { position: absolute; top: var(--space-1); right: var(--space-1); z-index: 5; display: flex; align-items: center; gap: var(--space-1); width: min(460px, calc(100% - 8px)); box-sizing: border-box; padding: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--color-surface-raised); box-shadow: var(--shadow-md); }
+.monaco-reader__search input { min-width: 0; min-height: var(--control-height); flex: 1; padding: var(--space-1) var(--space-2); color: var(--text); background: var(--bg-surface); border: 1px solid var(--color-control-border); border-radius: var(--radius-md); font: inherit; font-size: var(--text-md); }
 .monaco-reader__search input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .monaco-reader__matches { flex-shrink: 0; color: var(--text-muted); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 .monaco-reader--http, .monaco-reader--http :deep(.monaco-editor), .monaco-reader--http :deep(.monaco-editor-background) { background: var(--color-surface); }
 .monaco-reader--http { border-radius: inherit; overflow: clip; }
-.monaco-reader--http .monaco-reader__search { min-height: 41px; background: var(--color-surface-inset); }
-.monaco-reader--http .monaco-reader__search .ui-button { flex: none; width: 32px; min-height: 32px; padding: 0; }
+.monaco-reader--http .monaco-reader__search { min-height: 48px; }
+.monaco-reader--http .monaco-reader__search .ui-button { flex: none; width: var(--control-height-sm); min-height: var(--control-height-sm); padding: 0; }
+.monaco-reader--http .monaco-reader__search input { min-height: var(--control-height-sm); font-size: var(--text-sm); }
+.monaco-reader--http .monaco-reader__search :deep(svg) { width: 16px; height: 16px; }
 .monaco-reader--packet :deep(.margin) { border-right: 1px solid var(--border); }
 /* Monaco 主题全局共享；仅 HTTP 实例用局部表面与装饰槽留出正文内边距。 */
 .monaco-reader--http :deep(.margin) { border-right: 0; background: linear-gradient(to right, var(--color-surface-inset) calc(100% - 12px), var(--color-surface) calc(100% - 12px)); }

@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { onScopeDispose, ref } from 'vue'
 
 export interface ToastMessage {
   id: string
@@ -40,33 +40,67 @@ export const useUIStore = defineStore('ui', () => {
   }
   const toggleTheme = () => setTheme(theme.value === 'dark' ? 'light' : 'dark')
 
+  // 列表阅读状态仅留在当前标签页内存中，不持久化搜索内容。
+  const projectListView = ref({
+    authGeneration: -1,
+    activeSegment: 'all',
+    searchQuery: '',
+    selectedTenantId: 'all',
+    sortBy: 'created_desc',
+    scrollTop: 0,
+    scrollLeft: 0,
+  })
+
   // Global Refresh Counter
   const globalRefreshKey = ref(0)
   const triggerGlobalRefresh = () => {
     globalRefreshKey.value++
   }
 
-  // Toasts
+  // 悬停与键盘焦点独立暂停同一计时器，离开后继续剩余阅读时间。
   const toasts = ref<ToastMessage[]>([])
-  const toastTimeouts = new Map<string, ReturnType<typeof setTimeout>>()
+  const toastTimers = new Map<string, {
+    timeout?: ReturnType<typeof setTimeout>
+    remaining: number
+    startedAt: number
+    pauses: Set<'hover' | 'focus'>
+  }>()
   const removeToast = (id: string) => {
-    const timeout = toastTimeouts.get(id)
-    if (timeout !== undefined) {
-      clearTimeout(timeout)
-      toastTimeouts.delete(id)
-    }
+    clearTimeout(toastTimers.get(id)?.timeout)
+    toastTimers.delete(id)
     toasts.value = toasts.value.filter((t) => t.id !== id)
+  }
+  const startToastTimer = (id: string) => {
+    const timer = toastTimers.get(id)
+    if (!timer || timer.pauses.size) return
+    timer.startedAt = Date.now()
+    timer.timeout = setTimeout(() => {
+      if (toastTimers.get(id) === timer) removeToast(id)
+    }, timer.remaining)
+  }
+  const pauseToast = (id: string, reason: 'hover' | 'focus') => {
+    const timer = toastTimers.get(id)
+    if (!timer) return
+    if (!timer.pauses.size) {
+      clearTimeout(timer.timeout)
+      timer.remaining = Math.max(0, timer.remaining - (Date.now() - timer.startedAt))
+    }
+    timer.pauses.add(reason)
+  }
+  const resumeToast = (id: string, reason: 'hover' | 'focus') => {
+    const timer = toastTimers.get(id)
+    if (timer?.pauses.delete(reason) && !timer.pauses.size) startToastTimer(id)
   }
   const showToast = (text: string, type: ToastMessage['type'] = 'info', duration = 3000) => {
     const id = Math.random().toString(36).substring(2, 9)
     toasts.value.push({ id, text, type, duration })
-    const timeout = setTimeout(() => {
-      if (toastTimeouts.get(id) !== timeout) return
-      toastTimeouts.delete(id)
-      removeToast(id)
-    }, duration)
-    toastTimeouts.set(id, timeout)
+    toastTimers.set(id, { remaining: duration, startedAt: 0, pauses: new Set() })
+    startToastTimer(id)
   }
+  onScopeDispose(() => {
+    for (const timer of toastTimers.values()) clearTimeout(timer.timeout)
+    toastTimers.clear()
+  })
 
   // Command Palette
   const isCommandPaletteOpen = ref(false)
@@ -80,6 +114,7 @@ export const useUIStore = defineStore('ui', () => {
   return {
     isSidebarCollapsed,
     toggleSidebar,
+    projectListView,
     theme,
     setTheme,
     toggleTheme,
@@ -88,6 +123,8 @@ export const useUIStore = defineStore('ui', () => {
     toasts,
     showToast,
     removeToast,
+    pauseToast,
+    resumeToast,
     isCommandPaletteOpen,
     openCommandPalette,
     closeCommandPalette,

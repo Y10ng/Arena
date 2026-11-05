@@ -40,6 +40,7 @@ from cairn.dispatcher.runtime.exec_control import (
     EXEC_VERIFY_EXIT,
     EXEC_VERIFY_RUNNING,
 )
+from cairn.dispatcher.runtime.pause_clock import ExecutionSceneLost
 from cairn.dispatcher.runtime.process import ManagedProcess
 from cairn.dispatcher.runtime.temporary_files import runtime_temp_dir
 from cairn.dispatcher.workers.base import REPORT_READONLY_INPUT_ROOT
@@ -196,18 +197,46 @@ class ContainerManager:
         self._browser_session_policy = "legacy"
         self._browser_helper_slots = threading.BoundedSemaphore(4)
         self.traffic_execution = None
+        self.consumption_outbox = None
+        self._research_clocks = {}
+        self._research_stopped: set[str] = set()
+        self._research_preparing: set[str] = set()
 
     def configure_traffic_execution(
         self, client, *, root: Path, dispatcher_id: str,
         isolated: bool = False, upstream_ca: Path | None = None,
     ) -> None:
         from cairn.dispatcher.runtime.traffic_execution import TrafficExecutionBridge
+        from cairn.dispatcher.tasks.consumption_outbox import ConsumptionOutbox
 
+        if self.consumption_outbox is None:
+            self.consumption_outbox = ConsumptionOutbox(root.with_name(root.name + '-consumption'))
         if self.traffic_execution is None:
             self.traffic_execution = TrafficExecutionBridge(
                 self._client, client, root=root, dispatcher_id=dispatcher_id, config=self._config,
-                isolated=isolated, upstream_ca=upstream_ca,
+                isolated=isolated, upstream_ca=upstream_ca, instance_id=self.instance_id,
+                research_clock=self.research_clock,
+                research_stopped=lambda project_id: project_id in self._research_stopped,
             )
+
+    def deliver_consumption(self, identifier, client, *, completed: bool) -> None:
+        try:
+            if completed:
+                self.consumption_outbox.finish(identifier)
+            self.consumption_outbox.flush(client, limit=4)
+        except Exception as exc:
+            LOG.warning('consumption delivery pending id=%s error=%s', identifier, type(exc).__name__)
+
+    def retain_consumption_spool(self, container_name: str, identifier: str, path: str) -> None:
+        if self.consumption_outbox is None or path != f'/tmp/cairn-prompts/pi-consumption-{identifier}.jsonl':
+            raise RuntimeError('consumption_spool_binding_invalid')
+        container = self._require_container(container_name)
+        container.reload()
+        mounts = [mount for mount in container.attrs.get('Mounts', [])
+                  if mount.get('Destination') == '/tmp/cairn-prompts' and mount.get('Type') == 'bind' and mount.get('RW')]
+        if len(mounts) != 1:
+            raise RuntimeError('consumption_durable_mount_required')
+        self.consumption_outbox.retain(identifier, Path(mounts[0]['Source']) / Path(path).name)
 
     def prepare_task_execution(self, project, task_run_id: str, cancellation, options=None) -> dict:
         from cairn.dispatcher.worker_result_gateway import WorkerRequestError
@@ -219,9 +248,14 @@ class ContainerManager:
             )
         if self.traffic_execution is None:
             raise RuntimeError("traffic_execution_not_configured")
+        clock = self.research_clock(project.id)
+        cancellation.pause_clock = clock
+        clock.wait(lambda: cancellation.is_cancelled or project.id in self._research_stopped)
+        if cancellation.is_cancelled or project.id in self._research_stopped:
+            raise RuntimeError("research_execution_stopped")
         return self.traffic_execution.prepare_task(
             project, task_run_id, cancellation,
-            isolated=options is not None and options.network_mode == "none",
+            isolated=options.network_mode == "none", image=options.image,
         )
 
     def stop_task_execution(self, project_id: str, task_run_id: str) -> None:
@@ -634,8 +668,10 @@ class ContainerManager:
             raise ValueError("invalid project container identity")
         return f"{self._project_prefix}{sanitized}"
 
-    def chat_container_name(self, project_id: str) -> str:
-        return self.container_name(project_id) + "-chat"
+    def chat_container_name(self, conversation_id: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", conversation_id):
+            raise ValueError("invalid conversation container identity")
+        return f"{self._project_prefix}conversation-{conversation_id}"
 
     def project_id_from_container_name(self, name: str) -> str | None:
         # 归属校验后返回原始项目标签，避免名称转义导致orphan误判。
@@ -644,33 +680,153 @@ class ContainerManager:
         container = self._get_container(name)
         if container is None:
             return None
-        return str(container.attrs["Config"]["Labels"][self._LABEL_PROJECT_ID])
+        return container.attrs["Config"]["Labels"].get(self._LABEL_PROJECT_ID)
 
     def ensure_running(self, project_id: str, options: ContainerRuntimeOptions | None = None) -> str:
         name = self.container_name(project_id)
         runtime_options = options or self.default_runtime_options()
-        # 同一项目容器可能被多个调度线程触发，按容器名加锁避免并发创建冲突。
+        with self._research_preparation(project_id):
+            return self._ensure_running_locked(project_id, name, options=runtime_options)
+
+    @contextmanager
+    def _research_preparation(self, project_id: str):
+        name = self.container_name(project_id)
+        # 创建仍按原名称锁串行；控制路径不取这把包含慢 I/O 的锁。
+        with self._ensure_running_lock(name):
+            clock = self.research_clock(project_id)
+            self._research_preparing.add(name)
+            try:
+                clock.wait(lambda: project_id in self._research_stopped)
+                if project_id in self._research_stopped:
+                    raise RuntimeError("research_execution_stopped")
+                yield
+                # 准备可在锁外被热暂停；恢复前不向调用方发布“已可执行”。
+                clock.wait(lambda: project_id in self._research_stopped)
+                if project_id in self._research_stopped:
+                    raise RuntimeError("research_execution_stopped")
+            finally:
+                self._research_preparing.discard(name)
+
+    def research_clock(self, project_id: str):
+        from cairn.dispatcher.runtime.pause_clock import PauseClock
+
+        self.container_name(project_id)
+        with self._ensure_running_locks_guard:
+            return self._research_clocks.setdefault(project_id, PauseClock())
+
+    def hot_control(self, project_id: str, action: str, *, container_ids: list[str], in_flight: bool) -> list[dict[str, str]]:
+        """控制精确研究现场；不创建、启动或替换任何容器。"""
+        if action not in {"pause", "resume", "finish"}:
+            raise ValueError("invalid research control")
+        clock = self.research_clock(project_id)
+        if action == "finish":
+            self._research_stopped.add(project_id)
+            clock.resume()
+            # 启动边界已由 stopped fence 封住，不等待尚未返回的创建／readiness。
+            if not self._stop_research_containers(project_id, container_ids):
+                raise RuntimeError("研究进程尚未确认全部停止")
+            identities = list(dict.fromkeys([*container_ids, self.container_name(project_id)]))
+            # ID 与名称可能指向同一现场，物理回执按完整容器 ID 只记录一次。
+            containers = {container.id: container for identity in identities
+                          if (container := self._get_container(identity)) is not None
+                          and container.attrs["Config"]["Labels"].get("cairn.container_role") != "report"}
+            resources = [dict(kind="research", container_id=container.id, container_name=container.name, state="stopped")
+                         for container in containers.values()]
+            if self.traffic_execution is not None:
+                resources.extend(self.traffic_execution.stopped_resources(project_id))
+            return resources
+        if action == "pause":
+            clock.pause()
+        resources = []
+        if self.traffic_execution is not None:
+            resources.extend(self.traffic_execution.hot_control(project_id, action == "pause"))
+        identities = list(dict.fromkeys(container_ids))
+        if not identities:
+            current = self._get_container(self.container_name(project_id))
+            if action == "resume" and current is not None and current.name not in self._research_preparing:
+                raise ExecutionSceneLost("原研究容器的完整登记身份不可确认")
+            if current is not None and (current.status in {"running", "paused"}
+                                        or current.name in self._research_preparing):
+                identities.append(current.id)
+            elif in_flight and self.container_name(project_id) not in self._research_preparing:
+                raise ExecutionSceneLost("原研究容器已不存在或停止")
+        for identity in identities:
+            container = self._get_container(identity)
+            if container is None:
+                raise ExecutionSceneLost("原研究容器已不存在")
+            if action == "resume" and container.id != identity:
+                raise ExecutionSceneLost("恢复必须使用原容器的完整身份")
+            self._assert_owned(container, project_id=project_id)
+            if container.attrs["Config"]["Labels"].get("cairn.container_role") == "report":
+                raise ContainerOwnershipError("report is not a research execution")
+            if container.status in {"created", "exited"} and container.name in self._research_preparing:
+                resources.append(dict(kind="research", container_id=container.id,
+                                      container_name=container.name, state=container.status))
+                continue
+            if container.status not in {"running", "paused"}:
+                raise ExecutionSceneLost("研究现场已丢失，不能原地恢复")
+            if action == "pause" and container.status == "running":
+                container.pause()
+            elif action == "resume" and container.status == "paused":
+                container.unpause()
+            container.reload()
+            expected = "paused" if action == "pause" else "running"
+            if container.status != expected:
+                raise RuntimeError("研究执行域物理状态尚未确认")
+            resources.append(dict(kind="research", container_id=container.id, container_name=container.name, state=expected))
+        if action == "resume":
+            if self.traffic_execution is not None:
+                self.traffic_execution.hot_resume_completed(project_id)
+            clock.resume()
+        return resources
+
+    def report_container_name(self, project_id: str, task_run_id: str) -> str:
+        self.container_name(project_id)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", task_run_id):
+            raise ValueError("invalid report task identity")
+        return f"{self._project_prefix}report-{project_id}-{task_run_id}"
+
+    def ensure_report_running(self, project_id: str, task_run_id: str, options: ContainerRuntimeOptions | None = None) -> str:
+        name = self.report_container_name(project_id, task_run_id)
         with self._ensure_running_lock(name):
             return self._ensure_running_locked(
-                project_id,
-                name,
-                options=runtime_options,
+                project_id, name, options=options or self.default_runtime_options(),
+                report_task_run_id=task_run_id,
             )
 
-    def chat_directory(self, project_id: str) -> Path:
-        # 与研究 runtime 分开，不能为只读聊天调用会启动 gateway 的 control_volumes。
-        self.container_name(project_id)
+    def stop_owned_report(self, project_id: str, container_id: str) -> bool:
+        container = self._require_container(container_id, project_id=project_id)
+        labels = container.attrs["Config"]["Labels"]
+        if labels.get("cairn.container_role") != "report":
+            raise ContainerOwnershipError("container is not an independent report")
+        with self._ensure_running_lock(container.name):
+            return self._stop_retaining(container)
+
+    @staticmethod
+    def _stop_retaining(container: Container) -> bool:
+        container.reload()
+        if container.status == "paused":
+            # SIGKILL 直接终止冻结 cgroup，不先解冻并允许目标动作继续。
+            container.kill(signal="SIGKILL")
+        elif container.status not in {"exited", "dead", "created"}:
+            container.stop(timeout=1)
+        container.reload()
+        return container.status in {"exited", "dead", "created"}
+
+    def chat_directory(self, conversation_id: str) -> Path:
+        # 独立目录不调用研究 control_volumes，也不以材料上下文决定归属。
+        self.chat_container_name(conversation_id)
         if self.traffic_execution is None:
             raise RuntimeError("chat_runtime_not_configured")
         root = self.traffic_execution.root
-        return root.with_name(root.name + "-chat") / project_id
+        return root.with_name(root.name + "-conversations") / conversation_id
 
-    def ensure_chat_running(self, project_id: str, options: ContainerRuntimeOptions) -> str:
-        if options.features != {"project_chat": 1} or options.scenario_key != "project-chat":
+    def ensure_chat_running(self, conversation_id: str, options: ContainerRuntimeOptions) -> str:
+        if options.features != {"conversation_chat": 1} or options.scenario_key != "conversation-chat":
             raise ValueError("chat_runtime_options_invalid")
-        name = self.chat_container_name(project_id)
+        name = self.chat_container_name(conversation_id)
         with self._ensure_running_lock(name):
-            return self._ensure_running_locked(project_id, name, options=options)
+            return self._ensure_running_locked(None, name, options=options, conversation_id=conversation_id)
 
     def activate_for_readiness(
         self,
@@ -678,35 +834,53 @@ class ContainerManager:
         options: ContainerRuntimeOptions,
         *,
         register: Callable[[str], str],
-        finish: Callable[[str, str | None], None],
+        finish: Callable[[str, str], None],
+        abort: Callable[[str, str], None],
     ) -> str:
-        """先持久登记激活，再启动容器；daemon 变化时不伪造完成证明。"""
+        """先持久登记激活，再启动容器；只有原 daemon 名称锁内查无容器才结算未创建。"""
         name = self.container_name(project_id)
-        with self._ensure_running_lock(name):
+        with self._research_preparation(project_id):
             daemon_id = self.docker_daemon_id()
             token = register(daemon_id)
+            published = False
+
+            def publish(container_id):
+                nonlocal published
+                if self.docker_daemon_id() != daemon_id:
+                    raise RuntimeError("readiness Docker daemon changed before publication")
+                finish(token, container_id)
+                published = True
+
             try:
-                return self._ensure_running_locked(project_id, name, options=options)
+                return self._ensure_running_locked(project_id, name, options=options, publish=publish)
             finally:
-                if self.docker_daemon_id() == daemon_id:
+                if not published and self.docker_daemon_id() == daemon_id:
                     container = self._get_container(name)
-                    finish(token, container.id if container is not None else None)
+                    if container is None:
+                        abort(token, daemon_id)
+                    else:
+                        self._assert_owned(container, project_id=project_id)
+                        finish(token, container.id)
 
     def activate_existing_for_continuation(
-        self,
-        project_id: str,
-        options: ContainerRuntimeOptions,
-        expected_container_id: str,
-        *,
-        register: Callable[[str], str],
-        finish: Callable[[str, str], None],
+        self, project_id: str, options: ContainerRuntimeOptions, expected_container_id: str,
+        *, register: Callable[[str], str], finish: Callable[[str, str], None],
+        reuse: Callable[[str, str], bool],
+    ) -> str:
+        return self._activate_existing_for_continuation(
+            project_id, options, expected_container_id, register=register, finish=finish, reuse=reuse,
+        )
+
+    def _activate_existing_for_continuation(
+        self, project_id: str, options: ContainerRuntimeOptions, expected_container_id: str,
+        *, register: Callable[[str], str], finish: Callable[[str, str], None],
         reuse: Callable[[str, str], bool],
     ) -> str:
         """在锁内启动停止的原工作区，或复用本代已确认激活的同一容器。"""
         if not isinstance(expected_container_id, str) or not expected_container_id:
             raise ValueError("continuation requires exact container id")
         name = self.container_name(project_id)
-        with self._ensure_running_lock(name):
+        with self._research_preparation(project_id):
             daemon_id = self.docker_daemon_id()
             container = self._require_container(name, project_id=project_id)
             if container.id != expected_container_id or self._container_runtime_mismatch(container, options):
@@ -719,7 +893,7 @@ class ContainerManager:
                     raise RuntimeError("continuation Docker daemon changed during reuse")
                 current = self._require_container(name, project_id=project_id)
                 if (current.id != expected_container_id or self._container_runtime_mismatch(current, options)
-                        or self._container_state(current) != "running"):
+                        or not self._running_or_hot_paused(current, project_id)):
                     raise ContainerOwnershipError("continuation container changed during reuse")
                 return name
             if state not in {"exited", "created"}:
@@ -734,17 +908,18 @@ class ContainerManager:
                 raise ContainerOwnershipError("continuation container changed before start")
             if self._container_state(current) not in {"exited", "created"}:
                 raise RuntimeError("continuation container state changed before start")
-            self._start_existing(name)
+            # 先绑定原 token 与精确容器，再等待暂停门；未启动现场也能如实回执。
+            finish(token, expected_container_id)
+            self._start_existing(name, project_id=project_id)
             if self.docker_daemon_id() != daemon_id:
                 raise RuntimeError("continuation Docker daemon changed after start")
             current = self._require_container(name, project_id=project_id)
             if (
                 current.id != expected_container_id
                 or self._container_runtime_mismatch(current, options)
-                or self._container_state(current) != "running"
+                or not self._running_or_hot_paused(current, project_id)
             ):
                 raise ContainerOwnershipError("continuation container changed after start")
-            finish(token, expected_container_id)
             return name
 
     def default_runtime_options(self) -> ContainerRuntimeOptions:
@@ -757,11 +932,13 @@ class ContainerManager:
             scenario_key="default",
         )
 
-    def _ensure_running_locked(self, project_id: str, name: str, *, options: ContainerRuntimeOptions) -> str:
+    def _ensure_running_locked(self, project_id: str | None, name: str, *, options: ContainerRuntimeOptions, conversation_id: str | None = None, report_task_run_id: str | None = None, publish: Callable[[str], None] | None = None) -> str:
+        if (project_id is None) == (conversation_id is None):
+            raise ContainerOwnershipError("container requires exactly one owner")
         container = self._get_container(name)
         state = self._container_state(container)
-        if container is not None and container.attrs["Config"]["Labels"].get(self._LABEL_PROJECT_ID) != project_id:
-            raise ContainerOwnershipError("container project identity does not match the requested project")
+        if container is not None:
+            self._assert_owned(container, project_id=project_id, conversation_id=conversation_id)
         if container is not None and self._container_runtime_mismatch(container, options):
             # 工作区只存在于原容器中；运行边界变化时保留材料并明确阻断，而非删除重建。
             raise ContainerRuntimeMismatchError(
@@ -769,12 +946,19 @@ class ContainerManager:
                 f"project={project_id} container={name} scenario={options.scenario_key}"
             )
 
+        research_project = project_id if report_task_run_id is None else None
+        if container is not None and publish is not None:
+            publish(container.id)
+        if state == "paused":
+            if research_project is not None and self.research_clock(research_project).paused:
+                return name
+            raise RuntimeError("研究现场已冻结，只能通过热恢复入口解冻")
         if state == "running":
             LOG.debug("container already running project=%s container=%s", project_id, name)
             return name
         if state is not None:
             LOG.info("starting existing container project=%s container=%s state=%s", project_id, name, state)
-            self._start_existing(name)
+            self._start_existing(name, project_id=research_project)
             return name
         LOG.info(
             "creating container project=%s container=%s image=%s scenario=%s caps=%s dns=%s",
@@ -786,8 +970,14 @@ class ContainerManager:
             list(options.dns) or "docker-default",
         )
         volumes = self._advisory_volume_bind(options) or {}
-        if options.features.get("project_chat") == 1:
-            root = self.chat_directory(project_id)
+        if conversation_id is not None or report_task_run_id is not None:
+            if report_task_run_id is not None:
+                if self.traffic_execution is None:
+                    raise RuntimeError("report_runtime_not_configured")
+                base = self.traffic_execution.root
+                root = base.with_name(base.name + "-reports") / project_id / report_task_run_id
+            else:
+                root = self.chat_directory(conversation_id)
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
             for child, target in (("workspace", "/home/kali/workspace"), ("control", "/home/kali/.cairn"), ("prompts", "/tmp/cairn-prompts")):
                 directory = root / child
@@ -797,14 +987,16 @@ class ContainerManager:
                 os.chmod(directory, 0o700)
                 os.chown(directory, 1000, 1000)
                 volumes[str(directory)] = {"bind": target, "mode": "rw"}
-        if options.traffic_execution_enabled:
+        if options.traffic_execution_enabled and report_task_run_id is None:
             if self.traffic_execution is None:
                 raise RuntimeError("traffic_execution_not_configured")
             volumes.update(self.traffic_execution.control_volumes(
                 project_id, isolated=options.network_mode == "none",
             ))
         try:
-            self._client.containers.run(
+            # 研究容器 create 不启动进程；慢 Docker 返回后仍须跨过同一控制门。
+            create = self._client.containers.create if research_project is not None else self._client.containers.run
+            created = create(
                 options.image,
                 ["sleep", "infinity"],
                 detach=True,
@@ -817,11 +1009,24 @@ class ContainerManager:
                 memswap_limit=options.memswap_limit,
                 pids_limit=options.pids_limit,
                 volumes=volumes or None,
-                labels=self._container_labels(project_id, options),
+                labels={
+                    **self._container_labels(project_id, options, conversation_id=conversation_id),
+                    **({"cairn.container_role": "report", "cairn.report_task_run_id": report_task_run_id} if report_task_run_id is not None else {}),
+                },
             )
+            if research_project is not None:
+                created = self._get_container(name)
+                if created is None:
+                    raise RuntimeError(f"container {name} is not running after creation")
+                self._assert_owned(created, project_id=project_id)
+                if self._container_runtime_mismatch(created, options):
+                    raise ContainerOwnershipError("created container runtime signature does not match")
+                if publish is not None:
+                    publish(created.id)
+                self._start_existing(name, project_id=research_project)
             self._require_created_running_container(
                 name,
-                project_id=project_id,
+                project_id=project_id, conversation_id=conversation_id,
                 runtime_signature=options.runtime_signature,
             )
             LOG.info("created container project=%s container=%s", project_id, name)
@@ -834,14 +1039,21 @@ class ContainerManager:
         state = self._container_state(container)
         if container is not None and (
             container.attrs["Config"]["Labels"].get(self._LABEL_PROJECT_ID) != project_id
+            or container.attrs["Config"]["Labels"].get("cairn.conversation_id") != conversation_id
             or self._container_runtime_mismatch(container, options)
         ):
             raise ContainerOwnershipError("conflicting container project or runtime signature does not match")
+        if container is not None and publish is not None:
+            publish(container.id)
+        if state == "paused":
+            if research_project is not None and self.research_clock(research_project).paused:
+                return name
+            raise RuntimeError("研究现场已冻结，只能通过热恢复入口解冻")
         if state == "running":
             return name
         if state is not None:
             LOG.info("starting conflicted existing container project=%s container=%s state=%s", project_id, name, state)
-            self._start_existing(name)
+            self._start_existing(name, project_id=research_project)
             return name
         raise RuntimeError(f"failed to create container {name}")
 
@@ -912,6 +1124,10 @@ class ContainerManager:
             container = self._require_container(name)
             container.reload()
             metadata["container_id"] = container.id
+            labels = container.attrs.get("Config", {}).get("Labels") or {}
+            for key, label in (("project_id", self._LABEL_PROJECT_ID), ("report_task_run_id", "cairn.report_task_run_id"), ("container_role", "cairn.container_role")):
+                if labels.get(label):
+                    metadata[key] = labels[label]
             state = container.attrs.get("State", {}).get("Status")
             if state:
                 metadata["container_state"] = str(state)
@@ -1021,38 +1237,8 @@ class ContainerManager:
         return snapshot
 
     def cleanup_completed(self, project_id: str) -> bool:
-        if self.traffic_execution is not None and not self.traffic_execution.cleanup_project(project_id):
-            return False
-        ok = True
-        for name in self._project_container_names(project_id):
-            state = self.inspect_state(name)
-            if state is None:
-                continue
-            container = self._require_container(name, project_id=project_id)
-            if self._config.completed_action == "remove":
-                # completed_action=remove 适合一次性任务；stop 则保留容器便于排查。
-                LOG.info("removing completed project container project=%s container=%s", project_id, name)
-                try:
-                    container.remove(force=True)
-                except NotFound:
-                    continue
-                except DockerException as exc:
-                    LOG.warning("failed to remove container=%s error=%s", name, exc)
-                    ok = False
-                    continue
-                ok = self.inspect_state(name) is None and ok
-            elif state == "running":
-                LOG.info("stopping completed project container project=%s container=%s", project_id, name)
-                try:
-                    container.stop(timeout=1)
-                except NotFound:
-                    continue
-                except DockerException as exc:
-                    LOG.warning("failed to stop container=%s error=%s", name, exc)
-                    ok = False
-                    continue
-                ok = self.inspect_state(name) != "running" and ok
-        return ok
+        # 项目仍存在时，completed_action 不再授权销毁含材料的文件系统。
+        return self.cleanup_finishing(project_id, container_ids=[])
 
     def cleanup_paused(self, project_id: str, *, container_ids: list[str]) -> bool:
         """精确停止并保留暂停项目的容器文件系统；不把 unknown 当成退出。"""
@@ -1122,49 +1308,28 @@ class ContainerManager:
         return current_after is not None and current_after.id == current.id
 
     def cleanup_finishing(self, project_id: str, *, container_ids: list[str]) -> bool:
-        """人工结束及已停止项目仍按原策略删除精确归属资源。"""
+        """只停止精确研究归属，不删除材料，也不波及独立报告。"""
         name = self.container_name(project_id)
         with self._ensure_running_lock(name):
-            if self.traffic_execution is not None and not self.traffic_execution.cleanup_project(project_id):
-                return False
-            identities = list(dict.fromkeys([*container_ids, name]))
-            owned = {}
-            for identity in identities:
-                container = self._get_container(identity)
-                if container is not None:
-                    self._assert_owned(container, project_id=project_id)
-                    owned[container.id] = container
-            for actual_id, container in owned.items():
-                try:
-                    container.remove(force=True)
-                except NotFound:
-                    pass
-                except DockerException:
-                    return False
-                if self._get_container(actual_id) is not None:
-                    return False
-            return all(self._get_container(identity) is None for identity in identities)
+            return self._stop_research_containers(project_id, container_ids)
 
-    def cleanup_stopped(self, project_id: str) -> bool:
+    def _stop_research_containers(self, project_id: str, container_ids: list[str]) -> bool:
         if self.traffic_execution is not None and not self.traffic_execution.cleanup_project(project_id):
             return False
-        ok = True
-        for name in self._project_container_names(project_id):
-            state = self.inspect_state(name)
-            if state != "running":
+        identities = list(dict.fromkeys([*container_ids, self.container_name(project_id)]))
+        for identity in identities:
+            container = self._get_container(identity)
+            if container is None:
                 continue
-            LOG.info("stopping stopped project container project=%s container=%s", project_id, name)
-            container = self._require_container(name, project_id=project_id)
-            try:
-                container.stop(timeout=1)
-            except NotFound:
+            self._assert_owned(container, project_id=project_id)
+            if container.attrs["Config"]["Labels"].get("cairn.container_role") == "report":
                 continue
-            except DockerException as exc:
-                LOG.warning("failed to stop stopped project container=%s error=%s", name, exc)
-                ok = False
-                continue
-            ok = self.inspect_state(name) != "running" and ok
-        return ok
+            if not self._stop_retaining(container):
+                return False
+        return True
+
+    def cleanup_stopped(self, project_id: str) -> bool:
+        return self.cleanup_finishing(project_id, container_ids=[])
 
     def cleanup_orphan(self, name: str) -> bool:
         state = self.inspect_state(name)
@@ -1172,16 +1337,32 @@ class ContainerManager:
             return True
         LOG.info("removing orphan project container container=%s state=%s", name, state)
         container = self._require_container(name)
-        project_id = container.attrs["Config"]["Labels"][self._LABEL_PROJECT_ID]
-        if self.traffic_execution is not None and not self.traffic_execution.cleanup_project(project_id):
+        project_id = container.attrs["Config"]["Labels"].get(self._LABEL_PROJECT_ID)
+        if project_id is None:
+            return False
+        if not self._stop_retaining(container):
             return False
         try:
-            container.remove(force=True)
+            container.remove()
         except NotFound:
-            return True
+            pass
         except DockerException as exc:
             LOG.warning("failed to remove orphan container=%s error=%s", name, exc)
             return False
+        if self.traffic_execution is not None:
+            if not self.traffic_execution.destroy_project(project_id):
+                return False
+            # 项目已删除，且其报告容器也都销毁后才删除报告原挂载。
+            remaining = [item for item in self.managed_container_names()
+                         if self.project_id_from_container_name(item) == project_id]
+            if not remaining:
+                import shutil
+                base = self.traffic_execution.root
+                root = base.with_name(base.name + "-reports") / project_id
+                if root.is_symlink():
+                    raise RuntimeError("report_runtime_directory_invalid")
+                if root.exists():
+                    shutil.rmtree(root)
         return self.inspect_state(name) is None
 
     def managed_container_names(self) -> list[str]:
@@ -1197,6 +1378,7 @@ class ContainerManager:
         return sorted(
             container.name for container in containers
             if container.name.startswith(self._project_prefix) and self._owns_container(container)
+            and container.attrs["Config"]["Labels"].get(self._LABEL_PROJECT_ID) is not None
         )
 
     def needs_completed_cleanup(self, project_id: str) -> bool:
@@ -1206,7 +1388,7 @@ class ContainerManager:
             state = self.inspect_state(name)
             if state is None:
                 continue
-            if self._config.completed_action == "remove" or state == "running":
+            if state in {"running", "paused"}:
                 return True
         return False
 
@@ -1216,7 +1398,7 @@ class ContainerManager:
     def needs_stopped_cleanup(self, project_id: str) -> bool:
         if self.traffic_execution is not None and project_id in self.traffic_execution.pending_cleanup_projects():
             return True
-        return any(self.inspect_state(name) == "running" for name in self._project_container_names(project_id))
+        return any(self.inspect_state(name) in {"running", "paused"} for name in self._project_container_names(project_id))
 
     def _project_container_names(self, project_id: str) -> list[str]:
         name = self.container_name(project_id)
@@ -1234,19 +1416,14 @@ class ContainerManager:
         kill_after_seconds: int = 5,
     ) -> ManagedProcess:
         container = self._require_container(container_name)
-        argv: list[str] = []
-        if timeout_seconds is not None:
-            # 容器内 timeout 负责杀子进程树，Python 侧 communicate 仍有自己的保护超时。
-            argv.extend(
-                [
-                    "timeout",
-                    "-k",
-                    f"{kill_after_seconds}s",
-                    f"{timeout_seconds}s",
-                ]
-            )
-        argv.extend(command)
-        return ManagedProcess(container, argv, env)
+        # GNU timeout 使用墙钟且无法扣除 cgroup 冻结；进程树终止仍由既有 supervisor 负责。
+        process = ManagedProcess(container, command, env)
+        labels = container.attrs["Config"]["Labels"]
+        project_id = labels.get(self._LABEL_PROJECT_ID)
+        if project_id and labels.get("cairn.container_role") != "report":
+            process.pause_clock = self.research_clock(project_id)
+        process.command_timeout = timeout_seconds
+        return process
 
     def write_text_file(
         self,
@@ -1282,10 +1459,19 @@ class ContainerManager:
         cached = self._container_user_ids_cache.get(cache_key)
         if cached is not None:
             return cached
+        labels = container.attrs["Config"]["Labels"]
+        project_id = labels.get(self._LABEL_PROJECT_ID)
+        clock = self.research_clock(project_id) if project_id and labels.get("cairn.container_role") != "report" else None
         values: list[int] = []
         for flag in ("-u", "-g"):
             try:
-                result = container.exec_run(["id", flag, owner], demux=False)
+                result = (
+                    clock.start(lambda: container.exec_run(["id", flag, owner], demux=False),
+                                lambda: project_id in self._research_stopped)
+                    if clock is not None else container.exec_run(["id", flag, owner], demux=False)
+                )
+                if result is None:
+                    raise RuntimeError("research_execution_stopped")
             except DockerException as exc:
                 raise RuntimeError(f"failed to resolve container user {owner}: {exc}") from exc
             output = getattr(result, "output", b"") or b""
@@ -1495,8 +1681,9 @@ os.rmdir(child)
         self,
         name: str,
         *,
-        project_id: str,
+        project_id: str | None,
         runtime_signature: str,
+        conversation_id: str | None = None,
     ) -> Container:
         """按 exact name 重新核验刚创建容器的归属、签名和运行态。"""
         container = self._get_container(name)
@@ -1504,7 +1691,7 @@ os.rmdir(child)
             raise RuntimeError(
                 f"container {name} is not running after creation"
             )
-        self._assert_owned(container, project_id=project_id)
+        self._assert_owned(container, project_id=project_id, conversation_id=conversation_id)
         labels = container.attrs.get("Config", {}).get("Labels") or {}
         if (
             not isinstance(labels, dict)
@@ -1514,19 +1701,31 @@ os.rmdir(child)
             raise ContainerOwnershipError(
                 "created container runtime signature does not match"
             )
-        if self._container_state(container) != "running":
+        if not self._running_or_hot_paused(container, project_id):
             raise RuntimeError(
                 f"container {name} is not running after creation"
             )
         return container
 
-    def _start_existing(self, name: str) -> None:
+    def _running_or_hot_paused(self, container: Container, project_id: str | None) -> bool:
+        state = self._container_state(container)
+        return state == "running" or (state == "paused" and project_id is not None
+                                      and self.research_clock(project_id).paused)
+
+    def _start_existing(self, name: str, *, project_id: str | None = None) -> None:
         LOG.debug("starting container=%s", name)
         container = self._require_container(name)
         expected_id = container.id
         start_error: DockerException | None = None
         try:
-            container.start()
+            def start():
+                container.start()
+                return True
+
+            if project_id is None:
+                start()
+            elif self.research_clock(project_id).start(start, lambda: project_id in self._research_stopped) is None:
+                raise RuntimeError("research_execution_stopped")
         except DockerException as exc:
             start_error = exc
 
@@ -1534,7 +1733,7 @@ os.rmdir(child)
         if (
             current is not None
             and current.id == expected_id
-            and self._container_state(current) == "running"
+            and self._running_or_hot_paused(current, project_id)
         ):
             return
         if start_error is not None:
@@ -1553,25 +1752,28 @@ os.rmdir(child)
         if name.startswith(self._startup_prefix):
             return bool(re.fullmatch(r"[a-f0-9]{12}", name[len(self._startup_prefix):])) and labels.get(self._LABEL_PROJECT_ID) == "startup-healthcheck"
         project_id = labels.get(self._LABEL_PROJECT_ID)
-        if not name.startswith(self._project_prefix) or not isinstance(project_id, str):
-            return False
+        conversation_id = labels.get("cairn.conversation_id")
         try:
-            # 用原场景标签区分研究与聊天身份，不能仅凭同前缀或 -chat 后缀认领。
-            expected_name = (
-                self.chat_container_name(project_id)
-                if labels.get(self._LABEL_SCENARIO_KEY) == "project-chat"
-                else self.container_name(project_id)
-            )
-            return name == expected_name
+            if labels.get("cairn.container_role") == "report":
+                report_task_run_id = labels.get("cairn.report_task_run_id")
+                return (isinstance(project_id, str) and isinstance(report_task_run_id, str)
+                        and conversation_id is None and name == self.report_container_name(project_id, report_task_run_id))
+            if conversation_id is not None:
+                return (project_id is None and labels.get(self._LABEL_SCENARIO_KEY) == "conversation-chat"
+                        and name == self.chat_container_name(conversation_id))
+            return (isinstance(project_id, str) and labels.get(self._LABEL_SCENARIO_KEY) != "conversation-chat"
+                    and name == self.container_name(project_id))
         except ValueError:
             return False
 
-    def _assert_owned(self, container: Container, *, project_id: str | None = None) -> None:
+    def _assert_owned(self, container: Container, *, project_id: str | None = None, conversation_id: str | None = None) -> None:
         if not self._owns_container(container):
             raise ContainerOwnershipError("container is not owned by this pi dispatcher instance")
         # 项目名中的“/”会转为“-”，不能仅凭转义后同名就清理另一个项目。
         if project_id is not None and container.attrs["Config"]["Labels"].get(self._LABEL_PROJECT_ID) != project_id:
             raise ContainerOwnershipError("container project identity does not match the requested project")
+        if conversation_id is not None and container.attrs["Config"]["Labels"].get("cairn.conversation_id") != conversation_id:
+            raise ContainerOwnershipError("container conversation identity does not match")
 
     def _get_container(self, name: str) -> Container | None:
         try:
@@ -1585,11 +1787,11 @@ os.rmdir(child)
             raise ContainerOwnershipError("container lookup identity did not match its inspected identity")
         return container
 
-    def _require_container(self, name: str, *, project_id: str | None = None) -> Container:
+    def _require_container(self, name: str, *, project_id: str | None = None, conversation_id: str | None = None) -> Container:
         container = self._get_container(name)
         if container is None:
             raise RuntimeError(f"container not found: {name}")
-        self._assert_owned(container, project_id=project_id)
+        self._assert_owned(container, project_id=project_id, conversation_id=conversation_id)
         return container
 
     def _container_state(self, container: Container | None) -> str | None:
@@ -1629,11 +1831,11 @@ os.rmdir(child)
         # bundle 由 Dispatcher 原子物化，Worker 只能按需只读访问。
         return {str(source_path): {"bind": target, "mode": "ro"}}
 
-    def _container_labels(self, project_id: str, options: ContainerRuntimeOptions) -> dict[str, str]:
+    def _container_labels(self, project_id: str | None, options: ContainerRuntimeOptions, *, conversation_id: str | None = None) -> dict[str, str]:
         return {
             self._LABEL_INSTANCE_ID: self.instance_id,
             self._LABEL_ENGINE: "pi",
-            self._LABEL_PROJECT_ID: project_id,
+            **({"cairn.conversation_id": conversation_id} if conversation_id is not None else {self._LABEL_PROJECT_ID: project_id}),
             self._LABEL_SCENARIO_KEY: options.scenario_key,
             self._LABEL_RUNTIME_SIGNATURE: options.runtime_signature,
         }

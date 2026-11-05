@@ -23,6 +23,7 @@ class _HookClient:
         assert project_id == "project-1"
         assert kwargs["metadata"] == {
             "phase": "explore_execute", "hook_source": "pi", "stream": "stderr",
+            "session_id": "pi:session", "projection_complete": None,
         }
         if self.failure == "artifact_exception":
             raise RuntimeError("fixture upload failure")

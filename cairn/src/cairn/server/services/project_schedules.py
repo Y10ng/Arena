@@ -14,18 +14,19 @@ from cairn.server.auth import RequestPrincipal
 from cairn.server.db import PostgresConnection, get_conn, schedule_transaction
 from cairn.server.schemas.project_schedules import CreateScheduleRequest, ScheduleActionRequest, ScheduleTiming, UpdateScheduleRequest
 from cairn.server.schemas.projects import CreateProjectRequest
+from cairn.server.schemas.libraries import SelectableLibraryManifest
 from cairn.server.schemas.test_egress import TestEgressInput, TestEgressView, egress_request_identity
 from .test_egress import inherited_input, public_project_egress, save_project_egress, stored_settings
 
 from .creation_requests import begin_creation_request, complete_creation_request
 from .libraries import (
-    bind_schedule_library_revision, get_library, get_library_version,
-    list_library_bindings, list_schedule_library_revisions,
-    resolve_current_library_revisions, validate_library_revision_content,
+    bind_schedule_library_revision, get_bound_library_revision, get_library,
+    list_library_bindings, list_library_revision_files, list_schedule_library_revisions,
+    resolve_library_selections, validate_library_revision_content, safety_file_path,
 )
 from .project_authorization import authorization_scope_projection, project_authorization_block_reason
-from .project_records import create_project_record, project_pause_draining
-from .project_resources import validate_project_resource_records
+from .project_records import _project_library_bindings, create_project_record, project_pause_draining
+from .project_resources import list_project_resource_records, validate_project_resource_records
 from .schedule_resources import (
     copy_schedule_resources_to_project, list_schedule_resource_records,
     update_schedule_resources,
@@ -92,12 +93,14 @@ def _validate_input(conn, project: CreateProjectRequest, tenant_id: str, now: da
     for value, label in ((project.authorization_expires_at, "授权期限"), (project.explore_deadline, "执行停止时间")):
         if value and timestamp(value) <= now:
             raise HTTPException(422, f"{label}已到期，需显式更新")
-    for key in project.library_keys:
-        get_library(conn, key)
 
 
-def _stored_project(project: CreateProjectRequest, egress: TestEgressView) -> str:
+def _stored_project(project: CreateProjectRequest, egress: TestEgressView, revisions) -> str:
     public = project.model_dump(mode="json", exclude={"request_id", "resource_batch_id", "resources", "test_egress"})
+    public["library_selections"] = [
+        {"library_key": item.library_key, "source": "saved", "paths": item.paths, "expected_files": None}
+        for item in revisions
+    ]
     return json.dumps(public | {"test_egress": egress.model_dump()}, ensure_ascii=False)
 
 
@@ -110,19 +113,22 @@ def _project_input(row, *, with_auth=False) -> CreateProjectRequest:
     return CreateProjectRequest(**values, test_egress=body)
 
 
-def _replace_library_bindings(conn, schedule_id: str, keys: list[str], refresh: list[str]):
-    if not set(refresh).issubset(keys):
-        raise HTTPException(422, "只能更新已选择的资料库版本")
-    existing = {revision.library_key: revision for revision in list_schedule_library_revisions(conn, schedule_id)}
-    revisions = []
-    for key in keys:
-        if key in existing and key not in refresh:
-            revisions.append(existing[key])
-        else:
-            revisions.extend(resolve_current_library_revisions(conn, [key]))
+def _check_saved_choices(project, revisions):
+    saved = {item.library_key: item.paths for item in project.library_selections}
+    frozen = {item.library_key: item.paths for item in revisions}
+    if saved != frozen or any(item.source != "saved" for item in project.library_selections):
+        raise HTTPException(409, "计划资料配置与已保存绑定不一致")
+
+
+def _replace_library_bindings(conn, schedule_id: str, selections, *, tenant_id: str, user_id: str):
+    existing = list_schedule_library_revisions(conn, schedule_id)
+    revisions = resolve_library_selections(
+        conn, selections, tenant_id=tenant_id, user_id=user_id, existing=existing,
+    )
     conn.execute("DELETE FROM project_schedule_libraries WHERE schedule_id=?", (schedule_id,))
     for revision in revisions:
         bind_schedule_library_revision(conn, schedule_id, revision)
+    return revisions
 
 
 def preview_schedule(rule: ScheduleTiming, *, project: CreateProjectRequest | None = None, now: datetime | None = None) -> dict:
@@ -176,20 +182,26 @@ def create_schedule(body: CreateScheduleRequest, principal: RequestPrincipal, *,
             egress, encrypted_auth = (None, None) if body.mode == "once" else stored_settings(
                 body.project.test_egress, tenant_id=principal.tenant_id, owner_kind="schedule", owner_id=schedule_id,
             )
+            revisions = [] if body.mode == "once" else resolve_library_selections(
+                conn, body.project.library_selections,
+                tenant_id=principal.tenant_id, user_id=principal.subject_id,
+            )
             conn.execute(
                 """INSERT INTO project_schedules(id,tenant_id,creator_id,mode,status,version,timezone,start_at,
-                   local_time,weekdays_json,end_date,max_runs,next_run_at,project_json,created_at,updated_at,test_egress_auth)
-                   VALUES(?,?,?,?,'active',1,?,?,?,?,?,?,?,?,?,?,?)""",
+                   local_time,weekdays_json,end_date,max_runs,next_run_at,project_json,created_at,updated_at,test_egress_auth,
+                   library_selection_explicit)
+                   VALUES(?,?,?,?,'active',1,?,?,?,?,?,?,?,?,?,?,?,1)""",
                 (schedule_id, principal.tenant_id, principal.subject_id, body.mode, body.timezone, body.start_at,
                  body.local_time, json.dumps(body.weekdays), body.end_date, body.max_runs, next_run,
-                 None if body.mode == "once" else _stored_project(body.project, egress), iso(current), iso(current), encrypted_auth),
+                 None if body.mode == "once" else _stored_project(body.project, egress, revisions), iso(current), iso(current), encrypted_auth),
             )
             project_id = None
             if body.mode == "once":
                 project_id = create_project_record(body.project, conn=conn, tenant_id=principal.tenant_id, creator=principal.subject_id, initial_status="pending").project.id
                 conn.execute("UPDATE project_schedules SET project_id=? WHERE id=?", (project_id, schedule_id))
             else:
-                _replace_library_bindings(conn, schedule_id, body.project.library_keys, [])
+                for revision in revisions:
+                    bind_schedule_library_revision(conn, schedule_id, revision)
                 update_schedule_resources(conn, schedule_id, batch_id=body.project.resource_batch_id, tenant_id=principal.tenant_id, user_id=principal.subject_id, created_by=principal.subject_id)
             complete_creation_request(conn, tenant_id=principal.tenant_id, user_id=principal.subject_id, operation="schedule", request_id=str(body.request_id), project_id=project_id, schedule_id=schedule_id)
     return get_schedule(schedule_id, principal)
@@ -199,14 +211,18 @@ def _library_views(conn, schedule_id):
     results = []
     for revision in list_schedule_library_revisions(conn, schedule_id):
         library = get_library(conn, revision.library_key, include_archived=True)
-        version = get_library_version(conn, revision.library_key, revision.version)
-        results.append({"library_key": revision.library_key, "library_name": library.name, "version": revision.version, "digest_sha256": revision.digest_sha256, "file_count": version.file_count})
+        files = list_library_revision_files(conn, revision)
+        results.append({"library_key": revision.library_key, "library_name": library.name,
+                        "version": revision.version, "digest_sha256": revision.digest_sha256,
+                        "file_count": len(files), "paths": revision.paths,
+                        "selection_sha256": revision.selection_sha256})
     return results
 
 
 def _view(conn, row):
     result = dict(row)
     result.pop("test_egress_auth")
+    result["library_selection_explicit"] = bool(result["library_selection_explicit"])
     result["weekdays"] = json.loads(result.pop("weekdays_json"))
     result["project"] = json.loads(result.pop("project_json")) if row["project_json"] else None
     result["resources"] = [item.model_dump() if hasattr(item, "model_dump") else dict(item) for item in list_schedule_resource_records(conn, row["id"])]
@@ -216,6 +232,18 @@ def _view(conn, row):
         result["test_egress"] = public_project_egress(project).model_dump() if project else None
         result["explore_deadline"] = project["explore_deadline"] if project else None
         result["authorization_expires_at"] = project["authorization_expires_at"] if project else None
+        result["once_project_materials_available"] = project is not None
+        if project:
+            # 单次计划的批次与库绑定已由待启动项目消费，不能从周期计划的表读取。
+            result["resources"] = [
+                {"id": item.id, "path": item.path, "kind": item.kind,
+                 "size_bytes": item.size_bytes, "digest_sha256": item.sha256,
+                 "source_name": None}
+                for item in list_project_resource_records(row["project_id"], conn=conn)
+            ]
+            result["library_bindings"] = [
+                item.model_dump() for item in _project_library_bindings(conn, row["project_id"])
+            ]
     last = conn.execute("SELECT * FROM project_schedule_occurrences WHERE schedule_id=? ORDER BY processed_at DESC,id DESC LIMIT 1", (row["id"],)).fetchone()
     result["last_result"] = dict(last) if last else None
     return result
@@ -228,6 +256,30 @@ def get_schedule(schedule_id, principal):
             raise HTTPException(404, "计划不存在")
         _access(row, principal)
         return _view(conn, row)
+
+
+def get_schedule_library_manifest(schedule_id: str, key: str, principal: RequestPrincipal) -> SelectableLibraryManifest:
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM project_schedules WHERE id=?", (schedule_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "计划不存在")
+        _access(row, principal)
+        if row["mode"] == "once":
+            bindings = list_library_bindings(conn, row["project_id"]) if row["project_id"] else []
+            binding = next((item for item in bindings if item.library_key == key), None)
+            revision = (get_bound_library_revision(conn, row["project_id"], key, binding.version)
+                        if binding else None)
+        else:
+            revision = next((item for item in list_schedule_library_revisions(conn, schedule_id)
+                             if item.library_key == key), None)
+        if revision is None:
+            raise HTTPException(404, "计划未绑定该资料库")
+        library = get_library(conn, key, include_archived=True)
+        files = list_library_revision_files(conn, revision)
+        return SelectableLibraryManifest(
+            library_key=key, library_name=library.name, file_count=len(files), files=files,
+            safety_path=safety_file_path(key),
+        )
 
 
 def list_schedules(principal):
@@ -278,19 +330,34 @@ def update_schedule(schedule_id, body: UpdateScheduleRequest, principal, *, now=
             next_run = iso(timestamp(body.start_at))
         else:
             stored_input = _project_input(row)
-            if stored_input.targets is not None and body.project.targets is None:
+            project = body.project
+            revisions = list_schedule_library_revisions(conn, schedule_id)
+            old_choices = {item.library_key: (item.version, item.paths) for item in revisions}
+            choices_supplied = "library_selections" in project.model_fields_set
+            if not choices_supplied:
+                _check_saved_choices(stored_input, revisions)
+                project = project.model_copy(update={"library_selections": stored_input.library_selections})
+            if stored_input.targets is not None and project.targets is None:
                 raise HTTPException(422, "已有显式范围计划必须保留 targets，不能在编辑中改为 Origin 来源")
-            _validate_input(conn, body.project, row["tenant_id"], current)
+            _validate_input(conn, project, row["tenant_id"], current)
             egress, encrypted_auth = stored_settings(
-                body.project.test_egress, tenant_id=row["tenant_id"], owner_kind="schedule", owner_id=schedule_id,
+                project.test_egress, tenant_id=row["tenant_id"], owner_kind="schedule", owner_id=schedule_id,
                 current=TestEgressView.model_validate(json.loads(row["project_json"])["test_egress"]),
                 encrypted_auth=row["test_egress_auth"],
             )
             conn.execute("UPDATE project_schedules SET test_egress_auth=? WHERE id=?", (encrypted_auth, schedule_id))
-            project_json = _stored_project(body.project, egress)
-            _replace_library_bindings(conn, schedule_id, body.project.library_keys, body.refresh_library_keys)
-            update_schedule_resources(conn, schedule_id, resource_ids=body.resource_ids, batch_id=body.project.resource_batch_id, tenant_id=row["tenant_id"], user_id=principal.subject_id, created_by=principal.subject_id)
-            next_run, status, reason = _future_state(body, body.project, current, row["generated_count"])
+            if choices_supplied:
+                revisions = _replace_library_bindings(conn, schedule_id, project.library_selections,
+                                                      tenant_id=row["tenant_id"], user_id=principal.subject_id)
+            project_json = _stored_project(project, egress, revisions)
+            new_choices = {item.library_key: (item.version, item.paths) for item in revisions}
+            # 未改变旧计划的选择时保留 legacy；空旧计划需显式表示改为空选择。
+            explicit = bool(row["library_selection_explicit"] or body.library_selection_explicit
+                            or old_choices != new_choices)
+            conn.execute("UPDATE project_schedules SET library_selection_explicit=? WHERE id=?",
+                         (int(explicit), schedule_id))
+            update_schedule_resources(conn, schedule_id, resource_ids=body.resource_ids, batch_id=project.resource_batch_id, tenant_id=row["tenant_id"], user_id=principal.subject_id, created_by=principal.subject_id)
+            next_run, status, reason = _future_state(body, project, current, row["generated_count"])
         if body.mode == "once":
             status, reason = "active", None
         elif row["status"] == "paused" and status == "active":
@@ -339,9 +406,8 @@ def _validate_pending(conn, project, current, *, require_scope=True):
         raise HTTPException(409, EMPTY_SCOPE_REASON)
     validate_project_resource_records(conn, project["id"])
     for binding in list_library_bindings(conn, project["id"]):
-        revision = get_library_version(conn, binding.library_key, binding.version)
-        from cairn.server.schemas.libraries import LibraryRevisionRef
-        validate_library_revision_content(conn, LibraryRevisionRef(library_key=binding.library_key, version=binding.version, digest_sha256=revision.digest_sha256))
+        revision = get_bound_library_revision(conn, project["id"], binding.library_key, binding.version)
+        validate_library_revision_content(conn, revision)
 
 
 def _occurrence(conn, row, key, scheduled_at, current, status, *, project_id=None, reason=None):
@@ -403,6 +469,7 @@ def _consume_locked(conn, row, current, *, force=False):
     if project_input.targets == []:
         raise HTTPException(409, EMPTY_SCOPE_REASON)
     revisions = list_schedule_library_revisions(conn, row["id"])
+    _check_saved_choices(project_input, revisions)
     for revision in revisions:
         validate_library_revision_content(conn, revision)
     last_project = _lock_project(conn, row["last_project_id"]) if row["last_project_id"] else None
@@ -416,7 +483,11 @@ def _consume_locked(conn, row, current, *, force=False):
             generated = row["generated_count"]
             project_id = row["last_project_id"]
         else:
-            detail = create_project_record(_project_input(row, with_auth=True), conn=conn, tenant_id=row["tenant_id"], creator=row["creator_id"], library_revisions=revisions)
+            detail = create_project_record(
+                _project_input(row, with_auth=True), conn=conn, tenant_id=row["tenant_id"],
+                creator=row["creator_id"], library_revisions=revisions,
+                library_selection_explicit=bool(row["library_selection_explicit"]),
+            )
             project_id = detail.project.id
             copy_schedule_resources_to_project(conn, row["id"], project_id, created_by=row["creator_id"])
             _occurrence(conn, row, due, due, current, "started", project_id=project_id)

@@ -1,6 +1,6 @@
 import { api } from './client'
 import type { TestEgressInput, TestEgressPublic } from './testEgress'
-import type { CreateProjectRequest, ProjectLibraryBinding, ProjectResourceKind } from './types'
+import type { CreateProjectRequest, LibraryManifest, ProjectLibraryBinding, ProjectResourceKind } from './types'
 
 export type ScheduleMode = 'once' | 'daily' | 'weekly'
 export type ScheduleAction = 'cancel' | 'start_now' | 'pause' | 'resume' | 'disable'
@@ -22,7 +22,7 @@ export interface UpdateScheduleRequest extends ScheduleRules {
   version: number
   project?: CreateScheduleRequest['project']
   resource_ids?: string[]
-  refresh_library_keys?: string[]
+  library_selection_explicit?: boolean
   explore_deadline?: string | null
 }
 export interface ScheduleOccurrence {
@@ -50,6 +50,8 @@ export interface ProjectSchedule extends ScheduleRules {
   block_reason: string | null
   explore_deadline?: string | null
   authorization_expires_at?: string | null
+  once_project_materials_available?: boolean
+  library_selection_explicit?: boolean
   created_at: string
   updated_at: string
   project: (Omit<CreateProjectRequest, 'test_egress'> & { test_egress?: TestEgressPublic }) | null
@@ -59,7 +61,7 @@ export interface ProjectSchedule extends ScheduleRules {
     kind: ProjectResourceKind
     size_bytes: number
     digest_sha256: string
-    source_name: string
+    source_name: string | null
   }>
   library_bindings: ProjectLibraryBinding[]
   last_result: ScheduleOccurrence | null
@@ -81,6 +83,8 @@ export interface CreationRequestResult extends CreationRequestReference {
 const schedulePath = (id: string) => `/project-schedules/${encodeURIComponent(id)}`
 export const listProjectSchedules = () => api<ProjectSchedule[]>('GET', '/project-schedules')
 export const getProjectSchedule = (id: string) => api<ProjectSchedule>('GET', schedulePath(id))
+export const getScheduleLibraryManifest = (id: string, key: string) =>
+  api<LibraryManifest>('GET', `${schedulePath(id)}/library-manifests/${encodeURIComponent(key)}`)
 export const createProjectSchedule = (body: CreateScheduleRequest) =>
   api<ProjectSchedule>('POST', '/project-schedules', body)
 export const updateProjectSchedule = (id: string, body: UpdateScheduleRequest) =>

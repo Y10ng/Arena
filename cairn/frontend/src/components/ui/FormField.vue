@@ -75,9 +75,9 @@ const controlAttrs = computed(() => ({
 
 .ui-form-field__label {
   color: var(--text);
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
   font-weight: var(--font-medium);
-  line-height: var(--leading-snug);
+  line-height: var(--leading-normal);
 }
 
 .ui-form-field__required,
@@ -93,15 +93,15 @@ const controlAttrs = computed(() => ({
 .ui-form-field__error {
   margin: var(--space-0);
   font-size: var(--text-sm);
-  line-height: var(--leading-snug);
+  line-height: var(--leading-normal);
 }
 
 .ui-form-field__hint {
   color: var(--text-muted);
 }
 
+.ui-form-field__hint,
 .ui-form-field__error {
-  font-size: var(--text-md);
   overflow-wrap: anywhere;
 }
 </style>

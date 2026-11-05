@@ -30,6 +30,9 @@ def common_script(tmp_path: Path) -> Path:
     deploy.mkdir(parents=True)
     common = deploy / "common.sh"
     shutil.copy2(ROOT / "deploy/common.sh", common)
+    (deploy / "migrate_worker_config.py").write_text(
+        'import os\nraise SystemExit(int(os.environ.get("MIGRATE_EXIT", "0")))\n', encoding="utf-8",
+    )
     wrapper = deploy / "test-common.sh"
     wrapper.write_text(
         f"source {shlex.quote(str(common))}\nPYTHON_BIN={shlex.quote(sys.executable)}\n",
@@ -248,9 +251,9 @@ def test_deploy_scripts_use_server_then_dispatcher_runtime_settings() -> None:
     assert '"${SERVER_URL}/health"' in status
     assert 'write_server_endpoint' in start and 'load_active_server_endpoint' in status
     managed_start = start.index('start_managed_postgres')
-    managed_image = start.index('ensure_dispatch_worker_image', managed_start)
+    managed_image = start.index('ensure_dispatch_worker_image')
     managed_sync = start.index('synchronize_managed_postgres_password', managed_start)
-    assert managed_start < managed_image < managed_sync
+    assert managed_image < managed_start < managed_sync
     assert start.index('"${CAIRN_BIN}" db status') < start.index('ensure_local_secrets')
     assert start.index('ensure_local_secrets') < start.index('stage_initial_admin_password')
     assert start.index('stage_initial_admin_password') < start.index('auth bootstrap-runtime')
@@ -267,7 +270,7 @@ def test_deploy_scripts_use_server_then_dispatcher_runtime_settings() -> None:
     assert '\\getenv new_password POSTGRES_PASSWORD' in common
     assert "ALTER ROLE cairn WITH PASSWORD" in common and "new_password" in common
     assert 'docker image inspect "${image}"' in common
-    assert 'container/Dockerfile' in common
+    assert '"${context}/Dockerfile"' in common
     assert "startup-healthcheck-only" not in start
     assert '"${DEPLOY_DIR}/verify.sh"' not in start
     assert 'write_pid_metadata "${DISPATCHER_PID_FILE}"' in start
@@ -297,8 +300,8 @@ def test_deploy_scripts_use_server_then_dispatcher_runtime_settings() -> None:
     assert 'postgres.env.example' in common
     assert 'POSTGRES_ENV_FILE="${RUNTIME_DIR}/postgres.env"' in common
     assert 'migrate_worker_config.py' in install
-    assert 'if "${ROOT_DIR}/cairn/.venv/bin/python"' in install
-    assert 'Server 可继续启动' in install
+    assert '"${PYTHON_BIN}" "${DEPLOY_DIR}/migrate_worker_config.py"' in install
+    assert 'Server 可继续启动' not in install
     assert 'start.sh --with-dispatcher' not in install
     assert '无需再次执行启动命令' in install
     assert "docker info" not in install and "docker image inspect" not in install
@@ -312,7 +315,7 @@ def test_deploy_scripts_use_server_then_dispatcher_runtime_settings() -> None:
     assert "CAIRN_SESSION_COOKIE_SECURE" in env_example
     assert "CAIRN_MODEL_CREDENTIAL_KEYRING_FILE" in env_example
     assert "随机管理员密码" in install
-    assert "直接运行 install.sh 只用于升级或刷新依赖" in install
+    assert "直接运行 install.sh 只用于安装锁定依赖和迁移配置" in install
     assert "不设置 CAIRN_DATABASE_URL" in env_example
     assert "External PostgreSQL 模式" in env_example
     assert "CAIRN_POSTGRES_PASSWORD=\n" in postgres_env_example
@@ -633,6 +636,7 @@ def offline_verification_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     "version_suffix", "version_stderr_only", "manifest_agent_version", "manifest_sdk_version",
     "self_check_exit", "self_check_json", "self_check_status", "self_check_engine",
     "self_check_sdk", "self_check_online", "self_check_numeric_offline", "self_check_array",
+    "executor_missing", "gateway_entrypoint", "gateway_dependencies",
 ])
 def test_full_verification_uses_offline_pi_checks_and_propagates_failures(
     offline_verification_root: Path, monkeypatch: pytest.MonkeyPatch, capsys, failure: str | None,
@@ -648,8 +652,20 @@ def test_full_verification_uses_offline_pi_checks_and_propagates_failures(
     def command(args, *, timeout=60):
         calls.append(args)
         if args[1:3] == ["image", "inspect"]:
+            if args[3] == "arena-traffic-gateway:local":
+                entrypoint = ["mitmdump", "-s", "/opt/cairn/traffic/ingress.py", "-s", "/opt/cairn/traffic/capture.py"]
+                return subprocess.CompletedProcess(args, 0, json.dumps([] if failure == "gateway_entrypoint" else entrypoint), "")
             return subprocess.CompletedProcess(args, int(failure == "inspect_exit"),
                                                "sha256:fixture windows amd64" if failure == "platform" else "sha256:fixture linux amd64", "")
+        assert args[:6] == ["docker", "run", "--rm", "--network", "none", "--entrypoint"]
+        if args[6] == "python3":
+            assert args[7] == "arena-worker:local"
+            assert "/opt/cairn/task-executor/server.py" in args[-1] and "certutil" in args[-1]
+            return subprocess.CompletedProcess(args, int(failure == "executor_missing"), "", "")
+        if args[6] == "python":
+            assert args[7] == "arena-traffic-gateway:local"
+            assert "mitmproxy, pproxy" in args[-1] and "egress.py" in args[-1]
+            return subprocess.CompletedProcess(args, int(failure == "gateway_dependencies"), "", "")
         assert args[:7] == ["docker", "run", "--rm", "--network", "none", "--entrypoint", "cairn-agent"]
         assert args[7] == "arena-worker:local"
         assert len(args) == 9
@@ -687,7 +703,8 @@ def test_full_verification_uses_offline_pi_checks_and_propagates_failures(
     if failure is None:
         assert result == 0
         assert "验收通过" in captured.out
-        assert [args[-1] for args in calls[1:]] == ["--version", "--self-check"]
+        assert len(calls) == 6
+        assert "gateway_image=arena-traffic-gateway:local offline_check=ok" in captured.out
     else:
         assert result == 1
         assert "验收失败" in captured.err
@@ -695,13 +712,15 @@ def test_full_verification_uses_offline_pi_checks_and_propagates_failures(
         expected_error = (
             "镜像不存在或不可读" if failure == "inspect_exit" else
             "镜像平台异常" if failure == "platform" else
+            "executor 服务" if failure == "executor_missing" else
+            "采集镜像" if failure.startswith("gateway_") else
             "离线自检" if failure.startswith("self_check") else "版本不匹配或命令失败"
         )
         assert expected_error in captured.err
     expected_checks = [] if failure in {"inspect_exit", "platform"} else ["--version"]
-    if failure is None or failure.startswith("self_check"):
+    if failure is None or failure.startswith(("self_check", "executor_", "gateway_")):
         expected_checks.append("--self-check")
-    assert [args[-1] for args in calls[1:]] == expected_checks
+    assert [args[-1] for args in calls if "cairn-agent" in args] == expected_checks
     assert all("--request" not in args and "--env-file" not in args for args in calls)
 
 
@@ -755,15 +774,16 @@ def test_worker_image_pi_labels_fail_closed_using_shell_stub(
     (common_script.parent / "verify_deployment.py").write_text(
         'import os\nfrom pathlib import Path\n'
         'EXPECTED_CAIRN_AGENT_VERSION = "1.0.0"\nEXPECTED_PI_SDK_VERSION = "0.73.0"\n'
+        'def verify_gateway_image(image): raise AssertionError("unexpected gateway")\n'
         'def verify_image(image, version, sdk):\n'
-        '    assert (image, version, sdk) == ("sha256:candidate", "1.0.0", "0.73.0")\n'
+        '    assert (version, sdk) == ("1.0.0", "0.73.0")\n'
         '    with Path(os.environ["LOG"]).open("a") as log:\n'
         '        log.write("verify candidate\\n")\n',
         encoding="utf-8",
     )
     command = r'''
 source "$1"
-resolve_dispatch_worker_images() { printf '%s\n' "$IMAGE"; }
+resolve_dispatch_worker_images() { printf 'worker\t%s\n' "$IMAGE"; }
 docker() {
   printf '%s\n' "$*" >>"$LOG"
   if [[ "$1 $2" == "image inspect" ]]; then
@@ -834,7 +854,8 @@ def test_worker_image_resolution_uses_dispatch_registries(
         assert "Worker 配置加载失败" in result.stderr
     else:
         assert result.returncode == 0, result.stderr
-        assert result.stdout.splitlines() == expected
+        assert result.stdout.splitlines() == [*(f"worker\t{image}" for image in expected),
+                                              "gateway\tarena-traffic-gateway:local"]
     assert path.read_text() == content
 
 
@@ -849,7 +870,9 @@ def test_worker_refresh_promotes_only_verified_candidate(
     (common_script.parent / "verify_deployment.py").write_text(
         'import os\nfrom pathlib import Path\n'
         'EXPECTED_CAIRN_AGENT_VERSION = "1.0.0"\nEXPECTED_PI_SDK_VERSION = "0.73.0"\n'
+        'def verify_gateway_image(image): raise AssertionError("unexpected gateway")\n'
         'def verify_image(image, version, sdk):\n'
+        '    if image != "sha256:candidate": return\n'
         '    with Path(os.environ["LOG"]).open("a") as log:\n'
         '        log.write("verify candidate\\n")\n'
         '    raise SystemExit(int(os.environ["CHECK_EXIT"]))\n',
@@ -857,7 +880,7 @@ def test_worker_refresh_promotes_only_verified_candidate(
     )
     command = r'''
 source "$1"
-resolve_dispatch_worker_images() { printf '%s\n' arena-worker:local custom:profile; }
+resolve_dispatch_worker_images() { printf 'worker\t%s\n' arena-worker:local custom:profile; }
 docker() {
   printf '%s\n' "$*" >>"$LOG"
   case "$1 $2" in
@@ -890,15 +913,21 @@ ensure_dispatch_worker_image refresh
     assert not list((common_script.parent.parent / "runtime").glob(".worker-image.*"))
     if not expected:
         assert calls[-2:] == ["verify candidate", "tag sha256:candidate arena-worker:local"]
-        assert "自定义 Worker 未自动更新: custom:profile" in result.stderr
+        assert "自定义 worker 镜像未自动构建或更新: custom:profile" in result.stderr
     else:
         assert not any(line.startswith("tag ") for line in calls)
 
 
 def test_custom_only_worker_refresh_does_not_build_or_retag(common_script: Path) -> None:
+    (common_script.parent / "verify_deployment.py").write_text(
+        'EXPECTED_CAIRN_AGENT_VERSION = "1.0.0"\nEXPECTED_PI_SDK_VERSION = "0.73.0"\n'
+        'def verify_image(*args): pass\n'
+        'def verify_gateway_image(image): raise AssertionError("unexpected gateway")\n',
+        encoding="utf-8",
+    )
     command = r'''
 source "$1"
-resolve_dispatch_worker_images() { printf '%s\n' custom:profile; }
+resolve_dispatch_worker_images() { printf 'worker\t%s\n' custom:profile; }
 docker() {
   [[ "$1 $2 $3" == "image inspect custom:profile" ]] || return 95
   if [[ "$#" == 5 ]]; then printf '%s\n' 'pi 1.0.0 0.73.0'; fi
@@ -910,8 +939,95 @@ ensure_dispatch_worker_image refresh
         text=True, capture_output=True, check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert "自定义 Worker 未自动更新: custom:profile" in result.stderr
-    assert "默认本地 Worker 已准备" not in result.stdout
+    assert "自定义 worker 镜像未自动构建或更新: custom:profile" in result.stderr
+    assert "默认本地镜像已准备" not in result.stdout
+
+
+@pytest.mark.parametrize("mode,gateway,missing,build_exit,check_exit,migrate_exit,expected", [
+    ("missing", "arena-traffic-gateway:local", False, 0, 0, 0, 0),
+    ("missing", "arena-traffic-gateway:local", True, 0, 0, 0, 0),
+    ("refresh", "arena-traffic-gateway:local", False, 0, 0, 0, 0),
+    ("refresh", "arena-traffic-gateway:local", False, 24, 0, 0, 24),
+    ("refresh", "arena-traffic-gateway:local", False, 0, 25, 0, 25),
+    ("missing", "arena-traffic-gateway:local", False, 0, 25, 0, 25),
+    ("refresh", "custom:gateway", False, 0, 0, 0, 0),
+    ("refresh", "custom:gateway", True, 0, 0, 0, 1),
+    ("missing", "arena-traffic-gateway:local", False, 0, 0, 26, 26),
+])
+def test_research_and_gateway_preparation_share_fail_closed_entry(
+    tmp_path: Path, common_script: Path, mode: str, gateway: str, missing: bool,
+    build_exit: int, check_exit: int, migrate_exit: int, expected: int,
+) -> None:
+    log = tmp_path / "images.log"
+    log.touch()
+    (common_script.parent / "verify_deployment.py").write_text(
+        'import os\nfrom pathlib import Path\n'
+        'EXPECTED_CAIRN_AGENT_VERSION = "1.0.0"\nEXPECTED_PI_SDK_VERSION = "0.73.0"\n'
+        'def record(value):\n'
+        '    with Path(os.environ["LOG"]).open("a") as log: log.write(value + "\\n")\n'
+        'def verify_image(image, version, sdk): record("verify worker " + image)\n'
+        'def verify_gateway_image(image):\n'
+        '    record("verify gateway " + image)\n'
+        '    raise SystemExit(int(os.environ["CHECK_EXIT"]))\n',
+        encoding="utf-8",
+    )
+    command = r'''
+source "$1"
+resolve_dispatch_worker_images() { printf 'worker\tarena-worker:local\ngateway\t%s\n' "$GATEWAY"; }
+docker() {
+  printf '%s\n' "$*" >>"$LOG"
+  case "$1 $2" in
+    "image inspect")
+      if [[ "$#" == 3 ]]; then
+        [[ "$3" != "$GATEWAY" ]] || return "$MISSING"
+      else
+        [[ "$3" == arena-worker:local || "$3" == sha256:worker ]] || return 96
+        printf '%s\n' 'pi 1.0.0 0.73.0'
+      fi;;
+    "build -f")
+      role=worker
+      if [[ "$3" == */traffic-gateway/Dockerfile ]]; then
+        [[ "$BUILD_EXIT" == 0 ]] || return "$BUILD_EXIT"
+        role=gateway
+      fi
+      while [[ "$1" != "--iidfile" ]]; do shift; done
+      printf 'sha256:%s\n' "$role" >"$2";;
+    "tag sha256:worker") [[ "$3" == arena-worker:local ]];;
+    "tag sha256:gateway") [[ "$3" == arena-traffic-gateway:local ]];;
+    *) return 95;;
+  esac
+}
+ensure_runtime_dirs
+ensure_dispatch_worker_image "$MODE"
+printf 'ready\n' >>"$LOG"
+'''
+    result = subprocess.run(
+        ["bash", "-c", command, "bash", str(common_script)],
+        env={**os.environ, "LOG": str(log), "MODE": mode, "GATEWAY": gateway,
+             "MISSING": str(int(missing)), "BUILD_EXIT": str(build_exit),
+             "CHECK_EXIT": str(check_exit), "MIGRATE_EXIT": str(migrate_exit)},
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == expected, result.stderr
+    calls = log.read_text().splitlines()
+    assert ("ready" in calls) == (expected == 0)
+    assert not any("--no-cache" in call or call.startswith(("pull ", "prune ", "rm ")) for call in calls)
+    if migrate_exit:
+        assert calls == []
+        return
+    if gateway == "custom:gateway":
+        assert not any("traffic-gateway/Dockerfile" in call or call.startswith("tag sha256:gateway") for call in calls)
+    else:
+        should_build = mode == "refresh" or missing
+        assert sum("traffic-gateway/Dockerfile" in call for call in calls) == int(should_build)
+        assert ("tag sha256:gateway arena-traffic-gateway:local" in calls) == (should_build and expected == 0)
+        if should_build and expected == 0:
+            assert calls.index("verify gateway sha256:gateway") < calls.index("tag sha256:gateway arena-traffic-gateway:local")
+        if not should_build:
+            assert "verify gateway arena-traffic-gateway:local" in calls
+    if mode == "refresh" and gateway == "arena-traffic-gateway:local":
+        assert calls.index("verify worker sha256:worker") < calls.index("tag sha256:worker arena-worker:local")
+    assert not list((common_script.parent.parent / "runtime").glob(".worker-image.*"))
 
 
 def test_placeholder_detection_rejects_unconfigured_files(tmp_path: Path) -> None:

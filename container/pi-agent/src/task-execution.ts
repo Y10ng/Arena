@@ -92,11 +92,8 @@ export async function executeTaskCommand(
       response.on("error", () => fail("execution_disconnected"));
       response.on("end", () => { if (!settled) fail("execution_result_missing"); });
     });
-    // 执行端负责命令截止；客户端只为失联提供额外的有界终点，不回退本地执行。
-    request.setTimeout((options.timeout + 5) * 1000, () => {
-      fail("execution_disconnected");
-      request.destroy();
-    });
+    // 执行端和宿主共同负责扣除热暂停后的截止；Node 墙钟定时器会在解冻首帧误杀原连接。
+    // 失联仍由连接错误、AbortSignal、采集 watchdog 和宿主执行预算收口，不回退本地执行。
     request.on("error", () => fail(options.signal?.aborted ? "cancelled" : "execution_unavailable"));
     request.end(body);
   });

@@ -4,6 +4,7 @@ import {
   customHeaderError,
   emptyTenantModelDraft,
   protocolDefaultEndpoints,
+  pricingError,
   tenantModelDraft,
   tenantModelDraftIsValid,
 } from './tenantModelsModel'
@@ -39,6 +40,7 @@ describe('tenant Models state helpers', () => {
       inference_endpoint: null,
       model_name: '',
       enabled: true,
+      pricing: {},
     })
     const draft = tenantModelDraft(model('m1'))
     expect(draft).toEqual({
@@ -51,6 +53,7 @@ describe('tenant Models state helpers', () => {
       inference_endpoint: null,
       model_name: 'model-a',
       enabled: true,
+      pricing: {},
     })
     draft.custom_headers[0]!.value = 'changed'
     expect(model('m1').custom_headers[0]!.value).toBe('café-route')
@@ -77,6 +80,18 @@ describe('tenant Models state helpers', () => {
       custom_headers: [{ name: 'X-Route', value: '无法发送' }],
     })).toContain('HTTP 无法发送')
     expect(tenantModelDraftIsValid({ ...draft, model_name: ' ' })).toBe(false)
+  })
+
+  it('preserves decimal prices and distinguishes explicit zero from unpriced', () => {
+    const persisted = { ...model('m1'), pricing: { currency: 'USD', input: '0', output: '0.000000000001', cache_read: null } }
+    const draft = tenantModelDraft(persisted)
+    expect(draft.pricing).toEqual(persisted.pricing)
+    draft.pricing.input = null
+    expect(persisted.pricing.input).toBe('0')
+    expect(pricingError(draft.pricing)).toBe('')
+    expect(pricingError({ input: '0' })).toBe('')
+    for (const input of ['-1', 'NaN', 'Infinity', '1e3', '']) expect(pricingError({ input })).not.toBe('')
+    expect(pricingError({ currency: 'usd' })).not.toBe('')
   })
 
   it('returns the protocol-specific default endpoints', () => {

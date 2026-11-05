@@ -3,7 +3,7 @@ import type { BadgeTone } from '@/components/ui'
 import type { VerificationOutcome, VerificationStatus } from '@/api/verificationRequests'
 
 export function verificationListQuery(query: LocationQuery): Record<string, string> {
-  return Object.fromEntries(['external_id', 'mode', 'execution_status', 'outcome', 'offset', 'scroll'].flatMap((key) =>
+  return Object.fromEntries(['source_number', 'external_id', 'mode', 'execution_status', 'outcome', 'offset', 'scroll'].flatMap((key) =>
     typeof query[key] === 'string' ? [[key, query[key] as string]] : [],
   ))
 }

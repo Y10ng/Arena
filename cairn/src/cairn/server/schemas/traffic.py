@@ -6,7 +6,7 @@ import base64
 import binascii
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
 
 from .test_egress import TestEgressView
 
@@ -22,9 +22,11 @@ class TrafficSummaryQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     limit: int = Field(default=50, ge=1, le=200)
-    cursor: str | None = Field(default=None, min_length=1, max_length=2048)
+    page: int = Field(default=1, ge=1)
     project_id: str | None = Field(default=None, min_length=1, max_length=200)
     flow_id: str | None = Field(default=None, min_length=1, max_length=200)
+    vulnerability_id: str | None = Field(default=None, min_length=1, max_length=200)
+    observation_id: str | None = Field(default=None, min_length=1, max_length=200)
     task_run_id: str | None = Field(default=None, min_length=1, max_length=200)
     method: str | None = Field(default=None, min_length=1, max_length=100)
     host: str | None = Field(default=None, min_length=1, max_length=2048)
@@ -34,6 +36,13 @@ class TrafficSummaryQuery(BaseModel):
     status_family: Literal["1xx", "2xx", "3xx", "4xx", "5xx", "6xx", "7xx", "8xx", "9xx"] | None = None
     status_code: int | None = Field(default=None, ge=100, le=999)
     associated: bool | None = None
+    include_record_evidence: bool = False
+
+    @model_validator(mode="after")
+    def validate_record_scope(self):
+        if self.include_record_evidence and not (self.vulnerability_id and self.observation_id):
+            raise ValueError("record_scope_requires_vulnerability_and_observation")
+        return self
     error_code: str | None = Field(default=None, min_length=1, max_length=100)
 
     @field_validator("method", "host")
@@ -45,7 +54,8 @@ class TrafficSummaryQuery(BaseModel):
 
 
 class TrafficAssociationLocation(BaseModel):
-    observation_id: str
+    observation_id: str | None
+    source: Literal["observation", "record"]
     vulnerability_id: str
     status: str
     task_run_id: str | None
@@ -73,6 +83,8 @@ class TrafficSummary(BaseModel):
     host: str
     url: str
     path: str
+    display_host: str
+    display_target: str
     connection_host: str
     address_issue: str | None
     status_code: int | None
@@ -85,10 +97,10 @@ class TrafficSummary(BaseModel):
 
 class TrafficSummaryPage(BaseModel):
     items: list[TrafficSummary]
-    next_cursor: str | None
-    previous_cursor: str | None
-    has_more: bool
-    has_previous: bool
+    page: int
+    limit: int
+    total: int
+    total_pages: int
 
 
 class TrafficBodySeal(BaseModel):
@@ -99,15 +111,51 @@ class TrafficBodySeal(BaseModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class TrafficOwner(str):
+    """服务内部的带类型 owner key；来源项目不能替代会话执行归属。"""
+
+    def __new__(cls, project_id: str | None = None, *, conversation_id: str | None = None):
+        if (project_id is None) == (conversation_id is None):
+            raise ValueError("traffic_exact_owner_required")
+        value = super().__new__(cls, ("p:" + project_id) if project_id is not None else ("c:" + conversation_id))
+        value.project_id = project_id
+        value.conversation_id = conversation_id
+        return value
+
+    @property
+    def fields(self) -> dict:
+        return {"conversation_id": self.conversation_id} if self.conversation_id is not None else {"project_id": self.project_id}
+
+    @classmethod
+    def normalize(cls, value):
+        return value if isinstance(value, cls) else cls(project_id=value)
+
+    @classmethod
+    def from_binding(cls, value):
+        return cls(project_id=value.get("project_id"), conversation_id=value.get("conversation_id"))
+
+
 class TrafficScope(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     id: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9_-]+$")
-    project_id: str = Field(min_length=1, max_length=200)
+    project_id: str | None = Field(default=None, min_length=1, max_length=200)
+    conversation_id: str | None = Field(default=None, min_length=1, max_length=200)
     task_run_id: str = Field(min_length=1, max_length=200)
     generation: int = Field(ge=0)
     container_id: str = Field(min_length=1, max_length=255)
     test_egress: TestEgressView = Field(default_factory=TestEgressView)
+
+    @model_validator(mode="after")
+    def exact_owner(self):
+        TrafficOwner.from_binding(self.__dict__)
+        return self
+
+    @model_serializer(mode="wrap")
+    def serialize_owner(self, handler):
+        data = handler(self)
+        # 不给旧 project scope 添入 null 字段，保留已接受记录的字节与 hash 合同。
+        return {key: value for key, value in data.items() if key not in {"project_id", "conversation_id"} or value is not None}
 
 
 class TrafficMessage(BaseModel):

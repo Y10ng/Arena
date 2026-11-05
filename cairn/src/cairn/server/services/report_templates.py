@@ -9,7 +9,6 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 
-from cairn.report_template_contract import parse_report_template, requires_single_vulnerability, supports_single_vulnerability
 from cairn.server.db import PostgresConnection
 from cairn.server.report_template_defaults_v60 import DEFAULT_REPORT_TEMPLATE_KEY_V60
 from cairn.server.report_template_defaults_v69 import DEFAULT_SINGLE_REPORT_TEMPLATE_KEY, SINGLE_REPORT_PROFILE
@@ -41,16 +40,14 @@ def _template_model(conn: PostgresConnection, row) -> ReportTemplate:
         (row["key"],),
     ).fetchall()
     content = row["markdown_content"] or ""
-    validation_error = None
-    try:
-        parse_report_template(content)
-    except ValueError as exc:
-        validation_error = str(exc)
+    validation_error = None if content.strip() else "模板正文不能为空"
+    if len(content.encode("utf-8")) > 500_000:
+        validation_error = "模板正文不能超过 500000 个 UTF-8 字节"
     item = ReportTemplate(
         **dict(row),
         compatibility_profiles=[str(profile["profile_id"]) for profile in profiles],
         is_default=row["key"] == DEFAULT_REPORT_TEMPLATE_KEY_V60,
-        supports_single_vulnerability=validation_error is None and supports_single_vulnerability(content),
+        supports_single_vulnerability=False,
         validation_error=validation_error,
     )
     if item.markdown_content is not None and report_template_digest(item.markdown_content) != item.digest_sha256:
@@ -183,10 +180,6 @@ def require_report_template_profile(
     template = _template_model(conn, _template_row(conn, template_key, lock="FOR SHARE"))
     if template.markdown_content is None or not template.markdown_content.strip():
         raise HTTPException(409, "assessment_report_template_content_missing")
-    if profile_id not in template.compatibility_profiles or (
-        profile_id != SINGLE_REPORT_PROFILE and requires_single_vulnerability(template.markdown_content)
-    ):
-        raise HTTPException(409, "assessment_report_template_incompatible")
     if template.validation_error is not None:
         raise HTTPException(409, {"code": "assessment_report_template_invalid", "message": template.validation_error})
     return template

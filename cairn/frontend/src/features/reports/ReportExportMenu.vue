@@ -63,81 +63,32 @@
       @close-auto-focus="restoreFocus"
     >
       <div class="report-export__body">
-        <p v-if="loadingCatalog" role="status">正在读取报告模板…</p>
-        <template v-else>
-          <div class="report-export__options">
-            <FormField v-if="availableTemplates.length" label="报告模板" :for="selectId">
-              <Select
-                :id="selectId"
-                v-model="selectedTemplate"
-                :options="
-                  availableTemplates.map((item) => ({
-                    value: item.key,
-                    label: item.name + (item.is_default ? '（系统默认）' : ''),
-                  }))
-                "
-                :disabled="exporting"
-              />
-            </FormField>
-            <FormField label="导出格式" :for="`${selectId}-format`">
-              <Select
-                :id="`${selectId}-format`"
-                :model-value="selectedFormat"
-                :options="reportExportFormats"
-                :disabled="exporting"
-                @update:model-value="selectedFormat = $event as ReportExportFormat"
-              />
-            </FormField>
-          </div>
-          <p v-if="!availableTemplates.length && !error" role="alert">
-            没有适用于单漏洞的报告模板。
-          </p>
-          <p v-else-if="availableTemplates.length && !selectedTemplate" role="status">
-            请选择报告模板。
-          </p>
-          <p v-if="excludedTemplates.length" class="report-export__status">
-            仅显示适用于单漏洞的模板。
-          </p>
-        </template>
-        <slot name="preparation" :template-key="selectedTemplate" />
-        <section v-if="selectedTemplate" class="report-export__preview" aria-label="报告预览">
-          <div class="report-export__preview-head">
-            <h3>报告预览</h3>
-            <Button
-              variant="ghost"
-              size="sm"
-              :loading="previewLoading"
-              :disabled="exporting"
-              @click="loadPreview"
-              >刷新预览</Button
-            >
-          </div>
-          <p v-if="previewLoading" role="status">正在读取预览…</p>
-          <details v-else-if="previewError" class="report-export__error" open>
-            <summary>预览读取失败</summary>
-            <p>{{ previewError }}</p>
-          </details>
-          <SafeReportMarkdown v-else-if="previewMarkdown" :content="previewMarkdown" />
-        </section>
+        <slot name="preparation" />
+        <ReportReader embedded class="report-export__preview" :identity="JSON.stringify([identity, previewRevision])" :content="previewMarkdown" :ready="!previewLoading && !previewError && Boolean(previewMarkdown)">
+          <template #title><h2>报告预览</h2></template>
+          <template #actions><Button variant="ghost" size="sm" :loading="previewLoading" :disabled="exporting" @click="loadPreview">刷新预览</Button></template>
+          <template #state>
+            <p v-if="previewLoading" role="status">正在读取预览…</p>
+            <details v-else-if="previewError" class="report-export__error" open><summary>预览读取失败</summary><p>{{ previewError }}</p></details>
+            <p v-else>尚未读取到报告正文。</p>
+          </template>
+        </ReportReader>
         <details v-if="error" class="report-export__error" open role="alert">
           <summary>导出失败</summary>
           <p>{{ error }}</p>
         </details>
       </div>
       <template #footer>
-        <Button variant="ghost" @click="closeDialog(false)">{{
+        <div class="report-export__format">
+          <label :for="`${selectId}-format`">导出格式</label>
+          <Select :id="`${selectId}-format`" class="report-export__format-select" :model-value="selectedFormat" :options="reportExportFormats" :disabled="exporting" @update:model-value="selectedFormat = $event as ReportExportFormat" />
+        </div>
+        <Button variant="secondary" @click="closeDialog(false)">{{
           exporting ? '取消导出' : '关闭'
         }}</Button>
         <Button
-          v-if="error && !availableTemplates.length"
-          variant="secondary"
-          :loading="loadingCatalog"
-          @click="loadCatalog"
-          >重试</Button
-        >
-        <Button
           :loading="exporting"
-          :disabled="loadingCatalog || !selectedTemplate"
+          :disabled="previewLoading || Boolean(previewError) || !previewMarkdown"
           @click="confirmExport"
           >导出 {{ selectedFormatLabel }}</Button
         >
@@ -150,11 +101,9 @@
 import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { Download, X } from '@lucide/vue'
 import { PopoverAnchor, PopoverContent, PopoverPortal, PopoverRoot } from 'reka-ui'
-import { listReportTemplateCatalog } from '@/api/client'
-import type { ReportTemplateCatalogEntry } from '@/api/types'
-import { Button, Dialog, DropdownMenu, FormField, IconButton, Select } from '@/components/ui'
+import { Button, Dialog, DropdownMenu, IconButton, Select } from '@/components/ui'
 import type { ButtonSize } from '@/components/ui/Button.vue'
-import SafeReportMarkdown from './SafeReportMarkdown.vue'
+import ReportReader from './ReportReader.vue'
 import { loadReportImages, type ReportDisplayImage, type ReportImageData, type ReportImageLoader } from './reportImages'
 import {
   createReportExport,
@@ -165,7 +114,7 @@ import {
 
 const props = withDefaults(
   defineProps<{
-    loadMarkdown: (signal: AbortSignal, templateKey?: string) => Promise<string>
+    loadMarkdown: (signal: AbortSignal) => Promise<string>
     images?: ReportDisplayImage[]
     loadImages?: (signal: AbortSignal) => Promise<ReportDisplayImage[]>
     loadImage?: ReportImageLoader
@@ -174,7 +123,7 @@ const props = withDefaults(
     disabled?: boolean
     iconOnly?: boolean
     size?: ButtonSize
-    templateMode?: 'single-vulnerability'
+    preview?: boolean
     previewRevision?: string
   }>(),
   { disabled: false, iconOnly: false, previewRevision: '' },
@@ -184,9 +133,6 @@ const root = ref<HTMLElement | null>(null)
 const menuOpen = ref(false)
 const dialogOpen = ref(false)
 const exporting = ref(false)
-const loadingCatalog = ref(false)
-const catalog = ref<ReportTemplateCatalogEntry[]>([])
-const selectedTemplate = ref('')
 const selectedFormat = ref<ReportExportFormat>('md')
 const error = ref('')
 const message = ref('')
@@ -195,12 +141,6 @@ const previewMarkdown = ref('')
 const previewLoading = ref(false)
 const previewError = ref('')
 const selectId = `report-export-template-${useId()}`
-const availableTemplates = computed(() =>
-  catalog.value.filter((item) => item.supports_single_vulnerability),
-)
-const excludedTemplates = computed(() =>
-  catalog.value.filter((item) => !item.supports_single_vulnerability),
-)
 const selectedFormatLabel = computed(
   () => reportExportFormats.find((item) => item.value === selectedFormat.value)?.label,
 )
@@ -215,7 +155,6 @@ function cancel() {
   generation += 1
   controller?.abort()
   exporting.value = false
-  loadingCatalog.value = false
 }
 function cancelPreview() {
   previewGeneration += 1
@@ -246,20 +185,18 @@ watch(
   () => {
     closeDialog(false)
     menuOpen.value = false
-    catalog.value = []
-    selectedTemplate.value = ''
     previewMarkdown.value = ''
     clearFeedback()
   },
   { flush: 'sync' },
 )
-watch([selectedTemplate, () => props.previewRevision], () => {
+watch(() => props.previewRevision, () => {
   if (exporting.value) cancel()
   cancelPreview()
   previewMarkdown.value = ''
   previewError.value = ''
-  // 预览只读已保存正文；模板、格式和预览永远不提交整理请求。
-  if (dialogOpen.value && selectedTemplate.value) void loadPreview()
+  // 预览只读当前内容，不提交模型生成请求。
+  if (dialogOpen.value) void loadPreview()
 })
 onBeforeUnmount(() => {
   cancel()
@@ -267,33 +204,8 @@ onBeforeUnmount(() => {
   clearTimeout(feedbackTimer)
 })
 
-async function loadCatalog() {
-  cancel()
-  const request = ++generation
-  controller = new AbortController()
-  loadingCatalog.value = true
-  error.value = ''
-  try {
-    const result = await listReportTemplateCatalog(controller.signal)
-    if (request !== generation) return
-    catalog.value = result
-    const current = selectedTemplate.value
-    if (!availableTemplates.value.some((item) => item.key === current)) {
-      selectedTemplate.value = availableTemplates.value.find(
-        (item) => props.templateMode === 'single-vulnerability' && item.key === 'single-vulnerability-report',
-      )?.key || availableTemplates.value.find((item) => item.is_default)?.key || ''
-    } else if (selectedTemplate.value) {
-      void loadPreview()
-    }
-  } catch (cause) {
-    if (request === generation)
-      error.value = cause instanceof Error ? cause.message : '模板读取失败，请重试。'
-  } finally {
-    if (request === generation) loadingCatalog.value = false
-  }
-}
 async function loadPreview() {
-  if (!selectedTemplate.value || !dialogOpen.value) return
+  if (!dialogOpen.value) return
   cancelPreview()
   previewController = new AbortController()
   const signal = previewController.signal
@@ -301,7 +213,7 @@ async function loadPreview() {
   previewLoading.value = true
   previewError.value = ''
   try {
-    const markdown = await props.loadMarkdown(signal, selectedTemplate.value)
+    const markdown = await props.loadMarkdown(signal)
     if (request === previewGeneration && !signal.aborted) previewMarkdown.value = markdown
   } catch (cause) {
     if (request === previewGeneration && !signal.aborted)
@@ -317,20 +229,19 @@ async function chooseFormat(value: string) {
   selectedFormat.value = format
   trigger = root.value?.querySelector<HTMLElement>('button') || null
   clearFeedback()
-  if (props.templateMode) {
+  if (props.preview) {
     // 菜单先收起再打开所属弹层，避免两个浮层争抢焦点。
     menuOpen.value = false
     dialogOpen.value = true
-    await loadCatalog()
+    await loadPreview()
   } else {
     await exportReport(format)
   }
 }
 function confirmExport() {
-  if (!availableTemplates.value.some((item) => item.key === selectedTemplate.value)) return
-  return exportReport(selectedFormat.value, selectedTemplate.value)
+  return exportReport(selectedFormat.value)
 }
-async function exportReport(format: ReportExportFormat, templateKey?: string) {
+async function exportReport(format: ReportExportFormat) {
   if (exporting.value) return
   cancel()
   controller = new AbortController()
@@ -340,7 +251,7 @@ async function exportReport(format: ReportExportFormat, templateKey?: string) {
   exporting.value = true
   clearFeedback()
   try {
-    let markdown = await loadMarkdown(signal, templateKey)
+    let markdown = props.preview && previewMarkdown.value ? previewMarkdown.value : await loadMarkdown(signal)
     if (request !== generation || signal.aborted) return
     let imageData: ReportImageData[] = []
     try {
@@ -390,27 +301,16 @@ async function exportReport(format: ReportExportFormat, templateKey?: string) {
   gap: var(--space-4);
   min-width: 0;
 }
-.report-export__options {
-  display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
-  gap: var(--space-3);
-}
+.report-export__options { min-width: 0; }
+.report-export__format { --field-control-height: var(--control-height); display: flex; flex: 1; align-items: center; gap: var(--space-2); min-width: 0; }
+.report-export__format > label { flex: none; color: var(--text-muted); font-size: var(--text-sm); }
+.report-export__format-select { width: 180px; min-width: 0; }
 .report-export__preview {
   min-width: 0;
+  height: calc(46 * var(--ui-dvh));
+  min-height: 260px;
+  flex: none;
   border-top: 1px solid var(--border-subtle);
-  padding-top: var(--space-4);
-}
-.report-export__preview-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  margin-bottom: var(--space-3);
-}
-.report-export__preview-head h3 {
-  margin: 0;
-  font-size: var(--text-lg);
 }
 .report-export__error,
 .report-export__status {
@@ -431,29 +331,22 @@ async function exportReport(format: ReportExportFormat, templateKey?: string) {
   color: var(--text-muted);
 }
 @media (max-width: 600px) {
-  .report-export__options {
-    grid-template-columns: minmax(0, 1fr);
-  }
+  .report-export__format { flex-basis: 100%; }
 }
 </style>
 
 <style>
-.report-export-dialog .ui-dialog__description,
-.report-export-dialog .ui-dialog__title {
-  overflow-wrap: anywhere;
-  white-space: normal;
-}
 .report-export__feedback {
   z-index: var(--z-overlay-child);
   display: flex;
   align-items: flex-start;
   gap: var(--space-2);
-  max-width: min(360px, calc(100vw - var(--space-4)));
-  max-height: min(60dvh, var(--reka-popover-content-available-height));
+  max-width: min(360px, calc(100 * var(--ui-vw) - var(--space-4)));
+  max-height: min(calc(60 * var(--ui-dvh)), calc(var(--reka-popover-content-available-height) / var(--ui-scale)));
   overflow-y: auto;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-pop);
   color: var(--text);

@@ -22,6 +22,8 @@ def test_release_allowlist_excludes_runtime_and_build_inputs() -> None:
     assert "cairn/pyproject.toml" in files
     assert "cairn/src/cairn/server/static/index.html" in files
     assert "cairn/src/cairn/dispatcher/runtime/containers.py" in files
+    assert "cairn/src/cairn/server/routers/traffic.py" in files
+    assert "cairn/src/cairn/server/services/traffic.py" in files
     assert "deploy/start.sh" in files
     assert "deploy/install.sh" in files
     assert "deploy/update.sh" in files
@@ -54,6 +56,27 @@ def test_release_allowlist_excludes_runtime_and_build_inputs() -> None:
     assert not any(path.endswith((".db", ".log", ".pyc")) for path in files)
 
 
+def test_release_keeps_executor_service_without_independent_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for directory in package_release.TREE_ROOTS:
+        (tmp_path / directory).mkdir(parents=True)
+    required = (*package_release.EXACT_FILES, Path("container/Dockerfile"),
+                Path("container/task-executor/server.py"), Path("container/task-executor/Dockerfile"),
+                Path("container/traffic-gateway/Dockerfile"))
+    for relative in required:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture")
+    monkeypatch.setattr(package_release, "ROOT", tmp_path)
+
+    files = package_release.collect_files()
+
+    assert "container/task-executor/server.py" in files
+    assert "container/task-executor/Dockerfile" not in files
+    assert "container/Dockerfile" in files and "container/traffic-gateway/Dockerfile" in files
+
+
 def test_docker_context_excludes_sensitive_inputs_and_keeps_pi_sources() -> None:
     patterns = {
         line.strip() for line in (ROOT / "container/.dockerignore").read_text(encoding="utf-8").splitlines()
@@ -82,6 +105,30 @@ def test_docker_context_excludes_sensitive_inputs_and_keeps_pi_sources() -> None
             for rule in (pattern, pattern.removeprefix("**/"))
         ), name
         assert (ROOT / "container" / name).is_file()
+
+
+def test_candidate_key_detector_does_not_trip_release_scan() -> None:
+    import ast
+
+    path = Path("cairn/src/cairn/server/services/candidate_store.py")
+    data = (ROOT / path).read_bytes()
+    package_release.scan_content(path, data)
+    # 只求值这个常量，避免导入业务服务或连接数据库；检测字节必须完整保留。
+    assignment = next(
+        node for node in ast.parse(data).body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_PRIVATE_KEY_MARKERS" for target in node.targets)
+    )
+    markers = eval(compile(ast.Expression(assignment.value), str(path), "eval"), {"tuple": tuple})
+    assert markers == tuple(
+        b"-----BEGIN " + kind + b"-----" for kind in (
+            b"PRIVATE KEY", b"ENCRYPTED PRIVATE KEY", b"RSA PRIVATE KEY", b"DSA PRIVATE KEY",
+            b"EC PRIVATE KEY", b"OPENSSH PRIVATE KEY", b"PGP PRIVATE KEY BLOCK",
+        )
+    )
+    for marker in (markers[0], markers[2], markers[4], markers[5]):
+        with pytest.raises(RuntimeError, match="疑似包含密钥"):
+            package_release.scan_content(Path("payload.txt"), marker + b"\nactual-key-body")
 
 
 def test_release_secret_gate_rejects_private_key() -> None:

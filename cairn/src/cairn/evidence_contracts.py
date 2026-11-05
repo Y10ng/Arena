@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Annotated, Any, Generic, Literal, TypeVar
+from typing import Annotated, Any, ClassVar, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -68,7 +68,7 @@ def _evidence_item_schema(schema: dict[str, Any], model: type[BaseModel]) -> Non
         "then": {
             "properties": {
                 **{slot: {"type": "null"} for slot in sorted(slots - {"flow_id"})},
-                "source": {"enum": ["capture", "historical"]},
+                "source": {"enum": ["capture", "historical", "manual"] if model.allow_manual_flow else ["capture", "historical"]},
                 "excerpts": {"items": {
                     "required": ["representation", "sha256", "revision"],
                     "properties": {
@@ -110,6 +110,7 @@ class EvidenceExcerpt(BaseModel):
 
 
 class _EvidenceItem(BaseModel, Generic[Ref]):
+    allow_manual_flow: ClassVar[bool] = False
     model_config = ConfigDict(extra="forbid", strict=True, json_schema_extra=_evidence_item_schema)
 
     id: str = Field(min_length=1)
@@ -130,8 +131,9 @@ class _EvidenceItem(BaseModel, Generic[Ref]):
         if not present or not present <= set(_CONTENT_SLOTS[self.kind]):
             raise ValueError("evidence kind requires content in its own slots only")
         if self.flow_id is not None:
-            if present != {"flow_id"} or self.source not in {"capture", "historical"}:
-                raise ValueError("flow evidence must reference only a captured or historical flow")
+            allowed_sources = {"capture", "historical", "manual"} if self.allow_manual_flow else {"capture", "historical"}
+            if present != {"flow_id"} or self.source not in allowed_sources:
+                raise ValueError("flow evidence source or content slots invalid")
             if any(
                 excerpt.side not in {"request", "response"}
                 or excerpt.representation is None or excerpt.sha256 is None or excerpt.revision is None
@@ -152,6 +154,7 @@ class _EvidenceItem(BaseModel, Generic[Ref]):
 
 
 class EvidenceItem(_EvidenceItem[EvidenceRef]):
+    allow_manual_flow: ClassVar[bool] = True
     # 历史原文不冒充采集原件，也不能因校验或序列化而裁剪空白。
     request_text: str | None = None
     response_text: str | None = None

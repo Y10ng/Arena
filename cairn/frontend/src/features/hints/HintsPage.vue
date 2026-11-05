@@ -1,13 +1,60 @@
 <template>
   <main class="hints-page">
-    <Card class="hints-create-card" padding="md">
-      <form class="hints-create-form" @submit.prevent="submitHint">
-        <div class="hints-create-heading">
-          <div>
-            <h3>添加新提示</h3>
-            <p>可绑定 Intent、Fact，或作为项目级提示加入后续工作空间上下文。</p>
-          </div>
+    <section class="hints-history" aria-labelledby="hints-history-title">
+      <header class="hints-history-header">
+        <div class="hints-history-heading">
+          <h2 id="hints-history-title">提示记录</h2>
+          <span>{{ sortedHints.length }} 条</span>
         </div>
+      </header>
+      <EmptyState
+        v-if="sortedHints.length === 0"
+        title="暂无人工提示"
+      />
+      <ol v-else class="hints-records" aria-label="项目人工提示记录">
+        <li v-for="hint in sortedHints" :key="hint.id">
+          <article class="hint-record" :aria-label="`提示 ${hint.id}`">
+            <header class="hint-record-header">
+              <Badge :tone="hintCreatorMeta(hint.creator).tone" size="sm">
+                {{ hintCreatorMeta(hint.creator).label }}
+              </Badge>
+              <time class="hint-time" :datetime="hint.created_at" :title="hint.created_at">
+                {{ formatRelativeTime(hint.created_at) }}
+              </time>
+            </header>
+            <div class="hint-content">{{ hint.content }}</div>
+            <footer class="hint-record-footer">
+              <span class="hint-anchor">{{ hintAnchorMeta(hint).label }}</span>
+              <code>#{{ hint.id }}</code>
+            </footer>
+          </article>
+        </li>
+      </ol>
+    </section>
+
+    <aside class="hints-compose" aria-labelledby="hints-create-title">
+      <form class="hints-create-form" @submit.prevent="submitHint">
+        <header class="hints-create-heading">
+          <h2 id="hints-create-title">添加提示</h2>
+        </header>
+
+        <FormField
+          label="提示内容"
+          required
+        >
+          <template #default="{ controlAttrs, invalid }">
+            <Textarea
+              v-bind="controlAttrs"
+              v-model="newHintContent"
+              :invalid="invalid"
+              :disabled="mutationPending"
+              :rows="8"
+              placeholder="请输入指引提示内容..."
+              @keydown.meta.enter.prevent="submitHint"
+              @keydown.ctrl.enter.prevent="submitHint"
+            />
+          </template>
+        </FormField>
 
         <div class="hints-anchor-fields">
           <FormField label="目标线索 Intent（可选，优先）">
@@ -35,25 +82,6 @@
           </FormField>
         </div>
 
-        <FormField
-          label="提示内容"
-          required
-          hint="支持多行输入；按 Ctrl+Enter 或 Command+Enter 快速提交。"
-        >
-          <template #default="{ controlAttrs, invalid }">
-            <Textarea
-              v-bind="controlAttrs"
-              v-model="newHintContent"
-              :invalid="invalid"
-              :disabled="mutationPending"
-              :rows="4"
-              placeholder="请输入指引提示内容..."
-              @keydown.meta.enter.prevent="submitHint"
-              @keydown.ctrl.enter.prevent="submitHint"
-            />
-          </template>
-        </FormField>
-
         <div class="hints-create-actions">
           <Button
             type="submit"
@@ -65,61 +93,16 @@
           </Button>
         </div>
       </form>
-    </Card>
-
-    <FilterBar label="提示列表状态" class="hints-status-bar">
-      <strong>提示流 · 共 {{ sortedHints.length }} 条</strong>
-      <template #status>随工作空间每 10 秒同步</template>
-    </FilterBar>
-
-    <EmptyState
-      v-if="sortedHints.length === 0"
-      title="暂无人工提示"
-      description="添加提示后，Agent 可在后续工作空间上下文中参考这些信息。"
-    />
-
-    <DataTable
-      v-else
-      :rows="sortedHints"
-      :columns="hintColumns"
-      :row-key="hintRowKey"
-      caption="项目人工提示列表"
-      density="compact"
-    >
-      <template #cell-creator="{ row }">
-        <div class="hint-meta-cell">
-          <Badge :tone="hintCreatorMeta(row.creator).tone" size="sm">
-            {{ hintCreatorMeta(row.creator).label }}
-          </Badge>
-          <code>#{{ row.id }}</code>
-        </div>
-      </template>
-      <template #cell-anchor="{ row }">
-        <Badge :tone="hintAnchorMeta(row).tone" size="sm">
-          {{ hintAnchorMeta(row).label }}
-        </Badge>
-      </template>
-      <template #cell-content="{ row }">
-        <div class="hint-content">{{ row.content }}</div>
-      </template>
-      <template #cell-created="{ row }">
-        <span class="hint-time" :title="row.created_at">
-          {{ formatRelativeTime(row.created_at) }}
-        </span>
-      </template>
-    </DataTable>
+    </aside>
   </main>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { createProjectHint } from '@/api/client'
-import type { Hint } from '@/api/types'
-import { DataTable, FilterBar, type DataTableColumn } from '@/components/patterns'
 import {
   Badge,
   Button,
-  Card,
   EmptyState,
   FormField,
   Select,
@@ -166,17 +149,6 @@ const intentOptions = computed<SelectOption[]>(() =>
     label: `${intent.id} · ${intent.description}`,
   })),
 )
-
-const hintColumns = [
-  { key: 'creator', label: '创建者' },
-  { key: 'anchor', label: '锚点' },
-  { key: 'content', label: '提示内容' },
-  { key: 'created', label: '创建时间' },
-] satisfies readonly DataTableColumn<Hint, 'creator' | 'anchor' | 'content' | 'created'>[]
-
-function hintRowKey(hint: Hint): string {
-  return hint.id
-}
 
 function beginMutation(): symbol | null {
   if (mutationPending.value) return null

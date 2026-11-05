@@ -70,9 +70,16 @@ def resolve_model_execution_binding(conn, *, tenant_id, model_id) -> TenantModel
         raise HTTPException(422, {
             "code": "credential_unavailable", "message": "模型凭据无法解密，请检查服务器密钥配置或重新保存模型凭据。",
         }) from exc
+    # 普通项目的审计上下文由 Dispatcher 提交；费率依据必须另由 Server 按当次 revision 留存。
+    snapshot = {"model_id":model_id,"model_revision":int(row["revision"]),"model_name":row["model_name"],
+                "display_name":row["display_name"],"protocol":row["protocol"],"pricing":json.loads(row["pricing_json"])}
+    conn.execute("INSERT INTO model_consumption_rates(tenant_id,model_id,revision,model_json) VALUES (?,?,?,?) ON CONFLICT DO NOTHING",
+                 (tenant_id,model_id,int(row["revision"]),json.dumps(snapshot)))
     return TenantModelExecutionBinding(
         model_id=model_id,
         model_revision=int(row["revision"]),
+        model_display_name=row["display_name"],
+        pricing=json.loads(row["pricing_json"]),
         credential_version_id=str(credential["credential_version_id"]),
         credential_version=int(credential["version_number"]),
         credential_fingerprint=str(credential["credential_fingerprint"]),

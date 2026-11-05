@@ -183,7 +183,8 @@ def test_real_flow_candidate_conclude_and_normal_scope_stop(traffic_api, monkeyp
             control.exec_run(['python3', '/tmp/cairn-prompts/model.py'], detach=True)
             wait_for(lambda: (runtime.control_prompts / 'model-ready').exists())
             capability = manager.prepare_task_execution(project, run['id'], cancellation, options)
-            scope = bridge.task(project.id, run['id']).scope
+            scope_id = bridge.task(project.id, run['id']).scope_id
+            scope = next(scope for scope in runtime.scopes if scope.id == scope_id)
             assert len(runtime.manifest['scopes']) == 1
             worker = WorkerConfig(id=execution.worker_id, name='traffic-source-1', model_id=execution.model_id,
                 engine='pi', task_types=['explore'], concurrency=1, priority=0,

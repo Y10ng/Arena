@@ -80,6 +80,7 @@ export const buildKnowledgeNavigation = (
   files: KnowledgeFile[],
   expandedDirectories: ReadonlySet<string>,
   search = '',
+  collapsedSearchDirectories: ReadonlySet<string> = new Set(),
 ): KnowledgeNavigationEntry[] => {
   const query = search.trim().toLocaleLowerCase()
   const visibleFiles = query
@@ -98,7 +99,9 @@ export const buildKnowledgeNavigation = (
   const entries: KnowledgeNavigationEntry[] = []
   const visit = (directory: string, depth: number) => {
     for (const child of children.get(directory) || []) {
-      const expanded = Boolean(query) || expandedDirectories.has(child.directory)
+      const expanded = query
+        ? !collapsedSearchDirectories.has(child.directory)
+        : expandedDirectories.has(child.directory)
       entries.push({
         kind: 'directory',
         path: child.directory,

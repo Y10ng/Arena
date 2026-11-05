@@ -5,15 +5,19 @@ export const productionRouteNames = [
   'Login',
   'ChangePassword',
   'Overview',
+  'Agent',
   'Findings',
   'Traffic',
   'Reports',
   'Projects',
+  'ProjectSchedules',
+  'ProjectSchedule',
   'Verifications',
   'NewVerification',
   'VerificationDetail',
   'VerificationIntegrations',
   'VerificationConfiguration',
+  'WorkspaceOverview',
   'WorkspaceGraph',
   'WorkspaceAgent',
   'WorkspaceRuns',
@@ -51,9 +55,10 @@ export type NavigationIcon =
   | 'knowledge'
   | 'status'
   | 'auth'
+  | 'schedules'
 
 export type NavigationRole = 'authenticated' | 'super-admin'
-export type SidebarPlacement = 'primary' | 'scenario' | 'system' | 'standalone'
+export type SidebarPlacement = 'primary' | 'results' | 'support' | 'system'
 
 interface CommandMetadata {
   kindLabel: string
@@ -80,6 +85,11 @@ export interface NavigationRecord {
 const record = (value: NavigationRecord): NavigationRecord => value
 
 export const navigationRegistry = [
+  record({
+    routeName: 'Agent', label: 'ChatBot', icon: 'hints', role: 'authenticated',
+    sidebar: { placement: 'primary', order: 30 },
+    command: { kindLabel: '导航', title: '打开 ChatBot', subtitle: '持续对话、读取授权材料与下载已有成果', badge: 'ChatBot', keywords: ['agent', 'chatbot', '对话', '会话'] },
+  }),
   record({ routeName: 'Login', label: '登录', icon: 'auth', role: 'authenticated' }),
   record({ routeName: 'ChangePassword', label: '修改密码', icon: 'auth', role: 'authenticated' }),
   record({
@@ -87,12 +97,12 @@ export const navigationRegistry = [
     label: '仪表盘',
     icon: 'dashboard',
     role: 'authenticated',
-    sidebar: { placement: 'primary', order: 10 },
+    sidebar: { placement: 'primary', order: 20 },
     command: {
       kindLabel: '导航',
       title: '转到仪表盘',
       subtitle: '查看调度状态、近期失败与活动流',
-      badge: 'Dashboard',
+      badge: '仪表盘',
       keywords: ['dashboard', 'home', 'main', '仪表盘'],
     },
   }),
@@ -101,7 +111,7 @@ export const navigationRegistry = [
     label: '漏洞',
     icon: 'finding',
     role: 'authenticated',
-    sidebar: { placement: 'primary', order: 20 },
+    sidebar: { placement: 'results', order: 10 },
     command: {
       kindLabel: '导航',
       title: '转到漏洞',
@@ -112,7 +122,7 @@ export const navigationRegistry = [
   }),
   record({
     routeName: 'Traffic', label: '流量', icon: 'monitoring', role: 'authenticated',
-    sidebar: { placement: 'primary', order: 22 },
+    sidebar: { placement: 'results', order: 40 },
     command: {
       kindLabel: '导航', title: '转到流量', subtitle: '查看授权项目的 HTTP 流量',
       badge: '流量', keywords: ['traffic', 'http', '流量'],
@@ -123,7 +133,7 @@ export const navigationRegistry = [
     label: '报告',
     icon: 'artifacts',
     role: 'authenticated',
-    sidebar: { placement: 'primary', order: 25 },
+    sidebar: { placement: 'results', order: 30 },
     command: {
       kindLabel: '导航',
       title: '转到报告',
@@ -134,26 +144,32 @@ export const navigationRegistry = [
   }),
   record({
     routeName: 'Projects',
-    label: '任务管理',
+    label: '项目',
     icon: 'projects',
     role: 'authenticated',
-    sidebar: { placement: 'primary', order: 40 },
+    sidebar: { placement: 'primary', order: 10 },
     command: {
       kindLabel: '导航',
-      title: '转到任务管理列表',
+      title: '转到项目',
       subtitle: '列出并搜索所有安全探测任务',
-      badge: 'Tasks',
+      badge: '项目',
       keywords: ['list', 'detail', 'project'],
     },
   }),
   record({
+    routeName: 'ProjectSchedules', label: '计划', icon: 'schedules', role: 'authenticated',
+    sidebar: { placement: 'support', order: 30 },
+    command: { kindLabel: '导航', title: '转到计划', subtitle: '查看项目启动安排与执行记录', badge: '计划', keywords: ['schedule', '计划', '预约'] },
+  }),
+  record({ routeName: 'ProjectSchedule', label: '计划详情', icon: 'schedules', role: 'authenticated', breadcrumbParent: 'ProjectSchedules' }),
+  record({
     routeName: 'Verifications',
-    label: '漏洞复现与复测',
+    label: '复测',
     icon: 'vulnerabilities',
     role: 'authenticated',
-    sidebar: { placement: 'primary', order: 60 },
+    sidebar: { placement: 'results', order: 20 },
     command: {
-      kindLabel: '导航', title: '查看漏洞复现与复测',
+      kindLabel: '导航', title: '转到复测',
       subtitle: '提交漏洞资料并查看独立复测、证据与历史',
       badge: '复测', keywords: ['复现', '复测', 'verification', 'retest'],
     },
@@ -181,27 +197,19 @@ export const navigationRegistry = [
     },
   }),
   record({
-    routeName: 'WorkspaceAgent',
-    label: 'Agent',
-    icon: 'hints',
-    role: 'authenticated',
-    breadcrumbParent: 'workspace-project',
-    workspace: { order: 5 },
-    command: {
-      kindLabel: '当前项目',
-      title: '打开项目 Agent',
-      subtitle: '持续对话、读取项目成果与下载已有报告',
-      badge: 'Agent',
-      keywords: ['agent', '对话', '会话'],
-    },
+    routeName: 'WorkspaceOverview', label: '总览', icon: 'dashboard', role: 'authenticated',
+    breadcrumbParent: 'workspace-project', workspace: { order: 0 },
+    command: { kindLabel: '当前项目', title: '查看项目总览', subtitle: '查看原始目标、资料与累计 Token', badge: '总览', keywords: ['overview', '资料', '目标'] },
   }),
+  // 仅登记已有地址的全局重定向，不生成项目 tab 或命令。
+  record({ routeName: 'WorkspaceAgent', label: 'ChatBot', icon: 'hints', role: 'authenticated' }),
   record({
     routeName: 'WorkspaceGraph',
     label: '图谱',
     icon: 'graph',
     role: 'authenticated',
     breadcrumbParent: 'workspace-project',
-    workspace: { order: 10 },
+    workspace: { order: 40 },
     command: {
       kindLabel: '当前项目',
       title: '查看探索图谱',
@@ -231,7 +239,7 @@ export const navigationRegistry = [
     icon: 'hints',
     role: 'authenticated',
     breadcrumbParent: 'workspace-project',
-    workspace: { order: 50 },
+    workspace: { order: 60 },
     command: {
       kindLabel: '当前项目',
       title: '查看并添加提示',
@@ -242,22 +250,22 @@ export const navigationRegistry = [
   }),
   record({
     routeName: 'WorkspaceVulnerabilities',
-    label: '漏洞管理',
+    label: '漏洞成果',
     icon: 'vulnerabilities',
     role: 'authenticated',
     breadcrumbParent: 'workspace-project',
-    workspace: { order: 30 },
+    workspace: { order: 10 },
     command: {
       kindLabel: '当前项目',
-      title: '查看漏洞管理',
-      subtitle: '管理项目漏洞与渗透证据包',
+      title: '查看漏洞成果',
+      subtitle: '阅读项目漏洞与来源证据',
       badge: 'Vulnerabilities',
       keywords: ['漏洞', 'vulnerability', 'packet'],
     },
   }),
   record({
     routeName: 'WorkspaceTraffic', label: '流量', icon: 'monitoring', role: 'authenticated',
-    breadcrumbParent: 'workspace-project', workspace: { order: 35 },
+    breadcrumbParent: 'workspace-project', workspace: { order: 50 },
     command: {
       kindLabel: '当前项目', title: '查看项目流量', subtitle: '阅读采集交互与关联漏洞',
       badge: '流量', keywords: ['traffic', 'http', '流量'],
@@ -265,22 +273,23 @@ export const navigationRegistry = [
   }),
   record({
     routeName: 'WorkspaceArtifacts',
-    label: '证据资产',
+    label: '文件',
     icon: 'artifacts',
     role: 'authenticated',
     breadcrumbParent: 'workspace-project',
-    workspace: { order: 40 },
+    workspace: { order: 30 },
     command: {
       kindLabel: '当前项目',
-      title: '浏览证据文件',
-      subtitle: '查看并预览收集的产物',
-      badge: 'Artifacts',
-      keywords: ['evidence', 'files'],
+      title: '浏览研究文件',
+      subtitle: '只读浏览研究目录与已保存原件',
+      badge: '文件',
+      keywords: ['evidence', 'files', '文件', '目录'],
     },
   }),
   record({
     routeName: 'Monitoring',
-    label: '监控',
+    label: '运行监控',
+    sidebar: { placement: 'system', order: 50 },
     icon: 'monitoring',
     role: 'super-admin',
     command: {
@@ -293,14 +302,14 @@ export const navigationRegistry = [
   }),
   record({
     routeName: 'ConsoleWorkers',
-    label: 'Worker 配置',
+    label: '模型与 Worker',
     icon: 'workers',
     role: 'authenticated',
     breadcrumbParent: 'console-root',
     sidebar: { placement: 'system', order: 20 },
     command: {
       kindLabel: '系统管理',
-      title: 'Worker 配置',
+      title: '模型与 Worker',
       subtitle: '管理个人模型、Worker 与运行设置',
       badge: 'Workers',
       keywords: ['worker', 'model', 'pi', '模型', '运行设置'],
@@ -308,14 +317,14 @@ export const navigationRegistry = [
   }),
   record({
     routeName: 'ConsoleUsers',
-    label: 'Users',
+    label: '用户管理',
     icon: 'users',
     role: 'super-admin',
     breadcrumbParent: 'console-root',
     sidebar: { placement: 'system', order: 30 },
     command: {
       kindLabel: '系统管理',
-      title: '管理 Users',
+      title: '管理用户',
       subtitle: '创建、禁用账户并管理密码与会话',
       badge: 'Users',
       keywords: ['user', 'account', 'session', '用户'],
@@ -323,14 +332,14 @@ export const navigationRegistry = [
   }),
   record({
     routeName: 'ConsoleScenarios',
-    label: '方案场景',
+    label: '探索场景',
     icon: 'scenarios',
     role: 'super-admin',
     breadcrumbParent: 'console-root',
-    sidebar: { placement: 'scenario', order: 10 },
+    sidebar: { placement: 'support', order: 20 },
     command: {
       kindLabel: '系统管理',
-      title: '管理方案场景',
+      title: '管理探索场景',
       subtitle: '配置新建项目使用的 Scenario',
       badge: 'Scenarios',
       keywords: ['scenario'],
@@ -338,11 +347,11 @@ export const navigationRegistry = [
   }),
   record({
     routeName: 'ConsolePrompts',
-    label: '提示词 Prompts',
+    label: '提示词',
     icon: 'prompts',
     role: 'super-admin',
     breadcrumbParent: 'console-root',
-    sidebar: { placement: 'scenario', order: 20 },
+    sidebar: { placement: 'system', order: 40 },
     command: {
       kindLabel: '系统管理',
       title: '管理 Prompt Groups',
@@ -353,11 +362,11 @@ export const navigationRegistry = [
   }),
   record({
     routeName: 'ConsoleKnowledge',
-    label: '资料库管理',
+    label: '资料库',
     icon: 'knowledge',
     role: 'super-admin',
     breadcrumbParent: 'console-root',
-    sidebar: { placement: 'standalone', order: 10 },
+    sidebar: { placement: 'support', order: 10 },
     command: {
       kindLabel: '系统管理',
       title: '管理资料库',
@@ -455,35 +464,35 @@ export function breadcrumbsFromRegistry(
   if (!item || routeName === 'Login' || routeName === 'ChangePassword') return []
 
   const crumbs: Omit<BreadcrumbItem, 'current'>[] = [
-    { key: 'root', text: 'Arena', to: { name: 'Overview' } },
+    { key: 'root', text: 'Arena', to: { name: 'Projects' } },
   ]
 
-  if (item.breadcrumbParent === 'Projects') {
+  if (item.breadcrumbParent === 'ProjectSchedules') {
+    crumbs.push({ key: 'schedules', text: navigationByRouteName.get('ProjectSchedules')!.label, to: { name: 'ProjectSchedules' } })
+  } else if (item.breadcrumbParent === 'Projects') {
     crumbs.push({
       key: 'projects',
-      text: navigationByRouteName.get('Projects')?.label || '任务管理',
+      text: navigationByRouteName.get('Projects')?.label || '项目',
       to: { name: 'Projects' },
     })
   } else if (item.breadcrumbParent === 'Verifications') {
-    crumbs.push({ key: 'verifications', text: '漏洞复现与复测', to: { name: 'Verifications' } })
+    crumbs.push({ key: 'verifications', text: navigationByRouteName.get('Verifications')!.label, to: { name: 'Verifications' } })
   } else if (item.breadcrumbParent === 'workspace-project' && projectId) {
     crumbs.push({
       key: 'projects',
-      text: navigationByRouteName.get('Projects')?.label || '任务管理',
+      text: navigationByRouteName.get('Projects')?.label || '项目',
       to: { name: 'Projects' },
     })
     crumbs.push({
       key: 'project',
       text: projectTitle || projectId,
-      to: { name: 'WorkspaceGraph', params: { id: projectId } },
+      to: { path: `/projects/${projectId}` },
     })
   } else if (item.breadcrumbParent === 'console-root') {
     crumbs.push({ key: 'console', text: '系统管理', to: { name: 'ConsoleWorkers' } })
   }
 
-  if (!(routeName === 'WorkspaceGraph' && item.breadcrumbParent === 'workspace-project')) {
-    crumbs.push({ key: routeName, text: item.label })
-  }
+  crumbs.push({ key: routeName, text: item.label })
 
   return crumbs.map((crumb, index) => ({ ...crumb, current: index === crumbs.length - 1 }))
 }

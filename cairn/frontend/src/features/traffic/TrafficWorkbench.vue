@@ -1,21 +1,18 @@
 <template>
   <section class="traffic-workbench" aria-label="HTTP 流量工作台">
+    <h1 class="sr-only">流量</h1>
     <header class="traffic-toolbar">
-      <h2>流量</h2>
-      <RouterLink v-if="sourceVulnerability" class="traffic-return" :to="sourceVulnerability">返回漏洞</RouterLink>
-      <Select v-if="!fixedProjectId" aria-label="筛选项目" :model-value="queryText('project') || '__all__'" :options="projectOptions" @update:model-value="setFilter('project', $event)" />
-      <span class="traffic-refresh-state" role="status">{{ refreshLabel }}</span>
-      <Button size="sm" variant="secondary" :aria-pressed="paused" @click="togglePause"><Pause v-if="!paused" :size="14" /><Play v-else :size="14" />{{ paused ? '恢复刷新' : '暂停刷新' }}</Button>
-      <Button size="sm" variant="ghost" :disabled="loading" @click="retry"><RefreshCw :size="14" />刷新</Button>
-      <Button size="sm" variant="ghost" :aria-expanded="inspectorOpen" @click="inspectorOpen = !inspectorOpen"><PanelRight :size="14" />详情</Button>
-    </header>
-    <form class="traffic-filters" @submit.prevent="applySearch">
-      <Input v-model="searchDraft" aria-label="搜索 URL、Host 或路径" placeholder="搜索 URL、Host 或路径" />
-      <Button type="submit" size="sm" variant="secondary">搜索</Button>
-      <Select aria-label="筛选方法" :model-value="queryText('method') || '__all__'" :options="methodOptions" @update:model-value="setFilter('method', $event)" />
-      <Select aria-label="筛选状态码" :model-value="queryText('status_family') || '__all__'" :options="statusOptions" @update:model-value="setFilter('status_family', $event)" />
+      <RouterLink v-if="sourceVulnerability" class="traffic-return" :to="sourceVulnerability"><ArrowLeft :size="18" />返回漏洞</RouterLink>
+      <form v-show="!readerExpanded" class="traffic-filters" aria-label="筛选流量" @submit.prevent="applySearch">
+      <div class="traffic-search">
+        <Input v-model="searchDraft" aria-label="搜索 URL、Host 或路径" placeholder="搜索 URL、Host 或路径" />
+        <Button type="submit" size="sm" variant="ghost" aria-label="搜索流量"><Search :size="16" /></Button>
+      </div>
+      <Select v-if="!fixedProjectId" class="traffic-filter" :class="{ 'traffic-filter--active': queryText('project') }" aria-label="筛选项目" :model-value="queryText('project') || '__all__'" :options="projectOptions" @update:model-value="setFilter('project', $event)" />
+      <Select class="traffic-filter" :class="{ 'traffic-filter--active': queryText('method') }" aria-label="筛选方法" :model-value="queryText('method') || '__all__'" :options="methodOptions" @update:model-value="setFilter('method', $event)" />
+      <Select class="traffic-filter" :class="{ 'traffic-filter--active': queryText('status_family') }" aria-label="筛选状态码" :model-value="queryText('status_family') || '__all__'" :options="statusOptions" @update:model-value="setFilter('status_family', $event)" />
       <Popover align="end" size="md">
-        <template #trigger><Button size="sm" variant="ghost">更多筛选<span v-if="extraFilterCount"> · {{ extraFilterCount }}</span></Button></template>
+        <template #trigger><Button class="traffic-filter" :class="{ 'traffic-filter--active': extraFilterCount }" size="sm" variant="secondary"><SlidersHorizontal :size="15" />更多筛选<span v-if="extraFilterCount"> · {{ extraFilterCount }}</span></Button></template>
         <div class="traffic-extra-filters" role="group" aria-label="更多流量筛选">
           <label>采集完整性<Select aria-label="筛选采集完整性" :model-value="queryText('state') || '__all__'" :options="stateOptions" @update:model-value="setFilter('state', $event)" /></label>
           <label>关联<Select aria-label="筛选关联" :model-value="queryText('associated') || '__all__'" :options="associationOptions" @update:model-value="setFilter('associated', $event)" /></label>
@@ -26,57 +23,52 @@
         </div>
       </Popover>
       <Button size="sm" variant="ghost" :disabled="!canClearFilters" @click="clearFilters">清除筛选</Button>
-    </form>
+      </form>
+      <div class="traffic-actions">
+        <span v-if="readerExpanded" class="traffic-refresh-state" role="status">{{ refreshLabel }}</span>
+        <Button variant="secondary" :aria-pressed="paused" @click="togglePause"><Pause v-if="!paused" :size="18" /><Play v-else :size="18" />{{ paused ? '恢复刷新' : '暂停刷新' }}</Button>
+        <Button ref="metadataButton" variant="secondary" @click="openMetadata($event)"><Info :size="18" />采集信息</Button>
+        <Button :loading="loading" @click="retry"><RefreshCw :size="18" />刷新</Button>
+      </div>
+    </header>
     <p v-if="paginationNotice" class="traffic-notice" role="status">{{ paginationNotice }}</p>
     <p v-if="projectError" class="traffic-notice" role="alert">项目列表读取失败，仍可查看当前范围。<Button size="sm" variant="ghost" @click="loadProjects">重试</Button></p>
-    <p v-if="error" class="traffic-notice" role="alert">{{ error }}<Button size="sm" variant="ghost" @click="retry">重试</Button><Button v-if="cursor" size="sm" variant="ghost" @click="goLatest">返回最新页</Button></p>
-    <p v-if="scopeProjectId && !scopesLoading" class="traffic-scope-summary">{{ scopeLabel }}</p>
-    <div class="traffic-body" :class="{ 'traffic-body--inspector': inspectorOpen }">
-      <div ref="splitElement" class="traffic-main" :style="{ gridTemplateRows: `minmax(150px, ${splitRatio}fr) 8px minmax(180px, ${100 - splitRatio}fr)` }">
-        <div class="traffic-list">
-          <DataTable
-            :rows="page?.items || []" :columns="columns" :row-key="rowKey" caption="HTTP 流量"
-            density="traffic" resizable-columns :loading="loading && !page" :empty-label="error ? '列表未能读取' : hasFilters ? '没有匹配当前筛选的流量' : '尚无流量记录'"
-            :is-row-active="isSelected" active-row-aria="current" :row-attrs="rowAttrs"
-          >
-            <template #cell-time="{ row }"><span class="traffic-secondary" :title="row.received_at">{{ dateTime(row.received_at) }}</span></template>
-            <template #cell-project="{ row }"><span class="traffic-project" :title="row.project_title">{{ row.project_title }}</span></template>
-            <template #cell-method="{ row }"><span class="traffic-method">{{ row.method }}</span></template>
-            <template #cell-target="{ row }"><button type="button" class="traffic-target" :title="row.url" :aria-label="`阅读 ${row.method} ${row.host}${row.path}`" @click.stop="selectFlow(row)"><span v-if="row.address_issue" class="traffic-warning">地址待确认 · </span><span class="traffic-secondary">{{ row.host }}</span><span>{{ row.path }}</span></button></template>
-            <template #cell-state="{ row }"><span :class="{ 'traffic-secondary': row.state === 'complete', 'traffic-warning': row.state !== 'complete' }">{{ stateLabels[row.state] }}</span><span v-if="row.error_code" class="traffic-warning"> · {{ row.error_code }}</span></template>
-            <template #cell-bytes="{ row }"><span class="traffic-secondary">{{ capturedBytes(row) }} B</span><span v-if="syncLabel(row) === '待同步'" class="traffic-warning"> · 待同步</span></template>
-            <template #cell-associations="{ row }"><button v-if="row.associations.vulnerability_count" type="button" class="traffic-association-link" :aria-label="`查看 ${row.method} ${row.host}${row.path} 的 ${row.associations.vulnerability_count} 个关联漏洞`" @click.stop="openAssociations(row)">已关联 {{ row.associations.vulnerability_count }}</button><span v-else class="traffic-secondary">未关联</span></template>
-          </DataTable>
-          <footer class="traffic-pagination">
-            <span v-if="page" class="traffic-page-position" role="status">{{ pageNumber === null ? '历史定位' : `第 ${pageNumber} 页` }} · 本页 {{ page.items.length }} 条</span>
-            <Button size="sm" variant="ghost" :disabled="!page?.has_previous || loading" @click="goPage(page?.previous_cursor, -1)">上一页</Button>
-            <Button size="sm" variant="ghost" :disabled="!page?.has_more || loading" @click="goPage(page?.next_cursor, 1)">下一页</Button>
-            <Select aria-label="每页流量数" :model-value="String(filters.limit)" :options="pageSizeOptions" @update:model-value="setFilter('limit', $event)" />
-            <Button v-if="hasNew || cursor" size="sm" :variant="hasNew ? 'secondary' : 'ghost'" :disabled="loading" @click="goLatest">{{ hasNew ? '有新流量 · 返回最新页' : '返回最新页' }}</Button>
-          </footer>
+    <p v-if="error" class="traffic-notice" role="alert">{{ error }}<Button size="sm" variant="ghost" @click="retry">重试</Button><Button v-if="requestedPage > 1" size="sm" variant="ghost" @click="goLatest">返回最新页</Button></p>
+    <div class="traffic-body">
+      <div ref="splitElement" class="traffic-main" :style="{ gridTemplateRows: readerExpanded ? 'minmax(0, 1fr)' : !selectedFlowId ? 'minmax(0, 1fr) auto' : `minmax(200px, ${splitRatio}fr) 12px minmax(240px, ${100 - splitRatio}fr)` }">
+        <div v-show="!readerExpanded" class="traffic-list">
+          <TrafficTable :rows="page?.items || []" :selected-id="selectedFlowId" :selected-project-id="selectedProjectId" :loading="loading" :empty-label="error ? '列表未能读取' : hasFilters ? '没有匹配当前筛选的流量' : '尚无流量记录'" @select="selectFlow($event)" @associations="openAssociations" />
+          <Pagination v-if="page" :page="page.page" :limit="page.limit" :total="page.total" :total-pages="page.total_pages" :loading="loading" @page="goPage" @limit="setFilter('limit', String($event))">
+            <span class="traffic-refresh-state">{{ refreshLabel }}</span>
+            <Button v-if="hasNew || page.page > 1" size="sm" :variant="hasNew ? 'secondary' : 'ghost'" :disabled="loading" @click="goLatest">{{ hasNew ? '有新流量 · 返回最新页' : '返回最新页' }}</Button>
+          </Pagination>
         </div>
-        <div class="traffic-splitter" role="separator" tabindex="0" aria-label="调整列表与阅读器高度" aria-orientation="horizontal" :aria-valuenow="splitRatio" :aria-valuemin="splitBounds.min" :aria-valuemax="splitBounds.max" @pointerdown="startResize" @pointermove="resize" @pointerup="endResize" @pointercancel="endResize" @keydown="resizeKey" />
+        <div v-show="!readerExpanded && selectedFlowId" class="traffic-splitter" role="separator" tabindex="0" aria-label="调整列表与阅读器高度" aria-orientation="horizontal" :aria-valuenow="splitRatio" :aria-valuemin="splitBounds.min" :aria-valuemax="splitBounds.max" @pointerdown="startResize" @pointermove="resize" @pointerup="endResize" @pointercancel="endResize" @keydown="resizeKey" />
         <div class="traffic-reading">
-          <EvidenceReader v-if="selectedFlowId && selectedProjectId && !accessDenied" :key="selectionKey" ref="reader" :entity-key="selectionKey" :project-id="selectedProjectId" :items="readerItems" :load-preview="loadEvidencePreview" :original-url="originalUrl" :fill-height="true" :auto-refresh="false" @flow-loaded="onFlowLoaded">
+          <p v-if="selectedDetail?.error" class="traffic-notice" role="alert">采集错误：{{ selectedDetail.error.code }}<span v-if="selectedDetail.error.message">{{ selectedDetail.error.message }}</span></p>
+          <p v-if="selectedDetail?.location?.address_issue" class="traffic-notice" role="alert">地址待确认：{{ selectedDetail.location.address_issue }}</p>
+          <EvidenceReader v-if="selectedFlowId && selectedProjectId && !accessDenied" :key="selectionKey" ref="reader" :entity-key="selectionKey" :project-id="selectedProjectId" :items="readerItems" :load-preview="loadEvidencePreview" :original-url="originalUrl" :fill-height="true" :auto-refresh="false" @flow-loaded="onFlowLoaded" @expanded-change="readerExpanded = $event">
             <template #header-context><span v-if="!selectedInPage" class="traffic-selection-context">当前定位流量不在本页结果中</span></template>
             <template #header-actions><Button size="sm" variant="ghost" @click="clearSelection">清除选择</Button></template>
           </EvidenceReader>
           <p v-else-if="accessDenied" class="traffic-notice" role="alert">当前范围不可访问，已停止展示流量正文。<Button v-if="selectedFlowId" size="sm" variant="ghost" @click="clearSelection">清除选择</Button></p>
           <p v-else-if="selectedFlowId" class="traffic-notice" role="alert">定位链接缺少项目，请从流量列表重新选择。<Button size="sm" variant="ghost" @click="clearSelection">清除选择</Button></p>
-          <p v-else class="traffic-empty">选择一条流量阅读请求与响应。</p>
+          <p v-else class="traffic-empty">未选择流量</p>
         </div>
       </div>
-      <aside v-if="inspectorOpen" class="traffic-inspector" aria-label="流量详情">
-        <header><h3>流量详情</h3><Button size="sm" variant="ghost" @click="inspectorOpen = false">收起</Button></header>
+    </div>
+    <Dialog v-model:open="metadataOpen" title="采集信息" size="md" @open-auto-focus="focusMetadata" @close-auto-focus="restoreMetadataFocus">
+      <div class="traffic-metadata">
         <section v-if="selectedFlowId" ref="associationsElement" class="traffic-association-section" aria-label="关联漏洞" tabindex="-1">
           <h4>关联漏洞</h4>
           <nav v-if="selectedDetail?.observations?.length" class="traffic-associations">
-            <RouterLink v-for="association in selectedDetail.observations" :key="association.observation_id" :to="{ name: 'Findings', query: { vulnerabilityProjectId: selectedProjectId, vulnerabilityId: association.vulnerability_id, vulnerabilityObservationId: association.observation_id } }">{{ association.vulnerability_id }} · 已关联<span class="traffic-secondary">Observation {{ association.observation_id }}</span></RouterLink>
+            <RouterLink v-for="association in selectedDetail.observations" :key="`${association.vulnerability_id}:${association.observation_id || 'record'}`" :to="{ name: 'Findings', query: { vulnerabilityProjectId: selectedProjectId, vulnerabilityId: association.vulnerability_id, vulnerabilityObservationId: association.observation_id || undefined } }">{{ association.vulnerability_id }} · 已关联<span class="traffic-secondary">{{ association.observation_id ? `Observation ${association.observation_id}` : '漏洞记录补充' }}</span></RouterLink>
           </nav>
           <p v-else class="traffic-secondary">{{ selectedDetail ? '未记录已接受的关联发现' : '等待读取当前流量' }}</p>
         </section>
         <p v-else class="traffic-secondary">尚未选择流量</p>
         <template v-if="selectedDetail">
+          <h4>流量来源</h4>
           <dl>
             <dt>项目</dt><dd>{{ selectedProjectId }}</dd>
             <dt>flow / revision</dt><dd>{{ selectedDetail.id }} / {{ selectedDetail.revision }}</dd>
@@ -95,15 +87,16 @@
         </template>
         <template v-if="scopeProjectId">
           <h4>项目采集状态</h4>
-          <p v-if="!scopes.length" class="traffic-secondary">{{ scopeLabel }}</p>
+          <p class="traffic-scope-summary">{{ scopesLoading ? '正在读取采集状态…' : scopeLabel }}</p>
           <details v-for="scope in scopes" :key="scope.id">
             <summary>{{ trafficScopeLabel(scope) }} · {{ scope.task_run_id }}</summary>
             <dl><dt>上下文</dt><dd>{{ scope.id }}</dd><dt>最近更新</dt><dd>{{ scope.status_updated_at ? dateTime(scope.status_updated_at) : '未提供' }}</dd><dt>待同步</dt><dd>{{ pendingLabel(scope) }}</dd><template v-for="axis in stopAxes" :key="axis.key"><dt>{{ axis.label }}</dt><dd>{{ booleanLabel(scope.status?.[axis.key]) }}</dd></template><template v-if="scope.status?.code"><dt>诊断</dt><dd>{{ scope.status.code }}</dd></template><template v-if="scope.status?.failure_code"><dt>历史故障</dt><dd>{{ scope.status.failure_code }}</dd></template></dl>
           </details>
           <p v-if="scopesTruncated" class="traffic-secondary">仅展示前 100 个采集上下文，不能据此判断整个项目已停止。</p>
         </template>
-      </aside>
-    </div>
+      </div>
+      <template #footer><Button variant="secondary" @click="metadataOpen = false">返回流量</Button></template>
+    </Dialog>
   </section>
 </template>
 
@@ -115,16 +108,18 @@ const searchContexts = new WeakMap<Router, Map<string, string>>()
 </script>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Pause, Play, RefreshCw, PanelRight } from '@lucide/vue'
+import { ArrowLeft, Info, Pause, Play, RefreshCw, Search, SlidersHorizontal } from '@lucide/vue'
 import { ApiError, api, fetchArtifactPreview } from '@/api/client'
 import { getTrafficScopes, listTraffic, type TrafficFilters, type TrafficPage, type TrafficScopeStatus, type TrafficSummary } from '@/api/traffic'
 import type { EvidenceItem, EvidenceRef, ProjectSummary, TrafficFlowDetail, TrafficSide, TrafficState } from '@/api/types'
-import { Button, Input, Popover, Select } from '@/components/ui'
-import DataTable, { type DataTableColumn, type DataTableRowAttrs } from '@/components/patterns/DataTable.vue'
+import { Button, Dialog, Input, Popover, Select } from '@/components/ui'
+import TrafficTable from './TrafficTable.vue'
+import Pagination from '@/components/patterns/Pagination.vue'
 import EvidenceReader from '@/components/patterns/EvidenceReader.vue'
 import { dateTime } from '@/lib/format'
+import { toLogicalPixels } from '@/lib/uiScale'
 import { trafficScopeLabel } from './trafficStatus'
 
 const route = useRoute()
@@ -144,7 +139,9 @@ const sourceVulnerability = computed(() => queryText('vulnerabilityId') && query
 } : null)
 const reader = ref<{ refreshFlow: () => Promise<void> } | null>(null)
 const selectedDetail = ref<TrafficFlowDetail | null>(null)
-watch(selectionKey, () => { selectedDetail.value = null }, { flush: 'sync' })
+// 填满工作区时由父级让出列表空间，保留原分隔比例与表格实例。
+const readerExpanded = ref(false)
+watch(selectionKey, () => { selectedDetail.value = null; readerExpanded.value = false }, { flush: 'sync' })
 const readerItems = computed<EvidenceItem[]>(() => selectedFlowId.value ? [{ id: selectedFlowId.value, kind: 'http', flow_id: selectedFlowId.value, role: 'primary', title: 'HTTP 流量', source: 'capture' }] : [])
 function onFlowLoaded(detail: TrafficFlowDetail) {
   if (detail.project_id === selectedProjectId.value && detail.id === selectedFlowId.value) selectedDetail.value = detail
@@ -165,7 +162,6 @@ const statusOptions = [{ value: '__all__', label: '全部状态码' }, ...Array.
 const stateOptions = [{ value: '__all__', label: '全部采集状态' }, ...Object.entries(stateLabels).map(([value, label]) => ({ value, label }))]
 const associationOptions = [{ value: '__all__', label: '全部关联' }, { value: 'true', label: '已关联' }, { value: 'false', label: '未关联' }]
 const errorOptions = [{ value: '__all__', label: '全部错误状态' }, { value: 'transport_error', label: '传输错误' }, { value: 'collector_stopped', label: '采集器停止' }]
-const pageSizeOptions = [50, 100, 200].map((value) => ({ value: String(value), label: `${value} 条 / 页` }))
 const searches = searchContexts.get(router) ?? new Map<string, string>()
 searchContexts.set(router, searches)
 const search = computed(() => searches.get(queryText('search_context')) ?? '')
@@ -175,10 +171,12 @@ watch(search, (value) => { searchDraft.value = value })
 const taskRunDraft = ref(queryText('task_run'))
 const statusCodeDraft = ref(queryText('status_code'))
 watch(() => [queryText('task_run'), queryText('status_code')], ([taskRun, code]) => { taskRunDraft.value = taskRun!; statusCodeDraft.value = code! })
-const cursor = computed(() => queryText('cursor'))
+const requestedPage = computed(() => /^[1-9]\d*$/.test(queryText('page')) && Number.isSafeInteger(Number(queryText('page'))) ? Number(queryText('page')) : 1)
 const filters = computed<TrafficFilters>(() => ({
   project_id: scopeProjectId.value || undefined,
   task_run_id: queryText('task_run') || undefined,
+  vulnerability_id: queryText('vulnerability_id') || undefined,
+  observation_id: queryText('observation_id') || undefined,
   method: queryText('method') || undefined,
   url: search.value || undefined,
   state: (queryText('state') || undefined) as TrafficState | undefined,
@@ -187,17 +185,17 @@ const filters = computed<TrafficFilters>(() => ({
   error_code: queryText('error_code') || undefined,
   associated: queryText('associated') ? queryText('associated') === 'true' : undefined,
   limit: [50, 100, 200].includes(Number(queryText('limit'))) ? Number(queryText('limit')) : 50,
-  cursor: cursor.value || undefined,
+  page: requestedPage.value,
 }))
-const filterKeys = ['task_run', 'method', 'state', 'status_family', 'status_code', 'error_code', 'associated'] as const
+const filterKeys = ['task_run', 'method', 'state', 'status_family', 'status_code', 'error_code', 'associated', 'vulnerability_id', 'observation_id'] as const
 const hasFilters = computed(() => Boolean(search.value || (!fixedProjectId.value && queryText('project')) || filterKeys.some(queryText)))
 const extraFilterCount = computed(() => ['state', 'associated', 'task_run', 'status_code', 'error_code'].filter(queryText).length)
-const canClearFilters = computed(() => Boolean(hasFilters.value || cursor.value || searchDraft.value || taskRunDraft.value || statusCodeDraft.value))
+const canClearFilters = computed(() => Boolean(hasFilters.value || requestedPage.value > 1 || searchDraft.value || taskRunDraft.value || statusCodeDraft.value))
 async function clearFilters() {
   const query = { ...route.query }
   // 全局项目筛选可清除，但已选报文仍绑定原项目；项目内入口由路由参数固定作用域。
   if (!fixedProjectId.value && selectedFlowId.value) query.flow_project = selectedProjectId.value
-  for (const key of [...filterKeys, 'project', 'cursor', 'search_context']) delete query[key]
+  for (const key of [...filterKeys, 'project', 'page', 'cursor', 'search_context']) delete query[key]
   searchDraft.value = ''
   taskRunDraft.value = ''
   statusCodeDraft.value = ''
@@ -206,7 +204,7 @@ async function clearFilters() {
 }
 function setFilter(key: string, value: string) {
   if (value === '__all__') value = ''
-  void router.push({ query: { ...route.query, [key]: value || undefined, cursor: undefined,
+  void router.push({ query: { ...route.query, [key]: value || undefined, page: undefined,
     flow_project: !fixedProjectId.value && selectedFlowId.value ? selectedProjectId.value : undefined,
   } })
 }
@@ -215,74 +213,51 @@ function applySearch() {
   const context = value ? Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16)).join('-') : undefined
   if (context) searches.set(context, value)
   paginationNotice.value = ''
-  // 查询上下文与 cursor 一次切换，避免旧分页先携带新搜索发出请求。
-  void router.push({ query: { ...route.query, search_context: context, task_run: taskRunDraft.value.trim() || undefined, status_code: statusCodeDraft.value || undefined, cursor: undefined } })
+  // 查询上下文与页码一次切换，避免旧页先携带新搜索发出请求。
+  void router.push({ query: { ...route.query, search_context: context, task_run: taskRunDraft.value.trim() || undefined, status_code: statusCodeDraft.value || undefined, page: undefined } })
 }
-const paginationScope = computed(() => JSON.stringify({ ...filters.value, cursor: undefined, fixedProjectId: fixedProjectId.value }))
-const pageNumber = ref<number | null>(null)
-// 只记本次浏览成功访问过的 cursor；不从服务端边界推算全库排名或总页数。
-const visitedPages = new Map<string, Map<string, number | null>>()
-let pageScope = ''
-let pageCursor = ''
-function rememberPageInHistory() {
-  // 只把页序和不含搜索原文的 opaque cursor 绑定到当前历史条目，离页返回也能恢复。
-  router.options.history.replace(route.fullPath, { ...router.options.history.state, trafficCursor: pageCursor, trafficPage: pageNumber.value })
-}
-let pageNavigation: { scope: string; cursor: string; number: number | null; reset?: boolean } | null = null
-function goPage(value: string | null | undefined, direction: -1 | 1) {
-  if (!value) return
-  pageNavigation = { scope: paginationScope.value, cursor: value, number: pageNumber.value === null ? null : Math.max(1, pageNumber.value + direction) }
-  if (cursor.value === value) void refresh()
-  else void router.push({ query: { ...route.query, cursor: value } })
+const paginationScope = computed(() => JSON.stringify({ ...filters.value, page: undefined, fixedProjectId: fixedProjectId.value }))
+let successfulQuery = ''
+function goPage(value: number) {
+  if (loading.value) return
+  if (filters.value.page === value) void refresh()
+  else void router.push({ query: { ...route.query, page: value === 1 ? undefined : String(value) } })
 }
 function goLatest() {
   stopped.value = false
   failures = 0
-  pageNavigation = { scope: paginationScope.value, cursor: '', number: 1, reset: true }
-  if (cursor.value) void router.push({ query: { ...route.query, cursor: undefined } })
-  else void refresh()
+  goPage(1)
 }
 function isSelected(row: TrafficSummary) { return row.project_id === selectedProjectId.value && row.id === selectedFlowId.value }
-function rowKey(row: TrafficSummary) { return JSON.stringify([row.project_id, row.id]) }
 function selectFlow(row: TrafficSummary, replace = false) {
   return router[replace ? 'replace' : 'push']({ query: { ...route.query, flow: row.id, flow_project: fixedProjectId.value ? undefined : row.project_id, cleared: undefined } })
 }
 const associationsElement = ref<HTMLElement | null>(null)
-async function openAssociations(row: TrafficSummary) {
+const metadataButton = ref<InstanceType<typeof Button> | null>(null)
+let metadataReturnFocus: HTMLElement | null = null
+function openMetadata(event: Event) {
+  metadataReturnFocus = event.currentTarget as HTMLElement
+  metadataOpen.value = true
+}
+function focusMetadata(event: Event) {
+  if (!associationsElement.value) return
+  event.preventDefault()
+  associationsElement.value.focus({ preventScroll: true })
+}
+function restoreMetadataFocus(event: Event) {
+  const target = metadataReturnFocus?.isConnected ? metadataReturnFocus : metadataButton.value?.$el
+  if (!(target instanceof HTMLElement)) return
+  event.preventDefault()
+  target.focus({ preventScroll: true })
+}
+async function openAssociations(row: TrafficSummary, event: Event) {
+  const trigger = event.currentTarget as HTMLElement
   await selectFlow(row)
   if (!isSelected(row)) return
-  inspectorOpen.value = true
-  await nextTick()
-  associationsElement.value?.focus({ preventScroll: true })
-  associationsElement.value?.scrollIntoView({ block: 'nearest' })
+  metadataReturnFocus = trigger
+  metadataOpen.value = true
 }
 function clearSelection() { void router.push({ query: { ...route.query, flow: undefined, flow_project: undefined, cleared: '1' } }) }
-function rowAttrs(row: TrafficSummary, index: number): DataTableRowAttrs {
-  return { tabindex: 0, onClick: () => selectFlow(row), onKeydown: (event: KeyboardEvent) => {
-    if (event.target !== event.currentTarget) return
-    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectFlow(row) }
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault()
-      const next = page.value?.items[index + (event.key === 'ArrowDown' ? 1 : -1)]
-      if (!next) return
-      selectFlow(next)
-      const sibling = event.key === 'ArrowDown' ? (event.currentTarget as HTMLElement).nextElementSibling : (event.currentTarget as HTMLElement).previousElementSibling
-      ;(sibling as HTMLElement | null)?.focus()
-    }
-  } }
-}
-function capturedBytes(row: TrafficSummary) { return sides.reduce((total, side) => total + (row.sync.bodies[side.value].captured_bytes ?? 0), 0) }
-function syncLabel(row: TrafficSummary) { return sides.some((side) => ['pending', 'receiving'].includes(row.sync.bodies[side.value].status)) ? '待同步' : '已同步' }
-const columns = computed<DataTableColumn<TrafficSummary>[]>(() => [
-  { key: 'time', label: '接收时间', width: 170, minWidth: 100 },
-  ...(!fixedProjectId.value ? [{ key: 'project', label: '项目', width: 160, minWidth: 80, value: (row: TrafficSummary) => row.project_title }] : []),
-  { key: 'method', label: '方法', width: 80, minWidth: 64, value: (row) => row.method }, { key: 'target', label: 'Host / 路径', width: 420, minWidth: 160, flexible: true },
-  { key: 'status', label: '状态码', width: 80, minWidth: 72, value: (row) => row.status_code ?? '无响应' },
-  { key: 'state', label: '采集', width: 120, minWidth: 80, value: (row) => `${stateLabels[row.state]}${row.error_code ? ` · ${row.error_code}` : ''}` },
-  { key: 'bytes', label: '正文大小', width: 120, minWidth: 90, align: 'end', value: (row) => `${capturedBytes(row)} B · ${syncLabel(row)}` },
-  { key: 'duration', label: '耗时', width: 100, minWidth: 80, align: 'end', value: (row) => row.finished_at === null ? '未结束' : `${Math.max(0, Math.round((row.finished_at - row.started_at) * 1000))} ms` },
-  { key: 'associations', label: '关联', width: 100, minWidth: 80 },
-])
 
 const projects = ref<ProjectSummary[]>([])
 const projectError = ref(false)
@@ -300,15 +275,16 @@ const paused = ref(false)
 const hidden = ref(document.hidden)
 const stopped = ref(false)
 const accessDenied = ref(false)
+watch(accessDenied, (denied) => { if (denied) readerExpanded.value = false }, { flush: 'sync' })
 const lastSuccess = ref('')
 const hasNew = ref(false)
 const scopes = ref<TrafficScopeStatus[]>([])
 const scopesLoading = ref(true)
 const scopesTruncated = ref(false)
-const inspectorOpen = ref(false)
+const metadataOpen = ref(false)
 const selectedInPage = computed(() => page.value?.items.some(isSelected))
 const scopeLabel = computed(() => scopes.value.length ? `采集上下文 ${scopes.value.length}${scopesTruncated.value ? '+' : ''} · ${[...new Set(scopes.value.map(trafficScopeLabel))].join(' / ')}` : '尚无采集上下文：可能尚未开始执行，或此历史项目未启用采集。')
-const refreshLabel = computed(() => `${stopped.value ? '自动刷新已停止' : hidden.value ? '页面隐藏，已暂停' : paused.value ? '视图刷新已暂停' : '每 3 秒刷新'}${lastSuccess.value ? ` · 最近成功 ${lastSuccess.value}` : ''}`)
+const refreshLabel = computed(() => `${stopped.value ? '自动刷新已停止' : hidden.value ? '页面隐藏，已暂停' : paused.value ? '视图刷新已暂停' : requestedPage.value > 1 ? '历史页保持 · 每 3 秒检查新流量' : '每 3 秒刷新'}${lastSuccess.value ? ` · 最近检查 ${lastSuccess.value}` : ''}`)
 let timer: ReturnType<typeof setTimeout> | undefined
 let controller: AbortController | null = null
 let generation = 0
@@ -323,49 +299,53 @@ function schedule() {
   timer = setTimeout(() => void refresh(true), Math.min(30000, 3000 * 2 ** failures))
 }
 async function refresh(automatic = false) {
-  if (disposed || loading.value) return
+  if (disposed || controller) return
   clearTimeout(timer)
-  if (queryText('search_context') && !searches.has(queryText('search_context'))) {
-    paginationNotice.value = '搜索上下文已失效，已返回最新页。'
-    pageNumber.value = null
-    pageNavigation = null
-    await router.replace({ query: { ...route.query, search_context: undefined, cursor: undefined }, state: { trafficCursor: '', trafficPage: null } })
+  if (queryText('cursor') || (queryText('search_context') && !searches.has(queryText('search_context')))) {
+    paginationNotice.value = queryText('cursor') ? '原分页定位已失效，已返回第 1 页。' : '搜索上下文已失效，已返回第 1 页。'
+    const missingSearch = queryText('search_context') && !searches.has(queryText('search_context'))
+    await router.replace({ query: { ...route.query, cursor: undefined, page: undefined, ...(missingSearch ? { search_context: undefined } : {}) } })
     return
   }
   const currentGeneration = generation
-  const requestedScope = paginationScope.value
-  const requestedCursor = cursor.value
-  const navigation = pageNavigation?.scope === requestedScope && pageNavigation.cursor === requestedCursor ? pageNavigation : null
+  const probeOnly = automatic && requestedPage.value > 1
+  const requestedFilters = { ...filters.value }
   const request = new AbortController()
   controller = request
-  loading.value = true
+  // 后台检查不禁用分页输入，避免丢失焦点；显式翻页由查询监听取消旧请求。
+  loading.value = !automatic
   const current = () => !disposed && !request.signal.aborted && currentGeneration === generation && (!automatic || (!hidden.value && !paused.value))
   try {
-    const result = await listTraffic(filters.value, fixedProjectId.value || undefined, request.signal)
+    // 历史页只探测首页，不用新的 OFFSET 结果替换正在阅读的行，也不混入探测计数。
+    const result = await listTraffic(probeOnly ? { ...requestedFilters, page: 1, limit: 1 } : requestedFilters, fixedProjectId.value || undefined, request.signal)
     if (!current()) return
-    const visits = navigation?.reset ? new Map<string, number | null>() : visitedPages.get(requestedScope) ?? new Map<string, number | null>()
-    const historyState = router.options.history.state
-    const historyNumber = historyState.trafficCursor === requestedCursor && typeof historyState.trafficPage === 'number' ? historyState.trafficPage : null
-    pageNumber.value = navigation ? navigation.number : visits.get(requestedCursor) ?? (requestedCursor ? historyNumber : 1)
-    visits.set(requestedCursor, pageNumber.value)
-    visitedPages.set(requestedScope, visits)
-    pageScope = requestedScope
-    pageCursor = requestedCursor
-    rememberPageInHistory()
-    if (navigation?.reset) { latestSeen = ''; hasNew.value = false }
-    if (navigation === pageNavigation) pageNavigation = null
-    page.value = result
+    if (!probeOnly) {
+      page.value = result
+      successfulQuery = JSON.stringify({ ...requestedFilters, page: result.page })
+      if (result.page !== requestedFilters.page) {
+        paginationNotice.value = result.total_pages ? `结果页数已变化，已定位到第 ${result.page} 页。` : '当前筛选无结果，已返回第 1 页。'
+        accessDenied.value = false
+        error.value = ''
+        failures = 0
+        lastSuccess.value = new Date().toLocaleTimeString('zh-CN')
+        const first = initialSelection && !selectedFlowId.value && !queryText('cleared') ? result.items[0] : undefined
+        initialSelection = false
+        await router.replace({ query: { ...route.query, page: result.page === 1 ? undefined : String(result.page), ...(first ? { flow: first.id, flow_project: fixedProjectId.value ? undefined : first.project_id } : {}) } })
+        return
+      }
+      if (initialSelection) {
+        initialSelection = false
+        if (!selectedFlowId.value && !queryText('cleared') && result.items[0]) selectFlow(result.items[0], true)
+      }
+    }
     accessDenied.value = false
     error.value = ''
-    if (initialSelection) {
-      initialSelection = false
-      if (!selectedFlowId.value && !queryText('cleared') && result.items[0]) selectFlow(result.items[0], true)
+    if (probeOnly || result.page === 1) {
+      const newestKey = latestKey(result.items[0])
+      if (probeOnly && latestSeen && newestKey > latestSeen) hasNew.value = true
+      if (!probeOnly) hasNew.value = false
+      latestSeen = newestKey
     }
-    const newest = cursor.value ? (await listTraffic({ ...filters.value, cursor: undefined, limit: 1 }, fixedProjectId.value || undefined, request.signal)).items[0] : result.items[0]
-    if (!current()) return
-    const newestKey = latestKey(newest)
-    if (latestSeen && newestKey > latestSeen) hasNew.value = true
-    if (!latestSeen) latestSeen = newestKey
     if (scopeProjectId.value) {
       const status = await getTrafficScopes(scopeProjectId.value, request.signal)
       if (!current()) return
@@ -392,30 +372,28 @@ async function refresh(automatic = false) {
 function retry() { stopped.value = false; failures = 0; void refresh() }
 function togglePause() { paused.value = !paused.value; if (paused.value) clearTimeout(timer); else schedule() }
 function visibilityChanged() { hidden.value = document.hidden; if (hidden.value) clearTimeout(timer); else schedule() }
-watch(() => JSON.stringify([filters.value, queryText('search_context')]), () => {
+watch(() => JSON.stringify([filters.value, queryText('search_context'), queryText('cursor')]), () => {
   generation += 1
   controller?.abort()
+  controller = null
   loading.value = false
-  if (pageScope !== paginationScope.value) { page.value = null; pageNumber.value = null }
   error.value = ''
   stopped.value = false
   failures = 0
+  if (!queryText('cursor') && (!queryText('search_context') || searches.has(queryText('search_context'))) && successfulQuery === JSON.stringify(filters.value)) { schedule(); return }
   void refresh()
 }, { immediate: true })
-watch(() => route.fullPath, () => {
-  if (page.value && pageScope === paginationScope.value && pageCursor === cursor.value) rememberPageInHistory()
-})
-watch(() => JSON.stringify({ ...filters.value, cursor: undefined }), () => { latestSeen = ''; hasNew.value = false })
+watch(paginationScope, () => { latestSeen = ''; hasNew.value = false })
 watch(scopeProjectId, () => { scopes.value = []; scopesLoading.value = true; scopesTruncated.value = false }, { flush: 'sync' })
 watch(fixedProjectId, () => { initialSelection = true })
 
 const splitElement = ref<HTMLElement | null>(null)
-// 紧凑头与 30px 行高下，默认兼顾八行列表和十六行以上报文；仍可独立拖动。
-const splitRatio = ref(42)
+// 默认以正文阅读为主；列表仍容纳表头、分页及舒适行高，放大时不销毁它。
+const splitRatio = ref(34)
 const splitHeight = ref(0)
 const splitBounds = computed(() => {
-  const available = Math.max(330, splitHeight.value - 8)
-  return { min: Math.max(15, 150 / available * 100), max: Math.min(70, (available - 180) / available * 100) }
+  const available = Math.max(440, splitHeight.value - 12)
+  return { min: Math.max(15, 200 / available * 100), max: Math.min(70, (available - 240) / available * 100) }
 })
 let splitObserver: ResizeObserver | undefined
 let dragPointer: number | null = null
@@ -424,7 +402,7 @@ function startResize(event: PointerEvent) { dragPointer = event.pointerId; (even
 function resize(event: PointerEvent) {
   if (dragPointer !== event.pointerId || !splitElement.value) return
   const rect = splitElement.value.getBoundingClientRect()
-  if (rect.height) clampSplit((event.clientY - rect.top - 4) / Math.max(1, rect.height - 8) * 100)
+  if (rect.height) clampSplit((toLogicalPixels(event.clientY - rect.top) - 6) / Math.max(1, toLogicalPixels(rect.height) - 12) * 100)
 }
 function endResize() { dragPointer = null }
 function resizeKey(event: KeyboardEvent) {

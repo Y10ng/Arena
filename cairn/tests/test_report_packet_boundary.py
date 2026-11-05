@@ -52,7 +52,15 @@ def test_packet_http_and_contract_failures_remain_distinct(response, code):
 
 def test_working_packet_preserves_full_frozen_index_and_original_bytes():
     packet = {
-        "vulnerabilities": [{"id": "v1", "source_fact_id": "f1"}],
+        "materialized_at": "2026-11-05T00:00:00Z",
+        "project": {"id": "p1", "title": "冻结项目", "status": "paused", "execution_control_json": "内部调度原件"},
+        "assessment_summary": {
+            "project_status": "paused", "stop_reason": None,
+            "coverage": {"blocked": [{"reason": "缺少必要身份"}]},
+            "execution": {"attempts_started": 7}, "calls_by_task_type": [{"task_type": "reason", "count": 7}],
+        },
+        "intents": [{"id": "i1"}], "quality_snapshot": {"internal": True},
+        "vulnerabilities": [{"id": "v1", "number": "p1/v1", "status": "new", "source_fact_id": "f1"}],
         "observations": [{"id": "o1", "source_fact_id": "f1", "evidence_items": [
             {"id": "e1", "response": {"artifact_id": "a1"}},
         ]}],
@@ -65,7 +73,15 @@ def test_working_packet_preserves_full_frozen_index_and_original_bytes():
     _, _, files = _readable_input_references(original, "frozen: graph")
     working = json.loads(files[0].content)
     full = json.loads(next(item.content for item in files if item.path.endswith("/packet-full.json")))
-    assert "task_runs" not in working
+    assert not {"task_runs", "intents", "quality_snapshot"}.intersection(working)
+    assert working["project"] == {"id": "p1", "title": "冻结项目", "status": "paused"}
+    assert working["assessment_summary"] == {
+        "project_status": "paused", "stop_reason": None, "coverage": packet["assessment_summary"]["coverage"],
+    }
+    for key in ("materialized_at", "vulnerabilities", "observations"):
+        assert working[key] == packet[key]
+    for key in ("project", "assessment_summary", "intents", "quality_snapshot"):
+        assert full[key] == packet[key]
     assert working["facts"] == packet["facts"][:1]
     assert working["artifacts"] == packet["artifacts"][:1]
     assert set(working["artifact_reads"]) == {"a1"}

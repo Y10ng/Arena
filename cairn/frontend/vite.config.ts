@@ -16,8 +16,8 @@ export default defineConfig(({ mode }) => ({
   },
   build: {
     outDir: mode === 'verify' ? verifyBuildDir : serverStaticDir,
-    // static/ 只保存 Vite 产物，发布构建前清空可避免历史 hash 资源累积。
-    emptyOutDir: true,
+    // 发布保留旧 hash，避免已打开页面的延迟加载失效；隔离验证目录可清空。
+    emptyOutDir: mode === 'verify',
     assetsDir: 'assets',
     rollupOptions: {
       output: {

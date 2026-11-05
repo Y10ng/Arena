@@ -36,9 +36,13 @@ import TextEditor from './TextEditor.vue'
 
 const wrappers: VueWrapper[] = []
 
-function mountEditor(props: Partial<InstanceType<typeof TextEditor>['$props']> = {}) {
+function mountEditor(
+  props: Partial<InstanceType<typeof TextEditor>['$props']> = {},
+  slots: Record<string, string> = {},
+) {
   const wrapper = mount(TextEditor, {
     attachTo: document.body,
+    slots,
     props: {
       modelValue: '# 项目资料',
       label: '项目资料',
@@ -74,6 +78,27 @@ afterEach(() => {
 })
 
 describe('TextEditor fullscreen migration', () => {
+  it('keeps custom file identity and status in inline and fullscreen toolbars', async () => {
+    const wrapper = mountEditor({}, {
+      heading: '<span data-testid="file-status">notes.md · 占位符齐全</span>',
+    })
+    await flushPromises()
+
+    expect(wrapper.get('.text-editor-toolbar [data-testid="file-status"]').text()).toBe(
+      'notes.md · 占位符齐全',
+    )
+    expect(wrapper.find('.text-editor-language').exists()).toBe(false)
+
+    buttonByLabel('全屏编辑').click()
+    await flushPromises()
+
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')
+    expect(dialog?.querySelector('[data-testid="file-status"]')?.textContent).toBe(
+      'notes.md · 占位符齐全',
+    )
+    expect(dialog?.querySelector('[data-testid="monaco-editor"]')).not.toBeNull()
+  })
+
   it('opens one named fullscreen Dialog with the existing editor contract', async () => {
     mountEditor({
       modelValue: '',

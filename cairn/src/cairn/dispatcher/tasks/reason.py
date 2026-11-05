@@ -50,7 +50,7 @@ from cairn.dispatcher.worker_result_gateway import (
     decode_pi_result,
     worker_failure_error_type,
 )
-from cairn.dispatcher.tasks.delivery import DeliveryUnavailable, DELIVERY_PROMPT, register_delivery, resume_continuation, resume_delivery, remaining_delivery_seconds
+from cairn.dispatcher.tasks.delivery import DeliveryUnavailable, DELIVERY_PROMPT, ResearchDeliveryBudget, register_delivery, resume_continuation, resume_delivery, remaining_delivery_seconds
 from cairn.dispatcher.workers.registry import get_driver
 from cairn.server.models import ProjectDetail
 
@@ -87,10 +87,13 @@ def run_reason_task(
     result: ProcessResult | None = None
     lease.start()
     try:
+        cancellation.pause_clock = container_manager.research_clock(project.project.id)
+        delivery_budget = ResearchDeliveryBudget(cancellation.pause_clock)
         execution_timeout = config.tasks.reason.timeout
         if delivery_context is not None:
             container_name, frozen_delivery, execution_timeout = resume_delivery(
                 container_manager, project.project.id, worker, delivery_context, "reason_execute",
+                client=client, budget=delivery_budget,
             )
             session = frozen_delivery["session_id"]
             prompt = DELIVERY_PROMPT
@@ -133,6 +136,8 @@ def run_reason_task(
                 phase="reason_execute", session=session, timeout_seconds=execution_timeout,
                 binding=reason_context.binding, inputs={"open_intent_ids": [item["id"] for item in reason_context.open_intents]},
                 deadline_at=output_retry["deadline_at"] if output_retry is not None else None,
+                deadline_paused_seconds=output_retry["paused_seconds"] if output_retry is not None else None,
+                budget=delivery_budget,
             )
             LOG.debug(
                 "reason context prepared project=%s worker=%s facts=%s allowed_fact_ids=%s hints=%s open_intents=%s coverage_slots=%s",
@@ -171,7 +176,7 @@ def run_reason_task(
         task_execution = None if delivery_context is not None else container_manager.prepare_task_execution(
             project.project, task_run_id, cancellation, container_runtime,
         )
-        execution_timeout = remaining_delivery_seconds(frozen_delivery)
+        execution_timeout = remaining_delivery_seconds(frozen_delivery, budget=delivery_budget)
         command = driver.build_execute(
             worker, prompt, session, phase="reason_execute",
             project_id=project.project.id, task_run_id=task_run_id,
@@ -374,9 +379,11 @@ def run_reason_task(
         LOG.exception("reason task crashed project=%s worker=%s", project.project.id, worker.name)
         return "container_failed"
     finally:
-        container_manager.stop_task_execution(project.project.id, task_run_id)
+        if not cancellation.detached:
+            container_manager.stop_task_execution(project.project.id, task_run_id)
         if result is not None:
             result.cleanup()
-        # 无论任务如何结束，都停止 heartbeat 并释放 reason worker 槽位。
+        # 宿主 detach 只停止本地 heartbeat；业务 claim 和物理现场仍保留。
         lease.stop()
-        best_effort_release_reason(client, project.project.id, worker.name, task_run_id=task_run_id)
+        if not cancellation.detached:
+            best_effort_release_reason(client, project.project.id, worker.name, task_run_id=task_run_id)

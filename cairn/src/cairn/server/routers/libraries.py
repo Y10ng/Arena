@@ -1,4 +1,4 @@
-"""版本化 advisory library 管理接口。"""
+"""资料库当前集合管理接口；已使用资料由项目／计划授权读取。"""
 
 from __future__ import annotations
 
@@ -6,24 +6,9 @@ from fastapi import APIRouter, Depends, Response, status
 
 from cairn.server.auth import require_super_admin
 from cairn.server.db import get_conn
-from cairn.server.schemas.libraries import (
-    Library,
-    LibraryCreate,
-    LibraryFile,
-    LibraryFileContent,
-    LibraryVersion,
-    LibraryVersionCreate,
-)
+from cairn.server.schemas.libraries import Library, LibraryCreate, LibraryFilesWrite, SelectableLibraryManifest
 from cairn.server.services.libraries import (
-    archive_library,
-    create_library,
-    create_library_version,
-    get_library,
-    get_library_version,
-    list_libraries,
-    list_library_files,
-    list_library_versions,
-    read_library_file,
+    archive_library, create_library, get_library, list_libraries, replace_library_files,
 )
 
 router = APIRouter(tags=["libraries"], dependencies=[Depends(require_super_admin)])
@@ -54,38 +39,7 @@ def delete_library(key: str):
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
-@router.get("/libraries/{key}/versions", response_model=list[LibraryVersion])
-def get_library_versions(key: str):
+@router.put("/libraries/{key}/files", response_model=SelectableLibraryManifest)
+def put_library_files(key: str, body: LibraryFilesWrite):
     with get_conn() as conn:
-        return list_library_versions(conn, key)
-
-
-@router.post(
-    "/libraries/{key}/versions",
-    response_model=LibraryVersion,
-    status_code=status.HTTP_201_CREATED,
-)
-def post_library_version(key: str, body: LibraryVersionCreate):
-    with get_conn() as conn:
-        return create_library_version(conn, key, body.files, message=body.message)
-
-
-@router.get("/libraries/{key}/versions/{version}", response_model=LibraryVersion)
-def get_library_version_record(key: str, version: int):
-    with get_conn() as conn:
-        return get_library_version(conn, key, version)
-
-
-@router.get("/libraries/{key}/versions/{version}/files", response_model=list[LibraryFile])
-def get_library_version_files(key: str, version: int):
-    with get_conn() as conn:
-        return list_library_files(conn, key, version)
-
-
-@router.get(
-    "/libraries/{key}/versions/{version}/files/{path:path}",
-    response_model=LibraryFileContent,
-)
-def get_library_version_file(key: str, version: int, path: str):
-    with get_conn() as conn:
-        return read_library_file(conn, key, path, version)
+        return replace_library_files(conn, key, body.files)

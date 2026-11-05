@@ -44,7 +44,7 @@ def sample():
         "report_scope": {"vulnerability_id": "v1", "observation_id": "o1"},
         "assessment_summary": {"execution": {}, "coverage": {"tested": [], "blocked": [], "untested": []}},
         "vulnerabilities": [{"id": "v1", "title": "记录读取缺少授权", "status": "open", "severity": "high", "target": "/records",
-                              "record_evidence_items": [], "source_fact_id": "f1", "repro_steps": "旧步骤不作为本次说明"}],
+                              "record_evidence_items": [], "dispositions": [], "source_fact_id": "f1", "repro_steps": "旧步骤不作为本次说明"}],
         "observations": [
             {"id": "o1", "vulnerability_id": "v1", "evidence_items": [item, {"id": "trace", "kind": "artifact", "role": "supporting", "source": "capture", "artifact": {"artifact_id": "trace"}}]},
         ],
@@ -77,6 +77,7 @@ def test_long_tail_selection_is_exact_and_original_sha_unchanged():
     assert "关键节选；其余内容省略" in markdown
     assert "**跨用户读取**" in markdown and "\n\n已有响应" in markdown
     assert "另一次观察未复现" in markdown
+    assert all(token not in markdown for token in ("来源定位", "Observation o1", "Evidence interaction", "Artifact request", "utf8-bytes=", "SHA-256", "登录 Arena"))
     assert packet == original
     for artifact in packet["artifacts"]:
         raw = packet["artifact_contents"][artifact["id"]]["text"].encode()
@@ -188,8 +189,9 @@ def test_frozen_flow_report_selection_and_readonly_input_never_require_live_flow
                  "sha256": digest, "byte_start": 0, "byte_end": len(raw)}
     data["findings"][0]["steps"][0]["evidence"][0]["selections"] = [selection]
     context = readable_finding_context(data["findings"][0], packet)
-    assert "冻结结果" in context["finding.key_evidence"] and "Flow flow1" in context["finding.key_evidence"]
+    assert "冻结结果" in context["finding.key_evidence"] and "Flow flow1" not in context["finding.key_evidence"]
     assert "结构化重建" in context["finding.key_evidence"]
+    assert all(token not in context["finding.key_evidence"] for token in (digest, "revision", "utf8-bytes=", "http-evidence-v1"))
     _, _, files = report._readable_input_references(json.dumps(packet), "frozen graph")
     working = json.loads(files[0].content)
     assert "flow_contents" not in working and "冻结结果" not in files[0].content
@@ -360,6 +362,22 @@ def test_accepted_read_api_only_delivers_same_readable_fields_not_internal_packe
     assert "irrelevant-prefix" not in json.dumps(first, ensure_ascii=False)
 
 
+@pytest.mark.parametrize("preconditions,expected", [
+    (["无特殊条件"], "无特殊条件"),
+    (["需普通用户登录，并持有自己的对象编号"], "需普通用户登录，并持有自己的对象编号"),
+    ([], "未记录"),
+])
+def test_report_conditions_use_recorded_fact_without_inference(preconditions, expected):
+    packet, data = sample()
+    packet["observations"][0]["source_fact_id"] = "f1"
+    packet["facts"][0]["assessment_record"] = {"preconditions": preconditions}
+    original = deepcopy(packet)
+    context = readable_finding_context(data["findings"][0], packet)
+    assert context["finding.description"].endswith("**成立条件：**" + expected)
+    assert "另一次观察未复现" not in context["finding.description"]
+    assert packet == original
+
+
 def test_sensitive_selected_original_is_rejected_without_rewriting_source():
     packet, data = sample()
     text = "Authorization: Bearer synthetic-only-fixture-value"
@@ -428,10 +446,9 @@ def test_reused_steps_keep_frozen_parameters_evidence_ranges_and_long_original_l
     evidence = context["finding.key_evidence"]
     assert "尾部关键结果：跨用户记录" in evidence and "GET /records/other" in evidence
     assert "irrelevant-prefix" not in evidence and "研究旁支原件" not in evidence
-    assert "项目 p1 / 漏洞 v1 / Observation o1 / Evidence trace" in evidence
-    assert "Artifact trace" in evidence and "未记录关键选段" in evidence
+    assert "未记录关键选段" in evidence
     excerpt = frozen["observations"][0]["evidence_items"][0]["excerpts"][0]["pointer"]
-    assert excerpt in evidence
+    assert all(token not in evidence for token in ("Observation o1", "Evidence trace", "Artifact trace", excerpt))
     assert data["executive_summary"] == records["h0"]["content"]["text"]
     assert frozen == original
 

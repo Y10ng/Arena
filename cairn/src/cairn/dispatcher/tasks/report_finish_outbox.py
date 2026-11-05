@@ -189,6 +189,7 @@ class ReportOutputMetadata(BaseModel):
         pattern=r"^[a-f0-9]{64}$",
     )
     completeness_rule_version: int | None = None
+    report_segment_refs: list[dict[str, str]] | None = None
 
     @model_serializer
     def exact_metadata(self) -> dict[str, object]:

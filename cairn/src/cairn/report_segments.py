@@ -74,8 +74,12 @@ class FindingSegment(ReadableModel):
         return self
 
 
-ReportSegment = Annotated[SummarySegment | FindingSegment, Field(discriminator="kind")]
+from cairn.report_markdown import MarkdownSegment
+
+# 旧段仅供冻结任务重放；新请求的 Worker schema 只公开 MarkdownSegment。
+ReportSegment = Annotated[SummarySegment | FindingSegment | MarkdownSegment, Field(discriminator="kind")]
 REPORT_SEGMENT_ADAPTER = TypeAdapter(ReportSegment)
+MARKDOWN_SEGMENT_ADAPTER = TypeAdapter(MarkdownSegment)
 
 
 class SegmentReference(ReadableModel):

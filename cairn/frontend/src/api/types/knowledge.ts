@@ -2,6 +2,7 @@ export interface KnowledgeSet {
   key: string;
   path: string;
   builtin: boolean;
+  safety_path: string | null;
   file_count: number;
   referenced_by: string[];
 }

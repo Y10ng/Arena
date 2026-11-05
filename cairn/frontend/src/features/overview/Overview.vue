@@ -1,14 +1,22 @@
 <template>
-  <div class="overview-container console-page">
-    <header class="page-header">
-      <h1 class="page-title">仪表盘</h1>
+  <div class="overview-container">
+    <header class="overview-header">
+      <h1 class="sr-only">仪表盘</h1>
       <div class="overview-actions">
+        <div v-if="data" class="overview-freshness" aria-live="polite">
+          <span v-if="isError" class="overview-update-error">更新失败，显示上次数据 · </span>
+          <span
+            >数据时间
+            <time :datetime="data.generated_at">{{ dateTime(data.generated_at) }}</time></span
+          >
+        </div>
         <Button variant="ghost" :disabled="isFetching" @click="refetch()">
           <template #icon><RefreshCw :size="16" /></template>
           {{ isFetching ? '更新中' : '刷新' }}
         </Button>
-        <RouterLink :to="{ name: 'Projects' }">任务管理</RouterLink>
-        <RouterLink :to="{ name: 'Reports' }">查看报告</RouterLink>
+        <RouterLink class="overview-primary-link" :to="{ name: 'Projects' }"
+          >查看项目<ArrowUpRight :size="16"
+        /></RouterLink>
       </div>
     </header>
 
@@ -21,31 +29,42 @@
     </div>
 
     <template v-if="data">
-      <div class="overview-freshness" aria-live="polite">
-        <span v-if="isError" class="overview-update-error">更新失败，显示上次数据 · </span>
-        <span
-          >数据时间
-          <time :datetime="data.generated_at">{{ dateTime(data.generated_at) }}</time></span
-        >
-      </div>
       <dl class="overview-stats" aria-label="当前可见范围统计">
+        <div>
+          <dt>总 Token 用量（已记录）</dt>
+          <dd>{{ tokenSubtotal(data.consumption?.total) }}</dd>
+          <dd class="stat-detail">
+            {{ estimatedAmounts(data.consumption?.total) }}
+            <span v-if="data.consumption?.total.partial_responses"> · {{ data.consumption.total.partial_responses }} 次部分计量</span>
+            <span v-if="data.consumption?.total.unpriced_responses && data.consumption.total.amounts.length"> · {{ data.consumption.total.unpriced_responses }} 次未定价</span>
+          </dd>
+        </div>
+        <div>
+          <dt>今日 Token 用量（已记录）</dt>
+          <dd>{{ tokenSubtotal(data.consumption?.today) }}</dd>
+          <dd class="stat-detail">
+            {{ estimatedAmounts(data.consumption?.today) }}
+            <span v-if="data.consumption?.today.partial_responses"> · {{ data.consumption.today.partial_responses }} 次部分计量</span>
+            <span v-if="data.consumption?.today.unpriced_responses && data.consumption.today.amounts.length"> · {{ data.consumption.today.unpriced_responses }} 次未定价</span>
+          </dd>
+        </div>
         <div>
           <dt>进行中项目</dt>
           <dd>{{ data.projects.by_status.active ?? 0 }}</dd>
-        </div>
-        <div>
-          <dt>待启动项目</dt>
-          <dd>{{ data.projects.by_status.pending ?? 0 }}</dd>
+          <dd class="stat-detail">待启动 {{ data.projects.by_status.pending ?? 0 }}</dd>
         </div>
         <div>
           <dt>漏洞记录</dt>
           <dd>{{ data.vulnerabilities.total }}</dd>
-        </div>
-        <div>
-          <dt>严重／高危记录</dt>
-          <dd>{{ elevatedCount }}</dd>
+          <dd class="stat-detail">严重／高危 {{ elevatedCount }}</dd>
         </div>
       </dl>
+
+      <p v-if="data.consumption?.unobserved_bindings" class="overview-chart-note">
+        有 {{ data.consumption.unobserved_bindings }} 个执行绑定尚无计量回执，已记录用量可能不完整。
+      </p>
+      <TokenConsumption v-if="data.consumption" :data="data.consumption" />
+      <p v-else class="overview-chart-note">消费计量尚未提供，不能据此判断实际用量或费用。</p>
 
       <div class="overview-main">
         <section class="overview-panel" aria-labelledby="overview-projects-title">
@@ -65,6 +84,7 @@
                 <tr>
                   <th scope="col">名称</th>
                   <th scope="col">状态</th>
+                  <th scope="col" class="overview-token">累计 Token</th>
                   <th scope="col">创建时间</th>
                 </tr>
               </thead>
@@ -73,7 +93,7 @@
                   <td>
                     <RouterLink
                       class="overview-name"
-                      :to="{ name: 'WorkspaceGraph', params: { id: project.id } }"
+                      :to="`/projects/${project.id}`"
                       >{{ project.title }}</RouterLink
                     >
                   </td>
@@ -82,6 +102,7 @@
                       resolveProjectStatus(project.status).label
                     }}</Badge>
                   </td>
+                  <td class="overview-token"><ProjectConsumption :consumption="project.consumption" /></td>
                   <td class="overview-time">
                     <time :datetime="project.created_at">{{ dateTime(project.created_at) }}</time>
                   </td>
@@ -89,12 +110,13 @@
               </tbody>
             </table>
           </div>
-          <EmptyState v-else title="暂无项目" description="前往任务管理开始创建项目。" />
+          <EmptyState v-else title="暂无项目" />
         </section>
 
         <section class="overview-panel overview-severity" aria-labelledby="overview-severity-title">
           <div class="overview-section-header">
-            <h2 id="overview-severity-title">严重度概览</h2>
+            <h2 id="overview-severity-title">严重度数量</h2>
+            <span class="overview-section-meta">记录数</span>
           </div>
           <table class="overview-severity-table">
             <caption class="sr-only">
@@ -121,24 +143,24 @@
                 </th>
                 <td class="overview-bar-cell">
                   <span class="overview-bar-track" aria-hidden="true">
-                    <span
-                      class="overview-bar"
-                      :class="`overview-severity-${row.key}`"
-                      :style="{ width: `${row.widthPercent}%` }"
-                    ></span>
+                    <span class="overview-bar" :style="{ width: `${row.widthPercent}%` }"></span>
                   </span>
                 </td>
                 <td class="overview-count">{{ row.count }}</td>
               </tr>
             </tbody>
           </table>
+          <p class="overview-chart-note">含全部生命周期状态</p>
         </section>
       </div>
 
       <section class="overview-panel" aria-labelledby="overview-findings-title">
         <div class="overview-section-header">
           <h2 id="overview-findings-title">最近漏洞记录</h2>
-          <RouterLink :to="{ name: 'Findings' }">全部漏洞</RouterLink>
+          <div class="overview-section-links">
+            <RouterLink :to="{ name: 'Reports' }">查看报告</RouterLink>
+            <RouterLink :to="{ name: 'Findings' }">全部漏洞<ArrowUpRight :size="14" /></RouterLink>
+          </div>
         </div>
         <p id="overview-vulnerability-scope" class="sr-only">
           当前身份可见的全部生命周期状态，含获准查看的复测来源；时间为记录创建时间。
@@ -165,6 +187,7 @@
                 <td>
                   <RouterLink
                     class="overview-name"
+                    :title="item.title"
                     :to="{
                       name: 'Findings',
                       query: { vulnerabilityProjectId: item.project_id, vulnerabilityId: item.id },
@@ -196,7 +219,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink } from 'vue-router'
 import { useQuery } from '@tanstack/vue-query'
-import { RefreshCw } from '@lucide/vue'
+import { ArrowUpRight, RefreshCw } from '@lucide/vue'
 import { getOverview, overviewKey } from '@/api/overview'
 import { Alert, Badge, Button, EmptyState, Spinner, Tooltip } from '@/components/ui'
 import { resolveProjectStatus } from '@/features/projects/workspaceStatus'
@@ -205,6 +228,9 @@ import {
   vulnerabilityStatusMeta,
 } from '@/features/vulnerabilities/vulnerabilityMetadata'
 import { dateTime } from '@/lib/format'
+import { estimatedAmounts, tokenSubtotal } from '@/lib/consumption'
+import TokenConsumption from './TokenConsumption.vue'
+import ProjectConsumption from '@/features/projects/ProjectConsumption.vue'
 import { useAuthStore } from '@/stores/auth'
 import { buildSeverityRows, overviewRefreshInterval } from './overviewSeverityModel'
 

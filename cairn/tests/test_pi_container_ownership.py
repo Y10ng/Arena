@@ -53,6 +53,18 @@ class FakeContainer:
         self.actions.append("stop")
         self.attrs["State"]["Status"] = "exited"
 
+    def pause(self):
+        self.actions.append("pause")
+        self.attrs["State"]["Status"] = "paused"
+
+    def unpause(self):
+        self.actions.append("unpause")
+        self.attrs["State"]["Status"] = "running"
+
+    def kill(self, **kwargs):
+        self.actions.append("kill")
+        self.attrs["State"]["Status"] = "exited"
+
     def remove(self, **kwargs):
         self.actions.append("remove")
         self.client.objects.remove(self)
@@ -100,6 +112,10 @@ class FakeDocker:
     def run(self, image, command, **kwargs):
         self.runs.append(kwargs)
         return FakeContainer(self, kwargs["name"], kwargs["labels"])
+
+    def create(self, image, command, **kwargs):
+        self.runs.append(kwargs)
+        return FakeContainer(self, kwargs["name"], kwargs["labels"], state="created")
 
     def close(self):
         self.closed = True
@@ -221,7 +237,7 @@ def chat_runtime(runtime, tmp_path, monkeypatch):
     monkeypatch.setattr("cairn.dispatcher.runtime.containers.os.chown", lambda *_args: None)
     options = ContainerRuntimeOptions.build(
         image=manager._config.image, network_mode="none", dns=[], cap_add=[],
-        features={"project_chat": 1}, scenario_key="project-chat",
+        features={"conversation_chat": 1}, scenario_key="conversation-chat",
     )
     return manager, docker, options
 
@@ -235,8 +251,11 @@ def test_chat_container_creation_reuse_and_io_keep_research_separate(chat_runtim
     assert manager._owns_container(chat)
     assert manager._get_container(chat.id) is chat
     assert manager.inspect_state(name) == "running"
-    assert manager.project_id_from_container_name(name) == "proj_a"
-    assert manager.managed_container_names() == sorted([research.name, name])
+    assert manager.project_id_from_container_name(name) is None
+    assert manager.managed_container_names() == [research.name]
+    assert chat.attrs["Config"]["Labels"]["cairn.conversation_id"] == "proj_a"
+    assert "cairn.project_id" not in chat.attrs["Config"]["Labels"]
+    assert manager.cleanup_orphan(name) is False
     mounts = docker.runs[0]["volumes"]
     root = manager.chat_directory("proj_a")
     assert mounts == {
@@ -272,7 +291,7 @@ def test_chat_container_creation_reuse_and_io_keep_research_separate(chat_runtim
 def test_chat_container_rejects_conflicting_identity(chat_runtime, label, value):
     manager, docker, options = chat_runtime
     name = manager.chat_container_name("proj_a")
-    labels = manager._container_labels("proj_a", options)
+    labels = manager._container_labels(None, options, conversation_id="proj_a")
     labels[label] = value
     chat = FakeContainer(docker, name, labels)
     assert not manager._owns_container(chat)
@@ -285,7 +304,7 @@ def test_chat_container_rejects_conflicting_identity(chat_runtime, label, value)
 
 def test_chat_container_requires_exact_name_and_runtime(chat_runtime):
     manager, docker, options = chat_runtime
-    labels = manager._container_labels("proj_a", options)
+    labels = manager._container_labels(None, options, conversation_id="proj_a")
     for name in (manager.container_name("proj_a"), manager.chat_container_name("proj_a") + "-other"):
         assert not manager._owns_container(FakeContainer(docker, name, labels))
     labels["cairn.runtime_signature"] = "different"
@@ -326,7 +345,7 @@ def test_continuation_activates_only_the_original_stopped_container(runtime):
     ) == retained.name
     assert events == [
         ("register", docker.daemon_id, "exited"),
-        ("finish", "activation-token", retained.id, "running"),
+        ("finish", "activation-token", retained.id, "exited"),
     ]
     assert retained.actions == ["start"]
     assert docker.runs == []
@@ -419,7 +438,8 @@ def test_continuation_refuses_daemon_switch_after_start(runtime, monkeypatch):
             finish=lambda *_args: finished.append(True), reuse=lambda *_args: False,
         )
     assert retained.actions == ["start"]
-    assert finished == []
+    # 归属先于启动发布；daemon 变化仍阻止返回成功，不抹去原现场的绑定。
+    assert finished == [True]
     assert docker.runs == []
 
 
@@ -503,10 +523,12 @@ def test_owned_operations_remain_available(runtime, operation):
     result = operate(manager, container.name, operation)
     if operation in {"read", "materialize"}:
         assert result == b"fixture"
-    elif operation in {"stop", "completed_stop"}:
+    elif operation in {"stop", "completed_stop", "completed_remove"}:
         assert container.actions == ["stop"]
-    elif operation in {"completed_remove", "remove", "orphan"}:
+    elif operation == "remove":
         assert container.actions == ["remove"]
+    elif operation == "orphan":
+        assert container.actions == ["stop", "remove"]
 
 
 @pytest.mark.parametrize("operation", ["reuse", "stop", "completed_stop", "completed_remove"])
@@ -533,7 +555,7 @@ def test_name_conflict_rechecks_owner_and_runtime(runtime, monkeypatch, conflict
             labels.pop("cairn.runtime_signature")
         raise APIError("conflict", response=SimpleNamespace(status_code=409), explanation="name is already in use")
 
-    monkeypatch.setattr(docker, "run", concurrent_creation)
+    monkeypatch.setattr(docker, "create", concurrent_creation)
     if conflict == "owned":
         assert manager.ensure_running("proj_a") == manager.container_name("proj_a")
         assert docker.objects[0].actions == ["start"]
@@ -559,7 +581,7 @@ def test_container_creation_requires_exact_running_container(
     manager, docker = runtime
     monkeypatch.setattr(
         docker,
-        "run",
+        "create" if operation == "project" else "run",
         lambda *_args, **_kwargs: SimpleNamespace(),
     )
 

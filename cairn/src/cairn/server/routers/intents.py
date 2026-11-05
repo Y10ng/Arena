@@ -100,8 +100,8 @@ def heartbeat(project_id: str, intent_id: str, body: HeartbeatRequest):
     response: Intent | None = None
     renewal_rejected = False
     with get_conn() as conn:
-        project = check_project_active(conn, project_id)
-        if policy_from_project_row(project).protocol == GOAL_DRIVEN_PROTOCOL:
+        project = check_project_active(conn, project_id, task_run_id=body.task_run_id)
+        if policy_from_project_row(project).protocol == GOAL_DRIVEN_PROTOCOL and project["status"] == "active":
             stop_reason = advance_goal_driven_convergence(conn, project_id)
             if stop_reason is not None:
                 conn.commit()
@@ -183,7 +183,7 @@ def heartbeat(project_id: str, intent_id: str, body: HeartbeatRequest):
 )
 def release(project_id: str, intent_id: str, body: HeartbeatRequest):
     with get_conn() as conn:
-        check_project_active(conn, project_id)
+        check_project_active(conn, project_id, task_run_id=body.task_run_id)
         validate_execution_lease(conn, project_id, body.task_run_id, body.worker, intent_id=intent_id)
         row = get_releasable_open_intent_or_404(conn, project_id, intent_id, body.worker)
 
@@ -244,7 +244,7 @@ def conclude(project_id: str, intent_id: str, body: ConcludeRequest):
         if isinstance(body.vulnerability, HistoricalConcludeVulnerabilityInput):
             raise HTTPException(422, "vulnerability_schema_version_2_required")
         discovery_evidence = evidence_refs(body.vulnerability.evidence_items) if body.vulnerability is not None else []
-        check_project_active(conn, project_id)
+        check_project_active(conn, project_id, task_run_id=body.task_run_id)
         validate_execution_generation(
             conn,
             project_id,

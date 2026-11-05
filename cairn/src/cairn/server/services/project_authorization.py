@@ -395,11 +395,6 @@ def project_reauthorization_reason(
         progress = parse_scenario_snapshot(row_value(project, "assessment_progress_json"))
         if progress.get("phase") in {"finalizing", "completed"}:
             return "assessment_new_project_required"
-    if conn.execute(
-        "SELECT 1 FROM assessment_report_finalizations WHERE project_id = ? AND scope_key = '' LIMIT 1",
-        (project["id"],),
-    ).fetchone() is not None:
-        return "assessment_report_finalization_in_progress"
     if project_pause_draining(conn, project):
         return "project_pause_draining"
     if project_authorization_is_current(conn, project, now=now):

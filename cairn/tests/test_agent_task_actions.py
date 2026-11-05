@@ -53,8 +53,8 @@ def action_context(empty_postgres_url, tmp_path, monkeypatch):
         pid = project.project.id
         cid = "conv_" + uuid4().hex
         conn.execute(
-            "INSERT INTO agent_conversations(id,project_id,model_id,created_by,session_id,created_at) VALUES (?,?,?,?,?,?)",
-            (cid, pid, model.id, uid, "pi:" + str(uuid4()), "2026-10-29T00:00:00Z"),
+            "INSERT INTO agent_conversations(id,tenant_id,project_id,model_id,created_by,session_id,created_at) VALUES (?,?,?,?,?,?,?)",
+            (cid, tenant, pid, model.id, uid, "pi:" + str(uuid4()), "2026-10-29T00:00:00Z"),
         )
         row = conn.execute(
             "INSERT INTO agent_messages(conversation_id,project_id,client_message_id,text,created_at,submitted_by,submitted_tenant_id) "

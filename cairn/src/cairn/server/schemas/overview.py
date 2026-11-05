@@ -3,6 +3,7 @@
 from pydantic import BaseModel, Field
 
 from .common import ProjectStatus
+from .consumption import ConsumptionSummary
 
 
 class OverviewProjectCounts(BaseModel):
@@ -21,6 +22,7 @@ class OverviewProjectPreview(BaseModel):
     title: str
     status: ProjectStatus
     created_at: str
+    consumption: ConsumptionSummary | None = None
 
 
 class OverviewVulnerabilityPreview(BaseModel):
@@ -35,6 +37,7 @@ class OverviewVulnerabilityPreview(BaseModel):
 
 class OverviewResponse(BaseModel):
     generated_at: str
+    consumption: dict
     projects: OverviewProjectCounts
     vulnerabilities: OverviewVulnerabilityCounts
     project_previews: list[OverviewProjectPreview] = Field(max_length=6)

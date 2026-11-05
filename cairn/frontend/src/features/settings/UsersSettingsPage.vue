@@ -4,18 +4,17 @@
       {{ errorText(loadError) }}
     </Alert>
 
-    <Card class="users-list-card" padding="lg">
-      <div class="list-header">
-        <div>
-          <strong>用户列表</strong>
-          <p class="text-faint">已加载 {{ users.length }} 个账户</p>
-        </div>
-        <div class="list-actions">
-          <Button variant="success" size="sm" @click="openCreate">新增用户</Button>
-          <Button variant="secondary" size="sm" :disabled="loading" @click="reload">刷新</Button>
-        </div>
+    <header class="resource-page-heading users-page-heading">
+      <h1 class="sr-only">用户管理</h1>
+      <p class="text-muted">已加载 {{ users.length }} 个账户</p>
+      <div class="list-actions">
+        <IconButton label="刷新用户列表" :loading="loading" @click="reload"
+          ><RefreshCw :size="16"
+        /></IconButton>
+        <Button @click="openCreate">新增用户</Button>
       </div>
-
+    </header>
+    <section class="users-list-card" aria-label="用户列表">
       <ErrorState
         v-if="loadError && users.length === 0"
         title="用户列表加载失败"
@@ -26,7 +25,7 @@
         <Skeleton v-for="index in 5" :key="index" height="3.5rem" />
         <span class="sr-only">正在加载用户列表</span>
       </div>
-      <EmptyState v-else-if="users.length === 0" title="暂无用户" description="暂无用户。" />
+      <EmptyState v-else-if="users.length === 0" title="暂无用户" />
       <DataTable
         v-else
         :rows="users"
@@ -34,7 +33,7 @@
         :row-key="(user) => user.id"
         :row-attrs="userRowAttrs"
         caption="管理员用户列表"
-        density="compact"
+        density="default"
       >
         <template #cell-user="{ row: user }">
           <div class="user-identity">
@@ -62,32 +61,17 @@
         <template #cell-sessions="{ row: user }">{{ user.active_session_count }}</template>
         <template #cell-created="{ row: user }">{{ formatDate(user.created_at) }}</template>
         <template #cell-actions="{ row: user }">
-          <div class="user-actions">
-            <Button
-              variant="secondary"
-              size="sm"
-              :disabled="busyUserId === user.id || isCurrentUser(user)"
-              @click="requestStatusToggle(user)"
-            >
-              {{ user.disabled ? '启用' : '禁用账户' }}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              :disabled="busyUserId === user.id"
-              @click="openPasswordReset(user, $event)"
-              >重置密码</Button
-            >
-            <Button
-              variant="danger"
-              size="sm"
-              :disabled="
-                busyUserId === user.id || isCurrentUser(user) || user.active_session_count === 0
-              "
-              @click="requestSessionRevoke(user)"
-              >撤销会话</Button
-            >
-          </div>
+          <DropdownMenu :items="userActions(user)" @select="handleUserAction($event, user)">
+            <template #trigger>
+              <IconButton
+                label="用户操作"
+                :loading="busyUserId === user.id"
+                @click="rememberUserTrigger"
+                @keydown="rememberUserTrigger"
+                ><MoreHorizontal :size="16"
+              /></IconButton>
+            </template>
+          </DropdownMenu>
         </template>
       </DataTable>
 
@@ -96,12 +80,11 @@
           {{ loadingMore ? '加载中...' : '加载更多' }}
         </Button>
       </footer>
-    </Card>
+    </section>
 
     <Dialog
       :open="createOpen"
       title="新增用户"
-      description="新用户自动获得独立个人 Tenant。"
       size="sm"
       close-label="关闭新增用户"
       :dismissible="!creating"
@@ -197,8 +180,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, type HTMLAttributes } from 'vue'
+import { computed, nextTick, ref, watch, type HTMLAttributes } from 'vue'
 import { useRouter } from 'vue-router'
+import { MoreHorizontal, RefreshCw } from '@lucide/vue'
 import {
   createAdminUser,
   listAdminUsers,
@@ -212,13 +196,15 @@ import {
   Alert,
   Badge,
   Button,
-  Card,
   Dialog,
+  DropdownMenu,
+  IconButton,
   EmptyState,
   FormField,
   Input,
   Skeleton,
 } from '@/components/ui'
+import type { DropdownMenuOption } from '@/components/ui/DropdownMenu.vue'
 import { DEFAULT_PROVISIONED_PASSWORD } from '@/features/auth/passwordValidation'
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
@@ -264,6 +250,45 @@ const resetPasswordInput = ref('')
 const resetPasswordInputRef = ref<InstanceType<typeof Input> | null>(null)
 const passwordResetTrigger = ref<HTMLElement | null>(null)
 const pendingAction = ref<PendingAction | null>(null)
+let userActionTrigger: HTMLElement | null = null
+function rememberUserTrigger(event: Event) {
+  userActionTrigger = event.currentTarget as HTMLElement
+}
+function userActions(user: AdminUser): DropdownMenuOption[] {
+  const busy = busyUserId.value === user.id
+  const self = isCurrentUser(user)
+  return [
+    { value: 'password', label: '重置密码', disabled: busy },
+    {
+      value: 'status',
+      label: user.disabled ? '启用账户' : '禁用账户',
+      disabled: busy || self,
+      description: self ? '不能禁用当前账户' : undefined,
+      separatorBefore: true,
+      tone: user.disabled ? 'default' : 'danger',
+    },
+    {
+      value: 'revoke',
+      label: '撤销会话',
+      tone: 'danger',
+      disabled: busy || self || user.active_session_count === 0,
+      description: self
+        ? '不能撤销当前账户会话'
+        : user.active_session_count === 0
+          ? '没有活跃会话'
+          : undefined,
+    },
+  ]
+}
+watch(pendingAction, (action, previous) => {
+  if (!action && previous)
+    void nextTick(() => userActionTrigger?.isConnected && userActionTrigger.focus())
+})
+function handleUserAction(action: string, user: AdminUser) {
+  if (action === 'password') openPasswordReset(user, userActionTrigger)
+  else if (action === 'status') requestStatusToggle(user)
+  else if (action === 'revoke') requestSessionRevoke(user)
+}
 
 const resettingPassword = computed(() =>
   Boolean(passwordTarget.value && busyUserId.value === passwordTarget.value.id),
@@ -399,10 +424,9 @@ function requestStatusToggle(user: AdminUser) {
   pendingAction.value = { kind: 'status', user }
 }
 
-function openPasswordReset(user: AdminUser, event: MouseEvent) {
+function openPasswordReset(user: AdminUser, trigger: HTMLElement | null) {
   if (busyUserId.value === user.id) return
-  passwordResetTrigger.value =
-    event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  passwordResetTrigger.value = trigger
   passwordTarget.value = user
   resetPasswordInput.value = ''
 }
@@ -503,106 +527,75 @@ void reload()
 <style scoped>
 .users-settings-page {
   display: grid;
-  gap: var(--space-4);
+  gap: var(--space-3);
+  padding-inline: var(--layout-content-padding);
 }
-
-.list-header,
+.users-page-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+.users-page-heading p {
+  margin: 0;
+  font-size: var(--text-sm);
+}
 .list-actions,
 .status-stack {
   display: flex;
   align-items: center;
+  gap: 8px;
 }
-
-.list-header {
-  justify-content: space-between;
-  gap: var(--space-4);
-}
-
-.list-actions,
-.status-stack {
-  gap: var(--space-2);
-}
-
 .status-stack {
   flex-wrap: wrap;
 }
-
 .users-table-skeleton {
   display: grid;
-  gap: var(--space-2);
+  gap: 8px;
 }
-
 .user-identity {
-  display: grid;
-  gap: 3px;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
   min-width: 190px;
+  white-space: nowrap;
 }
-
-.users-table-wrap {
-  overflow-x: auto;
+.user-identity strong {
+  font-weight: 500;
+  font-size: var(--text-md);
 }
-
-.users-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
+.user-identity small {
+  font-size: var(--text-sm);
 }
-
-.users-table th,
-.users-table td {
-  padding: 12px 10px;
-  border-bottom: 1px solid var(--border-faint);
-  text-align: left;
-  vertical-align: middle;
-}
-
-.users-table th {
-  color: var(--text-muted);
-  font-weight: 600;
-}
-
-.users-table td:first-child {
-  display: grid;
-  gap: 3px;
-  min-width: 190px;
-}
-
 .current-user-label {
-  margin-left: var(--space-1);
-  color: var(--text-faint);
-  font-size: var(--text-xs);
-  font-weight: var(--font-medium);
+  margin-left: 8px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: 400;
 }
-
 .tenant-cell {
+  display: block;
   max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
-.user-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-width: 280px;
-}
-
 .load-more-row {
   display: flex;
   justify-content: center;
-  padding-top: var(--space-4);
+  padding-top: 20px;
 }
-
 .dialog-note {
-  margin: 0 0 var(--space-4);
+  margin: 0 0 20px;
   color: var(--text-muted);
   font-size: var(--text-md);
-  line-height: var(--leading-normal);
+  line-height: 1.7;
 }
-
 @media (max-width: 640px) {
-  .list-header {
+  .users-settings-page {
+    padding-inline: 12px;
+  }
+  .users-page-heading {
     align-items: flex-start;
     flex-direction: column;
   }

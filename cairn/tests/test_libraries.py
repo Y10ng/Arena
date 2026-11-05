@@ -1,197 +1,176 @@
+"""当前文件／实际使用资料的隔离 PostgreSQL 回归。"""
 from __future__ import annotations
 
-import sqlite3
+import os
 from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from cairn.server import db, migrations
-from cairn.server.schemas.libraries import LibraryFileWrite
-from cairn.server.services.libraries import (
-    archive_library,
-    bind_library_revision,
-    create_library,
-    create_library_version,
-    import_legacy_knowledge,
-    list_library_revision_files,
-    list_library_versions,
-    list_selectable_current_libraries,
-    library_storage_path,
-    read_library_file,
-    read_library_revision_content,
-    resolve_current_library_revisions,
-    remove_library_file,
-    replace_library_file,
+from cairn.server.schemas.libraries import LibraryFileWrite, LibrarySelection
+from cairn.server.services import libraries as service
+from test_postgres_bootstrap import postgres_instance, empty_postgres_url
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("CAIRN_TEST_POSTGRES_BOOTSTRAP") != "1",
+    reason="需显式启用隔离 PostgreSQL",
 )
 
 
-@pytest.fixture(autouse=True)
-def isolate_library_content(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("CAIRN_ADVISORY_LIBRARY_ROOT", str(tmp_path / "library-content"))
+@pytest.fixture
+def configured(empty_postgres_url, tmp_path, monkeypatch):
+    monkeypatch.setenv("CAIRN_ADVISORY_LIBRARY_ROOT", str(tmp_path / "content"))
+    db.configure(database_url=empty_postgres_url, artifact_path=tmp_path / "artifacts")
+    yield
+    db._reset_for_tests()
 
 
-def make_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(db.SCHEMA)
-    db._ensure_schema_migrations(conn, initialize_runtime=False)
-    migrations.SQLITE_OPTIONAL_PROJECT_RESOURCES.apply(conn)
-    migrations.SQLITE_ADVISORY_LIBRARIES.apply(conn)
-    migrations.SQLITE_ADVISORY_LIBRARY_BINDINGS.apply(conn)
-    return conn
+def choice(conn, key, paths=None):
+    manifest = service.get_selectable_library_manifest(conn, key)
+    return LibrarySelection(library_key=key, source="current", paths=paths,
+        expected_files={f.path: f.sha256 for f in manifest.files if paths is None or f.path in paths})
 
 
-def test_v21_clears_live_scenario_knowledge_without_changing_project_snapshot() -> None:
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.executescript(db.SCHEMA)
-    db._ensure_schema_migrations(conn, initialize_runtime=False)
-    migrations.SQLITE_OPTIONAL_PROJECT_RESOURCES.apply(conn)
-    try:
-        conn.execute("UPDATE scenarios SET knowledge = 'knowledge_base'")
-        snapshot = '{"knowledge":"knowledge_base","prompt_group":"default"}'
-        conn.execute(
-            """INSERT INTO projects
-               (id, title, status, created_at, scenario_snapshot_json)
-               VALUES ('snapshot-project', 'Snapshot', 'active', '2026-08-19T00:00:00Z', ?)""",
-            (snapshot,),
-        )
-
-        migrations.SQLITE_ADVISORY_LIBRARIES.apply(conn)
-
-        assert conn.execute(
-            "SELECT COUNT(*) AS count FROM scenarios WHERE knowledge IS NOT NULL"
-        ).fetchone()["count"] == 0
-        assert conn.execute(
-            "SELECT scenario_snapshot_json FROM projects WHERE id = 'snapshot-project'"
-        ).fetchone()["scenario_snapshot_json"] == snapshot
-    finally:
-        conn.close()
+def resolve(conn, selections, **kwargs):
+    return service.resolve_library_selections(conn, selections, tenant_id="fixture", user_id="fixture", **kwargs)
 
 
-def test_library_versions_preserve_raw_credentials_and_scripts() -> None:
-    conn = make_conn()
-    try:
-        create_library(conn, "operator_notes", "Operator notes")
-        credentials = "username=admin\npassword=p@ssw0rd\napi_key=sk-live-secret\n"
-        script = "#!/bin/sh\ncurl -u admin:p@ssw0rd https://target.invalid/\n"
-
-        first = create_library_version(
-            conn,
-            "operator_notes",
-            [
-                LibraryFileWrite(path="credentials/.env", content=credentials),
-                LibraryFileWrite(path="scripts/login.sh", content=script),
-            ],
-        )
-        replace_library_file(conn, "operator_notes", "scripts/login.sh", script + "id\n")
-
-        assert read_library_file(conn, "operator_notes", "credentials/.env", first.version).content == credentials
-        assert read_library_file(conn, "operator_notes", "scripts/login.sh", first.version).content == script
-        assert read_library_file(conn, "operator_notes", "scripts/login.sh").content == script + "id\n"
-        assert [item.version for item in list_library_versions(conn, "operator_notes")] == [2, 1]
-    finally:
-        conn.close()
+def test_current_edits_do_not_publish_history_and_use_snapshot_is_subset(configured):
+    with db.get_conn() as conn:
+        service.create_library(conn, "notes")
+        raw = "﻿user=fixture\r\npassword=fixture-only\r\n  # 原文\n"
+        service.replace_library_file(conn, "notes", "a.txt", raw)
+        service.replace_library_file(conn, "notes", "other.txt", "one")
+        selected = choice(conn, "notes", ["a.txt"])
+        service.replace_library_file(conn, "notes", "other.txt", "two")
+        assert service.list_library_versions(conn, "notes") == []
+        assert service.read_library_file(conn, "notes", "a.txt").content == raw
+        revision = resolve(conn, [selected])[0]
+        assert [f.path for f in service.list_library_files(conn, "notes", revision.version)] == ["a.txt"]
+        assert service.read_library_revision_content(conn, revision, "a.txt") == raw.encode()
+        service.replace_library_file(conn, "notes", "a.txt", "changed")
+        service.remove_library_file(conn, "notes", "other.txt")
+        assert len(service.list_library_versions(conn, "notes")) == 1
+        assert service.read_library_revision_content(conn, revision, "a.txt") == raw.encode()
+        assert service.get_selectable_library_manifest(conn, "notes").files[0].sha256 != selected.expected_files["a.txt"]
 
 
-def test_library_content_tampering_is_detected() -> None:
-    conn = make_conn()
-    try:
-        create_library(conn, "integrity")
-        create_library_version(
-            conn,
-            "integrity",
-            [LibraryFileWrite(path="credential.txt", content="password=exact\n")],
-        )
-        row = conn.execute(
-            "SELECT storage_key FROM advisory_library_files WHERE library_key = 'integrity'"
-        ).fetchone()
-        library_storage_path(row["storage_key"]).write_bytes(b"tampered")
+def test_selection_conflicts_and_saved_scope(configured):
+    with db.get_conn() as conn:
+        service.create_library(conn, "checks")
+        service.replace_library_file(conn, "checks", "a", "one")
+        whole = choice(conn, "checks")
+        subset = choice(conn, "checks", ["a"])
+        service.replace_library_file(conn, "checks", "b", "two")
+        with pytest.raises(HTTPException) as conflict:
+            resolve(conn, [whole])
+        assert conflict.value.status_code == 409
+        revision = resolve(conn, [subset])[0]
+        saved = LibrarySelection(library_key="checks", source="saved", paths=None)
+        with pytest.raises(HTTPException) as denied:
+            resolve(conn, [saved])
+        assert denied.value.status_code == 403
+        assert resolve(conn, [saved], existing=[revision]) == [revision]
+        with pytest.raises(HTTPException):
+            resolve(conn, [saved.model_copy(update={"paths": ["b"]})], existing=[revision])
+        service.replace_library_file(conn, "checks", "a", "changed")
+        with pytest.raises(HTTPException) as changed:
+            resolve(conn, [subset])
+        assert changed.value.status_code == 409
+        assert resolve(conn, [saved], existing=[revision]) == [revision]
+        with pytest.raises(ValidationError):
+            LibrarySelection(library_key="checks", version=revision.version, proof="old", paths=None)
 
+
+def test_root_initialization_and_common_write_protection(configured):
+    with db.get_conn() as conn:
+        root, path = service.ROOT_LIBRARY_KEY, service.SAFETY_FILE_PATH
+        assert service.read_library_file(conn, root, path).content.startswith("# 执行安全约束")
+        assert service.list_library_versions(conn, root) == []
+        raw = "﻿管理员原文\r\n  保留空格\n"
+        service.replace_library_file(conn, root, path, raw)
+        service.initialize_root_library(conn)
+        service.initialize_root_library(conn)
+        assert service.read_library_file(conn, root, path).content == raw
+        for operation in (
+            lambda: service.remove_library_file(conn, root, path),
+            lambda: service.replace_library_files(conn, root, []),
+            lambda: service.archive_library(conn, root),
+        ):
+            with pytest.raises(HTTPException) as blocked:
+                operation()
+            assert blocked.value.status_code == 409
+        service.create_library(conn, "ordinary")
+        service.replace_library_file(conn, "ordinary", path, "not protected")
+        service.remove_library_file(conn, "ordinary", path)
+        service.archive_library(conn, "ordinary")
+        assert service.read_library_file(conn, root, path).content == raw
+
+
+def test_legacy_import_never_overwrites_database_owned_libraries(configured, tmp_path):
+    root = tmp_path / "legacy"
+    (root / "legacy_notes").mkdir(parents=True)
+    (root / "legacy_notes/a.txt").write_text("disk", encoding="utf-8")
+    with db.get_conn() as conn:
+        service.import_legacy_knowledge(conn, root)
+        service.replace_library_file(conn, "legacy_notes", "a.txt", "database")
+        service.import_legacy_knowledge(conn, root)
+        assert service.read_library_file(conn, "legacy_notes", "a.txt").content == "database"
+        service.remove_library_file(conn, "legacy_notes", "a.txt")
+        service.import_legacy_knowledge(conn, root)
+        assert service.get_selectable_library_manifest(conn, "legacy_notes").files == []
+        assert service.list_library_versions(conn, "legacy_notes") == []
+
+
+def test_snapshot_integrity_and_transaction_rollback(configured):
+    with db.get_conn() as conn:
+        service.create_library(conn, "integrity")
+        service.replace_library_file(conn, "integrity", "note", "exact")
+    with pytest.raises(RuntimeError, match="fixture rollback"):
+        with db.get_conn() as conn:
+            resolve(conn, [choice(conn, "integrity")])
+            raise RuntimeError("fixture rollback")
+    with db.get_conn() as conn:
+        assert service.list_library_versions(conn, "integrity") == []
+        revision = resolve(conn, [choice(conn, "integrity")])[0]
+        row = conn.execute("SELECT storage_key FROM advisory_library_files WHERE library_key = 'integrity'").fetchone()
+        service.library_storage_path(row["storage_key"]).write_bytes(b"tampered")
         with pytest.raises(RuntimeError, match="mismatch"):
-            read_library_file(conn, "integrity", "credential.txt")
-    finally:
-        conn.close()
+            service.read_library_revision_content(conn, revision, "note")
 
 
-def test_removing_last_file_publishes_new_empty_version() -> None:
-    conn = make_conn()
-    try:
-        create_library(conn, "temporary")
-        create_library_version(conn, "temporary", [LibraryFileWrite(path="note", content="raw")])
-
-        remove_library_file(conn, "temporary", "note")
-
-        versions = list_library_versions(conn, "temporary")
-        assert [item.version for item in versions] == [2, 1]
-        assert versions[0].file_count == 0
-        assert read_library_file(conn, "temporary", "note", 1).content == "raw"
-    finally:
-        conn.close()
-
-
-def test_legacy_filesystem_import_is_exact_scoped_and_idempotent(tmp_path: Path) -> None:
-    root = tmp_path / "knowledge"
-    (root / "playbooks").mkdir(parents=True)
-    (root / "README.md").write_text("根知识\n", encoding="utf-8")
-    raw = "user=root\npassword=不得脱敏\n#!/bin/sh\necho ok\n"
-    (root / "playbooks/access.conf").write_text(raw, encoding="utf-8")
-    conn = make_conn()
-    try:
-        import_legacy_knowledge(conn, root)
-        import_legacy_knowledge(conn, root)
-
-        assert read_library_file(conn, "knowledge_base", "README.md").content == "根知识\n"
-        assert read_library_file(conn, "playbooks", "access.conf").content == raw
-        assert len(list_library_versions(conn, "knowledge_base")) == 1
-        assert len(list_library_versions(conn, "playbooks")) == 1
-    finally:
-        conn.close()
+def test_forward_migration_preserves_latest_raw_content_and_old_snapshots(empty_postgres_url, tmp_path, monkeypatch):
+    monkeypatch.setenv("CAIRN_ADVISORY_LIBRARY_ROOT", str(tmp_path / "content"))
+    current_migrations = migrations.POSTGRES_MIGRATIONS
+    # 只搭建旧 schema；不运行依赖新当前表的安装初始化。
+    with monkeypatch.context() as patch:
+        patch.setattr(db, "POSTGRES_MIGRATIONS", tuple(m for m in current_migrations if m.version < 82))
+        patch.setattr(service, "initialize_root_library", lambda conn: None)
+        db.configure(database_url=empty_postgres_url, artifact_path=tmp_path / "artifacts")
+    with db.get_conn() as conn:
+        conn.execute("INSERT INTO advisory_libraries(key,name,created_at,archived_at) VALUES ('archived','Archived','2026-01-01','2026-02-01')")
+        raw = "﻿旧原文\r\npassword=fixture-only\n"
+        content = raw.encode()
+        storage_key = service._store_content(content)
+        digest = service._library_digest({"note": content})
+        conn.execute("INSERT INTO advisory_library_versions(library_key,version,digest_sha256,source,created_at) VALUES ('archived',7,?,'api','2026-01-01')", (digest,))
+        conn.execute("INSERT INTO advisory_library_files(library_key,version,path,storage_key,size_bytes,sha256) VALUES ('archived',7,'note',?,?,?)", (storage_key, len(content), storage_key))
+    with db.get_conn() as conn:
+        db.run_migrations(conn, "postgresql", initialize_runtime=True)
+    with db.get_conn() as conn:
+        row = conn.execute("SELECT content FROM advisory_library_current_files WHERE library_key='archived'").fetchone()
+        assert row["content"] == raw
+        assert service.get_library(conn, "archived", include_archived=True).archived_at == "2026-02-01"
+        assert service.read_library_file(conn, "archived", "note", 7).content == raw
+        assert service.read_library_file(conn, service.ROOT_LIBRARY_KEY, service.SAFETY_FILE_PATH).content
+        assert len(service.list_library_versions(conn, "archived")) == 1
 
 
-def test_current_revision_resolution_dispatcher_reads_and_binding_protection() -> None:
-    conn = make_conn()
-    try:
-        create_library(conn, "shared")
-        assert list_selectable_current_libraries(conn) == []
-        create_library_version(
-            conn,
-            "shared",
-            [LibraryFileWrite(path="bin/login.py", content="password = 'raw-secret'\n")],
-        )
-
-        revision = resolve_current_library_revisions(conn, ["shared"])[0]
-        assert [item.key for item in list_selectable_current_libraries(conn)] == ["shared"]
-        assert [item.path for item in list_library_revision_files(conn, revision)] == ["bin/login.py"]
-        assert read_library_revision_content(conn, revision, "bin/login.py") == b"password = 'raw-secret'\n"
-
-        conn.execute(
-            """INSERT INTO projects (id, title, status, created_at)
-               VALUES ('project-1', 'Bound', 'active', '2026-08-19T00:00:00Z')"""
-        )
-        bind_library_revision(conn, "project-1", revision)
-        with pytest.raises(HTTPException) as exc:
-            archive_library(conn, "shared")
-        assert exc.value.status_code == 409
-
-        conn.execute("DELETE FROM projects WHERE id = 'project-1'")
-        assert conn.execute(
-            "SELECT 1 FROM project_advisory_library_bindings"
-        ).fetchone() is None
-        archive_library(conn, "shared")
-    finally:
-        conn.close()
-
-
-def test_app_exposes_canonical_and_knowledge_compatibility_routes() -> None:
+def test_management_routes_no_longer_publish_edit_versions():
     from cairn.server.app import app
-
     paths = app.openapi()["paths"]
-    assert "/libraries" in paths
-    assert "/libraries/{key}/versions" in paths
-    assert "/libraries/{key}/versions/{version}/files/{path}" in paths
-    assert "/knowledge" in paths
+    assert "/libraries/{key}/files" in paths
+    assert "/libraries/{key}/versions" not in paths
     assert "/knowledge/{key}/files/{name}" in paths

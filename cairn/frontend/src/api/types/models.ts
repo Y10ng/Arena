@@ -10,7 +10,16 @@ export interface CustomModelHeader {
   value: string
 }
 
+export interface ModelPricing {
+  currency?: string | null
+  input?: string | null
+  output?: string | null
+  cache_read?: string | null
+  cache_write?: string | null
+}
+
 export interface TenantModelConfig {
+  pricing?: ModelPricing
   display_name: string
   protocol: ModelProtocol
   base_url: string

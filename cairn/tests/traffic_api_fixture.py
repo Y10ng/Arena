@@ -50,7 +50,7 @@ def _login(base_url: str, login: str, password: str) -> requests.Session:
 
 
 @pytest.fixture
-def traffic_api(empty_postgres_url, tmp_path, monkeypatch):
+def traffic_api(empty_postgres_url, tmp_path, monkeypatch, request):
     """返回真实客户端和仅供计数的连接；先停 HTTP，再让上游删除私有空库。"""
     # 所有可写文件均限定在本次临时目录，既有部署密钥和凭据不会被读取。
     keyring = tmp_path / "traffic-keyring.json"
@@ -131,17 +131,21 @@ def traffic_api(empty_postgres_url, tmp_path, monkeypatch):
             "base_url": base_url + "/unused-model", "model_name": "traffic-not-executed",
             "api_key": secrets.token_urlsafe(24),
         })
-        worker = _json_request(user, base_url, "POST", "/tenant-workers", expected=201, json={
-            "display_name": "流量隔离实验 Worker", "model_id": model["id"], "engine": "pi",
-            "task_types": ["bootstrap", "reason", "explore"], "max_running": 2,
-        })
-        assert worker["available"] is True
+        # 当前普通项目绑定 Tenant 的固定三类 Worker；只配置合成模型，不恢复旧创建接口。
+        workers = _json_request(user, base_url, "GET", "/tenant-workers", expected=200)
+        assert {tuple(worker["task_types"]) for worker in workers} == {("bootstrap",), ("reason",), ("explore",)}
+        for worker in workers:
+            configured = _json_request(user, base_url, "PUT", f"/tenant-workers/{worker['id']}", expected=200, json={
+                "model_id": model["id"], "max_running": 2, "priority": worker["priority"],
+                "enabled": True, "expected_revision": worker["revision"],
+            })
+            assert configured["available"] is True
 
         def create_project(title: str):
             return _json_request(user, base_url, "POST", "/projects", expected=201, json={
                 "title": title, "origin": "仅测试本次隔离 Docker 拓扑中的合成 HTTP 服务",
                 "goal": "验证采集保存、重传幂等和原件读取，不执行模型研究",
-                "scenario": "goal-driven-v1", "tenant_worker_ids": [worker["id"]],
+                "scenario": "goal-driven-v1",
                 "authorization_expires_at": None,
             })
 
@@ -149,7 +153,7 @@ def traffic_api(empty_postgres_url, tmp_path, monkeypatch):
         project_id = project["project"]["id"]
         generation = project["project"]["execution_generation"]
         task_runs = []
-        for number in (1, 2):
+        for number in range(1, getattr(request, "param", 2) + 1):
             intent = _json_request(
                 user, base_url, "POST", f"/projects/{project_id}/intents", expected=201,
                 json={"from": ["origin"], "description": f"合成 HTTP 流量源 {number}"},

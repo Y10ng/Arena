@@ -30,9 +30,9 @@ def session_root_for_project(project) -> str:
 
 
 class TaskTrafficExecution:
-    def __init__(self, runtime, scope, cancellation) -> None:
+    def __init__(self, runtime, scope_id: str, cancellation) -> None:
         self.runtime = runtime
-        self.scope = scope
+        self.scope_id = scope_id
         self.cancellation = cancellation
         self.process = None
         self.failure: str | None = None
@@ -56,14 +56,16 @@ class TaskTrafficExecution:
                 self._cancel_thread.start()
 
     def stop(self, reason: str) -> dict:
+        if self.cancellation.detached:
+            return dict(self._termination)
         self.stopping.set()
         with self._stop_lock:
             if not self.execution_completed:
                 try:
-                    self._termination = self.runtime.stop_scope(self.scope.id, reason)
+                    self._termination = self.runtime.stop_scope(self.scope_id, reason)
                 except (DockerException, RequestException, OSError, RuntimeError):
                     self.failure = "traffic_termination_unconfirmed"
-                    LOG.warning("traffic stop unconfirmed scope=%s", self.scope.id)
+                    LOG.warning("traffic stop unconfirmed scope=%s", self.scope_id)
             return dict(self._termination)
 
 
@@ -71,16 +73,21 @@ class TrafficExecutionBridge:
     def __init__(
         self, docker_client, client, *, root: Path, dispatcher_id: str, config,
         isolated: bool = False, upstream_ca: Path | None = None,
+        research_clock=None, research_stopped=None, instance_id: str | None = None,
     ) -> None:
         self.docker_client = docker_client
         self.client = client
         self.root = root
         self.dispatcher_id = dispatcher_id
+        self.instance_id = instance_id
         self.config = config
         self.isolated = isolated
         self.upstream_ca = upstream_ca
+        self._research_clock = research_clock
+        self._research_stopped = research_stopped
         self._lock = threading.RLock()
         self._runtimes: dict[str, ProjectTrafficRuntime] = {}
+        self._conversation_runtimes: dict[str, ProjectTrafficRuntime] = {}
         self._syncs: dict[str, TrafficSync] = {}
         self._tasks: dict[tuple[str, str], TaskTrafficExecution] = {}
         self._stop = threading.Event()
@@ -97,22 +104,83 @@ class TrafficExecutionBridge:
                 runtime = ProjectTrafficRuntime(
                     self.docker_client, project_id=project_id, root=self.root / project_id,
                     gateway_image=self.config.traffic_gateway_image,
-                    executor_image=self.config.task_executor_image, isolated=bool(isolated) or self.isolated,
+                    executor_image=self.config.image,
+                    isolated=bool(isolated) or self.isolated,
                     dispatcher_id=self.dispatcher_id,
+                    pause_clock=self._research_clock(project_id) if self._research_clock is not None else None,
+                    cancelled=(lambda: self._research_stopped(project_id)) if self._research_stopped is not None else None,
                 )
                 self._runtimes[project_id] = runtime
             if isolated is not None and runtime.isolated != (isolated or self.isolated):
                 raise RuntimeError("traffic_network_policy_mismatch")
             return runtime
 
+    @staticmethod
+    def _runtime_key(runtime):
+        return runtime.traffic_owner if runtime.conversation_id is not None else runtime.project_id
+
+    def conversation_runtime(self, conversation_id: str):
+        with self._lock:
+            if not conversation_id or Path(conversation_id).name != conversation_id or conversation_id in {".", ".."}:
+                raise ValueError("traffic_conversation_identity_invalid")
+            runtime = self._conversation_runtimes.get(conversation_id)
+            if runtime is None:
+                directory = self.root.with_name(self.root.name + "-conversations") / conversation_id
+                runtime = ProjectTrafficRuntime(
+                    self.docker_client, project_id=None, conversation_id=conversation_id, root=directory / "research",
+                    workspace=directory / "workspace", gateway_image=self.config.traffic_gateway_image,
+                    executor_image=self.config.image, dispatcher_id=self.dispatcher_id, isolated=self.isolated,
+                    instance_id=self.instance_id,
+                )
+                self._conversation_runtimes[conversation_id] = runtime
+            return runtime
+
+    def prepare_conversation(self, conversation_id, task_run_id, cancellation, *, test_egress):
+        runtime = self.conversation_runtime(conversation_id)
+        key = (runtime.traffic_owner, task_run_id)
+        with self._lock:
+            if key in self._tasks:
+                execution = self._tasks[key]
+                if cancellation.is_cancelled or execution.stopping.is_set() or execution.failure:
+                    raise RuntimeError("traffic_task_stopped")
+                return execution
+        if cancellation.is_cancelled:
+            raise RuntimeError("traffic_task_cancelled")
+        runtime.prepare(upstream_ca=self.upstream_ca)
+        execution = None
+
+        def claim(scope_id):
+            nonlocal execution
+            execution = TaskTrafficExecution(runtime, scope_id, cancellation)
+            cancellation.register_resource(execution)
+
+        def register(binding):
+            if not self.client.register_traffic_scope(runtime.traffic_owner, binding).ok:
+                raise RuntimeError("traffic_scope_registration_failed")
+
+        try:
+            runtime.prepare_scope(task_run_id, cancellation.generation, test_egress=test_egress, claim=claim, register=register)
+            # 取消资源须先登记，但健康检查只能看到准备完整的 scope，避免读到尚未创建的 collector。
+            with self._lock:
+                self._tasks[key] = execution
+            self._start_sync(runtime)
+            if cancellation.is_cancelled or runtime.check_scope(execution.scope_id):
+                raise RuntimeError("traffic_task_cancelled")
+            return execution
+        except BaseException:
+            if execution is not None:
+                execution.stop("traffic_scope_preparation_failed")
+            raise
+
     def _start_sync(self, runtime) -> None:
         with self._lock:
-            if runtime.project_id not in self._syncs:
+            key = self._runtime_key(runtime)
+            if key not in self._syncs:
                 sync = TrafficSync(
                     self.client, capture=runtime.capture, receipts=runtime.root / "receipts",
                 )
                 sync.start()
-                self._syncs[runtime.project_id] = sync
+                self._syncs[key] = sync
             if not self._threads:
                 for target, name in ((self._watch, "traffic-health"), (self._publish, "traffic-status")):
                     thread = threading.Thread(target=target, name=name, daemon=True)
@@ -130,7 +198,7 @@ class TrafficExecutionBridge:
             str(runtime.execution): {"bind": "/run/cairn-exec", "mode": "ro"},
         }
 
-    def prepare_task(self, project, task_run_id: str, cancellation, *, isolated: bool = False) -> dict:
+    def prepare_task(self, project, task_run_id: str, cancellation, *, isolated: bool = False, image: str | None = None) -> dict:
         if not traffic_execution_enabled(project):
             raise WorkerRequestError(
                 "capabilities.task_execution", code="http_traffic_execution_required",
@@ -146,27 +214,33 @@ class TrafficExecutionBridge:
         # 每次创建 scope 读取权威出口，不能由项目 runtime 缓存冻结首次设置。
         test_egress = self.client.resolve_task_test_egress(project.id, task_run_id)
         runtime.prepare(upstream_ca=self.upstream_ca)
-        scope = runtime.prepare_scope(task_run_id, cancellation.generation, test_egress=test_egress)
-        execution = TaskTrafficExecution(runtime, scope, cancellation)
-        with self._lock:
-            self._tasks[key] = execution
-        cancellation.register_resource(execution)
-        self._start_sync(runtime)
-        binding = {
-            "id": scope.id, "project_id": scope.project_id,
-            "task_run_id": scope.task_run_id, "generation": scope.generation,
-            "container_id": scope.container_id,
-            "test_egress": runtime.manifest['scopes'][scope.id]['test_egress'],
-        }
-        try:
+        execution = None
+
+        def claim(scope_id):
+            nonlocal execution
+            execution = TaskTrafficExecution(runtime, scope_id, cancellation)
+            cancellation.register_resource(execution)
+
+        def register(binding):
             result = self.client.register_traffic_scope(project.id, binding)
             if not result.ok:
                 raise RuntimeError("traffic_scope_registration_failed")
+
+        try:
+            # 取消绑定先于慢创建，Server scope 归属先于执行者启动。
+            scope = runtime.prepare_scope(
+                task_run_id, cancellation.generation, test_egress=test_egress, executor_image=image,
+                claim=claim, register=register,
+            )
+            with self._lock:
+                self._tasks[key] = execution
+            self._start_sync(runtime)
             error = runtime.check_scope(scope.id)
             if error or cancellation.is_cancelled:
                 raise RuntimeError(error or "traffic_task_cancelled")
         except BaseException:
-            execution.stop("traffic_scope_preparation_failed")
+            if execution is not None:
+                execution.stop("traffic_scope_preparation_failed")
             raise
         return scope.capability()
 
@@ -189,9 +263,16 @@ class TrafficExecutionBridge:
             runtime.recover()
             self._start_sync(runtime)
             if any(
-                item.get("termination_confirmed") is not True
+                item.get("termination_confirmed") is not True and not item.get("hot_paused")
                 for item in runtime.manifest.get("scopes", {}).values()
             ):
+                raise RuntimeError("traffic_recovery_termination_unconfirmed")
+        conversations = self.root.with_name(self.root.name + "-conversations")
+        for path in sorted(conversations.glob("*/research/manifest.json")):
+            runtime = self.conversation_runtime(path.parent.parent.name)
+            runtime.recover()
+            self._start_sync(runtime)
+            if any(item.get("termination_confirmed") is not True for item in runtime.manifest.get("scopes", {}).values()):
                 raise RuntimeError("traffic_recovery_termination_unconfirmed")
         self._recovered = True
 
@@ -203,7 +284,7 @@ class TrafficExecutionBridge:
                 if execution.stopping.is_set():
                     continue
                 try:
-                    code = execution.runtime.check_scope(execution.scope.id)
+                    code = execution.runtime.check_scope(execution.scope_id)
                 except (DockerException, RequestException, OSError, RuntimeError):
                     code = "traffic_health_unavailable"
                 if code and not execution.stopping.is_set():
@@ -213,11 +294,11 @@ class TrafficExecutionBridge:
     def _publish(self) -> None:
         while not self._stop.wait(1.0):
             with self._lock:
-                runtimes = tuple(self._runtimes.values())
+                runtimes = (*self._runtimes.values(), *self._conversation_runtimes.values())
                 syncs = dict(self._syncs)
-                tasks = {execution.scope.id: execution for execution in self._tasks.values()}
+                tasks = {execution.scope_id: execution for execution in self._tasks.values()}
             for runtime in runtimes:
-                sync = syncs.get(runtime.project_id)
+                sync = syncs.get(self._runtime_key(runtime))
                 if sync is None:
                     continue
                 sync_status = sync.status()
@@ -233,7 +314,7 @@ class TrafficExecutionBridge:
                         upload = {}
                     payload = self._scope_status(facts, execution, upload, sync_status)
                     try:
-                        self.client.update_traffic_scope_status(runtime.project_id, scope_id, payload)
+                        self.client.update_traffic_scope_status(runtime.traffic_owner, scope_id, payload)
                     except RequestException:
                         # 状态发布失败不阻断健康检查或测试停止；私有 manifest/spool 继续保留。
                         LOG.warning("traffic status publication deferred scope=%s", scope_id)
@@ -270,11 +351,60 @@ class TrafficExecutionBridge:
             "pending": upload.get("pending"), "pending_bytes": upload.get("pending_bytes"),
         }
 
+    def hot_control(self, project_id: str, paused: bool) -> list[dict[str, str]]:
+        with self._lock:
+            runtime = self._runtimes.get(project_id)
+        return runtime.hot_control(paused) if runtime is not None else []
+
+    def hot_resume_completed(self, project_id: str) -> None:
+        with self._lock:
+            runtime = self._runtimes.get(project_id)
+        if runtime is not None:
+            runtime.hot_resume_completed()
+
+    def stopped_resources(self, project_id: str) -> list[dict[str, str]]:
+        with self._lock:
+            runtime = self._runtimes.get(project_id)
+        if runtime is None:
+            return []
+        # close 已逐个核验完整 scope；不依赖异步状态上传赶在终止回执之前完成。
+        return [{"kind": "test", "container_id": state["container_id"], "scope_id": scope_id,
+                 "task_run_id": state["task_run_id"], "state": "stopped"}
+                for scope_id, state in runtime.manifest.get("scopes", {}).items()
+                if state.get("termination_confirmed") is True and state.get("container_id")]
+
+    def retained_projects(self) -> set[str]:
+        with self._lock:
+            return set(self._runtimes)
+
+    def destroy_project(self, project_id: str) -> bool:
+        import shutil
+
+        with self._lock:
+            runtime = self._runtimes.get(project_id)
+            sync = self._syncs.get(project_id)
+        if runtime is not None:
+            runtime.destroy()
+            if sync is not None:
+                sync.stop(timeout=2.0)
+            # 目录身份来自已校验的 manifest，而非请求传入任意路径。
+            if runtime.root.is_symlink() or runtime.root.parent != self.root.resolve():
+                raise RuntimeError("traffic_project_identity_invalid")
+            shutil.rmtree(runtime.root)
+            with self._lock:
+                self._runtimes.pop(project_id, None)
+                self._syncs.pop(project_id, None)
+                self._tasks = {key: value for key, value in self._tasks.items() if key[0] != project_id}
+        return True
+
     def pending_cleanup_projects(self) -> set[str]:
         with self._lock:
             return {
                 project_id for project_id, runtime in self._runtimes.items()
-                if any(not resource.get("removed") for resource in runtime.manifest.get("resources", {}).values())
+                if runtime.manifest.get("prepared") is True or any(
+                    scope.get("termination_confirmed") is not True
+                    for scope in runtime.manifest.get("scopes", {}).values()
+                )
             }
 
     def cleanup_project(self, project_id: str) -> bool:
@@ -291,10 +421,11 @@ class TrafficExecutionBridge:
     def close(self) -> None:
         self._stop.set()
         with self._lock:
-            runtimes = tuple(self._runtimes.values())
+            runtimes = (*self._runtimes.values(), *self._conversation_runtimes.values())
             syncs = tuple(self._syncs.values())
         for runtime in runtimes:
-            runtime.close()
+            if not any(scope.get("hot_paused") for scope in runtime.manifest.get("scopes", {}).values()):
+                runtime.close()
         for sync in syncs:
             sync.stop(timeout=2.0)
         for thread in self._threads:

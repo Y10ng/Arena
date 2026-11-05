@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 from cairn.server.schemas.traffic import TrafficSummaryQuery
-from cairn.server.services.traffic_query import _Cursor, _decode_cursor, _encode_cursor
+from pydantic import ValidationError
 from cairn.server.traffic_schema import traffic_request_location
 from traffic_api_fixture import traffic_api, postgres_instance, empty_postgres_url  # noqa: F401
 
@@ -34,7 +34,7 @@ def _record(scope, flow_id, *, target=b"/api/Item?q=one%25", status=200, method=
             "response": {**message, "status_code": status, "reason_base64": _b64(b"Synthetic")} if status else None}
 
 
-def test_location_derivation_and_cursor_validation():
+def test_location_derivation_and_page_validation():
     request = _record({}, "f")["request"]
     original = deepcopy(request)
     assert traffic_request_location(request) == ("http://Synthetic.Invalid:8080/api/Item?q=one%25", "/api/Item")
@@ -47,14 +47,73 @@ def test_location_derivation_and_cursor_validation():
     assert traffic_request_location(request)[1] == "target.invalid:443"
     query = TrafficSummaryQuery(method="get", host="SYNTHETIC")
     assert query.method == "GET" and query.host == "synthetic"
-    cursor = _Cursor(version=1, identity="a" * 64, direction="next", received_at=NOW, project_id="p", flow_id="f")
-    token = _encode_cursor(cursor)
-    assert _decode_cursor(token, "a" * 64) == cursor
-    for invalid in (token + "=", "%%%", _encode_cursor(cursor.model_copy(update={"received_at": "2026-99-22T01:00:00Z"})),
-                    _b64(json.dumps({**cursor.model_dump(), "extra": 1}).encode()).rstrip("=")):
-        with pytest.raises(HTTPException) as failure:
-            _decode_cursor(invalid, "a" * 64)
-        assert failure.value.status_code == 422
+    assert query.page == 1 and query.limit == 50
+    for invalid in ({"page": 0}, {"page": -1}, {"page": 1.5}, {"limit": 0}, {"limit": 201}, {"cursor": "obsolete"}):
+        with pytest.raises(ValidationError):
+            TrafficSummaryQuery(**invalid)
+
+
+@pytest.mark.skipif(os.environ.get("CAIRN_TEST_POSTGRES_BOOTSTRAP") != "1", reason="requires disposable PostgreSQL opt-in")
+def test_summary_count_matches_authorized_distinct_flows(empty_postgres_url, tmp_path):
+    from cairn.server import db
+    from cairn.server.auth import RequestPrincipal
+    from cairn.server.schemas.traffic import TrafficSummaryPage
+    from cairn.server.services.traffic_query import list_traffic_summaries
+
+    # 仅为管理员页面不能证明的租户隔离、重复引用和深页计数建立一次性合成库。
+    db.configure(database_url=empty_postgres_url, artifact_path=tmp_path / "artifacts")
+    with db.get_conn() as conn:
+        conn.execute("INSERT INTO tenants(id, kind, name, created_at) VALUES ('count-other', 'personal', '隔离', ?)", (NOW,))
+        for project, tenant in (("count-a", "tenant_legacy"), ("count-b", "tenant_legacy"), ("count-hidden", "count-other")):
+            conn.execute("INSERT INTO projects(id, title, status, created_at, tenant_id) VALUES (?, ?, 'paused', ?, ?)",
+                         (project, project, NOW, tenant))
+            conn.execute("INSERT INTO task_runs(id, project_id, task_type, worker_name, worker_type, status) "
+                         "VALUES ('run', ?, 'explore', 'synthetic', 'pi', 'succeeded')", (project,))
+            conn.execute("INSERT INTO http_capture_scopes(id, project_id, task_run_id, generation, container_id, dispatcher_id, created_at) "
+                         "VALUES ('scope', ?, 'run', 0, 'synthetic', 'synthetic', ?)", (project, NOW))
+            for index in range(3):
+                flow_id = f"flow-{index}"
+                record = _record({}, flow_id)
+                record["request"]["body_bytes"] = 100
+                record["response"]["body_bytes"] = 7
+                conn.execute("INSERT INTO http_flows(id, project_id, capture_scope_id, revision, record_json, record_sha256, "
+                             "state, method, host, status_code, created_cursor, updated_cursor, received_at, updated_at, request_url, request_path) "
+                             "VALUES (?, ?, 'scope', 1, ?, ?, 'receiving', 'GET', 'synthetic.invalid', 200, ?, ?, ?, ?, ?, '/api/Item')",
+                             (flow_id, project, json.dumps(record), "a" * 64, index + 1, index + 1, NOW, NOW,
+                              "http://Synthetic.Invalid:8080/api/Item?q=one%25"))
+        evidence = json.dumps([{"id": "a", "kind": "http", "source": "capture", "flow_id": "flow-1"},
+                               {"id": "b", "kind": "http", "source": "historical", "flow_id": "flow-1"}])
+        conn.execute("INSERT INTO vulnerabilities(id, project_id, title, severity, created_at, updated_at, evidence_items_json) "
+                     "VALUES ('v', 'count-a', '合成', 'low', ?, ?, ?)", (NOW, NOW, evidence))
+        for observation in ("o1", "o2"):
+            conn.execute("INSERT INTO vulnerability_observations(id, project_id, vulnerability_id, severity, confidence, observed_at, evidence_items_json) "
+                         "VALUES (?, 'count-a', 'v', 'low', 0.5, ?, ?)", (observation, NOW, evidence))
+    principal = RequestPrincipal(kind="user", subject_id="count-reader", tenant_id="tenant_legacy", role="user")
+
+    def read(**filters):
+        result = list_traffic_summaries(TrafficSummaryQuery(**filters), principal)
+        TrafficSummaryPage.model_validate(result)
+        return result
+
+    pages = [read(page=page, limit=2) for page in (1, 2, 3)]
+    assert all(result["total"] == 6 and result["total_pages"] == 3 for result in pages)
+    keys = [(row["project_id"], row["id"]) for result in pages for row in result["items"]]
+    assert keys == sorted(((project, f"flow-{index}") for project in ("count-a", "count-b") for index in range(3)), reverse=True)
+    assert read(page=999, limit=2) == pages[-1]
+    assert read(host="missing", page=999) == {"items": [], "page": 1, "limit": 50, "total": 0, "total_pages": 0}
+    for filters in ({"associated": True}, {"vulnerability_id": "v"},
+                    {"observation_id": "o1"}, {"vulnerability_id": "v", "observation_id": "o1", "include_record_evidence": True}):
+        result = read(page=999, limit=1, **filters)
+        assert result["total"] == result["total_pages"] == result["page"] == 1
+        assert result["items"][0]["id"] == "flow-1"
+        assert result["items"][0]["associations"]["observation_count"] == 2
+    assert read(associated=False)["total"] == 5
+    assert read(url="?q=one%25")["total"] == 6
+    assert read(path="q=one")["total"] == 0
+    assert pages[0]["items"][0]["sync"]["bodies"]["response"]["captured_bytes"] == 7
+    with pytest.raises(HTTPException) as denied:
+        read(project_id="count-hidden")
+    assert denied.value.status_code == 404
 
 
 @pytest.mark.skipif(os.environ.get("CAIRN_TEST_POSTGRES_BOOTSTRAP") != "1", reason="requires disposable PostgreSQL opt-in")
@@ -116,7 +175,7 @@ def test_scope_status_filters_terminal_run_beyond_first_page(empty_postgres_url,
 
 
 @pytest.mark.skipif(os.environ.get("CAIRN_TEST_POSTGRES_BOOTSTRAP") != "1", reason="requires disposable PostgreSQL opt-in")
-def test_authorized_summary_keysets_filters_and_observation_links(traffic_api):
+def test_authorized_summary_pages_filters_and_observation_links(traffic_api):
     api = traffic_api
     conn = api.conn
     p1, p2 = api.project_id, api.other_project_id
@@ -175,31 +234,38 @@ def test_authorized_summary_keysets_filters_and_observation_links(traffic_api):
     get(f"/projects/{p1}/traffic/summary", project_id=p2, expected=422)
 
     first = get(limit=2)
-    second = get(limit=2, cursor=first["next_cursor"])
-    third = get(limit=2, cursor=second["next_cursor"])
-    assert [(r["project_id"], r["id"]) for page in (first, second, third) for r in page["items"]] == expected_keys
-    assert not first["has_previous"] and not third["has_more"]
-    assert get(limit=2, cursor=second["previous_cursor"])["items"] == first["items"]
-    get(limit=2, cursor=first["next_cursor"], method="POST", expected=422)
-    get(limit=2, cursor=first["next_cursor"], error_code="transport_error", expected=422)
-    get(limit=2, cursor=first["next_cursor"], session=api.outsider, expected=422)
-    get(f"/projects/{p1}/traffic/summary", limit=2, cursor=first["next_cursor"], expected=422)
+    second = get(limit=2, page=2)
+    third = get(limit=2, page=3)
+    assert [(r["project_id"], r["id"]) for result in (first, second, third) for r in result["items"]] == expected_keys
+    assert set(first) == {"items", "page", "limit", "total", "total_pages"}
+    assert [result["page"] for result in (first, second, third)] == [1, 2, 3]
+    assert all(result["total"] == 6 and result["total_pages"] == 3 for result in (first, second, third))
+    assert get(limit=2, page=99) == third
+    empty = get(host="no-matches", page=99)
+    assert empty == {"items": [], "page": 1, "limit": 50, "total": 0, "total_pages": 0}
+    assert get(limit=2, page=2, session=api.outsider)["total"] == 3
+    assert get(f"/projects/{p1}/traffic/summary", limit=2, page=2)["total"] == 3
     get(limit=201, expected=422)
-    get(cursor="not-a-cursor", expected=422)
+    get(page=0, expected=422)
+    get(cursor="obsolete", expected=422)
     for filters, count in (({"host": "SYNTHETIC"}, 6), ({"host": "%"}, 0), ({"method": "post"}, 2),
                            ({"url": "?q=one%25"}, 6), ({"path": "Item"}, 6), ({"path": "q=one"}, 0),
                            ({"path": "item"}, 0), ({"status_family": "4xx"}, 2), ({"status_code": 200}, 4),
                            ({"status_family": "2xx", "status_code": 404}, 0), ({"state": "receiving"}, 6),
                            ({"task_run_id": run["id"]}, 3), ({"flow_id": "flow-1"}, 2)):
-        assert len(get(**filters)["items"]) == count, filters
+        result = get(**filters)
+        assert len(result["items"]) == result["total"] == count, filters
     get(status_family="400", expected=422)
 
-    # 仅 canonical 上的材料不能冒充已接受 Observation；重复条目也不能重复算关联。
+    # canonical 补充可关联，但不能冒充 Observation；重复条目不重复计数。
     evidence = [{"id": "one", "kind": "http", "source": "capture", "flow_id": "flow-1"},
                 {"id": "two", "kind": "http", "source": "historical", "flow_id": "flow-1"}]
     conn.execute("INSERT INTO vulnerabilities(id, project_id, title, severity, created_at, updated_at, evidence_items_json) "
                  "VALUES ('v1', ?, '合成关联', 'low', ?, ?, ?)", (p1, NOW, NOW, json.dumps(evidence)))
-    assert get(associated=True)["items"] == []
+    canonical = get(associated=True)["items"]
+    assert len(canonical) == 1
+    assert canonical[0]["associations"]["observation_count"] == 0
+    assert canonical[0]["associations"]["items"][0]["observation_id"] is None
     for number in range(7):
         conn.execute("INSERT INTO vulnerability_observations(id, project_id, vulnerability_id, severity, confidence, "
                      "observed_at, evidence_items_json) VALUES (?, ?, 'v1', 'low', 0.5, ?, ?)",
@@ -213,7 +279,29 @@ def test_authorized_summary_keysets_filters_and_observation_links(traffic_api):
     assert len(get(associated=False)["items"]) == 5
     assert get(associated=True, session=api.outsider)["items"] == []
     detail = get(f"/projects/{p1}/traffic/flow-1")
-    assert len(detail["observations"]) == 7
+    assert len(detail["observations"]) == 8
+    assert len(get(vulnerability_id="v1")["items"]) == 1
+    assert len(get(observation_id="query-observation-0")["items"]) == 1
+    assert get(vulnerability_id="other", observation_id="query-observation-0")["items"] == []
+    assert get(vulnerability_id="v1", observation_id="other", include_record_evidence=True)["items"] == []
+    assert len(get(vulnerability_id="v1", observation_id="query-observation-0", include_record_evidence=True)["items"]) == 1
+    # 真实人工 PATCH 只变 canonical；可关联尚未封存的同项目索引，不读取正文。
+    before = conn.execute("SELECT evidence_items_json FROM vulnerability_observations WHERE project_id=? AND id='query-observation-0'", (p1,)).fetchone()["evidence_items_json"]
+    manual = {"id": "manual-flow", "kind": "http", "source": "manual", "flow_id": "flow-2"}
+    patch_url = api.base_url + f"/projects/{p1}/vulnerabilities/v1"
+    assert api.user.patch(patch_url, json={"evidence_items": [evidence[1], manual]}, timeout=15).status_code == 200
+    scoped = get(project_id=p1, vulnerability_id="v1", observation_id="query-observation-0", include_record_evidence=True)["items"]
+    assert {row["id"] for row in scoped} == {"flow-1", "flow-2"}
+    manual_summary = next(row for row in scoped if row["id"] == "flow-2")["associations"]
+    assert manual_summary["observation_count"] == 0 and manual_summary["vulnerability_count"] == 1
+    assert get(project_id=p1, observation_id="query-observation-0")["items"][0]["id"] == "flow-1"
+    assert len(get(project_id=p1, observation_id="query-observation-0")["items"]) == 1
+    assert conn.execute("SELECT evidence_items_json FROM vulnerability_observations WHERE project_id=? AND id='query-observation-0'", (p1,)).fetchone()["evidence_items_json"] == before
+    assert api.user.patch(patch_url, json={"evidence_items": [evidence[1], manual, {**manual, "id": "duplicate"}]}, timeout=15).status_code == 422
+    assert api.user.patch(patch_url, json={"evidence_items": [evidence[1], {**manual, "flow_id": "not-in-project"}]}, timeout=15).status_code == 422
+    assert api.user.patch(patch_url, json={"evidence_items": [evidence[1]]}, timeout=15).status_code == 200
+    assert get(project_id=p1, flow_id="flow-2", associated=True)["items"] == []
+    assert get(f"/projects/{p1}/traffic/flow-2")["id"] == "flow-2"
 
     original = records[p1, "flow-1"]
     result = api.machine.sync_traffic_flow(p1, "query-scope", original)
@@ -256,8 +344,9 @@ def test_authorized_summary_keysets_filters_and_observation_links(traffic_api):
     assert [row["id"] for row in get(state="failed", error_code="transport_error")["items"]] == ["failed-flow"]
     assert [row["id"] for row in get(error_code="collector_stopped")["items"]] == ["stopped-flow"]
 
-    # 新入站/正文更新不会将历史边界重置为首页，旧 Pi 列表仍返回整数项目游标和完整记录。
-    assert get(limit=2, cursor=first["next_cursor"])["items"] == second["items"]
+    # 显式翻页读取当前集合；原始机器列表仍使用整数项目游标和完整记录。
+    current_rows = get()["items"]
+    assert get(limit=2, page=2)["items"] == current_rows[2:4]
     legacy = api.machine.list_http_flows(p1, task_run_id=None, limit=2)
     assert legacy.ok and isinstance(legacy.data["next_cursor"], int)
     assert "request" in legacy.data["items"][0] and "update_cursor" in legacy.data
@@ -273,7 +362,9 @@ def test_authorized_summary_keysets_filters_and_observation_links(traffic_api):
                  "VALUES ('query-verification', 1, ?, 'user', ?, 'query-client', ?, 'retest', ?, 'query-intent', 'text', 'query-resource', ?, ?)",
                  (tenant, outsider["id"], "a" * 64, p2, NOW, NOW))
     assert all(row["project_id"] == p1 for row in get()["items"])
-    assert all(row["project_id"] == p1 for row in get(limit=2, cursor=first["next_cursor"])["items"])
+    authorized_page = get(limit=2, page=2)
+    assert all(row["project_id"] == p1 for row in authorized_page["items"])
+    assert authorized_page["total"] == len(get()["items"])
     get(f"/projects/{p2}/traffic/summary", expected=404)
     reader = conn.execute("SELECT id FROM users WHERE login = 'traffic-reader'").fetchone()["id"]
     conn.execute("UPDATE verification_requests SET caller_id = ?, deleted_at = ? WHERE id = 'query-verification'", (reader, NOW))

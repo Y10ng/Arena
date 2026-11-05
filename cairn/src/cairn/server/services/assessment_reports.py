@@ -30,18 +30,15 @@ from cairn.server.models import (
 )
 
 from .assessment_policy import policy_from_project_row, require_execution_contract, row_value
-from .assessment_convergence import assessment_execution_view, assessment_has_running_work, stop_assessment
-from .assessment_quality_snapshot import build_assessment_quality_snapshot
+from .assessment_convergence import assessment_execution_view
 from .ids import get_project_or_404
 from .report_policy import (
-    REPORT_DATA_SCHEMA_VERSION,
     freeze_report_execution_plan,
     parse_report_execution_plan,
     report_policy_from_project_row,
 )
 from .report_templates import require_report_template_profile
 from .time_utils import timestamp_delta_seconds, utcnow
-from .vulnerability_chains import build_vulnerability_chain_candidates
 
 _REPORT_VERSION = 1
 _REPORT_FINISH_PROTOCOL = "cairn-assessment-report-finish-v1"
@@ -106,6 +103,9 @@ def _report_discovery_rows(conn: sqlite3.Connection, project_id: str, *, observa
         if observations:
             item["reproduction_steps"] = json.loads(item.pop("reproduction_steps_json"))
         else:
+            from .vulnerability_dispositions import list_vulnerability_dispositions
+
+            item["dispositions"] = list_vulnerability_dispositions(conn, project_id, item["id"])
             item["record_evidence_items"] = item["evidence_items"]
             item["record_repro_steps"] = item["repro_steps"]
             item["record_remediation"] = item["remediation"]
@@ -156,7 +156,8 @@ def _finalization_row(conn, project_id, *, scope_key="", generation_token=None):
 
 
 def _scope_input_sha256(packet: dict[str, Any]) -> str:
-    # 只比较该次发现的输入；项目运行状态、报告请求本身和无关任务不使成果失效。
+    # vulnerabilities 包含人工处置原文与来源快照；新处置使当前输入过时，不改已冻结成品。
+    # 项目运行状态、报告请求本身和无关任务不使成果失效。
     material = {key: packet.get(key) for key in (
         "vulnerability_id", "observation_id", "vulnerabilities", "observations",
         "facts", "verifications", "evidence_links", "artifact_contents", "flow_evidence", "flow_contents",
@@ -180,6 +181,12 @@ def _finalization_view(conn, row: sqlite3.Row) -> AssessmentReportFinalizationVi
     # digest 是内部 fencing material，不进入通用读取模型。
     values.pop("claim_sha256", None)
     values["template_compatibility_profiles"] = _json_value(values.pop("template_profiles_json"), [])
+    if row["input_snapshot_artifact_id"]:
+        snapshot = conn.execute("SELECT metadata_json FROM artifacts WHERE project_id = ? AND id = ?",
+                                (row["project_id"], row["input_snapshot_artifact_id"])).fetchone()
+        if snapshot is not None:
+            # 仅投影已绑定且核验过的快照索引，不把受理时间或完成时间当作材料时点。
+            values["materialized_at"] = _json_value(snapshot["metadata_json"], {}).get("materialized_at")
     return AssessmentReportFinalizationView(**values)
 
 
@@ -204,11 +211,10 @@ def _require_report_execution_generation(project, task_run) -> None:
     if task_run is None:
         raise HTTPException(409, "assessment_report_claim_mismatch")
     context = _json_value(task_run["runtime_context_json"], {})
-    if context.get("report_claim", {}).get("scope_key"):
-        # 单条只读交付由自己的 generation fencing，不借用研究项目暂停代次。
-        return
-    if task_run["execution_generation"] != project["execution_generation"] or task_run["pause_requested"]:
-        raise HTTPException(409, "execution_generation_mismatch")
+    claim = context.get("report_claim") if isinstance(context, dict) else None
+    if not isinstance(claim, dict) or not isinstance(claim.get("generation_token"), str) or not claim["generation_token"] or task_run["pause_requested"]:
+        raise HTTPException(409, "assessment_report_claim_mismatch")
+    # 独立受理的报告由 finalization 的 generation_token/attempt fencing，研究结束不撤销它。
 
 
 def _finish_report_task_run(
@@ -249,7 +255,7 @@ def _validate_frozen_execution(row: sqlite3.Row) -> None:
     if (
         not isinstance(profiles, list)
         or not all(isinstance(profile, str) for profile in profiles)
-        or plan.template_profile not in profiles
+        or (plan.output_contract_version < 5 and plan.template_profile not in profiles)
     ):
         raise HTTPException(409, "assessment_report_template_profile_invalid")
     markdown = row["template_markdown"]
@@ -351,7 +357,7 @@ def _expected_report_metadata(
         "report_template_key": finalization["template_key"],
         "packet_version": plan.packet_version,
         "output_contract_version": plan.output_contract_version,
-        "report_data_schema_version": REPORT_DATA_SCHEMA_VERSION,
+        "report_data_schema_version": plan.report_data_schema_version,
         "report_template_digest_sha256": finalization["template_digest_sha256"],
         "report_policy_version": finalization["report_policy_version"],
         "report_execution_plan_sha256": finalization[
@@ -401,7 +407,7 @@ def _validate_report_artifact(
         or artifact["uri"] != expected_uri
         or artifact["sha256"] != artifact_sha256
         or not isinstance(metadata, dict)
-        or set(metadata) != {*expected_metadata, "runtime_context"}
+        or set(metadata) != {*expected_metadata, "runtime_context", *({"report_segment_refs"} if expected_metadata["output_contract_version"] == 5 else set())}
         or not isinstance(metadata.get("runtime_context"), dict)
         or any(
             metadata.get(key) != value
@@ -416,6 +422,44 @@ def _validate_report_artifact(
         raise HTTPException(409, error_code) from exc
     if not markdown.strip():
         raise HTTPException(409, error_code)
+    if expected_metadata["output_contract_version"] == 5:
+        from cairn.report_markdown import assemble_markdown_segments
+        from cairn.report_segments import SegmentReference, REPORT_MAX_SEGMENTS
+        from .verification_requests import _validate_public_text
+
+        try:
+            references = metadata["report_segment_refs"]
+            if not isinstance(references, list) or not 1 <= len(references) <= REPORT_MAX_SEGMENTS:
+                raise ValueError("report_segment_references_invalid")
+            snapshot = _artifact_row(conn, finalization["project_id"], snapshot_artifact_id, error_code=error_code)
+            packet = json.loads(_artifact_content_bytes(snapshot, error_code=error_code))["report_packet"]
+            origin = _snapshot_origin_task_run(conn, task_run)
+            binding = {"project_id": finalization["project_id"], "task_run_id": origin["id"],
+                       "generation_token": finalization["generation_token"],
+                       "input_snapshot_sha256": snapshot_sha256,
+                       "report_template_digest_sha256": finalization["template_digest_sha256"]}
+            records = {}
+            for reference in references:
+                handle = SegmentReference.model_validate(reference).artifact_handle
+                candidates = conn.execute(
+                    "SELECT * FROM artifacts WHERE project_id = ? AND task_run_id = ? AND kind = 'file' "
+                    "AND metadata_json::jsonb->>'source' = 'report_segment' "
+                    "AND metadata_json::jsonb->>'registered_handle' = ?",
+                    (finalization["project_id"], origin["id"], handle),
+                ).fetchall()
+                if not candidates or len({item["sha256"] for item in candidates}) != 1:
+                    raise ValueError("report_segment_artifact_missing_or_conflicting")
+                records[handle] = json.loads(_artifact_content_bytes(candidates[0], error_code=error_code))
+            assembled = assemble_markdown_segments(references, records, binding=binding, packet=packet)
+            if assembled["markdown"] != markdown:
+                raise ValueError("report_markdown_artifact_mismatch")
+            _validate_public_text(markdown)
+        except HTTPException as exc:
+            if exc.detail == "verification_sensitive_result_rejected":
+                raise HTTPException(409, error_code) from exc
+            raise
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HTTPException(409, error_code) from exc
     if finalization["scope_key"]:
         from cairn.report_readable import readable_finding_context, validate_report_readable
         from .verification_requests import _validate_public_text
@@ -528,7 +572,7 @@ def _validate_snapshot_artifact(
         "report_template_key": finalization["template_key"],
         "packet_version": plan.packet_version,
         "output_contract_version": plan.output_contract_version,
-        "report_data_schema_version": REPORT_DATA_SCHEMA_VERSION,
+        "report_data_schema_version": plan.report_data_schema_version,
         "report_template_digest_sha256": finalization["template_digest_sha256"],
         "report_execution_plan_sha256": finalization[
             "report_execution_plan_sha256"
@@ -546,7 +590,7 @@ def _validate_snapshot_artifact(
         or artifact["uri"] != expected_uri
         or artifact["sha256"] != digest_sha256
         or not isinstance(metadata, dict)
-        or set(metadata) != {*expected_metadata, "runtime_context"}
+        or set(metadata) != {*expected_metadata, "runtime_context", *({"materialized_at"} if plan.output_contract_version == 5 else set())}
         or not isinstance(metadata.get("runtime_context"), dict)
         or any(metadata.get(key) != value for key, value in expected_metadata.items())
     ):
@@ -574,6 +618,14 @@ def _validate_snapshot_artifact(
         }
     ):
         raise HTTPException(409, error_code)
+    if plan.output_contract_version == 5:
+        materialized_at = snapshot["report_packet"].get("materialized_at")
+        try:
+            parsed_at = datetime.fromisoformat(materialized_at)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(409, error_code) from exc
+        if parsed_at.tzinfo is None or metadata.get("materialized_at") != materialized_at:
+            raise HTTPException(409, error_code)
     if finalization["scope_key"] and snapshot["report_packet"] != json.loads(finalization["frozen_packet_json"]):
         raise HTTPException(409, error_code)
     return artifact
@@ -674,24 +726,9 @@ def _require_report_request_eligibility(
     conn: sqlite3.Connection,
     project: sqlite3.Row,
 ) -> None:
-    from .project_records import project_pause_unconfirmed
-
-    status = str(project["status"])
-    if project_pause_unconfirmed(conn, str(project["id"])):
-        raise HTTPException(409, "project_pause_draining")
-    if assessment_has_running_work(conn, str(project["id"])):
-        raise HTTPException(409, "assessment_report_tasks_not_quiescent")
-    if status == "completed":
-        return
-    if status == "paused":
-        raise HTTPException(409, "assessment_report_project_paused")
-    if status == "active":
-        raise HTTPException(409, "assessment_report_project_active")
-    if status != "stopped":
+    # 报告只读取已有成果；研究是否在途不影响独立报告域。
+    if project["status"] not in {"active", "paused", "completed", "stopped"}:
         raise HTTPException(409, "assessment_report_project_status_invalid")
-    project_id = str(project["id"])
-    if _stopped_project_has_active_assessment_runs(conn, project_id):
-        raise HTTPException(409, "assessment_report_stopped_tasks_not_quiescent")
 
 
 def _require_report_claim_eligibility(
@@ -702,23 +739,7 @@ def _require_report_claim_eligibility(
     require_execution_contract(project)
     if finalization is not None and finalization["scope_key"]:
         return
-    from .project_records import project_pause_unconfirmed
-
-    status = str(project["status"])
-    if project_pause_unconfirmed(conn, str(project["id"])):
-        raise HTTPException(409, "project_pause_draining")
-    if assessment_has_running_work(conn, str(project["id"])):
-        raise HTTPException(409, "assessment_report_tasks_not_quiescent")
-    if status == "completed":
-        return
-    if status == "paused":
-        raise HTTPException(409, "assessment_report_project_paused")
-    if status == "active":
-        raise HTTPException(409, "assessment_report_project_active")
-    if status != "stopped":
-        raise HTTPException(409, "assessment_report_project_status_invalid")
-    if _stopped_project_has_active_assessment_runs(conn, str(project["id"])):
-        raise HTTPException(409, "assessment_report_stopped_tasks_not_quiescent")
+    _require_report_request_eligibility(conn, project)
 
 
 def request_assessment_report_generation(
@@ -1291,7 +1312,7 @@ def claim_assessment_report_finalization(
                         "template_compatibility_profiles": json.loads(row["template_profiles_json"]),
                         "packet_version": plan.packet_version,
                         "output_contract_version": plan.output_contract_version,
-                        "report_data_schema_version": REPORT_DATA_SCHEMA_VERSION,
+                        "report_data_schema_version": plan.report_data_schema_version,
                         "template_digest_sha256": row["template_digest_sha256"],
                         "report_execution_plan_sha256": row["report_execution_plan_sha256"],
                         "report_prompt_digest_sha256": row["report_prompt_digest_sha256"],
@@ -1966,17 +1987,13 @@ def _build_scoped_report_packet(conn, project_id, vulnerability_id, observation_
 
 
 def prepare_assessment_report_packet(conn, project_id: str, *, generation_token: str | None = None) -> str | None:
-    """短事务收口停止态；材料读取另用一致性快照，不占用项目写锁。"""
-    project = _lock_report_project(conn, project_id)
+    """只定位报告代次；材料读取不修改研究生命周期或获取项目写锁。"""
+    get_project_or_404(conn, project_id)
     finalization = _finalization_row(conn, project_id, generation_token=generation_token)
     if generation_token is not None and finalization is None:
         raise HTTPException(404, "assessment_report_finalization_not_found")
     if finalization is not None and finalization["scope_key"]:
         return str(finalization["generation_token"])
-    if assessment_has_running_work(conn, project_id):
-        raise HTTPException(409, "assessment_report_tasks_not_quiescent")
-    if project["status"] == "stopped" and policy_from_project_row(project).phased:
-        stop_assessment(conn, project_id, row_value(project, "coverage_stop_reason") or "user_stopped")
     return str(finalization["generation_token"]) if finalization is not None else None
 
 
@@ -1994,8 +2011,8 @@ def build_assessment_report_packet(
             raise HTTPException(404, "assessment_report_finalization_not_found")
         if row["scope_key"]:
             return AssessmentReportPacket.model_validate_json(row["frozen_packet_json"])
-    if assessment_has_running_work(conn, project_id):
-        raise HTTPException(409, "assessment_report_tasks_not_quiescent")
+    # PostgreSQL 在本事务首次读取时固定快照；不使用请求排队时间充当材料截止时间。
+    materialized_at = conn.execute("SELECT transaction_timestamp() AS ts").fetchone()["ts"].astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     # 出口仅供传输层消费，公开报告输入不携带配置或密文信封。
     project = _row_dict({key: value for key, value in dict(project_row).items()
                          if key not in {"test_egress_json", "test_egress_auth"}})
@@ -2044,13 +2061,11 @@ def build_assessment_report_packet(
     )
     policy = asdict(assessment_policy)
     report_policy = asdict(report_policy_from_project_row(project_row))
-    quality = build_assessment_quality_snapshot(conn, project_id)
-    chains = [
-        item.model_dump()
-        for item in build_vulnerability_chain_candidates(conn, project_id)
-    ]
     observations = _report_discovery_rows(conn, project_id, observations=True)
     vulnerabilities = _report_discovery_rows(conn, project_id)
+    from cairn.vulnerability_number import vulnerability_number
+    for vulnerability in vulnerabilities:
+        vulnerability["number"] = vulnerability_number(project_id, vulnerability["id"])
     record_sources = [{"vulnerability_id": item["id"], "evidence_items": item["record_evidence_items"]} for item in vulnerabilities]
     from .flow_evidence import freeze_report_flows
 
@@ -2059,6 +2074,7 @@ def build_assessment_report_packet(
         conn, project_id, [*observations, *record_sources], source_checks=source_checks,
     )
     packet = AssessmentReportPacket(
+        materialized_at=materialized_at,
         **_report_display_materials(conn, project_id, [*observations, *record_sources], source_checks=source_checks),
         flow_evidence=flow_evidence, flow_contents=flow_contents,
         artifact_contents=_report_artifact_contents(
@@ -2076,38 +2092,10 @@ def build_assessment_report_packet(
         ),
         facts=_rows(
             conn,
-            "SELECT * FROM facts WHERE project_id = ? ORDER BY created_at, id",
-            (project_id,),
+            "SELECT * FROM facts WHERE project_id = ? AND id = ANY(?) ORDER BY created_at, id",
+            (project_id, sorted({item["source_fact_id"] for item in [*vulnerabilities, *observations] if item.get("source_fact_id")})),
             json_columns=("assessment_record_json",),
         ),
-        intents=_rows(
-            conn,
-            "SELECT * FROM intents WHERE project_id = ? ORDER BY created_at, id",
-            (project_id,),
-        ),
-        intent_sources=_rows(
-            conn,
-            "SELECT * FROM intent_sources WHERE project_id = ? ORDER BY intent_id, source_order, fact_id",
-            (project_id,),
-        ),
-        surface_manifest=_rows(
-            conn,
-            "SELECT * FROM surface_manifest_entries WHERE project_id = ? ORDER BY created_at, entry_id",
-            (project_id,),
-            json_columns=("identity_json", "traits_json", "evidence_json"),
-        ),
-        coverage_cells=_rows(
-            conn,
-            "SELECT * FROM coverage_slots WHERE project_id = ? ORDER BY slot_key",
-            (project_id,),
-        ),
-        coverage_scope_dispositions=_rows(
-            conn,
-            "SELECT * FROM coverage_scope_dispositions WHERE project_id = ? ORDER BY created_at, disposition_id",
-            (project_id,),
-            json_columns=("target_ids_json", "evidence_json"),
-        ),
-        quality_snapshot=asdict(quality) if quality is not None else None,
         vulnerabilities=vulnerabilities,
         observations=observations,
         verifications=_rows(
@@ -2118,20 +2106,8 @@ def build_assessment_report_packet(
         ),
         evidence_links=_rows(
             conn,
-            "SELECT * FROM fact_evidence WHERE project_id = ? ORDER BY fact_id, artifact_id, pointer",
-            (project_id,),
-        ),
-        chain_candidates=chains,
-        assessment_attempts=_rows(
-            conn,
-            "SELECT * FROM assessment_attempts WHERE project_id = ? ORDER BY started_at, id",
-            (project_id,),
-        ),
-        task_runs=_rows(
-            conn,
-            "SELECT * FROM task_runs WHERE project_id = ? AND task_type NOT IN ('agent_chat', 'report') ORDER BY started_at, id",
-            (project_id,),
-            json_columns=("runtime_context_json",),
+            "SELECT * FROM fact_evidence WHERE project_id = ? AND fact_id = ANY(?) ORDER BY fact_id, artifact_id, pointer",
+            (project_id, sorted({item["source_fact_id"] for item in [*vulnerabilities, *observations] if item.get("source_fact_id")})),
         ),
     )
     # 研究事实及其显式证据是报告输入；下载副本、聊天记录和执行日志不因同属项目而混入。

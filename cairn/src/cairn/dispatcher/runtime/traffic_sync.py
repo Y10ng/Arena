@@ -13,7 +13,7 @@ import time
 
 from cairn.dispatcher.protocol.client import ApiResult, CairnClient
 from cairn.server.schemas.traffic import (
-    TRAFFIC_BATCH_BODY_BYTES, TRAFFIC_BATCH_BYTES, TRAFFIC_BATCH_FLOWS, TRAFFIC_CHUNK_BYTES,
+    TRAFFIC_BATCH_BODY_BYTES, TRAFFIC_BATCH_BYTES, TRAFFIC_BATCH_FLOWS, TRAFFIC_CHUNK_BYTES, TrafficOwner,
 )
 
 
@@ -165,7 +165,7 @@ class TrafficSync:
             if not self._ready(metadata_key):
                 self._pending_bytes += unsent_bytes
                 return False
-            result = self.client.sync_traffic_flow(binding["project_id"], binding["id"], record)
+            result = self.client.sync_traffic_flow((binding["project_id"] if binding.get("project_id") is not None else TrafficOwner(conversation_id=binding["conversation_id"])), binding["id"], record)
             if not self._accept(metadata_key, result):
                 self._pending_bytes += unsent_bytes
                 return False
@@ -215,13 +215,13 @@ class TrafficSync:
                 if self._stop.is_set():
                     return False
                 result = self.client.sync_traffic_body(
-                    binding["project_id"], binding["id"], flow_id, side,
+                    (binding["project_id"] if binding.get("project_id") is not None else TrafficOwner(conversation_id=binding["conversation_id"])), binding["id"], flow_id, side,
                     **expected, content=chunk,
                 )
                 if result.ok and not result.error_code and (
                     not isinstance(result.data, dict)
                     or any(result.data.get(name) != value for name, value in {
-                        **expected, "project_id": binding["project_id"], "flow_id": flow_id,
+                        **expected, **TrafficOwner.from_binding(binding).fields, "flow_id": flow_id,
                         "side": side, "next_offset": accepted + length,
                     }.items())
                 ):
@@ -269,11 +269,11 @@ class TrafficSync:
                 _save_receipt(receipt_path, receipt)
             if self._stop.is_set():
                 return False
-            result = self.client.seal_traffic_body(binding["project_id"], binding["id"], flow_id, side, **seal)
+            result = self.client.seal_traffic_body((binding["project_id"] if binding.get("project_id") is not None else TrafficOwner(conversation_id=binding["conversation_id"])), binding["id"], flow_id, side, **seal)
             if result.ok and not result.error_code and (
                 not isinstance(result.data, dict) or not result.data.get("artifact_id")
                 or any(result.data.get(name) != value for name, value in {
-                    **seal, "project_id": binding["project_id"], "flow_id": flow_id, "side": side,
+                    **seal, **TrafficOwner.from_binding(binding).fields, "flow_id": flow_id, "side": side,
                 }.items())
             ):
                 result = ApiResult(status_code=422, error_code="invalid_seal_receipt")
@@ -391,7 +391,7 @@ class TrafficSync:
         return True
 
     def _batch(self, binding: dict, candidates: list[tuple[dict, dict, str, dict]]) -> None:
-        result = self.client.sync_traffic_batch(binding["project_id"], binding["id"], [item[3] for item in candidates])
+        result = self.client.sync_traffic_batch((binding["project_id"] if binding.get("project_id") is not None else TrafficOwner(conversation_id=binding["conversation_id"])), binding["id"], [item[3] for item in candidates])
         remote = result.data.get("items") if result.ok and isinstance(result.data, dict) else None
         valid = isinstance(remote, list) and len(remote) == len(candidates) and all(
             isinstance(reply, dict) and reply.get("flow_id") == record["id"]
@@ -557,7 +557,7 @@ class TrafficSync:
             progressed = self._scan_scope(scope_id, scope) or progressed
             if scope_id not in self._registered:
                 binding = scope["binding"]
-                if not self._accept(scope_key, self.client.register_traffic_scope(binding["project_id"], binding)):
+                if not self._accept(scope_key, self.client.register_traffic_scope((binding["project_id"] if binding.get("project_id") is not None else TrafficOwner(conversation_id=binding["conversation_id"])), binding)):
                     return progressed
                 self._registered.add(scope_id)
             self._service_scope(scope_id, scope)

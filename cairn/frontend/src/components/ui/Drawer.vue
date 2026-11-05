@@ -13,11 +13,13 @@
     <DrawerPortal :disabled="portalDisabled">
       <DrawerOverlay class="ui-drawer__overlay" />
       <DrawerContent
+        v-bind="description || $slots.description ? {} : { 'aria-describedby': undefined }"
         class="ui-drawer__content"
         :class="[`ui-drawer__content--${side}`, `ui-drawer__content--${size}`]"
         :initial-focus="initialFocus"
         :final-focus="finalFocus"
         @escape-key-down="handleEscapeKeyDown"
+        @close-auto-focus="emit('closeAutoFocus', $event)"
         @pointer-down-outside="handleDismissEvent"
       >
         <header class="ui-drawer__header">
@@ -25,14 +27,14 @@
             <DrawerTitle class="ui-drawer__title">
               <slot name="title">{{ title }}</slot>
             </DrawerTitle>
-            <DrawerDescription class="ui-drawer__description">
+            <DrawerDescription v-if="description || $slots.description" class="ui-drawer__description">
               <slot name="description">{{ description }}</slot>
             </DrawerDescription>
           </div>
 
           <DrawerClose v-if="showClose && dismissible" as-child>
             <IconButton class="ui-drawer__close" :label="closeLabel" size="sm">
-              <span aria-hidden="true">&times;</span>
+              <X :size="16" aria-hidden="true" />
             </IconButton>
           </DrawerClose>
         </header>
@@ -51,6 +53,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { X } from '@lucide/vue'
 import {
   DrawerClose,
   DrawerContent,
@@ -72,7 +75,7 @@ const props = withDefaults(
   defineProps<{
     open: boolean
     title: string
-    description: string
+    description?: string
     side?: DrawerSide
     size?: DrawerSize
     modal?: DrawerModal
@@ -99,6 +102,7 @@ const props = withDefaults(
 const emit = defineEmits<{
   (event: 'update:open', value: boolean, details?: DrawerOpenChangeDetails): void
   (event: 'openComplete', value: boolean): void
+  (event: 'closeAutoFocus', value: Event): void
   (event: 'escapeKeyDown', value: KeyboardEvent): void
 }>()
 
@@ -141,7 +145,7 @@ defineOptions({ name: 'UiDrawer' })
 .ui-drawer__content {
   position: fixed;
   z-index: var(--z-modal);
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -157,18 +161,18 @@ defineOptions({ name: 'UiDrawer' })
 .ui-drawer__content--right {
   top: 0;
   bottom: 0;
-  width: calc(100vw - var(--space-5));
-  max-height: 100dvh;
+  width: calc(100 * var(--ui-vw) - var(--space-5));
+  max-height: calc(100 * var(--ui-dvh));
 }
 
 .ui-drawer__content--left {
   left: 0;
-  border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+  border-radius: 0 var(--radius-xl) var(--radius-xl) 0;
 }
 
 .ui-drawer__content--right {
   right: 0;
-  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+  border-radius: var(--radius-xl) 0 0 var(--radius-xl);
 }
 
 .ui-drawer__content--left.ui-drawer__content--sm,
@@ -190,18 +194,18 @@ defineOptions({ name: 'UiDrawer' })
 .ui-drawer__content--bottom {
   right: 0;
   left: 0;
-  width: 100vw;
-  max-height: calc(100dvh - var(--space-5));
+  width: calc(100 * var(--ui-vw));
+  max-height: calc(100 * var(--ui-dvh) - var(--space-5));
 }
 
 .ui-drawer__content--top {
   top: 0;
-  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  border-radius: 0 0 var(--radius-xl) var(--radius-xl);
 }
 
 .ui-drawer__content--bottom {
   bottom: 0;
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
 }
 
 .ui-drawer__content--top.ui-drawer__content--sm,
@@ -220,7 +224,9 @@ defineOptions({ name: 'UiDrawer' })
 }
 
 .ui-drawer__header {
-  padding: var(--space-5) var(--space-5) var(--space-3);
+  padding: var(--space-5) var(--space-6);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -233,6 +239,7 @@ defineOptions({ name: 'UiDrawer' })
 
 .ui-drawer__title {
   margin: 0;
+  overflow-wrap: anywhere;
   color: var(--text);
   font-size: var(--text-xl);
   font-weight: var(--font-semibold);
@@ -240,6 +247,7 @@ defineOptions({ name: 'UiDrawer' })
 }
 
 .ui-drawer__description {
+  overflow-wrap: anywhere;
   margin: var(--space-2) 0 0;
   color: var(--text-muted);
   font-size: var(--text-md);
@@ -253,12 +261,16 @@ defineOptions({ name: 'UiDrawer' })
 .ui-drawer__body {
   min-height: 0;
   flex: 1;
-  padding: var(--space-3) var(--space-5) var(--space-5);
+  padding: var(--space-5) var(--space-6);
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .ui-drawer__footer {
-  padding: var(--space-3) var(--space-5) var(--space-5);
+  background: var(--bg-inset);
+  padding: var(--space-4) var(--space-6);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -324,7 +336,7 @@ defineOptions({ name: 'UiDrawer' })
 @media (max-width: 640px) {
   .ui-drawer__content--left,
   .ui-drawer__content--right {
-    width: calc(100vw - var(--space-4));
+    width: calc(100 * var(--ui-vw) - var(--space-4));
   }
 
   .ui-drawer__header,

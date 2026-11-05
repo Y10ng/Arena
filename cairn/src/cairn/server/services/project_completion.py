@@ -76,6 +76,7 @@ def _goal_driven_completion_detail(conn, project_row) -> ProjectDetail:
         intents=build_intents(conn, project_id),
         hints=[Hint(**dict(row)) for row in hints],
         targets=build_targets(conn, project_id),
+        library_selection_explicit=bool(project_row["library_selection_explicit"]),
     )
 
 
@@ -177,6 +178,11 @@ def _require_goal_driven_quiescence(
         FROM task_run_candidates AS candidate
         WHERE candidate.project_id = ?
           AND NOT EXISTS (
+              SELECT 1 FROM task_runs AS run
+              WHERE run.project_id = candidate.project_id AND run.id = candidate.task_run_id
+                AND run.task_type = 'report'
+          )
+          AND NOT EXISTS (
               SELECT 1
               FROM task_run_candidate_outcomes AS outcome
               WHERE outcome.candidate_id = candidate.id
@@ -236,7 +242,7 @@ def _complete_project_record(
                 if accepted is None:
                     raise HTTPException(409, "assessment_completion_conflict")
                 return intent_to_model(conn, accepted, project_id)
-        check_project_active(conn, project_id)
+        check_project_active(conn, project_id, task_run_id=body.task_run_id)
         validate_execution_generation(conn, project_id, body.task_run_id)
         expire_reason_leases(conn, project_id)
         project_row = get_project_or_404(conn, project_id)
@@ -431,7 +437,7 @@ def _complete_project_record(
                 reason_trigger = NULL,
                 reason_started_at = NULL,
                 reason_last_heartbeat_at = NULL
-            WHERE id = ? AND status = 'active'
+            WHERE id = ? AND status IN ('active', 'paused')
             RETURNING id
             """,
             (project_id,),
@@ -472,12 +478,6 @@ def project_reopen_reason(conn, project) -> str | None:
         return str(exc.detail)
     if policy_from_project_row(project).phased:
         return "assessment_new_project_required"
-    report = conn.execute(
-        "SELECT status FROM assessment_report_finalizations WHERE project_id = ? AND scope_key = ''",
-        (project["id"],),
-    ).fetchone()
-    if report is not None and report["status"] != "ready":
-        return "assessment_report_finalization_outstanding"
     try:
         completion = get_completion_intent_or_409(conn, project["id"])
     except HTTPException as exc:

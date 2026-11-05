@@ -57,35 +57,46 @@ defineOptions({ name: 'UiInput', inheritAttrs: false })
 <style scoped>
 .ui-input {
   width: 100%;
-  min-height: var(--control-height);
-  border: calc(var(--space-1) / 4) solid var(--border);
+  min-width: 0;
+  min-height: var(--field-control-height, var(--control-height-form));
+  border: calc(var(--space-1) / 4) solid var(--color-control-border);
   border-radius: var(--radius-md);
-  background: var(--bg-inset);
+  background: var(--bg-surface);
   color: var(--text);
   padding: calc(var(--space-1) * 1.5) var(--space-3);
-  font-size: var(--text-md);
-  line-height: var(--leading-normal);
+  font-family: var(--font-sans);
+  font-size: var(--field-font-size, var(--text-body));
+  line-height: var(--leading-snug);
   transition:
     background-color var(--dur-fast) var(--ease),
     border-color var(--dur-fast) var(--ease),
     box-shadow var(--dur-fast) var(--ease);
 }
 
-.ui-input:hover:not(:disabled) {
+.ui-input:hover:not(:disabled):not([readonly]) {
   border-color: var(--border-strong);
 }
 
 .ui-input:focus {
   border-color: var(--accent);
-  box-shadow: var(--ring);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
-.ui-input--invalid {
+.ui-input--invalid,
+.ui-input[aria-invalid='true'] {
   border-color: var(--danger);
 }
 
-.ui-input--invalid:focus {
+.ui-input--invalid:focus,
+.ui-input[aria-invalid='true']:focus {
   border-color: var(--danger);
+  outline-color: var(--danger);
+}
+
+.ui-input[readonly] {
+  background: var(--bg-inset);
+  cursor: text;
 }
 
 .ui-input:disabled {

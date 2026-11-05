@@ -1,362 +1,272 @@
 <template>
-  <div
-    class="artifacts-page"
-    :class="{
-      'artifacts-page--report': selectedArtifactIsReportMarkdown,
-      'artifacts-page--previewing': Boolean(selectedArtifact) && !directoryVisible,
-    }"
-  >
-    <Card v-show="!isReportReading" ref="fileList" class="artifacts-list-card" padding="md">
-      <FilterBar label="产物筛选" class="artifacts-filter-bar">
-        <Tabs v-model="viewMode" :options="viewOptions" variant="pill" />
-        <FormField label="搜索文件名" class="artifacts-search-field">
-          <template #default="{ controlAttrs }">
-            <Input
-              v-model="filenameSearch"
-              v-bind="controlAttrs"
-              placeholder="按文件名筛选…"
-              :disabled="isLoading && !hasQueryData"
-              @keydown.esc="filenameSearch = ''"
-            />
-          </template>
-        </FormField>
-        <FormField label="文件类别" class="artifacts-kind-field">
-          <template #default="{ controlAttrs }">
-            <Select
-              v-model="kindFilter"
-              v-bind="controlAttrs"
-              :options="kindOptions"
-              :disabled="isLoading && !hasQueryData"
-            />
-          </template>
-        </FormField>
-        <template v-if="isFetching && hasQueryData" #status>同步中…</template>
-        <template #actions>
-          <Button
-            variant="secondary"
-            size="sm"
-            :loading="isFetching"
-            :disabled="!currentProjectId"
-            @click="refreshArtifacts"
-          >
-            刷新
+  <MasterDetail class="artifacts-page" fill-height>
+    <template #master>
+      <header class="workspace-tree-header">
+        <form class="workspace-searchbox" role="search" @submit.prevent="submitSearch">
+          <Button type="submit" variant="ghost" size="sm" aria-label="搜索文件" :disabled="!workspaceId || searchLoading">
+            <Search :size="16" aria-hidden="true" />
           </Button>
-        </template>
-      </FilterBar>
-
-      <div
-        v-if="isLoading && !hasQueryData"
-        class="artifacts-list-skeleton"
-        role="status"
-        aria-label="正在加载项目产物"
-      >
-        <Skeleton v-for="index in 4" :key="index" shape="text" />
+          <Input
+            ref="searchInput"
+            :model-value="searchDraft"
+            aria-label="搜索文件名或路径"
+            placeholder="搜索文件名或路径…"
+            :maxlength="512"
+            @update:model-value="updateSearchDraft(String($event ?? ''))"
+            @compositionstart="composing = true"
+            @compositionend="composing = false"
+            @keydown.enter="guardSearchEnter"
+            @keydown.esc.stop.prevent="clearSearch"
+          />
+          <Button v-if="searchDraft" variant="ghost" size="sm" aria-label="清除搜索" @click="clearSearch">
+            <X :size="14" aria-hidden="true" />
+          </Button>
+        </form>
+        <Button
+          variant="secondary"
+          :loading="refreshing"
+          :disabled="!projectId || searchLoading"
+          @click="refreshFiles"
+        >
+          <template #icon><RefreshCw :size="16" /></template>
+          刷新
+        </Button>
+      </header>
+      <div v-if="searchQuery" ref="searchPanel" class="workspace-tree-scroll" aria-label="文件搜索结果" @keydown.esc.stop.prevent="clearSearch">
+        <p v-if="searchLoading" role="status">{{ searchResults.length ? '搜索更新中…' : '正在查找…' }}</p>
+        <div v-if="searchError" class="workspace-tree-error" role="alert">
+          <p>{{ searchError }}</p>
+          <Button size="sm" variant="secondary" @click="runSearch()">重新查找</Button>
+        </div>
+        <p v-else-if="searchComplete && !searchResults.length && !searchLoading" class="workspace-tree-empty" role="status">未找到匹配文件</p>
+        <ul class="workspace-search-results">
+          <li v-for="entry in searchResults" :key="entry.path">
+            <button
+              class="workspace-search-result"
+              :data-path="entry.path"
+              :aria-pressed="selection?.kind === 'live' && selection.entry.path === entry.path"
+              @click="selectFile(entry)"
+            >
+              <File :size="16" aria-hidden="true" />
+              <span><strong>{{ entry.name }}</strong><small>{{ entry.path }}</small></span>
+            </button>
+          </li>
+        </ul>
+        <Button v-if="searchCursor && !searchError" size="sm" variant="secondary" :loading="searchLoading" @click="runSearch(true)">继续查找</Button>
       </div>
-
-      <ErrorState
-        v-else-if="isError && !hasQueryData"
-        title="产物加载失败"
-        :description="listErrorMessage"
-        @retry="refreshArtifacts"
-      />
-
-      <EmptyState
-        v-else-if="hasQueryData && !artifacts.length"
-        title="暂无项目产物"
-        description="Worker 产生报告、截图、日志或数据文件后会显示在这里。"
-      />
-
-      <template v-else-if="artifacts.length">
-        <ErrorState
-          v-if="isError"
-          class="artifacts-background-error"
-          title="产物同步失败"
-          :description="listErrorMessage"
-          @retry="refreshArtifacts"
-        />
-
-        <EmptyState
-          v-if="!filteredArtifacts.length"
-          title="没有符合当前筛选条件的产物"
-          description="请调整产物视图、文件类别或文件名搜索条件。"
-        />
-
-        <DataTable
-          v-else
-          :rows="filteredArtifacts"
-          :columns="artifactColumns"
-          :row-key="artifactRowKey"
-          :is-row-active="isArtifactSelected"
-          active-row-aria="current"
-          caption="项目产物列表"
-          density="compact"
-        >
-          <template #cell-file="{ row }">
-            <span class="artifact-file-name" :title="row.uri">{{ artifactFilename(row) }}</span>
-            <span class="artifact-file-secondary">
-              {{ artifactKindLabel(row.kind) }} · {{ bytes(row.size) }}
-              <span v-if="row.kind_deprecated"> · 历史类别</span>
-            </span>
-          </template>
-          <template #cell-actions="{ row }">
-            <Button
-              variant="link"
-              size="sm"
-              :aria-label="`预览产物 ${artifactFilename(row)}`"
-              @click="selectArtifact(row)"
-            >
-              {{ selectedArtifactId === row.id ? '已打开' : '预览' }}
-            </Button>
-          </template>
-        </DataTable>
-      </template>
-    </Card>
-
-    <ReportReader
-      v-if="selectedArtifact && selectedArtifactIsReportMarkdown"
-      v-show="isReportReading"
-      v-model:mode="reportMode"
-      class="artifact-report-reader"
-      :identity="artifactRowKey(selectedArtifact)"
-      :content="textPreviewContent"
-      :ready="hasTextPreview && !isPreviewLoading"
-    >
-      <template #title>
-        <div class="artifact-report-title">
-          <Button variant="ghost" size="sm" @click="returnToFiles"
-            ><ArrowLeft :size="16" aria-hidden="true" />返回文件</Button
-          >
-          <h2 :title="selectedArtifact.uri">{{ artifactFilename(selectedArtifact) }}</h2>
+      <div v-show="!searchQuery" ref="treePanel" class="workspace-tree-scroll" aria-label="研究目录">
+        <p v-if="root.loading && !root.loaded" role="status">正在读取目录…</p>
+        <div v-if="root.error" class="workspace-tree-error" role="alert">
+          <p>{{ root.error }}</p>
+          <Button size="sm" variant="secondary" @click="refreshFiles">重试目录</Button>
         </div>
-      </template>
-      <template #actions>
-        <a class="artifact-download-link" :href="artifactContentUrl(selectedArtifact)" download
-          >下载完整报告</a
+        <p
+          v-if="root.loaded && !root.entries.length && !root.loading && !root.error"
+          class="workspace-tree-empty"
         >
-        <Popover align="end" size="md">
-          <template #trigger><Button variant="ghost" size="sm">文件信息</Button></template>
-          <dl class="artifact-file-info">
-            <dt>大小</dt>
-            <dd>{{ bytes(selectedArtifact.size) }}</dd>
-            <dt>生成于</dt>
-            <dd>{{ formatRelativeTime(selectedArtifact.created_at) }}</dd>
-            <dt>SHA256</dt>
-            <dd>
-              {{ selectedArtifact.sha256
-              }}<Button variant="link" size="sm" @click="copySha">复制 HASH</Button>
-            </dd>
-            <template v-if="selectedArtifact.task_run_id"
-              ><dt>运行</dt>
-              <dd>
-                <Button variant="link" size="sm" @click="goToRun(selectedArtifact.task_run_id)"
-                  >查看运行</Button
-                >
-              </dd></template
-            >
-          </dl>
-        </Popover>
-      </template>
-      <template #notice>
-        <Alert
-          v-if="previewData?.truncated"
-          class="artifact-preview-alert"
-          tone="info"
-          :title="previewWindow === 'head' ? '当前仅显示报告开头' : '当前仅显示报告尾部'"
+          目录为空
+        </p>
+        <TreeRoot
+          v-if="treeItems.length"
+          v-slot="{ flattenItems }"
+          :items="treeItems"
+          :model-value="selectedNode"
+          :expanded="expanded"
+          :get-key="nodeKey"
+          :get-children="nodeChildren"
+          selection-behavior="replace"
+          aria-label="研究文件树"
+          class="workspace-tree"
+          @update:expanded="updateExpanded"
         >
-          已读取 {{ bytes(previewData.bytes_read) }}，原文件共
-          {{ bytes(previewData.size) }}。目录仅覆盖已载入部分，下载可获取完整报告。
-          <template #actions
-            ><Button variant="secondary" size="sm" @click="togglePreviewWindow">{{
-              previewWindow === 'head' ? '查看文件尾部' : '查看文件开头'
-            }}</Button></template
+          <TreeItem
+            v-for="item in flattenItems"
+            :key="item._id"
+            v-slot="{ isExpanded }"
+            v-bind="item.bind"
+            :disabled="item.value.kind === 'status'"
+            class="workspace-tree-row"
+            :data-path="item.value.path"
+            :data-kind="item.value.kind"
+            :style="{ paddingInlineStart: `${8 + (item.level - 1) * 18}px` }"
+            :title="
+              item.value.kind === 'blocked'
+                ? `${item.value.path}：链接或特殊文件不允许读取`
+                : item.value.name
+            "
+            @select="selectNode($event, item.value)"
           >
-        </Alert>
-        <Alert
-          v-if="selectedArtifact.kind_deprecated"
-          class="artifact-preview-alert"
-          tone="warning"
-          title="历史兼容类别"
-          >{{ artifactDeprecationMessage(selectedArtifact) }}</Alert
+            <ChevronRight
+              v-if="item.value.kind === 'directory'"
+              :size="14"
+              class="workspace-tree-chevron"
+              :class="{ 'is-open': isExpanded }"
+              aria-hidden="true"
+            />
+            <span v-else class="workspace-tree-chevron" />
+            <component
+              :is="
+                item.value.kind === 'directory'
+                  ? isExpanded
+                    ? FolderOpen
+                    : Folder
+                  : item.value.kind === 'blocked'
+                    ? LockKeyhole
+                    : item.value.kind === 'file'
+                      ? File
+                      : Ellipsis
+              "
+              :size="16"
+              class="workspace-tree-icon"
+              aria-hidden="true"
+            />
+            <span class="workspace-tree-label">{{ item.value.name }}</span>
+          </TreeItem>
+        </TreeRoot>
+        <Button
+          v-if="root.nextCursor"
+          size="sm"
+          variant="ghost"
+          :loading="root.loading"
+          @click="loadDirectory('', true)"
+          >继续加载目录</Button
         >
-      </template>
-      <template #state>
-        <div v-if="isPreviewLoading" class="artifact-preview-loading" role="status">
-          <Spinner /><span>正在载入报告…</span>
-        </div>
-        <ErrorState
-          v-else
-          title="报告预览载入失败"
-          :description="previewError || '预览尚未载入，请重试或下载原文件。'"
-          @retry="retryPreview"
-        />
-      </template>
-    </ReportReader>
-
-    <Card v-else class="artifact-preview-card" padding="none">
-      <EmptyState
-        v-if="!selectedArtifact"
-        class="artifact-preview-empty"
-        :title="invalidArtifactNotice ? '指定产物不存在或已删除' : '选择一个文件开始审阅'"
-        :description="
-          invalidArtifactNotice
-            ? '当前项目中找不到深链指定的产物，已移除无效选择。'
-            : '支持预览标准输出、报告、补丁、HAR 和截图；二进制产物可下载后分析。'
-        "
-      />
-
-      <template v-else>
-        <header class="artifact-preview-header">
-          <Button class="artifact-files-back" variant="ghost" size="sm" @click="returnToFiles"
-            ><ArrowLeft :size="16" aria-hidden="true" />返回文件</Button
-          >
-          <div class="artifact-preview-title">
-            <h2 :title="selectedArtifact.uri">{{ artifactFilename(selectedArtifact) }}</h2>
-          </div>
-          <Popover align="end" size="md">
-            <template #trigger><Button variant="ghost" size="sm">文件信息</Button></template>
-            <dl class="artifact-file-info">
-              <dt>大小</dt>
-              <dd>{{ bytes(selectedArtifact.size) }}</dd>
-              <dt>生成于</dt>
-              <dd>{{ selectedArtifact.created_at }}</dd>
-              <dt>SHA256</dt>
-              <dd>
-                {{ selectedArtifact.sha256
-                }}<Button variant="link" size="sm" @click="copySha">复制 HASH</Button>
-              </dd>
-              <template v-if="selectedArtifact.task_run_id"
-                ><dt>运行</dt>
-                <dd>
-                  <Button variant="link" size="sm" @click="goToRun(selectedArtifact.task_run_id)"
-                    >查看运行</Button
+      </div>
+    </template>
+    <template #detail>
+      <section class="artifact-preview-card" aria-label="文件预览">
+        <template v-if="selection || savedId">
+          <header class="artifact-preview-header">
+            <div class="artifact-preview-title">
+              <Badge v-if="selection?.kind === 'saved'" size="sm" tone="neutral">已保存原件</Badge>
+              <h2 :title="displayName">{{ displayName }}</h2>
+              <p v-if="selection?.kind === 'live'" class="artifact-relative-path">
+                {{ selection.entry.path }}
+              </p>
+            </div>
+            <Popover v-if="selection" align="end" size="md">
+              <template #trigger><Button size="sm" variant="ghost">文件信息</Button></template>
+              <dl class="artifact-file-info">
+                <template v-if="selection.kind === 'live'">
+                  <dt>工作目录</dt>
+                  <dd>/home/kali/workspace</dd>
+                  <dt>相对路径</dt>
+                  <dd>{{ selection.entry.path }}</dd>
+                  <dt>修改时间</dt>
+                  <dd>{{ livePreview?.modified_at || selection.entry.modified_at }}</dd>
+                </template>
+                <template v-else>
+                  <dt>Artifact ID</dt>
+                  <dd>{{ selection.artifact.id }}</dd>
+                  <dt>保存时间</dt>
+                  <dd>{{ selection.artifact.created_at }}</dd>
+                  <dt>SHA256</dt>
+                  <dd>
+                    {{ selection.artifact.sha256
+                    }}<Button size="sm" variant="link" @click="copySha">复制 HASH</Button>
+                  </dd>
+                  <template v-if="selection.artifact.task_run_id"
+                    ><dt>来源运行</dt>
+                    <dd>
+                      <Button
+                        size="sm"
+                        variant="link"
+                        @click="goToRun(selection.artifact.task_run_id)"
+                        >查看运行</Button
+                      >
+                    </dd></template
                   >
-                </dd></template
-              >
-            </dl>
-          </Popover>
-          <a
-            class="artifact-download-link"
-            :href="artifactContentUrl(selectedArtifact)"
-            download
-            title="下载完整原文件"
-          >
-            下载原文件
-          </a>
-        </header>
-
-        <Alert
-          v-if="selectedArtifact.kind_deprecated"
-          class="artifact-preview-alert"
-          tone="warning"
-          title="历史兼容类别"
-        >
-          {{ artifactDeprecationMessage(selectedArtifact) }}
-        </Alert>
-
-        <Alert
-          v-if="previewData?.truncated"
-          class="artifact-preview-alert artifact-window-alert"
-          tone="info"
-          :title="previewWindow === 'tail' ? '当前显示文件尾部窗口' : '当前显示文件开头窗口'"
-        >
-          已读取 {{ bytes(previewData.bytes_read) }}，原文件共 {{ bytes(previewData.size) }}。
-          {{ previewWindow === 'head' ? '这不是完整文件。' : '下载原文件可获取完整服务器产物。' }}
-          <template #actions>
-            <Button variant="secondary" size="sm" @click="togglePreviewWindow">
-              {{ previewWindow === 'tail' ? '查看文件开头' : '查看文件尾部' }}
-            </Button>
-          </template>
-        </Alert>
-
-        <div class="artifact-preview-body">
-          <div v-if="isPreviewLoading" class="artifact-preview-loading" role="status">
-            <Spinner />
-            <span>正在载入预览内容…</span>
+                </template>
+                <dt>大小</dt>
+                <dd>{{ fileSize == null ? '未知' : bytes(fileSize) }}</dd>
+              </dl>
+            </Popover>
+            <a v-if="downloadUrl" class="artifact-download-link" :href="downloadUrl" download
+              >下载完整文件</a
+            >
+          </header>
+          <div v-if="previewKind === 'text' && (preview?.truncated || isMarkdown)" class="artifact-preview-tools">
+            <span v-if="preview?.truncated"
+              >{{ previewWindow === 'head' ? '文件开头' : '文件尾部' }} · 已读取
+              {{ bytes(preview?.bytes_read ?? 0) }} / {{ bytes(preview?.size ?? 0)
+              }}<template v-if="preview?.truncated"> · 内容已截断</template></span
+            >
+            <Button v-if="preview?.truncated" size="sm" variant="ghost" @click="toggleWindow">{{
+              previewWindow === 'head' ? '查看文件尾部' : '查看文件开头'
+            }}</Button>
+            <Button
+              v-if="isMarkdown"
+              size="sm"
+              variant="ghost"
+              @click="rawMarkdown = !rawMarkdown"
+              >{{ rawMarkdown ? '阅读文本' : '查看源码' }}</Button
+            >
           </div>
-
-          <template v-else-if="artifactIsScreenshot(selectedArtifact)">
-            <div v-if="!screenshotFailed" class="artifact-image-preview">
-              <img
-                :key="screenshotIdentity"
-                :src="artifactContentUrl(selectedArtifact)"
-                :alt="`产物截图：${artifactFilename(selectedArtifact)}`"
-                class="artifact-screenshot"
-                @error="handleScreenshotError"
+          <Alert v-if="livePreview?.encoding_lossy" tone="info" class="artifact-preview-alert"
+            >当前 UTF-8 窗口含替代字符；下载完整文件可保留原始字节。</Alert
+          >
+          <p v-if="previewLoading && preview" class="artifact-refresh-note" role="status">
+            预览更新中，暂显示上次读取内容…
+          </p>
+          <div ref="previewBody" class="artifact-preview-body">
+            <div v-if="previewLoading && !preview" class="artifact-preview-loading" role="status">
+              <Spinner />正在载入预览…
+            </div>
+            <ErrorState
+              v-else-if="previewError"
+              title="文件读取失败"
+              :description="previewError"
+              @retry="retryPreview"
+            />
+            <template v-else-if="previewKind === 'text'">
+              <MarkdownPreview
+                v-if="isMarkdown && !rawMarkdown"
+                :content="preview?.content || ''"
               />
+              <MonacoEditor
+                v-else
+                :model-value="preview?.content || ''"
+                :reading-state="readingState"
+                :reading-view="readingView"
+                :language="language"
+                read-only
+                height="100%"
+                :min-height="0"
+                word-wrap="on"
+                :aria-label="`${displayName} 的文本预览`"
+              />
+            </template>
+            <div v-else-if="previewKind === 'image' && !imageFailed" class="artifact-image-preview">
+              <img :key="imageUrl" :src="imageUrl" :alt="displayName" @error="handleImageError" />
             </div>
             <EmptyState
               v-else
-              title="截图载入失败"
-              description="可以下载原文件后使用本地图片查看器审阅。"
-            >
-              <template #actions>
-                <a
-                  class="artifact-download-link"
-                  :href="artifactContentUrl(selectedArtifact)"
-                  download
-                >
-                  下载截图原文件
-                </a>
-              </template>
-            </EmptyState>
-          </template>
-
-          <div v-else-if="hasTextPreview" class="artifact-text-preview">
-            <MarkdownPreview v-if="selectedArtifactIsMarkdown" :content="textPreviewContent" />
-            <MonacoEditor
-              v-else
-              :model-value="textPreviewContent"
-              :language="selectedArtifactLanguage"
-              read-only
-              height="100%"
-              :min-height="0"
-              :word-wrap="artifactWordWrap"
-              :aria-label="`产物 ${artifactFilename(selectedArtifact)} 的文本预览`"
+              :title="imageFailed ? '图片载入失败' : '该文件不支持在线预览'"
             />
           </div>
-
-          <EmptyState
-            v-else-if="artifactIsTextPreviewable(selectedArtifact)"
-            title="无法载入文本预览"
-            :description="previewError || '该文件支持文本预览，但内容暂时没有载入成功。'"
-          >
-            <template #actions>
-              <Button size="sm" @click="retryPreview">重试预览</Button>
-              <a
-                class="artifact-download-link"
-                :href="artifactContentUrl(selectedArtifact)"
-                download
-              >
-                下载原文件
-              </a>
-            </template>
-          </EmptyState>
-
-          <EmptyState
-            v-else
-            title="该类型不支持在线文本预览"
-            :description="`文件大小 ${bytes(selectedArtifact.size)}。请下载后使用对应的本地工具分析。`"
-          >
-            <template #actions>
-              <a
-                class="artifact-download-link"
-                :href="artifactContentUrl(selectedArtifact)"
-                download
-              >
-                下载原文件
-              </a>
-            </template>
-          </EmptyState>
-        </div>
-      </template>
-    </Card>
-  </div>
+        </template>
+        <EmptyState
+          v-else
+          title="选择文件以预览"
+        />
+      </section>
+    </template>
+  </MasterDetail>
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import {
+  computed,
+  defineAsyncComponent,
+  nextTick,
+  onBeforeUnmount,
+  reactive,
+  ref,
+  watch,
+} from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useQuery } from '@tanstack/vue-query'
+import { TreeRoot, TreeItem } from 'reka-ui'
+import { ChevronRight, Ellipsis, File, Folder, FolderOpen, LockKeyhole, RefreshCw, Search, X } from '@lucide/vue'
 import {
   fetchArtifactPreview,
   fetchArtifactTailPreview,
@@ -364,397 +274,601 @@ import {
   type ArtifactPreview,
   type ProjectArtifact,
 } from '@/api/client'
-import MarkdownPreview from '@/components/MarkdownPreview.vue'
-import { DataTable, ErrorState, FilterBar, type DataTableColumn } from '@/components/patterns'
-import { ArrowLeft } from '@lucide/vue'
-import ReportReader from '@/features/reports/ReportReader.vue'
 import {
-  Alert,
-  Button,
-  Card,
-  Popover,
-  EmptyState,
-  FormField,
-  Input,
-  Select,
-  Skeleton,
-  Spinner,
-  Tabs,
-  type TabsOption,
-} from '@/components/ui'
-import { fileExtension, isMarkdownFile, resolveFileLanguage } from '@/lib/fileLanguage'
-import { bytes, formatRelativeTime } from '@/lib/format'
+  fetchWorkspacePreview,
+  listWorkspaceEntries,
+  searchWorkspaceFiles,
+  workspaceContentUrl,
+  type WorkspaceEntry,
+  type WorkspacePreview,
+  type WorkspaceWindow,
+} from '@/api/workspace'
+import MarkdownPreview from '@/components/MarkdownPreview.vue'
+import type { MonacoReadingState } from '@/components/MonacoEditor.vue'
+import { MasterDetail, ErrorState } from '@/components/patterns'
+import { Alert, Badge, Button, EmptyState, Input, Popover, Spinner } from '@/components/ui'
+import { isMarkdownFile, resolveFileLanguage } from '@/lib/fileLanguage'
+import { bytes } from '@/lib/format'
 import { useUIStore } from '@/stores/ui'
 import { useWorkspaceStore } from '@/stores/workspace'
 import {
   artifactFilename,
-  artifactIsScreenshot,
   artifactIsTextPreviewable,
-  artifactKindLabel,
-  filterAndSortArtifacts,
-  kindOptionsForArtifacts,
-  viewModeForArtifact,
-  type ArtifactKindFilter,
-  type ArtifactPreviewWindow,
-  type ArtifactViewMode,
+  workspaceErrorCode,
+  workspaceErrorMessage,
+  workspaceNodeKey,
 } from './artifactsModel'
 
 const MonacoEditor = defineAsyncComponent(() => import('@/components/MonacoEditor.vue'))
-
 const route = useRoute()
 const router = useRouter()
-const workspaceStore = useWorkspaceStore()
 const uiStore = useUIStore()
-const currentProjectId = computed(() => workspaceStore.currentProjectId)
-
-const viewOptions = [
-  { value: 'deliverable', label: '交付产物' },
-  { value: 'diagnostic', label: '诊断日志' },
-] satisfies readonly TabsOption[]
-const viewMode = ref<ArtifactViewMode>('deliverable')
-const kindFilter = ref<ArtifactKindFilter>('all')
-const filenameSearch = ref('')
-const selectedArtifactId = ref<string | null>(null)
-const invalidArtifactNotice = ref(false)
-const directoryVisible = ref(false)
-const fileList = ref<InstanceType<typeof Card> | null>(null)
-const reportMode = ref<'rendered' | 'raw'>('rendered')
-let previewAbort: AbortController | null = null
-const previewWindow = ref<ArtifactPreviewWindow>('tail')
-const previewData = ref<ArtifactPreview | null>(null)
+const store = useWorkspaceStore()
+const projectId = computed(() => store.currentProjectId || '')
+const workspaceId = ref('')
+type Directory = {
+  entries: WorkspaceEntry[]
+  nextCursor: string | null
+  loaded: boolean
+  loading: boolean
+  error: string
+  pages: number
+}
+type Node = {
+  key: string
+  name: string
+  path: string
+  kind: WorkspaceEntry['kind'] | 'more' | 'retry' | 'status'
+  children?: Node[]
+  entry?: WorkspaceEntry
+}
+type Selection =
+  | { kind: 'live'; entry: WorkspaceEntry; workspaceId: string }
+  | { kind: 'saved'; artifact: ProjectArtifact }
+const emptyDirectory = (): Directory => ({
+  entries: [],
+  nextCursor: null,
+  loaded: false,
+  loading: false,
+  error: '',
+  pages: 0,
+})
+// 用 Map 保留任意真实文件名，避免 __proto__ 等键干扰对象或响应式访问。
+const directories = reactive(new Map<string, Directory>([['', emptyDirectory()]]))
+const root = computed(() => directories.get('')!)
+const expanded = ref<string[]>([])
+const selection = ref<Selection | null>(null)
+const savedId = ref('')
+const previewWindow = ref<WorkspaceWindow>('head')
+const livePreview = ref<WorkspacePreview | null>(null)
+const savedPreview = ref<ArtifactPreview | null>(null)
+const previewLoading = ref(false)
 const previewError = ref('')
-const isPreviewLoading = ref(false)
-const screenshotFailedIdentity = ref<string | null>(null)
-let previewRequestGeneration = 0
-let projectVisitGeneration = 0
+const imageFailed = ref(false)
+const rawMarkdown = ref(false)
+const refreshing = ref(false)
+const searchDraft = ref('')
+const searchQuery = ref('')
+const searchResults = ref<WorkspaceEntry[]>([])
+const searchCursor = ref<string | null>(null)
+const searchComplete = ref(false)
+const searchLoading = ref(false)
+const searchError = ref('')
+const composing = ref(false)
+const searchInput = ref<InstanceType<typeof Input>>()
+const searchPanel = ref<HTMLElement>()
+let searchAbort: AbortController | undefined
+const treePanel = ref<HTMLElement>()
+const previewBody = ref<HTMLElement>()
+const readingState = reactive<MonacoReadingState>({
+  views: {},
+  searchOpen: false,
+  query: '',
+  matchIndex: 0,
+})
+const readingView = computed(() =>
+  JSON.stringify([
+    projectId.value,
+    selection.value?.kind,
+    selection.value?.kind === 'live' ? selection.value.workspaceId : '',
+    selection.value?.kind === 'live' ? selection.value.entry.path : selection.value?.artifact.id,
+    previewWindow.value,
+  ]),
+)
+let visit = 0
+let previewGeneration = 0
+let savedGeneration = 0
+let previewAbort: AbortController | undefined
+const directoryRequests = new Map<string, AbortController>()
 let mounted = true
-let preserveInvalidNoticeForNextQueryClear = false
-
-const {
-  data: artifactsData,
-  error,
-  isError,
-  isFetching,
-  isLoading,
-  refetch,
-} = useQuery<ProjectArtifact[]>({
-  queryKey: ['workspaceArtifacts', currentProjectId],
-  queryFn: () => {
-    const projectId = currentProjectId.value
-    return projectId ? listProjectArtifacts(projectId) : Promise.resolve([])
-  },
-  enabled: computed(() => Boolean(currentProjectId.value)),
-})
-
-const hasQueryData = computed(() => artifactsData.value !== undefined)
-const artifacts = computed(() => artifactsData.value ?? [])
-const kindOptions = computed(() => kindOptionsForArtifacts(artifacts.value, viewMode.value))
-const filteredArtifacts = computed(() =>
-  filterAndSortArtifacts(artifacts.value, viewMode.value, kindFilter.value, filenameSearch.value),
+const key = (kind: string, path: string) =>
+  workspaceNodeKey(projectId.value, workspaceId.value, kind, path)
+const nodeKey = (node: Node) => node?.key || ''
+const nodeChildren = (node: Node) => node.children
+function nodes(path: string): Node[] {
+  const dir = directories.get(path)
+  if (!dir) return []
+  const result: Node[] = dir.entries.map((entry) => ({
+    key: key(entry.kind, entry.path),
+    name: entry.name,
+    path: entry.path,
+    kind: entry.kind,
+    entry,
+    ...(entry.kind === 'directory' ? { children: nodes(entry.path) } : {}),
+  }))
+  if (path) {
+    if (dir.loading)
+      result.push({ key: key('status', path), name: '正在读取目录…', path, kind: 'status' })
+    else if (dir.error)
+      result.push({ key: key('retry', path), name: `${dir.error} 重试目录`, path, kind: 'retry' })
+    else if (dir.loaded && !result.length)
+      result.push({ key: key('status', path), name: '目录为空', path, kind: 'status' })
+    if (dir.nextCursor && !dir.loading)
+      result.push({ key: key('more', path), name: '继续加载目录', path, kind: 'more' })
+  }
+  return result
+}
+const treeItems = computed(() => nodes(''))
+const selectedNode = computed<Node | undefined>(() =>
+  selection.value?.kind === 'live'
+    ? { key: key('file', selection.value.entry.path), ...selection.value.entry }
+    : undefined,
 )
-const selectedArtifact = computed(() => {
-  const projectId = currentProjectId.value
-  if (!projectId || !selectedArtifactId.value) return null
-  return (
-    artifacts.value.find(
-      (artifact) => artifact.id === selectedArtifactId.value && artifact.project_id === projectId,
-    ) ?? null
-  )
-})
-const listErrorMessage = computed(() =>
-  error.value instanceof Error && error.value.message ? error.value.message : '请稍后重试。',
-)
-const selectedArtifactLanguage = computed(() =>
-  resolveFileLanguage(selectedArtifact.value?.uri ?? '', selectedArtifact.value?.kind ?? ''),
-)
-const selectedArtifactIsMarkdown = computed(() =>
-  isMarkdownFile(selectedArtifact.value?.uri ?? '', selectedArtifact.value?.kind ?? ''),
-)
-const selectedArtifactIsReportMarkdown = computed(() => {
-  const artifact = selectedArtifact.value
-  if (artifact?.kind !== 'report') return false
-  return ['md', 'markdown'].includes(fileExtension(artifact.uri))
-})
-const isReportReading = computed(
-  () => selectedArtifactIsReportMarkdown.value && !directoryVisible.value,
-)
-const artifactWordWrap = computed<'on' | 'off'>(() =>
-  selectedArtifact.value?.kind === 'raw_output' ? 'off' : 'on',
-)
-const hasTextPreview = computed(() => {
-  const artifact = selectedArtifact.value
-  const preview = previewData.value
-  return Boolean(
-    artifact &&
-    preview &&
-    preview.artifact_id === artifact.id &&
-    preview.project_id === currentProjectId.value &&
-    typeof preview.content === 'string',
-  )
-})
-const textPreviewContent = computed(() =>
-  hasTextPreview.value ? (previewData.value?.content ?? '') : '',
-)
-const screenshotIdentity = computed(() => {
-  const artifact = selectedArtifact.value
-  return artifact ? `${projectVisitGeneration}:${artifact.project_id}:${artifact.id}` : ''
-})
-const screenshotFailed = computed(
+const preview = computed(() => livePreview.value || savedPreview.value)
+const savedImage = computed(
   () =>
-    Boolean(screenshotIdentity.value) &&
-    screenshotFailedIdentity.value === screenshotIdentity.value,
+    selection.value?.kind === 'saved' &&
+    selection.value.artifact.kind === 'screenshot' &&
+    selection.value.artifact.size <= 16 * 1024 * 1024 &&
+    /\.(png|jpe?g|gif|webp)$/i.test(artifactFilename(selection.value.artifact)),
 )
-
-const artifactColumns = [
-  { key: 'file', label: '文件' },
-  { key: 'actions', label: '操作', align: 'end' },
-] satisfies readonly DataTableColumn<ProjectArtifact, 'file' | 'actions'>[]
-
-function artifactRowKey(artifact: ProjectArtifact): string {
-  return `${artifact.project_id}:${artifact.id}`
-}
-
-function isArtifactSelected(artifact: ProjectArtifact): boolean {
-  return selectedArtifactId.value === artifact.id && currentProjectId.value === artifact.project_id
-}
-
-function artifactContentUrl(artifact: ProjectArtifact): string {
-  return `/projects/${encodeURIComponent(artifact.project_id)}/artifacts/${encodeURIComponent(artifact.id)}/content`
-}
-
-function artifactDeprecationMessage(artifact: ProjectArtifact): string {
-  return (
-    artifact.deprecation_message || '冻结兼容：当前阶段不再新建或采集此类产物，仅保留历史读取。'
-  )
-}
-
-function queryArtifactId(): string | null {
-  const value = route.query.artifactId
-  return typeof value === 'string' && value.trim() ? value : null
-}
-
-function invalidatePreview() {
-  previewRequestGeneration += 1
+const previewKind = computed(
+  () =>
+    livePreview.value?.preview_kind ||
+    (savedPreview.value ? 'text' : savedImage.value ? 'image' : 'binary'),
+)
+const displayName = computed(() =>
+  selection.value?.kind === 'live'
+    ? selection.value.entry.name
+    : selection.value?.kind === 'saved'
+      ? artifactFilename(selection.value.artifact)
+      : savedId.value,
+)
+const sourceName = computed(() =>
+  selection.value?.kind === 'live'
+    ? selection.value.entry.path
+    : selection.value?.artifact.uri || '',
+)
+const isMarkdown = computed(() => isMarkdownFile(sourceName.value))
+const language = computed(() => resolveFileLanguage(sourceName.value))
+const fileSize = computed(
+  () =>
+    preview.value?.size ??
+    (selection.value?.kind === 'live'
+      ? selection.value.entry.size
+      : selection.value?.artifact.size),
+)
+const downloadUrl = computed(() => {
+  const value = selection.value
+  if (!value) return ''
+  return value.kind === 'live'
+    ? workspaceContentUrl(projectId.value, value.workspaceId, value.entry.path)
+    : `/projects/${encodeURIComponent(value.artifact.project_id)}/artifacts/${encodeURIComponent(value.artifact.id)}/content`
+})
+const imageUrl = computed(() =>
+  selection.value?.kind === 'live' && livePreview.value?.preview_kind === 'image'
+    ? workspaceContentUrl(
+        projectId.value,
+        selection.value.workspaceId,
+        selection.value.entry.path,
+        true,
+      )
+    : savedImage.value
+      ? downloadUrl.value
+      : '',
+)
+function clearPreview() {
+  previewGeneration++
   previewAbort?.abort()
-  previewAbort = null
-  previewData.value = null
+  livePreview.value = null
+  savedPreview.value = null
+  previewLoading.value = false
   previewError.value = ''
-  isPreviewLoading.value = false
-  screenshotFailedIdentity.value = null
+  imageFailed.value = false
 }
-
-function clearSelection(resetNotice = true) {
-  selectedArtifactId.value = null
-  previewWindow.value = 'tail'
-  invalidatePreview()
-  if (resetNotice) invalidArtifactNotice.value = false
+function resetSearch() {
+  searchAbort?.abort()
+  searchAbort = undefined
+  searchQuery.value = ''
+  searchResults.value = []
+  searchCursor.value = null
+  searchComplete.value = false
+  searchLoading.value = false
+  searchError.value = ''
 }
-
-function isCurrentPreviewSource(
-  requestGeneration: number,
-  projectId: string,
-  projectVisit: number,
-  artifactId: string,
-  window: ArtifactPreviewWindow,
-): boolean {
-  return (
+function clearSearch() {
+  searchDraft.value = ''
+  resetSearch()
+  searchInput.value?.focus()
+}
+function updateSearchDraft(value: string) {
+  searchDraft.value = value
+  // 修改后先退出旧查询；Enter 才启动新搜索，旧回包不能冒充当前输入的结果。
+  if (value.trim() !== searchQuery.value) resetSearch()
+}
+function guardSearchEnter(event: KeyboardEvent) {
+  if (event.isComposing || composing.value || event.keyCode === 229) event.preventDefault()
+}
+function submitSearch() {
+  if (composing.value || searchLoading.value || !workspaceId.value) return
+  const query = searchDraft.value.trim()
+  if (!query) return clearSearch()
+  resetSearch()
+  searchQuery.value = query
+  void runSearch()
+}
+async function runSearch(append = false, preserve = false): Promise<boolean> {
+  if (!searchQuery.value || !workspaceId.value || searchLoading.value) return false
+  searchAbort?.abort()
+  const controller = new AbortController()
+  searchAbort = controller
+  const project = projectId.value
+  const identity = workspaceId.value
+  const query = searchQuery.value
+  const epoch = visit
+  const current = () => mounted && searchAbort === controller && project === projectId.value &&
+    identity === workspaceId.value && query === searchQuery.value && epoch === visit
+  searchLoading.value = true
+  searchError.value = ''
+  searchComplete.value = false
+  if (!append && !preserve) searchResults.value = []
+  try {
+    const response = await searchWorkspaceFiles(project, identity, query, append ? searchCursor.value || undefined : undefined, controller.signal)
+    if (!current()) return false
+    if (response.project_id !== project || response.workspace_id !== identity || response.query !== query)
+      throw new Error('identity mismatch')
+    searchResults.value = [...new Map([
+      ...(append ? searchResults.value : []), ...response.entries,
+    ].map((entry) => [entry.path, entry])).values()]
+    searchCursor.value = response.next_cursor
+    searchComplete.value = !response.has_more
+    return true
+  } catch (error) {
+    if (current()) {
+      if (workspaceErrorCode(error) === 'workspace_identity_changed')
+        resetWorkspace(workspaceErrorMessage(error))
+      else searchError.value = workspaceErrorMessage(error)
+    }
+    return false
+  } finally {
+    if (current()) searchLoading.value = false
+  }
+}
+function resetWorkspace(message = '') {
+  visit++
+  resetSearch()
+  searchDraft.value = ''
+  directoryRequests.forEach((controller) => controller.abort())
+  directoryRequests.clear()
+  directories.clear()
+  directories.set('', emptyDirectory())
+  root.value.error = message
+  workspaceId.value = ''
+  expanded.value = []
+  if (selection.value?.kind === 'live') {
+    selection.value = null
+    clearPreview()
+  }
+}
+async function loadDirectory(path: string, append = false, refresh = false): Promise<boolean> {
+  const project = projectId.value
+  if (!project || (path && !workspaceId.value)) return false
+  if (!directories.has(path)) directories.set(path, emptyDirectory())
+  const dir = directories.get(path)!
+  if (dir.loading && !refresh) return false
+  directoryRequests.get(path)?.abort()
+  const controller = new AbortController()
+  directoryRequests.set(path, controller)
+  const epoch = visit
+  const expected = workspaceId.value
+  const current = () =>
     mounted &&
-    previewRequestGeneration === requestGeneration &&
-    currentProjectId.value === projectId &&
-    projectVisitGeneration === projectVisit &&
-    selectedArtifactId.value === artifactId &&
-    previewWindow.value === window
-  )
+    visit === epoch &&
+    projectId.value === project &&
+    directoryRequests.get(path) === controller
+  dir.loading = true
+  dir.error = ''
+  let cursor = append ? dir.nextCursor || undefined : undefined
+  const pages = refresh ? Math.max(1, dir.pages) : 1
+  let result: WorkspaceEntry[] = append ? [...dir.entries] : []
+  try {
+    for (let page = 0; page < pages; page++) {
+      const response = await listWorkspaceEntries(
+        project,
+        path,
+        expected || undefined,
+        cursor,
+        controller.signal,
+      )
+      if (!current()) return false
+      if (
+        response.project_id !== project ||
+        response.path !== path ||
+        !response.workspace_id ||
+        (expected && response.workspace_id !== expected)
+      )
+        throw new Error('identity mismatch')
+      if (!expected) workspaceId.value = response.workspace_id
+      result = [
+        ...new Map([...result, ...response.entries].map((entry) => [entry.path, entry])).values(),
+      ]
+      cursor = response.next_cursor || undefined
+      if (!cursor) break
+    }
+    dir.entries = result
+    dir.nextCursor = cursor || null
+    dir.pages = append ? dir.pages + 1 : pages
+    dir.loaded = true
+    return true
+  } catch (error) {
+    if (current()) {
+      if (workspaceErrorCode(error) === 'workspace_identity_changed')
+        resetWorkspace(workspaceErrorMessage(error))
+      else dir.error = workspaceErrorMessage(error)
+    }
+    return false
+  } finally {
+    if (current()) {
+      dir.loading = false
+      directoryRequests.delete(path)
+    }
+  }
 }
-
-async function loadPreview(artifact: ProjectArtifact, window = previewWindow.value) {
-  if (!artifactIsTextPreviewable(artifact)) {
-    invalidatePreview()
+function updateExpanded(keys: string[]) {
+  const previous = expanded.value
+  expanded.value = keys
+  for (const value of keys.filter((value) => !previous.includes(value))) {
+    const path = JSON.parse(value)[3] as string
+    if (!directories.get(path)?.loaded) void loadDirectory(path)
+  }
+}
+function selectNode(event: CustomEvent, node: Node) {
+  event.preventDefault()
+  if (node.kind === 'directory') {
+    // Reka 点击会自行 toggle；Enter/Space 只有 select，需要补齐键盘展开。
+    if (event.detail.originalEvent instanceof KeyboardEvent)
+      updateExpanded(
+        expanded.value.includes(node.key)
+          ? expanded.value.filter((value) => value !== node.key)
+          : [...expanded.value, node.key],
+      )
     return
   }
-
-  const projectId = artifact.project_id
-  const projectVisit = projectVisitGeneration
-  const requestGeneration = ++previewRequestGeneration
-  const artifactId = artifact.id
-  previewAbort?.abort()
+  if (node.kind === 'more' || node.kind === 'retry') {
+    void loadDirectory(node.path, node.kind === 'more')
+    return
+  }
+  if (node.kind !== 'file' || !node.entry) return
+  selectFile(node.entry)
+}
+function selectFile(entry: WorkspaceEntry) {
+  savedGeneration++
+  savedId.value = ''
+  selection.value = { kind: 'live', entry, workspaceId: workspaceId.value }
+  previewWindow.value = 'head'
+  rawMarkdown.value = false
+  const query = { ...route.query }
+  delete query.artifactId
+  if (route.query.artifactId)
+    void router.replace({ name: 'WorkspaceArtifacts', params: { id: projectId.value }, query })
+  void loadPreview()
+}
+async function loadPreview(preserve = false) {
+  if (preserve) {
+    previewGeneration++
+    previewAbort?.abort()
+    previewError.value = ''
+    imageFailed.value = false
+  } else clearPreview()
+  const source = selection.value
+  if (!source) return
+  if (source.kind === 'saved' && !artifactIsTextPreviewable(source.artifact)) return
+  const generation = previewGeneration
+  const epoch = visit
+  const project = projectId.value
+  const window = previewWindow.value
   const controller = new AbortController()
   previewAbort = controller
-  previewData.value = null
-  previewError.value = ''
-  isPreviewLoading.value = true
-
+  const current = () =>
+    mounted &&
+    generation === previewGeneration &&
+    (source.kind === 'saved' || epoch === visit) &&
+    project === projectId.value &&
+    window === previewWindow.value
+  previewLoading.value = true
   try {
-    const data =
-      window === 'tail'
-        ? await fetchArtifactTailPreview(projectId, artifactId, controller.signal)
-        : await fetchArtifactPreview(projectId, artifactId, controller.signal)
-    if (isCurrentPreviewSource(requestGeneration, projectId, projectVisit, artifactId, window)) {
-      if (data.project_id !== projectId || data.artifact_id !== artifactId) {
-        previewError.value = '服务端返回的项目或 Artifact 身份与所选文件不一致，已阻止渲染。'
-      } else {
-        previewData.value = data
-      }
+    if (source.kind === 'live') {
+      const response = await fetchWorkspacePreview(
+        project,
+        source.workspaceId,
+        source.entry.path,
+        window,
+        controller.signal,
+      )
+      if (!current()) return
+      if (
+        response.project_id !== project ||
+        response.workspace_id !== source.workspaceId ||
+        response.path !== source.entry.path ||
+        response.window !== window
+      )
+        throw new Error('identity mismatch')
+      livePreview.value = response
+    } else {
+      const response = await (window === 'head' ? fetchArtifactPreview : fetchArtifactTailPreview)(
+        project,
+        source.artifact.id,
+        controller.signal,
+      )
+      if (!current()) return
+      if (response.project_id !== project || response.artifact_id !== source.artifact.id)
+        throw new Error('identity mismatch')
+      savedPreview.value = response
     }
-  } catch (caught) {
-    if (isCurrentPreviewSource(requestGeneration, projectId, projectVisit, artifactId, window)) {
-      previewError.value =
-        caught instanceof Error && caught.message ? caught.message : '载入预览失败'
-      uiStore.showToast('载入预览失败', 'danger')
+  } catch (error) {
+    if (current()) {
+      if (workspaceErrorCode(error) === 'workspace_identity_changed')
+        resetWorkspace(workspaceErrorMessage(error))
+      else previewError.value = workspaceErrorMessage(error)
     }
   } finally {
-    if (isCurrentPreviewSource(requestGeneration, projectId, projectVisit, artifactId, window)) {
-      isPreviewLoading.value = false
-    }
+    if (current()) previewLoading.value = false
   }
 }
-
-function applySelection(artifact: ProjectArtifact, updateRoute: boolean) {
-  invalidArtifactNotice.value = false
-  if (viewModeForArtifact(artifact) !== viewMode.value) {
-    viewMode.value = viewModeForArtifact(artifact)
-    kindFilter.value = 'all'
-  }
-  selectedArtifactId.value = artifact.id
-  directoryVisible.value = false
-  reportMode.value = 'rendered'
-  previewWindow.value =
-    artifact.kind === 'report' && isMarkdownFile(artifact.uri, artifact.kind) ? 'head' : 'tail'
-  invalidatePreview()
-  if (updateRoute) {
-    void router.replace({
-      name: 'WorkspaceArtifacts',
-      params: { id: artifact.project_id },
-      query: { ...route.query, artifactId: artifact.id },
-    })
-  }
-}
-
-function selectArtifact(artifact: ProjectArtifact) {
-  directoryVisible.value = false
-  if (isArtifactSelected(artifact)) return
-  applySelection(artifact, true)
-}
-
-async function returnToFiles() {
-  directoryVisible.value = true
-  await nextTick()
-  const root = fileList.value?.$el as HTMLElement | undefined
-  root?.querySelector<HTMLElement>('[aria-current="true"] button')?.focus({ preventScroll: true })
-}
-
-function reconcileRouteSelection() {
-  const projectId = currentProjectId.value
-  const artifactId = queryArtifactId()
-  if (!projectId || !artifactId || !hasQueryData.value) return
-
-  const artifact = artifacts.value.find(
-    (candidate) => candidate.id === artifactId && candidate.project_id === projectId,
-  )
-  if (artifact) {
-    if (selectedArtifactId.value !== artifact.id) applySelection(artifact, false)
-    return
-  }
-  if (isFetching.value) return
-
-  clearSelection(false)
-  invalidArtifactNotice.value = true
-  preserveInvalidNoticeForNextQueryClear = true
-  const nextQuery = { ...route.query }
-  delete nextQuery.artifactId
-  void router.replace({ name: 'WorkspaceArtifacts', params: { id: projectId }, query: nextQuery })
-}
-
-function refreshArtifacts() {
-  if (currentProjectId.value) void refetch()
-}
-
-function togglePreviewWindow() {
-  previewWindow.value = previewWindow.value === 'tail' ? 'head' : 'tail'
-}
-
-function retryPreview() {
-  if (selectedArtifact.value) void loadPreview(selectedArtifact.value)
-}
-
-function goToRun(runId: string) {
-  const projectId = currentProjectId.value
-  if (!projectId) return
-  void router.push({ name: 'WorkspaceRuns', params: { id: projectId }, query: { runId } })
-}
-
-async function copySha() {
-  const sha = selectedArtifact.value?.sha256
-  if (!sha) return
+async function loadSaved(id: string) {
+  savedId.value = id
+  selection.value = null
+  clearPreview()
+  const generation = ++savedGeneration
+  const project = projectId.value
+  previewLoading.value = true
+  const current = () =>
+    mounted && generation === savedGeneration && project === projectId.value && savedId.value === id
   try {
-    if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
-    await navigator.clipboard.writeText(sha)
-    uiStore.showToast('SHA256 HASH 值已复制到剪切板', 'success')
-  } catch {
-    uiStore.showToast('复制 SHA256 HASH 失败', 'danger')
-  }
-}
-
-function handleScreenshotError() {
-  if (screenshotIdentity.value) screenshotFailedIdentity.value = screenshotIdentity.value
-}
-
-watch(viewMode, () => {
-  kindFilter.value = 'all'
-})
-
-watch(currentProjectId, () => {
-  projectVisitGeneration += 1
-  viewMode.value = 'deliverable'
-  kindFilter.value = 'all'
-  filenameSearch.value = ''
-  clearSelection()
-})
-
-watch(
-  () => route.query.artifactId,
-  () => {
-    const artifactId = queryArtifactId()
-    if (!artifactId) {
-      if (preserveInvalidNoticeForNextQueryClear) {
-        preserveInvalidNoticeForNextQueryClear = false
-        return
-      }
-      clearSelection()
+    const artifacts = await listProjectArtifacts(project)
+    if (!current()) return
+    const artifact = artifacts.find((item) => item.id === id && item.project_id === project)
+    if (!artifact) {
+      previewError.value = '指定的已保存原件不存在、已删除或不属于当前项目。'
+      previewLoading.value = false
       return
     }
-    reconcileRouteSelection()
-  },
-  { immediate: true },
-)
-
+    selection.value = { kind: 'saved', artifact }
+    previewWindow.value = 'head'
+    rawMarkdown.value = false
+    await loadPreview()
+  } catch {
+    if (current()) {
+      previewError.value = '已保存原件读取失败，请重试。'
+      previewLoading.value = false
+    }
+  }
+}
+function toggleWindow() {
+  previewWindow.value = previewWindow.value === 'head' ? 'tail' : 'head'
+  void loadPreview()
+}
+async function retryPreview(preserve = false) {
+  if (savedId.value && !selection.value) await loadSaved(savedId.value)
+  else await loadPreview(preserve)
+}
+async function refreshFiles() {
+  if (refreshing.value || searchLoading.value) return
+  refreshing.value = true
+  const project = projectId.value
+  const epoch = visit
+  const view = readingView.value
+  const panel = searchQuery.value ? searchPanel.value : treePanel.value
+  const focused = panel?.contains(document.activeElement)
+    ? (document.activeElement as HTMLElement).dataset.path
+    : undefined
+  const treeScroll = panel?.scrollTop || 0
+  const scrolls = [
+    previewBody.value,
+    ...Array.from(
+      previewBody.value?.querySelectorAll<HTMLElement>(
+        '.markdown-preview, .artifact-image-preview',
+      ) || [],
+    ),
+  ]
+    .filter((element): element is HTMLElement => Boolean(element))
+    .map((element) => ({ element, top: element.scrollTop, left: element.scrollLeft }))
+  const paths = expanded.value
+    .map((value) => JSON.parse(value)[3] as string)
+    .sort((a, b) => a.split('/').length - b.split('/').length)
+  try {
+    if (searchQuery.value) {
+      await runSearch(false, true)
+      if (project === projectId.value && epoch === visit && view === readingView.value)
+        await retryPreview(true)
+    } else if (await loadDirectory('', false, true)) {
+      for (const path of paths) {
+        if (project !== projectId.value || epoch !== visit) return
+        await loadDirectory(path, false, true)
+      }
+      if (project === projectId.value && epoch === visit && view === readingView.value)
+        await retryPreview(true)
+    }
+  } finally {
+    refreshing.value = false
+    await nextTick()
+    if (project === projectId.value && epoch === visit) {
+      if (panel?.isConnected) panel.scrollTop = treeScroll
+      if (view === readingView.value)
+        scrolls.forEach(({ element, top, left }) => {
+          element.scrollTop = top
+          element.scrollLeft = left
+        })
+      if (focused !== undefined)
+        Array.from(panel?.querySelectorAll<HTMLElement>('[data-path]') || [])
+          .find((item) => item.dataset.path === focused)
+          ?.focus({ preventScroll: true })
+    }
+  }
+}
+function handleImageError(event: Event) {
+  if ((event.currentTarget as HTMLImageElement).getAttribute('src') === imageUrl.value)
+    imageFailed.value = true
+}
+function goToRun(runId: string) {
+  void router.push({ name: 'WorkspaceRuns', params: { id: projectId.value }, query: { runId } })
+}
+async function copySha() {
+  if (selection.value?.kind !== 'saved') return
+  try {
+    await navigator.clipboard.writeText(selection.value.artifact.sha256)
+    uiStore.showToast('SHA256 已复制', 'success')
+  } catch {
+    uiStore.showToast('复制 SHA256 失败', 'danger')
+  }
+}
 watch(
-  [artifactsData, isFetching],
-  ([data]) => {
-    if (data === undefined) return
-    reconcileRouteSelection()
+  projectId,
+  () => {
+    savedGeneration++
+    selection.value = null
+    savedId.value = ''
+    clearPreview()
+    resetWorkspace()
+    if (projectId.value) void loadDirectory('')
   },
   { immediate: true },
 )
-
 watch(
-  [selectedArtifact, previewWindow],
-  ([artifact]) => {
-    if (artifact) void loadPreview(artifact)
-    else invalidatePreview()
+  [projectId, () => route.query.artifactId],
+  ([project, value]) => {
+    if (project && typeof value === 'string' && value.trim()) void loadSaved(value)
+    else if (savedId.value) {
+      savedGeneration++
+      savedId.value = ''
+      selection.value = null
+      clearPreview()
+    }
   },
   { immediate: true },
 )
-
 watch(
   () => uiStore.globalRefreshKey,
-  () => refreshArtifacts(),
+  () => {
+    void refreshFiles()
+  },
 )
-
 onBeforeUnmount(() => {
   mounted = false
-  previewRequestGeneration += 1
-  previewAbort?.abort()
+  resetSearch()
+  savedGeneration++
+  clearPreview()
+  directoryRequests.forEach((controller) => controller.abort())
 })
 </script>
 

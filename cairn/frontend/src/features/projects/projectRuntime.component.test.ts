@@ -146,6 +146,114 @@ afterEach(() => {
 })
 
 describe('project runtime status and lifecycle with real queries and components', () => {
+  it.each(['failed', 'lost'] as const)('resume recovery retries %s from the workspace only after confirmation', async (failure) => {
+    const requestedAt = new Date(Date.now() - 10_000).toISOString()
+    mocks.workspace.projectDetail.project.execution_control = {
+      request_id: 'failed-resume', action: 'resume', state: failure, requested_at: requestedAt,
+      confirmed_at: null, error: failure === 'lost' ? 'execution_scene_lost' : 'execution_control_failed',
+      resources: [{ kind: 'research', container_id: 'original-container', state: 'paused' }],
+      resources_request_id: 'original-pause', resources_observed_at: requestedAt,
+    }
+    runtime = runtimeFixture({ state: 'blocked', code: 'execution_scene_lost',
+      execution_control: mocks.workspace.projectDetail.project.execution_control })
+    runtime.actions.resume = { allowed: true, reason: null }
+    const view = await mountWorkspace()
+    expect(view.find('[aria-label="项目状态"]').text()).toBe('恢复失败')
+    expect(button('重试继续').disabled).toBe(false)
+    button('重试继续').click()
+    await settle()
+    expect(document.body.querySelector('[role="alertdialog"]')?.textContent).toContain('可能继续后续研究并产生模型费用')
+    expect(mocks.api.mock.calls.filter((call) => call[0] === 'POST')).toHaveLength(0)
+    mocks.api.mockImplementation(async (method: string, path: string) => {
+      if (method === 'POST') {
+        mocks.workspace.projectDetail.project.execution_control = {
+          ...mocks.workspace.projectDetail.project.execution_control,
+          request_id: 'new-resume', state: 'requested', requested_at: new Date().toISOString(),
+        }
+        runtime = runtimeFixture({ state: 'starting', code: 'project_resuming',
+          execution_control: mocks.workspace.projectDetail.project.execution_control })
+        runtime.actions.resume = { allowed: false, reason: 'execution_control_pending' }
+        return mocks.workspace.projectDetail.project
+      }
+      if (path.includes('/runtime')) return runtime
+      return []
+    })
+    button('确认重试继续').click()
+    await settle()
+    expect(mocks.api.mock.calls.filter((call) => call[0] === 'POST')).toEqual([['POST', '/projects/p1/resume']])
+    expect(button('等待恢复确认').disabled).toBe(true)
+    expect(view.find('[aria-label="项目状态"]').text()).toBe('正在恢复')
+    button('等待恢复确认').click()
+    await settle()
+    expect(mocks.api.mock.calls.filter((call) => call[0] === 'POST')).toHaveLength(1)
+    view.find('[aria-label="运行详情"]').trigger('click')
+    await settle()
+    expect(document.body.textContent).toContain('前次观测／本次未确认')
+    expect(document.body.textContent).toContain('original-container')
+    expect(document.body.textContent).toContain('original-pause')
+    mocks.workspace.projectDetail.project.execution_control = {
+      ...mocks.workspace.projectDetail.project.execution_control, state: 'running', confirmed_at: new Date().toISOString(),
+    }
+    await settle()
+    expect(view.find('[aria-label="项目状态"]').text()).toBe('进行中')
+    expect(button('暂停项目').disabled).toBe(false)
+  })
+
+  it('resume recovery list entry uses server eligibility and waits after one retry', async () => {
+    Object.assign(mocks.ui, { projectListView: reactive({
+      authGeneration: 0, activeSegment: 'all', searchQuery: '', selectedTenantId: 'all',
+      sortBy: 'created_desc', scrollTop: 0, scrollLeft: 0,
+    }) })
+    const p = summary('p1')
+    p.execution_control = { request_id: 'failed-resume', action: 'resume', state: 'lost' }
+    projectList = [p]
+    runtime = runtimeFixture({ state: 'blocked', code: 'execution_scene_lost', execution_control: p.execution_control })
+    runtime.actions.resume = { allowed: true, reason: null }
+    mocks.api.mockImplementation(async (method: string, path: string) => {
+      if (method === 'POST') {
+        p.execution_control = { request_id: 'new-resume', action: 'resume', state: 'requested', requested_at: new Date().toISOString() }
+        runtime = runtimeFixture({ state: 'starting', code: 'project_resuming', execution_control: p.execution_control })
+        runtime.actions.resume = { allowed: false, reason: 'execution_control_pending' }
+        return p
+      }
+      if (path === '/projects') return [...projectList]
+      if (path.startsWith('/projects/runtime?')) return { items: [runtime] }
+      if (path === '/projects/p1/runtime?schema_version=2') return runtime
+      return []
+    })
+    const view = await mountProjects()
+    view.find('[aria-label="项目操作菜单"]').trigger('click')
+    await settle()
+    const retryItem = [...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => el.textContent?.includes('重试继续'))!
+    expect(retryItem).toBeDefined()
+    retryItem.click()
+    await settle()
+    expect(document.body.querySelector('[role="alertdialog"]')?.textContent).toContain('产生模型费用')
+    expect(mocks.api.mock.calls.filter((call) => call[0] === 'POST')).toHaveLength(0)
+    button('确认重试继续').click()
+    await settle()
+    expect(mocks.api.mock.calls.filter((call) => call[0] === 'POST')).toEqual([['POST', '/projects/p1/resume']])
+    expect(view.find('[aria-label="项目状态"]').text()).toBe('正在恢复')
+    view.find('[aria-label="项目操作菜单"]').trigger('click')
+    await settle()
+    const waitItem = [...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')].find((el) => el.textContent?.includes('等待恢复确认'))!
+    expect(waitItem.getAttribute('aria-disabled')).toBe('true')
+  })
+
+  it.each(['paused', 'active'] as const)('resume recovery does not bypass authorization for %s metadata', async (status) => {
+    mocks.workspace.projectDetail.project.status = status
+    mocks.workspace.projectDetail.project.execution_control = status === 'paused'
+      ? { action: 'pause', state: 'paused', requested_at: new Date().toISOString(), confirmed_at: new Date().toISOString() }
+      : { action: 'resume', state: 'lost' }
+    runtime = runtimeFixture({ project_status: status, state: status === 'paused' ? 'paused' : 'blocked' })
+    runtime.actions.resume = { allowed: false, reason: 'project_reauthorization_required' }
+    runtime.actions.reauthorize = { allowed: false, reason: 'project_status_invalid' }
+    const view = await mountWorkspace()
+    expect(button(status === 'paused' ? '继续项目' : '重试继续').disabled).toBe(true)
+    expect(view.text()).toContain('当前项目需要显式确认授权')
+    expect(mocks.api.mock.calls.filter((call) => call[0] === 'POST')).toHaveLength(0)
+  })
+
   it('shows metadata status without runtime reasons or another diagnostic entry', async () => {
     const view = await mountWorkspace()
     expect(view.findAll('[aria-label="项目状态"]')).toHaveLength(1)
@@ -716,7 +824,7 @@ describe('project runtime status and lifecycle with real queries and components'
       runtimeFixture({ observed_at: new Date(Date.now() - 60_001).toISOString() }),
       runtimeFixture({ schema_version: 99 as 1 }),
     ]) {
-      queryClient.setQueryData(['project-runtime-batch', ['p1']], { items: [snapshot] })
+      queryClient.setQueryData(['project-runtime-batch', ['p1']], { items: [snapshot] }, { updatedAt: Date.now() - 60_001 })
       await settle()
       expect(view.find('.project-row-status').text()).toBe('进行中')
       expect(view.find('.projects-stale-alert').exists()).toBe(false)

@@ -1,158 +1,46 @@
 import { describe, expect, it } from 'vitest'
-import type { ArtifactKind, ProjectArtifact } from '@/api/client'
+import { ApiError } from '@/api/client'
 import {
   artifactFilename,
-  artifactIsScreenshot,
   artifactIsTextPreviewable,
-  artifactKindLabel,
-  artifactViewCategory,
-  filterAndSortArtifacts,
-  kindOptionsForArtifacts,
-  viewModeForArtifact,
+  workspaceErrorMessage,
+  workspaceNodeKey,
 } from './artifactsModel'
 
-const artifact = (
-  id: string,
-  kind: ArtifactKind,
-  category: ProjectArtifact['category'],
-  createdAt: string,
-  uri = `artifacts/${id}`,
-): ProjectArtifact => ({
-  id,
-  project_id: 'p1',
-  task_run_id: null,
-  kind,
-  kind_deprecated: false,
-  deprecation_message: null,
-  category,
-  uri,
-  sha256: id.repeat(8),
-  size: 12,
-  created_at: createdAt,
-  metadata: {},
-})
-
-describe('artifacts model', () => {
-  it('maps workspace views and artifact categories', () => {
-    expect(artifactViewCategory('deliverable')).toBe('deliverable')
-    expect(artifactViewCategory('diagnostic')).toBe('evidence')
-    expect(viewModeForArtifact(artifact('a', 'report', 'deliverable', '2026-08-20'))).toBe(
-      'deliverable',
-    )
-    expect(viewModeForArtifact(artifact('b', 'log', 'evidence', '2026-08-20'))).toBe('diagnostic')
+describe('workspace presentation boundaries', () => {
+  it('keeps names and saved text support without reconstructing live paths', () => {
+    expect(artifactFilename({ uri: 'artifact://saved/中文%20报告.md' })).toBe('中文 报告.md')
+    expect(artifactIsTextPreviewable({ kind: 'report' })).toBe(true)
+    expect(artifactIsTextPreviewable({ kind: 'screenshot' })).toBe(false)
+    expect(artifactIsTextPreviewable({ kind: 'pcap' })).toBe(false)
   })
-
-  it('filters by category and exact kind, sorts newest first, and keeps ties stable', () => {
-    const source = [
-      artifact('old', 'report', 'deliverable', '2026-08-18T00:00:00Z'),
-      artifact('tie-one', 'file', 'deliverable', '2026-08-20T00:00:00Z'),
-      artifact('evidence', 'log', 'evidence', '2026-08-21T00:00:00Z'),
-      artifact('tie-two', 'report', 'deliverable', '2026-08-20T00:00:00Z'),
-    ]
-
-    expect(filterAndSortArtifacts(source, 'deliverable', 'all').map(({ id }) => id)).toEqual([
-      'tie-one',
-      'tie-two',
-      'old',
-    ])
-    expect(filterAndSortArtifacts(source, 'deliverable', 'report').map(({ id }) => id)).toEqual([
-      'tie-two',
-      'old',
-    ])
-    expect(filterAndSortArtifacts(source, 'diagnostic', 'all').map(({ id }) => id)).toEqual([
-      'evidence',
-    ])
-    expect(source.map(({ id }) => id)).toEqual(['old', 'tie-one', 'evidence', 'tie-two'])
+  it('keys by project, workspace identity, entry kind and full relative path', () => {
+    const key = workspaceNodeKey('p1', 'w1', 'file', 'a/readme.md')
+    expect(key).not.toBe(workspaceNodeKey('p2', 'w1', 'file', 'a/readme.md'))
+    expect(key).not.toBe(workspaceNodeKey('p1', 'w2', 'file', 'a/readme.md'))
+    expect(key).not.toBe(workspaceNodeKey('p1', 'w1', 'file', 'b/readme.md'))
   })
-
-  it('searches decoded filenames without matching URI directories', () => {
-    const source = [
-      artifact(
-        'encoded',
-        'report',
-        'deliverable',
-        '2026-08-20T00:00:00Z',
-        'artifact://projects/p1/runs/r1/reports/Final%20Report.MD',
-      ),
-      artifact(
-        'directory-only',
-        'report',
-        'deliverable',
-        '2026-08-21T00:00:00Z',
-        'artifact://projects/p1/runs/final-report/notes.txt',
-      ),
-      artifact(
-        'diagnostic',
-        'log',
-        'evidence',
-        '2026-08-22T00:00:00Z',
-        'artifact://projects/p1/runs/r1/final-report.log',
-      ),
-    ]
-
+  it.each([
+    ['not_created', '尚未创建'],
+    ['deleted', '已删除'],
+    ['owner_unknown', '归属'],
+    ['unreachable', '不可达'],
+    ['permission_denied', '权限'],
+    ['layer_unsupported', '历史现场'],
+    ['identity_changed', '身份已变化'],
+    ['cursor_invalid', '续页已失效'],
+    ['path_private', '私有'],
+    ['path_blocked', '特殊文件'],
+    ['path_not_found', '已不存在'],
+  ])('maps %s without exposing raw server exceptions', (code, text) => {
     expect(
-      filterAndSortArtifacts(source, 'deliverable', 'all', ' final report ').map(({ id }) => id),
-    ).toEqual(['encoded'])
-    expect(
-      filterAndSortArtifacts(source, 'deliverable', 'report', 'REPORT.md').map(({ id }) => id),
-    ).toEqual(['encoded'])
-    expect(filterAndSortArtifacts(source, 'deliverable', 'all', 'runs')).toEqual([])
-    expect(
-      filterAndSortArtifacts(source, 'diagnostic', 'log', 'FINAL-REPORT').map(({ id }) => id),
-    ).toEqual(['diagnostic'])
-    expect(filterAndSortArtifacts(source, 'deliverable', 'all', '   ').map(({ id }) => id)).toEqual(
-      ['directory-only', 'encoded'],
-    )
-    expect(source.map(({ id }) => id)).toEqual(['encoded', 'directory-only', 'diagnostic'])
+      workspaceErrorMessage(new ApiError('/private/secret', 409, { detail: `workspace_${code}` })),
+    ).toContain(text)
   })
-
-  it('keeps default kinds and exposes historical kinds present in the current category', () => {
-    const source = [
-      artifact('capture', 'pcap', 'deliverable', '2026-08-20'),
-      artifact('archive', 'har', 'evidence', '2026-08-20'),
-    ]
-
-    expect(kindOptionsForArtifacts(source, 'deliverable').map(({ value }) => value)).toEqual([
-      'all',
-      'screenshot',
-      'report',
-      'patch',
-      'file',
-      'pcap',
-    ])
-    expect(kindOptionsForArtifacts(source, 'diagnostic').map(({ value }) => value)).toEqual([
-      'all',
-      'raw_output',
-      'log',
-      'hook_log',
-      'har',
-    ])
-  })
-
-  it('classifies all supported preview kinds and filenames', () => {
-    const textKinds: ArtifactKind[] = [
-      'raw_output',
-      'log',
-      'report',
-      'patch',
-      'file',
-      'har',
-      'hook_log',
-    ]
-    for (const kind of textKinds) {
-      expect(artifactIsTextPreviewable(artifact(kind, kind, 'evidence', '2026-08-20'))).toBe(true)
-      expect(artifactKindLabel(kind)).not.toBe('')
-    }
-    expect(artifactIsTextPreviewable(artifact('pcap', 'pcap', 'deliverable', '2026-08-20'))).toBe(
-      false,
+  it('never renders arbitrary errors or private server details', () => {
+    expect(workspaceErrorMessage(new ApiError('token=canary', 500, { detail: '/host/path' }))).toBe(
+      '文件读取失败，请稍后重试。',
     )
-    expect(artifactIsScreenshot(artifact('shot', 'screenshot', 'deliverable', '2026-08-20'))).toBe(
-      true,
-    )
-    expect(
-      artifactFilename(
-        artifact('encoded', 'report', 'deliverable', '2026-08-20', 'reports/final%20report.md'),
-      ),
-    ).toBe('final report.md')
+    expect(workspaceErrorMessage(new Error('/host/path'))).not.toContain('/host/path')
   })
 })

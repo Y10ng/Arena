@@ -6,7 +6,6 @@ from re import fullmatch
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from cairn.report_template_contract import parse_report_template
 
 
 class ReportTemplateUpdate(BaseModel):
@@ -15,9 +14,7 @@ class ReportTemplateUpdate(BaseModel):
     name: str
     description: str = ""
     markdown_content: str
-    compatibility_profiles: list[str] = Field(
-        default_factory=lambda: ["assessment-report-packet-v1"]
-    )
+    compatibility_profiles: list[str] = Field(default_factory=list)
 
     @field_validator("name")
     @classmethod
@@ -41,7 +38,6 @@ class ReportTemplateUpdate(BaseModel):
             raise ValueError("must not be empty")
         if len(value.encode("utf-8")) > 500_000:
             raise ValueError("must be 500000 UTF-8 bytes or fewer")
-        parse_report_template(value)
         # Markdown 缩进和末尾空格有语义，保存与 digest 均保留提交的正文。
         return value
 
@@ -55,8 +51,6 @@ class ReportTemplateUpdate(BaseModel):
                 raise ValueError("compatibility profile must be a stable identifier")
             if text not in profiles:
                 profiles.append(text)
-        if not profiles:
-            raise ValueError("at least one compatibility profile is required")
         return profiles
 
 

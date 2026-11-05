@@ -1,5 +1,6 @@
 import { ref, type Ref } from 'vue'
 import type { GraphNode, NodeDragState, Position } from './graphTypes'
+import { toLogicalPixels } from '@/lib/uiScale'
 
 export function useGraphNodeDrag(userNodePositions: Ref<Record<string, Position>>, zoom: Ref<number>) {
   const draggingNodeId = ref<string | null>(null)
@@ -41,8 +42,8 @@ export function useGraphNodeDrag(userNodePositions: Ref<Record<string, Position>
     userNodePositions.value = {
       ...userNodePositions.value,
       [node.id]: {
-        x: dragState.startX + screenDx / zoom.value,
-        y: dragState.startY + screenDy / zoom.value,
+        x: dragState.startX + toLogicalPixels(screenDx) / zoom.value,
+        y: dragState.startY + toLogicalPixels(screenDy) / zoom.value,
       },
     }
     event.preventDefault()

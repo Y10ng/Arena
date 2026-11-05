@@ -226,6 +226,74 @@ def _run(source: Path, target: Path, *start_args: str) -> subprocess.CompletedPr
     )
 
 
+@pytest.mark.parametrize("external_knowledge", [False, True])
+def test_start_sets_material_paths_before_bootstrap(tmp_path: Path, external_knowledge: bool) -> None:
+    import sys
+
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+    shutil.copy2(ROOT / "deploy/start.sh", deploy / "start.sh")
+    knowledge = tmp_path / ("external-knowledge" if external_knowledge else "runtime/data/knowledge")
+    _write(tmp_path / "dispatcher.token", "fixture-token")
+    _write_script(deploy / "cairn", '''if [[ "$1" == db ]]; then exit 0; fi
+[[ "$1 $2" == "auth bootstrap-runtime" ]]
+printf '%s\\n' "$CAIRN_KNOWLEDGE_ROOT" "$CAIRN_ARTIFACT_ROOT" "$CAIRN_ADVISORY_LIBRARY_ROOT" > paths.txt
+exit 29''')
+    _write(deploy / "common.sh", f'''ROOT_DIR={shlex.quote(str(tmp_path))}
+RUNTIME_DIR="${{ROOT_DIR}}/runtime"
+DATA_DIR="${{RUNTIME_DIR}}/data"
+PID_DIR="${{RUNTIME_DIR}}/pids"
+DISPATCH_CONFIG="${{RUNTIME_DIR}}/dispatch.yaml"
+DISPATCHER_TOKEN_FILE="${{ROOT_DIR}}/dispatcher.token"
+INITIAL_ADMIN_PASSWORD_FILE="${{ROOT_DIR}}/unused-password"
+PYTHON_BIN={shlex.quote(sys.executable)}
+CAIRN_BIN="${{ROOT_DIR}}/deploy/cairn"
+ensure_runtime_dirs() {{ :; }}
+acquire_operation_lock() {{ :; }}
+ensure_application_initialized() {{ :; }}
+load_runtime_env() {{
+  export CAIRN_DATABASE_URL=postgresql://fixture/unused
+  unset CAIRN_KNOWLEDGE_ROOT
+  {'export CAIRN_KNOWLEDGE_ROOT=' + shlex.quote(str(knowledge)) if external_knowledge else ':'}
+  export CAIRN_ARTIFACT_ROOT="${{ROOT_DIR}}/original-artifacts"
+  export CAIRN_ADVISORY_LIBRARY_ROOT="${{ROOT_DIR}}/original-library"
+}}
+resolve_server_endpoint() {{ :; }}
+configure_trusted_origins() {{ :; }}
+validate_external_database_url() {{ :; }}
+ensure_local_secrets() {{ :; }}
+stage_initial_admin_password() {{ :; }}
+''')
+    # 只运行脚本到 bootstrap 替身，替身故意退出，绝不进入真实服务或数据库。
+    result = subprocess.run([str(deploy / "start.sh"), "--server-only"], text=True, capture_output=True)
+    assert result.returncode != 0
+    assert "自动初始化失败" in result.stderr
+    assert (tmp_path / "paths.txt").read_text().splitlines() == [
+        str(knowledge), str(tmp_path / "original-artifacts"), str(tmp_path / "original-library"),
+    ]
+
+
+@pytest.mark.parametrize("git_kind", ["directory", "worktree"])
+def test_update_rejects_git_before_staging_or_stopping(tmp_path: Path, git_kind: str) -> None:
+    source = tmp_path / "new-release"
+    target = tmp_path / "installed"
+    _managed_source(source)
+    _installed_target(target)
+    if git_kind == "directory":
+        (target / ".git").mkdir()
+    else:
+        _write(target / ".git", "gitdir: /original/repository/.git/worktrees/installed\n")
+    before = {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()}
+
+    result = _run(source, target)
+
+    assert result.returncode != 0
+    assert "Git 工作区" in result.stderr
+    assert not (target / "lifecycle.log").exists()
+    assert not list(target.glob(".arena-update-*"))
+    assert before == {p.relative_to(target): p.read_bytes() for p in target.rglob("*") if p.is_file()}
+
+
 @pytest.mark.parametrize("option", ["--host", "--port"])
 def test_start_option_value_cannot_skip_worker_preparation(tmp_path: Path, option: str) -> None:
     source = tmp_path / "new-release"

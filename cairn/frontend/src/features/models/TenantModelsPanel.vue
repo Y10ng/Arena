@@ -1,10 +1,13 @@
 <template>
   <section id="models" class="tenant-models-panel" aria-labelledby="models-heading">
-    <div class="section-header">
-      <h3 id="models-heading">模型</h3>
-      <IconButton label="刷新模型" :loading="refreshing" @click="refreshModels"
-        ><RefreshCw :size="16"
-      /></IconButton>
+    <div class="resource-section-heading">
+      <h2 id="models-heading">模型目录</h2>
+      <div class="inline-actions">
+        <IconButton label="刷新模型" :loading="refreshing" @click="refreshModels"
+          ><RefreshCw :size="16"
+        /></IconButton>
+        <Button :disabled="busy" @click="startCreate">新增模型</Button>
+      </div>
     </div>
     <ErrorState
       v-if="modelsQuery.error.value"
@@ -18,7 +21,7 @@
         <thead>
           <tr>
             <th scope="col">名称</th>
-            <th scope="col">协议 / 模型 ID</th>
+            <th scope="col">连接定义</th>
             <th scope="col">凭据</th>
             <th scope="col">状态</th>
             <th scope="col">操作</th>
@@ -26,10 +29,17 @@
         </thead>
         <tbody>
           <tr v-for="model in models" :key="model.id">
-            <th scope="row">{{ model.display_name }}</th>
+            <th scope="row">
+              <div class="model-cell-inline">
+                <span class="model-name" :title="model.display_name">{{ model.display_name }}</span>
+                <span class="mono model-id" :title="model.model_name">{{ model.model_name }}</span>
+              </div>
+            </th>
             <td>
-              <span>{{ protocolLabel(model.protocol) }}</span>
-              <div class="mono model-id">{{ model.model_name }}</div>
+              <div class="model-cell-inline">
+                <span class="model-protocol">{{ protocolLabel(model.protocol) }}</span>
+                <span class="mono model-id" :title="model.base_url">{{ model.base_url }}</span>
+              </div>
             </td>
             <td>{{ model.credential_configured ? '已配置' : '未配置' }}</td>
             <td>
@@ -117,7 +127,25 @@
           <p v-if="discoveryError" class="field-error" role="alert">
             获取失败：{{ discoveryError }}
           </p>
-          <div class="model-form-grid">
+          <fieldset class="model-pricing">
+            <legend>计价 · 每百万 Token</legend>
+            <div class="model-form-grid">
+              <FormField v-slot="{ controlAttrs }" label="币种">
+                <Input v-bind="controlAttrs" :model-value="draft.pricing.currency ?? null" placeholder="未设置" maxlength="3"
+                  @update:model-value="draft.pricing.currency = String($event ?? '').trim().toUpperCase() || null" />
+              </FormField>
+              <FormField v-for="field in pricingFields" :key="field.key" v-slot="{ controlAttrs }" :label="field.label">
+                <Input v-bind="controlAttrs" :model-value="draft.pricing[field.key] ?? null" inputmode="decimal" placeholder="未定价"
+                  @update:model-value="draft.pricing[field.key] = String($event ?? '').trim() || null" />
+              </FormField>
+            </div>
+            <p v-if="pricingError(draft.pricing)" class="field-error" role="alert">{{ pricingError(draft.pricing) }}</p>
+            <p class="section-desc">留空不是零价；改价仅影响之后的执行，金额为已配置费率的估算。</p>
+          </fieldset>
+          <Checkbox v-model="draft.enabled" label="启用模型" />
+          <details class="model-advanced" :open="!editing || Boolean(headerError)">
+            <summary>认证与自定义 Headers</summary>
+            <div class="model-advanced-body">
             <FormField v-slot="{ controlAttrs }" label="API Key"
               ><Input
                 v-bind="controlAttrs"
@@ -128,11 +156,6 @@
                   editing?.credential_configured ? '留空保留已保存 Key' : '可留空保存配置'
                 "
             /></FormField>
-            <div class="model-enabled"><Checkbox v-model="draft.enabled" label="启用模型" /></div>
-          </div>
-          <details class="model-advanced" :open="Boolean(headerError)">
-            <summary>高级设置</summary>
-            <div class="model-advanced-body">
               <FormField v-slot="{ controlAttrs }" label="认证字段"
                 ><Select
                   v-bind="controlAttrs"
@@ -181,6 +204,11 @@
                 >
               </div>
               <p v-if="headerError" class="field-error" role="alert">{{ headerError }}</p>
+            </div>
+          </details>
+          <details class="model-advanced">
+            <summary>自定义 endpoint</summary>
+            <div class="model-advanced-body">
               <div class="model-form-grid">
                 <FormField v-slot="{ controlAttrs }" label="Models endpoint"
                   ><Input
@@ -328,6 +356,8 @@ import {
   customHeaderError,
   emptyTenantModelDraft,
   protocolDefaultEndpoints,
+  pricingError,
+  pricingFields,
   tenantModelDraft,
   tenantModelDraftIsValid,
 } from './tenantModelsModel'

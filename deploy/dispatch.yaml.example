@@ -27,7 +27,10 @@ tasks:
     timeout: 600
 
 container:
+  # Worker 与 TaskRun executor 共用研究镜像；自定义镜像也须包含执行服务。
   image: "arena-worker:local"
+  # gateway、collector 和网络 helper 共用独立采集镜像。
+  traffic_gateway_image: "arena-traffic-gateway:local"
   allowed_images: []
   network_mode: "host"
   # 留空时使用 Docker 默认 resolver；仅填写部署方批准并实测可达的 DNS IP。

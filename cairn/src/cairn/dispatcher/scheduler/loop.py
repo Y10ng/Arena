@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import wait
+from threading import Event, Lock, Thread
 
 from cairn.dispatcher.runtime.browser_sessions import BrowserSession
 from cairn.dispatcher.runtime.containers import CandidateExecutionCheck, canonical_server_address
@@ -15,6 +16,7 @@ from .cleanup import CleanupMixin
 from .common import *
 from .config_runtime import ConfigRuntimeMixin
 from .dispatch_cycle import DispatchCycleMixin
+from .execution_control import ExecutionControlObserver
 from .heartbeat_reporter import HeartbeatReporterMixin
 from .report_finish_outbox import ReportFinishOutboxMixin
 from .runtime_context import RuntimeContextMixin
@@ -100,6 +102,12 @@ class DispatcherLoop(
         # Agent 独占一个真实线程，研究池满载时仍能执行；不改变研究 hard_cap。
         self.agent_executor = ThreadPoolExecutor(max_workers=AGENT_CAPACITY, thread_name_prefix="project-agent")
         self.cleanup_executor = ThreadPoolExecutor(max_workers=8)
+        # 网络投递若永久挂起，不能占用业务/清理线程池或阻止其 shutdown。
+        self._consumption_lock = Lock()
+        self._consumption_wake = Event()
+        self._consumption_stop = Event()
+        self._consumption_thread: Thread | None = None
+        self._consumption_job = None
         # futures 只保存当前进程提交的任务；Server 中旧 running 由启动 reconcile 处理。
         self.futures: dict[Future[str], RunningTask] = {}
         self.cleanup_futures: dict[Future[bool], tuple[str, str | None, str | tuple[str, int] | None]] = {}
@@ -130,6 +138,7 @@ class DispatcherLoop(
         self._candidate_fenced_projects: set[str] = set()
         self._candidate_fenced_task_runs: set[tuple[str, str]] = set()
         self._candidate_fenced_containers: set[str] = set()
+        self.execution_control_observer = None
         self.dispatcher_id: str | None = None
         self.started_at = _utcnow()
         self._last_config_hash = self._config_sha256 or self._hash_config(config)
@@ -146,7 +155,56 @@ class DispatcherLoop(
                     migrated,
                 )
 
+    def _schedule_consumption_recovery(self) -> None:
+        with self._consumption_lock:
+            if self._consumption_stop.is_set() or self._consumption_job is not None:
+                return
+            if self._consumption_thread is None or not self._consumption_thread.is_alive():
+                thread = Thread(target=self._run_consumption_recovery, name="consumption-recovery", daemon=True)
+                try:
+                    thread.start()
+                except Exception as exc:
+                    LOG.warning("consumption recovery start failed error=%s", type(exc).__name__)
+                    return
+                self._consumption_thread = thread
+            # 每轮至多安排一项；运行中不排队，也不因超时创建替代线程。
+            self._consumption_job = (self.container_manager.consumption_outbox, self.client)
+            self._consumption_wake.set()
+
+    def _run_consumption_recovery(self) -> None:
+        while True:
+            self._consumption_wake.wait()
+            self._consumption_wake.clear()
+            with self._consumption_lock:
+                if self._consumption_stop.is_set():
+                    return
+                job = self._consumption_job
+            try:
+                if job is not None:
+                    outbox, client = job
+                    outbox.flush(client, limit=16, stop=self._consumption_stop)
+            except BaseException as exc:
+                LOG.warning("consumption recovery failed error=%s", type(exc).__name__)
+            finally:
+                with self._consumption_lock:
+                    self._consumption_job = None
+
+    def _stop_consumption_recovery(self) -> None:
+        stop = getattr(self, "_consumption_stop", None)
+        if stop is None:
+            return
+        with self._consumption_lock:
+            stop.set()
+            self._consumption_wake.set()
+            thread = self._consumption_thread
+        if thread is not None:
+            # 已在网络调用中无法安全取消；有界等待后留给下次启动恢复。
+            thread.join(timeout=0.25)
+            if thread.is_alive():
+                LOG.warning("consumption recovery still in flight during shutdown")
+
     def close(self) -> None:
+        self._stop_consumption_recovery()
         try:
             if self.futures:
                 LOG.info(
@@ -154,6 +212,12 @@ class DispatcherLoop(
                     len(self.futures),
                     sorted({task.project_id for task in self.futures.values()}),
                 )
+            if self.execution_control_observer is not None:
+                self.execution_control_observer.close()
+            # 冻结现场不能为退出而解冻或杀掉；只让宿主等待退出，Server claim 保持原状。
+            for task in self.futures.values():
+                if task.task_type in {"bootstrap", "reason", "explore"} and task.cancellation.pause_clock.paused:
+                    task.cancellation.pause_clock.detach()
             self.executor.shutdown(wait=True)
             self.agent_executor.shutdown(wait=True)
             self._reap_futures()
@@ -208,6 +272,8 @@ class DispatcherLoop(
         try:
             self._ensure_config_loaded(once=once)
             self.run_startup_healthchecks()
+            self.execution_control_observer = ExecutionControlObserver(self)
+            self.execution_control_observer.start()
             while True:
                 loop_started_at = _utcnow()
                 loop_started = time.perf_counter()
@@ -227,6 +293,8 @@ class DispatcherLoop(
                             "project schedule consumption failed processed=%s errors=%s",
                             consumed["processed"], consumed["errors"],
                         )
+                    # Server 拥有连续暂停期限；不依赖研究空槽，也不由 Dispatcher 本地时间判断。
+                    self.client.expire_paused_projects()
                     # 控制观察先于配置刷新、收尾和版本探针；取消广播本身不做 Docker I/O。
                     summaries = self.client.list_projects()
                     self._cancel_inactive_tasks(summaries)
@@ -238,6 +306,8 @@ class DispatcherLoop(
                         self._validate_server_settings()
                         self._settings_checked = True
                     self._reap_futures()
+                    # 消费只重送宿主回执；慢投递不能占住调度主循环或重跑模型。
+                    self._schedule_consumption_recovery()
                     # 先停止重启前所有测试 scope，再允许 candidate/stale 恢复及新派发。
                     self.container_manager.traffic_execution.recover()
                     # candidate fence 必须先于 stale reconcile、任何新派发与破坏性清理恢复。

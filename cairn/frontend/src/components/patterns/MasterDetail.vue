@@ -26,7 +26,7 @@ withDefaults(defineProps<{ configuration?: boolean; fillHeight?: boolean }>(), {
 .master-detail {
   display: grid;
   grid-template-columns: var(--master-detail-master-width, 270px) minmax(0, 1fr);
-  gap: var(--space-4);
+  gap: var(--space-5);
   align-items: start;
   min-width: 0;
 }
@@ -34,6 +34,7 @@ withDefaults(defineProps<{ configuration?: boolean; fillHeight?: boolean }>(), {
 .md-master,
 .md-detail {
   min-width: 0;
+  min-height: 0;
 }
 
 .master-detail--fill-height {

@@ -17,6 +17,7 @@ const routerPush = vi.fn()
 const showToast = vi.fn()
 const runtimeOverride = ref<ProjectRuntime | null>(null)
 const runtimeFailure = ref(false)
+const runtimeRefetch = vi.fn()
 const invalidateQueries = vi.fn()
 
 const resourceConfig = {
@@ -66,6 +67,7 @@ const baseProject = {
   authorization_expires_at: null,
   explore_attempts_started: 3,
   explore_deadline: null,
+  schedule_id: null as string | null,
   report_capability: {
     supported: true,
     policy_version: 1,
@@ -101,6 +103,9 @@ function deferred<T>() {
 function mockWorkspaceDependencies() {
   vi.doMock('vue-router', () => ({
     useRouter: () => ({ push: routerPush }),
+    useRoute: () => ({ name: 'WorkspaceGraph', params: { id: 'proj_test' } }),
+    onBeforeRouteLeave: vi.fn(),
+    onBeforeRouteUpdate: vi.fn(),
   }))
   vi.doMock('@tanstack/vue-query', () => ({
     useQuery: (options: { queryKey: readonly unknown[] | { value: readonly unknown[] } }) => {
@@ -141,7 +146,10 @@ function mockWorkspaceDependencies() {
                 },
               }),
           ),
+          dataUpdatedAt: ref(Date.now()),
           isError: runtimeFailure,
+          isFetching: ref(false),
+          refetch: runtimeRefetch,
           error: ref(new Error('network failure')),
         }
       }
@@ -237,6 +245,7 @@ afterEach(() => {
   vi.doUnmock('@/api/client')
   runtimeOverride.value = null
   runtimeFailure.value = false
+  runtimeRefetch.mockReset()
   invalidateQueries.mockReset()
   vi.resetModules()
   document.body.innerHTML = ''
@@ -258,6 +267,62 @@ afterEach(() => {
 })
 
 describe('ProjectWorkspace shared control migration', () => {
+  it('shows the pause timeout policy near ordinary project controls, not managed projects', async () => {
+    const wrapper = await mountWorkspace('active')
+    expect(wrapper.get('.workspace-pause-policy').text()).toBe('暂停满12小时将自动结束，工作文件保留')
+    Object.assign(workspaceStore.projectDetail.project, { verification_request_id: 'verification-1' })
+    await flushPromises()
+    expect(wrapper.find('.workspace-pause-policy').exists()).toBe(false)
+    expect(apiMock).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it.each(['active', 'completed', 'stopped'])('R4 exposes existing schedule history for %s without lifecycle actions', async (status) => {
+    const wrapper = await mountWorkspace(status)
+    expect(wrapper.findAll('.workspace-tabs > a').some(link => link.text() === '计划历史')).toBe(false)
+    workspaceStore.projectDetail.project.schedule_id = 'schedule-history'
+    await flushPromises()
+    const link = wrapper.findAll('.workspace-tabs > a').find(item => item.text() === '计划历史')!
+    expect(link.attributes('to')).toBe('/project-schedules/schedule-history')
+    expect(apiMock).not.toHaveBeenCalled()
+    workspaceStore.projectDetail.project.schedule_id = null
+    await flushPromises()
+    expect(wrapper.findAll('.workspace-tabs > a').some(item => item.text() === '计划历史')).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('总览替代旧资料弹窗入口，外壳只保留项目导航', async () => {
+    const wrapper = await mountWorkspace()
+    expect(wrapper.findAll('.workspace-tabs > a').map((link) => link.text())).toEqual(['总览', '漏洞成果', '运行日志', '文件', '图谱', '流量', '人工提示'])
+    expect(buttonByText('项目资料')).toBeUndefined()
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull()
+    expect(createProjectResourceBatchMock).not.toHaveBeenCalled()
+    expect(commitProjectResourceBatchMock).not.toHaveBeenCalled()
+    await wrapper.get('button[aria-label="项目更多操作"]').trigger('click')
+    await flushPromises()
+    expect([...document.body.querySelectorAll('[role="menuitem"]')].some((item) => item.textContent?.includes('项目资料'))).toBe(false)
+    wrapper.unmount()
+  }, 15_000)
+
+  it('R2 shows pausing and stale observations without changing the metadata action', async () => {
+    runtimeOverride.value = runtimeV2Fixture({ project_id: baseProject.id, project_status: 'paused', state: 'pausing', code: 'project_pause_draining' })
+    const wrapper = await mountWorkspace('paused')
+    expect(wrapper.get('.header-left [aria-label="项目状态"]').text()).toBe('已暂停')
+    expect(wrapper.get('.header-left').text()).toContain('停止待确认')
+    expect(buttonByText('继续项目')?.disabled).toBe(false)
+    runtimeFailure.value = true
+    await flushPromises()
+    expect(wrapper.get('.header-left').text()).toContain('观测未更新')
+    expect(buttonByText('继续项目')?.disabled).toBe(false)
+    await wrapper.get('button[aria-label="运行详情"]').trigger('click')
+    await flushPromises()
+    expect(document.body.querySelector('.project-observation-details')?.textContent).toContain('历史观测时间')
+    buttonByText('刷新观测')!.click()
+    expect(runtimeRefetch).toHaveBeenCalledWith({ cancelRefetch: false })
+    expect(apiMock).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('keeps project status beside its title and moves low-frequency metadata into More', async () => {
     const wrapper = await mountWorkspace('stopped')
     expect(wrapper.find('.header-left [aria-label="项目状态"]').exists()).toBe(true)
@@ -266,7 +331,7 @@ describe('ProjectWorkspace shared control migration', () => {
     await selectMoreItem(wrapper, '项目信息')
     const information = document.body.querySelector('.workspace-project-information')!
     expect(information.textContent).toContain('执行停止时间不限')
-    expect(information.textContent).toContain('项目组未分组')
+    expect(information.textContent).toContain('授权过期时间无限期')
     wrapper.unmount()
   })
 
@@ -277,11 +342,7 @@ describe('ProjectWorkspace shared control migration', () => {
     expect(document.body.textContent).toContain('实时状态刷新失败')
     expect(document.body.textContent).toContain('测试项目')
     expect(wrapper.findAll('.workspace-tabs .tab-item').map((tab) => tab.text())).toEqual([
-      '图谱',
-      '运行',
-      '漏洞',
-      '产物',
-      '提示',
+      '总览', '漏洞成果', '运行日志', '文件', '图谱', '流量', '人工提示',
     ])
 
     workspaceStore.error = ''
@@ -372,14 +433,14 @@ describe('ProjectWorkspace shared control migration', () => {
     wrapper.unmount()
   }, 15_000)
 
-  it('waits for authoritative terminal quiescence before opening the report flow', async () => {
+  it.each(['active', 'paused'])('finishes %s research without automatically opening the report flow', async (status) => {
     const finish = deferred<void>()
     apiMock.mockReturnValue(finish.promise)
-    const wrapper = await mountWorkspace('active')
+    const wrapper = await mountWorkspace(status)
 
-    buttonByText('结束并生成报告')?.click()
-    await flushPromises()
-    const confirmButton = buttonByText('确认结束并等待报告')
+    await selectMoreItem(wrapper, '结束项目')
+    expect(document.body.querySelector('[role="alertdialog"]')?.textContent).toContain('不会自动生成报告')
+    const confirmButton = buttonByText('确认结束项目')
     confirmButton?.click()
     confirmButton?.click()
     await flushPromises()
@@ -390,7 +451,8 @@ describe('ProjectWorkspace shared control migration', () => {
 
     finish.resolve()
     await flushPromises()
-    expect(document.body.textContent).toContain('正在确认评估已静默')
+    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull()
+    expect(document.body.querySelector('[data-testid="project-report-dialog"]')).toBeNull()
 
     workspaceStore.projectDetail.project.status = 'stopped'
     runtimeOverride.value = runtimeFixture({
@@ -428,10 +490,13 @@ describe('ProjectWorkspace shared control migration', () => {
     })
     await flushPromises()
 
+    expect(document.body.querySelector('[data-testid="project-report-dialog"]')).toBeNull()
+    expect(apiMock).toHaveBeenCalledOnce()
+    buttonByText('查看成果')?.click()
+    await flushPromises()
     expect(
       document.body.querySelector('[data-testid="project-report-dialog"]')?.textContent,
     ).toContain('报告流程 proj_test stopped')
-    expect(document.body.textContent).not.toContain('正在确认评估已静默')
     wrapper.unmount()
   }, 15_000)
 
@@ -439,9 +504,8 @@ describe('ProjectWorkspace shared control migration', () => {
     apiMock.mockRejectedValue(new Error('结束请求冲突'))
     const wrapper = await mountWorkspace('active')
 
-    buttonByText('结束并生成报告')?.click()
-    await flushPromises()
-    buttonByText('确认结束并等待报告')?.click()
+    await selectMoreItem(wrapper, '结束项目')
+    buttonByText('确认结束项目')?.click()
     await flushPromises()
 
     expect(document.body.textContent).toContain('项目操作失败')
@@ -455,9 +519,8 @@ describe('ProjectWorkspace shared control migration', () => {
     apiMock.mockReturnValue(update.promise)
     const wrapper = await mountWorkspace()
 
-    buttonByText('测试项目')?.click()
-    await flushPromises()
-    const input = document.body.querySelector<HTMLInputElement>('input[aria-label="项目名称"]')!
+    await selectMoreItem(wrapper, '重命名项目')
+    const input = document.body.querySelector<HTMLInputElement>('#workspace-project-title')!
     input.value = '  新标题  '
     input.dispatchEvent(new Event('input', { bubbles: true }))
     input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }))
@@ -466,7 +529,7 @@ describe('ProjectWorkspace shared control migration', () => {
 
     expect(apiMock).toHaveBeenCalledOnce()
     expect(apiMock).toHaveBeenCalledWith('PUT', '/projects/proj_test/title', { title: '新标题' })
-    expect(document.body.textContent).toContain('正在保存')
+    expect(buttonByText('保存名称')?.getAttribute('aria-busy')).toBe('true')
     expect(input.disabled).toBe(true)
 
     update.resolve()
@@ -484,8 +547,8 @@ describe('ProjectWorkspace shared control migration', () => {
     expect(menu).not.toBeNull()
     expect(items.map((item) => item.textContent)).toEqual([
       '项目信息',
-      'Workers',
-      '资料',
+      '重命名项目',
+      '代理设置',
       '导出项目配置 YAML',
       '下载漏洞证据 ZIP（按漏洞分组）',
       '彻底删除项目',
@@ -551,96 +614,12 @@ describe('ProjectWorkspace shared control migration', () => {
     const wrapper = await mountWorkspace()
     await wrapper.get('button[aria-label="项目更多操作"]').trigger('click')
     await flushPromises()
-    const labels = [...document.body.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)
+    const labels = [...document.body.querySelectorAll('[role="menuitem"]')].map(
+      (item) => item.textContent,
+    )
     expect(labels.some((label) => label?.includes('Workers'))).toBe(false)
     expect(labels.some((label) => label?.includes('代理设置'))).toBe(true)
     expect(getProjectManagementOptionsMock).not.toHaveBeenCalled()
-    wrapper.unmount()
-  }, 15_000)
-
-  it('keeps resource mutation available with a trusted v2 stopped snapshot', async () => {
-    runtimeOverride.value = runtimeV2Fixture({
-      project_id: 'proj_test',
-      project_status: 'stopped',
-      state: 'stopped',
-      active_runs: [],
-    })
-    const wrapper = await mountWorkspace('stopped')
-
-    await selectMoreItem(wrapper, '资料')
-
-    const note = document.body.querySelector<HTMLElement>('.resource-mutation-note')
-    expect(note?.textContent).toContain('资料变更仅用于后续允许的任务')
-    expect(note?.classList.contains('blocked')).toBe(false)
-    wrapper.unmount()
-  }, 15_000)
-
-  it('cancels a pending resource batch when the resource Dialog closes', async () => {
-    uploadProjectResourceBatchFileMock.mockResolvedValue({
-      id: 'member-1',
-      path: 'login.bin',
-      kind: 'file',
-      size_bytes: 4,
-      sha256: 'a'.repeat(64),
-      source: 'file',
-    })
-    const wrapper = await mountWorkspace()
-
-    await selectMoreItem(wrapper, '资料')
-    const input = document.body.querySelectorAll<HTMLInputElement>('input[type="file"]')[0]
-    Object.defineProperty(input, 'files', {
-      configurable: true,
-      value: [new File([new Uint8Array([0xff, 0x00, 0x80, 0x01])], 'login.bin')],
-    })
-    input.dispatchEvent(new Event('change', { bubbles: true }))
-    await flushPromises()
-
-    expect(
-      document.body.querySelector<HTMLInputElement>('[aria-label="资源相对路径"]')?.value,
-    ).toBe('login.bin')
-    buttonByText('关闭')?.click()
-    await flushPromises()
-
-    expect(cancelProjectResourceBatchMock).toHaveBeenCalledWith('batch-1')
-    expect(document.body.querySelector('[role="dialog"]')).toBeNull()
-    wrapper.unmount()
-  }, 15_000)
-
-  it('commits the complete batch once and keeps the Dialog modal while pending', async () => {
-    uploadProjectResourceBatchFileMock.mockResolvedValue({
-      id: 'member-1',
-      path: 'login.bin',
-      kind: 'file',
-      size_bytes: 4,
-      sha256: 'a'.repeat(64),
-      source: 'file',
-    })
-    const commit = deferred<{ resources: [] }>()
-    commitProjectResourceBatchMock.mockReturnValue(commit.promise)
-    const wrapper = await mountWorkspace()
-
-    await selectMoreItem(wrapper, '资料')
-    const input = document.body.querySelectorAll<HTMLInputElement>('input[type="file"]')[0]
-    Object.defineProperty(input, 'files', {
-      configurable: true,
-      value: [new File(['test'], 'login.bin')],
-    })
-    input.dispatchEvent(new Event('change', { bubbles: true }))
-    await flushPromises()
-
-    buttonByText('原子导入资料')?.click()
-    buttonByText('原子导入资料')?.click()
-    await flushPromises()
-
-    expect(commitProjectResourceBatchMock).toHaveBeenCalledOnce()
-    expect(commitProjectResourceBatchMock).toHaveBeenCalledWith('proj_test', 'batch-1')
-    expect(buttonByText('关闭')?.disabled).toBe(true)
-    expect(document.body.querySelector('button[aria-label="关闭"]')).toBeNull()
-
-    commit.resolve({ resources: [] })
-    await flushPromises()
-    expect(document.body.querySelector('[role="dialog"]')).toBeNull()
-    expect(showToast).toHaveBeenCalledWith('辅助资料已原子导入，将用于后续 TaskRun', 'success')
     wrapper.unmount()
   }, 15_000)
 

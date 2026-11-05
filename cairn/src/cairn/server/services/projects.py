@@ -33,14 +33,23 @@ def lease_clock() -> tuple[str, int]:
     return _BOOT_ID, time.clock_gettime_ns(time.CLOCK_BOOTTIME)
 
 
-def check_project_active(conn: sqlite3.Connection, project_id: str) -> sqlite3.Row:
+def check_project_active(conn: sqlite3.Connection, project_id: str, *, task_run_id: str | None = None) -> sqlite3.Row:
     # 与阶段决策/报告冻结共享项目行锁，避免 PG 并发接受过期输入。
     conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
     row = get_project_or_404(conn, project_id)
     from .project_records import require_unmanaged_project
     require_unmanaged_project(conn, project_id)
+    from .project_execution_control import execution_dispatch_blocked
+
+    if row["status"] == "paused" and task_run_id is not None:
+        run = validate_execution_generation(conn, project_id, task_run_id)
+        if run["status"] != "running":
+            raise HTTPException(409, "execution_not_running")
+        return row
     if row["status"] != "active":
         raise HTTPException(403, f"Project is {row['status']}")
+    if execution_dispatch_blocked(row) and task_run_id is None:
+        raise HTTPException(409, "execution_control_pending")
     return row
 
 
@@ -586,6 +595,7 @@ def project_meta_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> Project
     ).fetchone()
     verification = conn.execute("SELECT id FROM verification_requests WHERE project_id = ?", (row["id"],)).fetchone()
     from .test_egress import public_project_egress
+    from .project_execution_control import effective_explore_deadline
 
     return ProjectMeta(
         test_egress=public_project_egress(row),
@@ -598,6 +608,7 @@ def project_meta_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> Project
         title=row["title"],
         status=row["status"],
         execution_generation=int(row_value(row, "execution_generation") or 0),
+        execution_control=parse_scenario_snapshot(row_value(row, "execution_control_json")),
         authorization_epoch=int(row_value(row, "authorization_epoch") or 0),
         authorization_scope_digest=authorization.scope_digest,
         authorization_scope_descriptor=authorization.scope_descriptor,
@@ -617,7 +628,7 @@ def project_meta_from_row(conn: sqlite3.Connection, row: sqlite3.Row) -> Project
             template_profile=(report_policy.template_profile or None) if verification is None else None,
             reason=report_policy.reason if verification is None else "verification_request_managed",
         ),
-        explore_deadline=row_value(row, "explore_deadline"),
+        explore_deadline=effective_explore_deadline(row, row_value(row, "explore_deadline")),
         authorization_expires_at=row_value(row, "authorization_expires_at"),
         explore_attempts_started=int(row_value(row, "explore_attempts_started") or 0),
         coverage_checkpoint_cell_count=int(
@@ -734,7 +745,8 @@ def expire_workers(conn: sqlite3.Connection, project_id: str | None = None) -> N
     boot_id, now_ns = lease_clock()
     active = """to_fact_id IS NULL AND worker IS NOT NULL AND last_heartbeat_at IS NOT NULL
         AND EXISTS (SELECT 1 FROM projects p WHERE p.id = intents.project_id
-                    AND p.status != 'paused' AND p.assessment_protocol = ?)
+                    AND p.status != 'paused' AND p.assessment_protocol = ?
+                    AND COALESCE(p.execution_control_json::jsonb ->> 'state', 'running') = 'running')
         AND NOT EXISTS (SELECT 1 FROM verification_requests vr WHERE vr.project_id = intents.project_id)"""
     scope = " AND project_id = ?" if project_id is not None else ""
     params = (GOAL_DRIVEN_PROTOCOL, *((project_id,) if project_id is not None else ()))
@@ -758,7 +770,9 @@ def expire_workers(conn: sqlite3.Connection, project_id: str | None = None) -> N
 
 def expire_reason_leases(conn: sqlite3.Connection, project_id: str | None = None) -> bool:
     boot_id, now_ns = lease_clock()
-    active = "reason_worker IS NOT NULL AND status != 'paused' AND assessment_protocol = ? AND reason_last_heartbeat_at IS NOT NULL"
+    active = """reason_worker IS NOT NULL AND status != 'paused' AND assessment_protocol = ?
+        AND reason_last_heartbeat_at IS NOT NULL
+        AND COALESCE(execution_control_json::jsonb ->> 'state', 'running') = 'running'"""
     scope = " AND id = ?" if project_id is not None else ""
     params = (GOAL_DRIVEN_PROTOCOL, *((project_id,) if project_id is not None else ()))
     conn.execute(

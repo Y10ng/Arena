@@ -78,7 +78,6 @@ class ContainerConfig(BaseModel):
 
     image: str
     traffic_gateway_image: str = "arena-traffic-gateway:local"
-    task_executor_image: str = "arena-task-executor:local"
     allowed_images: list[str] = Field(default_factory=list)
     network_mode: str
     completed_action: CompletedAction

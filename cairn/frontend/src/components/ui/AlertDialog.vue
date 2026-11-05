@@ -97,11 +97,11 @@ defineOptions({ name: 'UiAlertDialog' })
   z-index: var(--z-overlay-child);
   top: 50%;
   left: 50%;
-  width: calc(100vw - var(--space-6));
+  width: calc(100 * var(--ui-vw) - var(--space-6));
   max-width: var(--overlay-dialog-sm);
-  max-height: calc(100dvh - var(--space-6));
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
+  max-height: calc(100 * var(--ui-dvh) - var(--space-6));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -115,22 +115,23 @@ defineOptions({ name: 'UiAlertDialog' })
 }
 
 .ui-alert-dialog__content--warning {
-  border-color: color-mix(in srgb, var(--warning) 42%, var(--border-strong));
+  border-color: color-mix(in srgb, var(--warning) 20%, var(--border));
 }
 
 .ui-alert-dialog__content--danger {
-  border-color: color-mix(in srgb, var(--danger) 42%, var(--border-strong));
+  border-color: color-mix(in srgb, var(--danger) 20%, var(--border));
 }
 
 .ui-alert-dialog__header {
   min-height: 0;
-  padding: var(--space-5);
+  padding: var(--space-5) var(--space-6);
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 
 .ui-alert-dialog__title {
   margin: 0;
+  overflow-wrap: anywhere;
   color: var(--text);
   font-size: var(--text-xl);
   font-weight: var(--font-semibold);
@@ -146,20 +147,22 @@ defineOptions({ name: 'UiAlertDialog' })
 }
 
 .ui-alert-dialog__description {
+  overflow-wrap: anywhere;
   margin: var(--space-2) 0 0;
   color: var(--text-muted);
   font-size: var(--text-md);
-  line-height: var(--leading-normal);
+  line-height: var(--leading-relaxed);
 }
 
 .ui-alert-dialog__body {
   min-height: 0;
-  padding: var(--space-3) var(--space-5);
+  padding: var(--space-4) var(--space-6);
   overflow-y: auto;
 }
 
 .ui-alert-dialog__footer {
-  padding: var(--space-4) var(--space-5);
+  background: var(--bg-inset);
+  padding: var(--space-4) var(--space-6);
   border-top: 1px solid var(--border-subtle);
   flex-shrink: 0;
   display: flex;
@@ -186,14 +189,14 @@ defineOptions({ name: 'UiAlertDialog' })
 @keyframes ui-alert-dialog-content-enter {
   from {
     opacity: 0;
-    transform: translate(-50%, calc(-50% + var(--space-2))) scale(0.98);
+    transform: translate(-50%, calc(-50% + var(--space-1)));
   }
 }
 
 @media (max-width: 640px) {
   .ui-alert-dialog__content {
-    width: calc(100vw - var(--space-4));
-    max-height: calc(100dvh - var(--space-4));
+    width: calc(100 * var(--ui-vw) - var(--space-4));
+    max-height: calc(100 * var(--ui-dvh) - var(--space-4));
   }
 
   .ui-alert-dialog__header,

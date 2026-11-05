@@ -35,8 +35,9 @@ const props = defineProps<{
   originalUrl: (reference: EvidenceRef) => string | null
   imageUrl?: (reference: EvidenceRef) => string | null
   artifactSize?: (reference: EvidenceRef) => number | null | undefined
+  initialOpen?: boolean
 }>()
-const open = ref(false)
+const open = ref(Boolean(props.initialOpen))
 const disclosure = ref<HTMLDetailsElement>()
 const summary = ref<HTMLElement>()
 // 收起卸载读取器，仅为同一来源条目保留轻量阅读位置，不保留大正文读取许可。
@@ -52,8 +53,9 @@ defineExpose({ reveal })
 </script>
 
 <style scoped>
-.evidence-item-disclosure { min-width: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
-.evidence-item-disclosure > summary { padding: var(--space-2) var(--space-3); cursor: pointer; overflow-wrap: anywhere; font-weight: var(--font-medium); }
+.evidence-item-disclosure { min-width: 0; border-top: 1px solid var(--border); }
+.evidence-item-disclosure > summary { padding: var(--space-4) 0; cursor: pointer; overflow-wrap: anywhere; font-size: var(--text-md); font-weight: var(--font-medium); }
+.evidence-item-disclosure > summary:hover { color: var(--accent); }
 .evidence-item-disclosure > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .evidence-item-disclosure__body { min-width: 0; }
 </style>

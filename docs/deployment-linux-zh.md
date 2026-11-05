@@ -39,20 +39,18 @@ cd "$UNPACK_DIR"/arena-*-linux-code-only
 
 后续 `./deploy/...` 命令均在这个应用根目录执行。安装位置可自行选择，不必使用示例目录。
 
-**2. 准备三个配套镜像，以下二选一。** 当前任务除了主 Worker，还需要流量网关和执行器；只准备主 Worker 可能导致服务启动后任务仍无法执行。镜像引用和 tar 路径都是待替换参数，不是已发布地址。
+**2. 准备两个配套镜像，以下二选一。** Worker 和 executor 共用研究镜像；网关、collector 和网络 helper 使用独立采集镜像。运行容器、挂载和任务停止边界不合并。镜像引用和 tar 路径都是待替换参数，不是已发布地址。
 
 从实际仓库拉取，任一步失败时先处理，不继续启动：
 
 ```bash
 WORKER_IMAGE='替换为实际仓库/worker:配套版本'
 GATEWAY_IMAGE='替换为实际仓库/traffic-gateway:配套版本'
-EXECUTOR_IMAGE='替换为实际仓库/task-executor:配套版本'
 docker pull "$WORKER_IMAGE" &&
-  docker pull "$GATEWAY_IMAGE" &&
-  docker pull "$EXECUTOR_IMAGE"
+  docker pull "$GATEWAY_IMAGE"
 ```
 
-或逐个导入可信镜像 tar；分发方提供的单个 tar 也可以包含全部三个镜像：
+或逐个导入可信镜像 tar；分发方提供的单个 tar 也可以包含两个镜像：
 
 ```bash
 IMAGE_TAR='/绝对路径/配套镜像.tar'
@@ -65,7 +63,6 @@ docker load --input "$IMAGE_TAR"
 container:
   image: "替换为实际Worker镜像名:版本"
   traffic_gateway_image: "替换为实际网关镜像名:版本"
-  task_executor_image: "替换为实际执行器镜像名:版本"
 ```
 
 也可在新安装中将镜像标为默认名以省去 YAML 修改：`docker tag "$WORKER_IMAGE" arena-worker:local`；导入 tar 后先将 `WORKER_IMAGE` 设为其实际镜像名。改名不是必需步骤，已有默认 tag 时不要无意覆盖。已有显式镜像注册的配置见后面的按需说明。
@@ -83,16 +80,14 @@ cd Arena
 npm --prefix cairn/frontend ci
 npm --prefix cairn/frontend run build:server
 docker build -t arena-worker:local container/ &&
-  docker build -t arena-traffic-gateway:local container/traffic-gateway/ &&
-  docker build --build-arg WORKER_IMAGE=arena-worker:local \
-    -t arena-task-executor:local container/task-executor/
+  docker build -t arena-traffic-gateway:local container/traffic-gateway/
 ```
 
 - `install.sh` 用 `uv sync --frozen --no-dev` 安装 Python 依赖，只创建缺失配置，不启动服务、不构建前端或镜像。
-- `build:server` 包含类型检查，生成由 Server 提供的正式前端；会清空 `cairn/src/cairn/server/static/`，不要在其中存放私有文件。无需启动 Vite 开发服务，`build:verify` 不能代替正式构建。
-- 三个构建上下文分别为 `container/`、`container/traffic-gateway/`、`container/task-executor/`。执行器继承主 Worker，因此先构建主 Worker；网关独立构建。使用自定义 tag 时同步修改配置中的三个镜像字段，以及执行器构建的 `WORKER_IMAGE` 参数。
+- `build:server` 包含类型检查，生成由 Server 提供的正式前端；更新 `cairn/src/cairn/server/static/index.html` 并保留旧 hash 资源以支持已打开页面的延迟加载，不要在静态目录中存放私有文件。无需启动 Vite 开发服务，`build:verify` 不能代替正式构建。
+- 两个构建上下文为 `container/`、`container/traffic-gateway/`。研究镜像已包含执行服务和浏览器证书工具，不再构建独立 executor 镜像。使用自定义 tag 时修改 `container.image`、`container.traffic_gateway_image` 及已有显式研究镜像映射。
 
-`start.sh` 只会构建缺失的默认主 Worker，**不会重建已有的同名镜像，也不会准备或检查网关、执行器**；不要省略上述步骤。自定义镜像需先自行 build、pull 或 load。完成后使用下面的共用配置与启动步骤。
+`start.sh` 自动构建缺失的默认研究镜像和网关镜像，并分别做无网络检查；已有同名镜像只检查、不自动刷新。旧 Worker 缺少执行服务时会明确报错，须先重建。自定义镜像需先自行 build、pull 或 load，脚本不静默覆盖，也不在失败后回落默认镜像。完成后使用下面的共用配置与启动步骤。
 
 ## 修改端口和常用配置
 
@@ -249,25 +244,54 @@ PostgreSQL 备份不包含这些文件；资料库定义在数据库、正文在
 
 `stop.sh` 不等于所有 Worker 执行都已退出。更新或改变执行环境前，先结束或暂停相关任务并确认执行退出。`--server-only` 仅供维护，不启动新的 Dispatcher，也不会停止已运行的 Dispatcher；需要仅运行 Server 时先停应用，再执行 `./deploy/start.sh --server-only`。不要从两个安装目录同时启动连接同一数据库、使用同一身份的 Dispatcher。
 
+### 读取暂停或结束后的执行材料
+
+在应用根目录使用本机运维 CLI；它只依赖当前 Docker daemon，不连接业务数据库、不调用模型，也不经过 Tenant Web API 鉴权。执行人须有本机 Docker 权限；读取 bind/volume 文件还须能读取其宿主源路径。不要把这个入口当作不可信租户的文件沙箱或开放为远程下载接口。
+
+```bash
+# 先取得精确项目下的完整 container_id，包括已保留的研究、独立报告和测试 executor。
+cairn/.venv/bin/cairn materials containers --project '实际项目ID'
+
+# 省略 --path 只返回支持的材料入口，不下载 HOME/TMPDIR 整棵目录。
+cairn/.venv/bin/cairn materials list --project '实际项目ID' --container '完整64位容器ID'
+
+# 选择已知材料子目录做有界索引，或直接查某个文件。
+cairn/.venv/bin/cairn materials list --project '实际项目ID' --container '完整64位容器ID' \
+  --path /home/kali/workspace/research
+
+# 保存单个普通文件的原始字节；输出文件必须尚不存在，父目录须已存在。
+cairn/.venv/bin/cairn materials save --project '实际项目ID' --container '完整64位容器ID' \
+  --path /tmp/c1-control-layer --output /安全目录/新的材料文件.bin
+```
+
+- `list` / `save` 只读取 `paused`、`exited`、`created`、`dead` 的静止现场，**不会 exec、start、unpause、停止或删除容器**。活动现场会明确拒绝；不要为了下载材料擅自暂停真实任务。容器名称、短 ID、名称前缀和其他项目的 ID 都不能替代完整 ID 与归属标签核验。
+- 支持标准 Worker 的 `/home/kali`（含 workspace、浏览器 profile）、`/tmp`、`/var/tmp` 下的材料。`/`、其他 Linux 系统目录不开放；HOME、`/tmp`、`/var/tmp` 只作为入口，不能整根归档，应选择具体文件或材料子目录。根入口清单不是文件存在性证明。
+- `.cairn`、pi 私有配置、prompts、执行 gate/socket、capture CA、egress private、未知 `.config` 子目录及私有挂载别名不开放；浏览器 `.config/chromium`、`.config/google-chrome`、`.config/ms-playwright` 可作为研究材料读取。研究/报告的 writable-layer 导出要求当前私有 control 与 prompts 已分别挂载，旧的未隔离现场会明确拒绝，不通过启动或复制控制配置补齐。
+- 目录索引来自 Docker tar 流，最多读取 8 MiB / 200 条记录；遇私有子树也会停止。`truncated: true` 与 `limit_reason` 表示不完整，不能当作全部材料清单；请缩小到已知子目录，不会后台下载整盘。索引不导出文件正文，`blocked_special` 的链接、socket 等特殊项不能作为普通文件保存。
+- 保存会逐父路径检查 symlink，拒绝 tar 中的 symlink / hardlink、目录冒充与额外文件。bind/volume 文件另经宿主 `O_NOFOLLOW` / `fstat.nlink` 核验；**Docker archive stat 不提供 writable-layer inode 的 nlink，因此 layer 只验证 tar 可观测的链接类型，不宣称证明 layer inode 没有 hardlink**。结果的 `hardlink_check` 区分 `host_nlink_and_tar` 与 `tar_only`。同一文件系统仍可能被其他宿主进程或共享挂载写入，CLI 不提供并发写入的一致性快照。
+- 保存只在私有临时文件完整写入后原子无覆盖发布，失败删除临时字节，不覆盖已有文件或输出 symlink。材料不是可执行输入；下载后先审阅，不直接运行其中脚本。此入口读取保留的容器材料，不替代 Server 中已接受 Artifact 的现有下载，也不读取已删除的容器或业务材料。
+
 ### 源码更新
 
 当前没有从 GitHub 获取代码并完成整套升级的源码一键更新器。先在原应用根目录执行 `git status --short` 和 `git branch --show-current`，保留并处理本地修改；不要用 `reset --hard` 或清理工作区代替处理。以下示例适用于**当前已在 `main`、工作区无待保护改动，且 `origin` 指向预期仓库**的安装；开发分支按自己的目标更新，不直接套用。
 
-确认相关任务已经退出后执行；任一步失败即停止，不继续启动半套环境：
+先阅读下方[本次跨版本升级注意](#本次跨版本升级注意)，确认迁移条件、原件目录与一致备份齐备，相关任务已退出且处于获准维护窗口。**存在待迁移历史会话的安装不在本轮完整升级支持范围内**，不要直接套用。先 fetch 并确认可以快进，再停服务；任一步失败即停止，不继续启动半套环境：
 
 ```bash
 (
   set -e
+  test -z "$(git status --porcelain)" || { printf '请先处理本地修改\n' >&2; exit 1; }
+  test "$(git branch --show-current)" = main
+  git fetch origin main
+  git merge-base --is-ancestor HEAD origin/main
   ./deploy/stop.sh
-  git pull --ff-only origin main
+  git merge --ff-only origin/main
   ./deploy/install.sh
   npm --prefix cairn/frontend ci
   npm --prefix cairn/frontend run build:server
-  # 自定义镜像需同步替换三个 tag 和 WORKER_IMAGE，保留原配置。
+  # 自定义镜像需使用实际研究镜像与网关 tag，保留原配置。
   docker build -t arena-worker:local container/
   docker build -t arena-traffic-gateway:local container/traffic-gateway/
-  docker build --build-arg WORKER_IMAGE=arena-worker:local \
-    -t arena-task-executor:local container/task-executor/
   ./deploy/start.sh
   ./deploy/status.sh
 )
@@ -277,10 +301,10 @@ PostgreSQL 备份不包含这些文件；资料库定义在数据库、正文在
 
 ### 部署包更新
 
-取得配套新包，像路径 A 一样解压到**原安装目录之外的新空目录**。**当前更新器只自动准备主 Worker，尚未接入网关和执行器；运行更新器前必须先准备这两个与新版本配套的镜像，不能把下面一条命令当作完整执行环境的一键升级。**
+取得配套新包，像路径 A 一样解压到**原安装目录之外的新空目录**。先核对[跨版本升级条件](#本次跨版本升级注意)；有待迁移历史会话时，不要把包更新器当作文件／session 迁移入口。本地更新器会统一准备研究镜像与独立网关镜像，但不负责从远端获取新应用或发布镜像。新更新器在暂存和停服务前拒绝目标中的 `.git` 目录或 worktree 文件，请对 Git 安装使用源码路径。
 
-- 使用预构建镜像：按路径 A 拉取或导入三个配套镜像，确认原安装配置的三个镜像引用对应本次版本。新 tag 需要显式更新引用；仅发布或拉取新 tag 不会自动修改配置。
-- 使用默认本地镜像：确认旧任务已退出并停止原宿主应用，再从新包根目录按路径 B 的三个 Docker 命令构建。此时更新器仍会检查并缓存重建主 Worker；相同输入且缓存有效时复用已有层。网关和执行器须自行确认构建成功，更新器目前不会替它们检查。
+- 使用预构建／自定义镜像：按路径 A 拉取或导入两个配套镜像，确认原安装配置的引用对应本次版本。新 tag 需要显式更新引用；仅发布或拉取新 tag 不会自动修改配置。
+- 使用默认本地镜像：确认旧任务已退出后直接执行下方新包更新器，无需提前手工构建。更新器使用新版源码缓存构建两镜像，研究镜像检查 pi runner、执行服务与证书工具，网关单独检查采集依赖和入口；准备失败不启动新应用。
 
 准备完成后运行**新包中的**更新器，替换下例两个绝对路径：
 
@@ -288,16 +312,16 @@ PostgreSQL 备份不包含这些文件；资料库定义在数据库、正文在
 /新包解压目录/arena-实际版本-linux-code-only/deploy/update.sh --target /现有应用根目录
 ```
 
-一条入口依次完成：**停止宿主应用 → 替换受管程序和静态资源 → install 同步依赖 → 准备 Worker → start（沿用现有 PostgreSQL 自动迁移）→ 检查服务状态**。Worker 准备使用原安装目录中的新版代码、Python 环境和运行配置；准备失败即中断，不继续 start 或迁移。无需另跑数据库迁移命令，也不升级 PostgreSQL 大版本。
+一条入口依次完成：**停止宿主应用 → 替换受管程序和静态资源 → install 同步依赖 → 准备研究与网关镜像 → start（沿用现有 PostgreSQL 自动迁移）→ 检查服务状态**。两镜像准备使用原安装目录中的新版代码、Python 环境和运行配置；准备失败即中断，不继续 start 或迁移。无需另跑数据库迁移命令，也不升级 PostgreSQL 大版本。
 
-- 实际配置引用默认本地 `arena-worker:local` 时，即使镜像已存在也带缓存构建新版候选，通过标签和无网络应用自检后才更新默认 tag；构建或验收失败不覆盖原引用，不清理旧镜像或构建缓存。
+- 实际配置引用默认本地 `arena-worker:local`、`arena-traffic-gateway:local` 时，即使镜像已存在也分别带缓存构建新版候选，通过各自无网络检查后才更新对应 tag；构建或验收失败不提升该候选，不清理旧镜像或构建缓存。此准备不是两个 tag 的原子事务：后一个失败时前一个可能已准备完成，但不会继续启动，修复后重跑完整更新入口。
 - 自定义镜像名、远端 tag/digest 和显式映射保持不变，不自动覆盖。更新器逐项说明未自动更新，需自行准备与新应用配套的镜像；已有镜像的标签检查不证明版本配套。缺失镜像或无效配置明确失败，不回退默认值。
-- `-- --server-only` 明确跳过 Worker 准备并仅启动 Server，不表示 Worker 已更新；仅用于有意选择的维护模式，不是 Worker 构建失败后的绕过办法。
+- `-- --server-only` 明确跳过研究与网关镜像准备并仅启动 Server，不表示执行环境已更新；仅用于有意选择的维护模式，不是镜像构建失败后的绕过办法。
 - **首次完整下载和构建可以接受，后续更新应复用未变化的安装层。** 同一基础镜像 / 架构、安装输入不变且有效构建缓存仍在时，源码或 AGENTS 更新复用工具安装层，lock 不变时复用 `npm ci` 层；编译和应用自检仍可重跑。本次层重排、历史 timeout 改动、base 变化或缓存缺失可能重跑安装，不保证任意旧机器首次升级零下载。仅 `docker load` 的最终镜像不等于拥有完整多阶段缓存。
 
 更新保留 `runtime`、完整 keyring / token、数据库卷、项目资料、Artifact、外置存储与 Python 环境位置，依赖仍会同步。tag 更新只影响后续新建容器，**不替换已有项目容器、不恢复或重跑任务**；宿主服务停止也不证明 Worker 已退出。更新前应结束或暂停相关任务并确认执行退出。它不是源码同步器，不用于需要保留开发源码或受管目录本地改动的 Git 工作区。临时监听参数可在末尾通过 `-- --host 0.0.0.0 --port 8080` 原样传入；持久配置仍修改原安装的 `runtime/arena.env`，已有外置静态资源路径不会被改写。
 
-失败时按输出检查，修复后**重新运行新包的完整 `update.sh --target ...` 命令并保留原参数**，不要直接 start 而漏掉 Worker 准备。迁移阻断按原错误处理，不删除项目、报告、归档材料或改 SQL 绕过。旧程序临时备份只覆盖程序文件，不含数据库 / runtime，也不保证依赖、配置、镜像或数据库整体回滚；install 可能已改变依赖或 legacy 私有配置，start 可能已执行迁移。升级前按需备份数据库、数据目录、私有配置、完整 keyring（含历史版本）和 token，外置文件一起保留。
+失败时按输出检查，修复后**重新运行新包的完整 `update.sh --target ...` 命令并保留原参数**，不要直接 start 而漏掉两镜像的刷新准备。迁移阻断按原错误处理，不删除项目、报告、归档材料或改 SQL 绕过。旧程序临时备份只覆盖程序文件，不含数据库 / runtime，也不保证依赖、配置、镜像或数据库整体回滚；install 可能已改变依赖或 legacy 私有配置，start 可能已执行迁移。升级前按需备份数据库、数据目录、私有配置、完整 keyring（含历史版本）和 token，外置文件一起保留。
 
 如需自行生成部署包，在完整源码根目录安装好依赖并完成 `build:server` 后执行 `python3 deploy/package_release.py`，默认产物为 `dist/arena-<version>-linux-code-only.zip`。这是可选分发操作，不是使用已有包的前置步骤，也不包含 Worker 镜像。当前仓库没有随 push 自动打包、发布镜像的 workflow；更新器也不从 GitHub 下载新版本，不存在默认跟随 `main` 的远端 ref。
 
@@ -305,14 +329,24 @@ PostgreSQL 备份不包含这些文件；资料库定义在数据库、正文在
 
 - **拉取预构建镜像：** Docker 按内容寻址的镜像层下载，本机已有的相同层会复用。它不是按单个文件打补丁；某层变化，需要下载新的整层。把稳定工具层放在应用层之前、发布时保留构建缓存，才能让只改应用的版本继续共享大工具层。
 - **本地构建：** 主 Worker 已把工具安装放在应用和指引 COPY 之前；仅应用或指引变化、基础镜像及安装输入不变且缓存仍有效时，可复用已有工具层。工具版本、依赖输入、基础镜像或架构变化，以及缓存缺失，仍会重新下载相应层；新增工具也不保证只下载新增那个文件。
-- **当前执行器的例外：** `container/task-executor/Dockerfile` 在主 Worker 之上安装 `libnss3-tools`。主 Worker 镜像变化时，该 apt 层会失效并重新执行安装；它复用主 Worker 的扫描器等大层，但还不满足“应用更新完全不重新安装工具”。这项依赖分层收敛仍待实施，不以历史主 Worker 缓存验证冒充已经解决。
+- **研究镜像已合并：** 执行服务直接复制到 Worker 镜像，`libnss3-tools` 与字体位于应用、执行服务和指引之前，删除独立 executor Dockerfile。Node 与 Kali 基础引用固定 digest，普通应用改动不会因浮动 `latest` 悄悄更换基础；工具或基础升级另行显式处理。网关保持自己的 Python、mitmproxy 与 pproxy 依赖层。
 - 不默认运行 Docker prune，不删除旧工具缓存，不把最终镜像的 `load` 当成导入了完整多阶段构建缓存。首次安装或缓存不存在时仍需完整准备相关依赖。
 
 ### 本次跨版本升级注意
 
-本次包含 PostgreSQL v60–v75 迁移和新的执行合同，Server、Dispatcher、正式前端与执行镜像应配套升级。v61 要求没有 pending / running 报告；v71 要求旧普通 Worker 可明确映射到 bootstrap / reason / explore 三种单角色，重复或歧义配置会明确阻断，补建的 Worker 需要配置模型。默认报告模板键冲突也可能阻断迁移；不得靠清库或改写已应用迁移绕过。更早版本还须遵守其原有迁移前置条件。
+`install.sh` 会一次性转换旧标准 `container.task_executor_image: arena-task-executor:local`：删除旧字段，executor 改用实际选中的研究镜像；旧值已与 `container.image` 相同也可直接删除。其他自定义 executor 值会在写配置和凭据前明确阻断，不静默丢弃。应先将定制能力并入对应研究镜像（包含执行服务、证书工具与 pi runner），确认实际 `images/profile` 映射后移除旧字段，再重新安装；无需保留旧键作为 fallback。没有旧键的配置不需要转换。默认镜像重建只影响新建容器，旧项目的控制容器仍保留；镜像引用变化触发既有复用签名检查，不能以重打同名 tag 或重启应用宣称所有历史容器已升级。
 
-升级后普通项目不再手选 Worker 组合；模型、Worker 及执行参数集中在 Worker 配置，项目 Agent 单独配置默认模型。新复测结果使用 v4、报告分段提交使用 v5，历史已接受材料保留，不承诺旧冻结执行可直接续跑。完整用户可见变化见根目录 `CHANGELOG.md`。
+本次新增 **PostgreSQL v76–v83**：独立会话归属、漏洞人工处置、物理执行控制、会话研究与回收、暂停时钟、资料选择、当前资料正文、模型响应级用量与价格快照。Server、Dispatcher、正式前端与两镜像应配套升级。更早的迁移条件仍有效：v61 要求没有 pending / running 报告；v71 拒绝无法明确映射到 bootstrap / reason / explore 的普通 Worker、重复角色和异常 owner 关系，补建 Worker 后仍需配置模型；旧模板键冲突等按实际错误处理，不清库、不改已应用迁移 checksum。
+
+**历史会话：自动 schema 迁移不是无损续聊迁移。** v76 遇到没有对应消息的 chat run 会拒绝升级；有运行历史的会话可能留下 `session_verification_required`，旧附件／产物可能留下 `conversation_file_migration_required`。当前 `update.sh`、`start.sh` 和 CLI **没有调用旧会话文件／SDK session 的显式迁移函数，本轮不提供通用运维入口**。有这些数据的旧安装应先保留原环境与一致备份，另行安排基于原件的迁移，不直接执行上述整套升级后期待续聊。新安装或无此类历史数据的安装仍需满足其他 schema 前置条件。
+
+源码中的 `migrate_conversation_files` 和 `migrate_local_conversation_session` 不是可直接复制执行的升级命令。前者需托管事务、原 Artifact 根目录及摘要匹配的原件；后者还需原机器的真实 Dispatcher 身份、原 Server 地址／挂载、仍存在且为 exited/created 的原聊天容器、最后写入 run 和可验证的 SDK manifest/session。缺失归属、原容器／原件、遗留锁或 SDK 证据时只保留阻断，不能猜目录、改状态假解锁或启动历史容器。文件迁移普通事务回滚清理本次副本；session 迁移失败可能保留副本并在重试时严格比对，不承诺任意中断后自动恢复。
+
+**v82 在首次数据库初始化时读取原资料正文和旧知识目录。** 升级前在原安装 `runtime/arena.env` 明确保留 `CAIRN_ADVISORY_LIBRARY_ROOT`（默认相对应用根目录的 `datas/cairn/advisory-library-content`）、`CAIRN_KNOWLEDGE_ROOT`（脚本默认 `runtime/data/knowledge`）和 `CAIRN_ARTIFACT_ROOT`，外置路径建议为绝对路径。本版 `start.sh` 在 bootstrap 之前设置这些运行路径，保留显式知识根，不等到 Server 启动后才设置。资料库最新版本（含归档库）的文件必须存在、字节数／SHA256／UTF-8 正确；历史版本正文之后仍会读取原目录，不能在迁移后删除。
+
+旧知识根缺失可能被当成没有材料，非 UTF-8、symlink 或非法路径可能跳过；**v82 成功不证明全部旧知识已导入**。必须在首次迁移前核对原目录；已经在错误目录下完成 v82 的安装、仅恢复数据库未恢复原文件／身份的安装，不在本轮自动修复范围内，补回目录后重启不会重做已完成迁移。不把 `db migrate --dry-run` 当作无副作用的资料检查，也不修改迁移记录强迫重跑。
+
+升级后 ChatBot 是独立会话入口，项目作为可选上下文；创建／计划使用 `library_selections`，旧 `library_keys` 与资料库版本 CRUD 退出，流量汇总改为分页。新复测结果使用 v4；报告数据为 v6、分段输出合同仍为 v5，历史已接受材料保留，不承诺旧冻结执行直接续跑。完整变化见根目录 `CHANGELOG.md`。
 
 ## 排障
 

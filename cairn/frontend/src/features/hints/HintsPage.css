@@ -1,105 +1,153 @@
 .hints-page {
-  width: 100%;
-  max-width: 1120px;
-  min-width: 0;
-  margin: 0 auto;
-  padding: var(--space-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
-
-.hints-header,
-.hints-create-heading {
-  min-width: 0;
-}
-
-.hints-header h2,
-.hints-create-heading h3 {
-  margin: 0;
-  color: var(--text);
-}
-
-.hints-header h2 {
-  font-size: var(--text-xl);
-}
-
-.hints-header p,
-.hints-create-heading p {
-  margin: var(--space-1) 0 0;
-  color: var(--text-muted);
-  line-height: var(--leading-normal);
-}
-
-.hints-create-form {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
-
-.hints-anchor-fields {
-  min-width: 0;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr) minmax(400px, 0.5fr);
+  align-items: start;
+  width: 100%;
+  min-width: 0;
+  padding: var(--layout-content-padding);
+  gap: var(--space-5);
+}
+
+.hints-history,
+.hints-compose {
+  min-width: 0;
+}
+
+.hints-history-header {
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+
+.hints-history-heading {
+  display: flex;
+  align-items: baseline;
   gap: var(--space-3);
+}
+
+.hints-history-heading h2 {
+  margin: 0;
+  font-size: var(--text-section);
+  font-weight: var(--font-semibold);
+}
+
+.hints-history-heading > span {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.7;
+}
+
+.hints-records {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.hints-records > li {
+  border-bottom: 1px solid var(--border);
+}
+
+.hint-record {
+  padding-block: var(--space-5);
+}
+
+.hint-record-header,
+.hint-record-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+}
+
+.hint-record-header .ui-badge {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.hint-time {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.hint-content {
+  max-width: 880px;
+  margin-block: var(--space-4);
+  color: var(--text);
+  font-size: var(--text-md);
+  line-height: var(--leading-reading);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.hint-record-footer {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.hint-record-footer code {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
+
+.hint-anchor {
+  padding-right: var(--space-3);
+  border-right: 1px solid var(--border);
+}
+
+.hints-compose {
+  padding-left: 28px;
+  border-left: 1px solid var(--border);
+}
+
+.hints-create-heading h2 {
+  margin: 0;
+  font-size: var(--text-section);
+  font-weight: var(--font-semibold);
+}
+
+.hints-create-form,
+.hints-anchor-fields {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-5);
+}
+
+.hints-create-form textarea {
+  font-size: var(--text-md);
+  line-height: 1.8;
 }
 
 .hints-create-actions {
   display: flex;
   justify-content: flex-end;
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
 }
 
-.hints-status-bar {
-  padding-block: var(--space-1);
-}
+@container workspace (max-width: 1000px) {
+  .hints-page {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-5);
+  }
 
-.hints-status-bar strong {
-  color: var(--text);
-  font-size: var(--text-sm);
-}
-
-.hint-meta-cell {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
-.hint-meta-cell code,
-.hint-time {
-  color: var(--text-faint);
-  font-size: var(--text-xs);
-}
-
-.hint-content {
-  min-width: min(420px, 52vw);
-  max-width: 680px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  line-height: var(--leading-normal);
-}
-
-.hint-time {
-  white-space: nowrap;
+  .hints-compose {
+    padding: var(--space-5) 0 0;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
 }
 
 @media (max-width: 720px) {
   .hints-page {
-    padding: var(--space-3);
-  }
-
-  .hints-anchor-fields {
     grid-template-columns: minmax(0, 1fr);
+    padding: var(--space-4);
   }
 
-  .hints-create-actions,
   .hints-create-actions > * {
     width: 100%;
-  }
-
-  .hint-content {
-    min-width: min(320px, 78vw);
   }
 }

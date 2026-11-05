@@ -181,7 +181,7 @@ afterEach(() => {
 })
 
 describe('HintsPage', () => {
-  it('renders labeled shared controls, an accurate sync status, and accessible hint rows', async () => {
+  it('renders labeled controls and chronological plain-text records with creator, time, ID and anchors', async () => {
     workspaceStore.projectDetail = detail('project-a', [
       hint('older', { created_at: '2026-08-20T00:00:00Z' }),
       hint('newer', {
@@ -200,12 +200,15 @@ describe('HintsPage', () => {
     expect(controlByLabel('提示内容').getAttribute('required')).not.toBeNull()
     expect(wrapper.text()).toContain('随工作空间每 10 秒同步')
     expect(wrapper.text()).not.toContain('实时刷新')
-    expect(wrapper.get('caption').text()).toBe('项目人工提示列表')
-    expect(wrapper.findAll('th').every((heading) => heading.attributes('scope') === 'col')).toBe(
-      true,
+    const records = wrapper.findAll('ol[aria-label="项目人工提示记录"] article')
+    expect(records[0]?.attributes('aria-label')).toBe('提示 newer')
+    expect(records[1]?.attributes('aria-label')).toBe('提示 older')
+    expect(records[0]?.get('time').attributes('datetime')).toBe('2026-08-21T01:00:00Z')
+    expect(records[0]?.get('.hint-content').element.textContent).toBe(
+      workspaceStore.projectDetail!.hints[1]!.content,
     )
-    expect(wrapper.find('tbody tr').text()).toContain('newer')
-    expect(wrapper.findAll('tbody tr')[1]?.text()).toContain('older')
+    expect(records[1]?.text()).toContain('usr-1')
+    expect(records[1]?.text()).toContain('项目级')
     expect(wrapper.text()).toContain('AGENT 自治系统')
     expect(wrapper.text()).toContain('intent i001')
     expect(wrapper.text()).toContain('Authorization: Bearer allowed-secret')
@@ -218,6 +221,30 @@ describe('HintsPage', () => {
     )
     expect(document.body.textContent).not.toContain('origin · Origin')
     expect(document.body.textContent).not.toContain('goal · Goal')
+  })
+
+  it('keeps the draft mounted while records sync and does not interpret text as Markdown', async () => {
+    const content =
+      '# 原始标题\n**保留星号**\n[参考](https://example.invalid)\n' + '完整正文\n'.repeat(80)
+    workspaceStore.projectDetail = detail('project-a', [
+      hint('fact-hint', { content, fact_id: 'f001' }),
+    ])
+    const wrapper = mountPage()
+    await setTextarea('尚未提交的多行草稿\n保留此行')
+    const textarea = controlByLabel<HTMLTextAreaElement>('提示内容')
+
+    workspaceStore.projectDetail = detail('project-a', [
+      hint('fact-hint', { content, fact_id: 'f001' }),
+      hint('synced', { created_at: '2026-08-22T00:00:00Z' }),
+    ])
+    await flushPromises()
+    const record = wrapper.get('[aria-label="提示 fact-hint"]')
+    expect(record.get('.hint-content').element.textContent).toBe(content)
+    expect(record.findAll('a, h1, strong')).toHaveLength(0)
+    expect(record.text()).toContain('fact f001')
+    expect(controlByLabel('提示内容')).toBe(textarea)
+    expect(textarea.value).toBe('尚未提交的多行草稿\n保留此行')
+    expect(mocks.createProjectHint).not.toHaveBeenCalled()
   })
 
   it('submits exact project, fact, and intent payloads with intent precedence', async () => {

@@ -87,6 +87,56 @@ def export_schema(schema_format: str, output_path: Path | None):
     click.echo(content, nl=False)
 
 
+@main.group("materials")
+def materials_commands():
+    """通过本机 Docker 权限读取静止执行现场的材料，不使用 Tenant Web 授权。"""
+
+
+def _materials_result(operation, *args):
+    import tarfile
+
+    import docker
+    from requests.exceptions import RequestException
+
+    from cairn.dispatcher.runtime.materials import MaterialsError, ProjectMaterials
+
+    try:
+        with docker.from_env(timeout=10) as client:
+            result = getattr(ProjectMaterials(client), operation)(*args)
+    except MaterialsError as exc:
+        raise click.ClickException(str(exc)) from exc
+    except (docker.errors.DockerException, RequestException, OSError, tarfile.TarError, ValueError) as exc:
+        # 不透传 daemon、主机路径或归档异常中的私有正文。
+        raise click.ClickException("materials_read_failed：请核对本机 Docker、容器和材料路径") from exc
+    click.echo(json.dumps(result, ensure_ascii=False, sort_keys=True))
+
+
+@materials_commands.command("containers")
+@click.option("--project", "project_id", required=True, help="精确项目 ID")
+def materials_containers(project_id: str):
+    """列出标签归属匹配的研究、报告和测试 executor（包括暂停和停止的容器）。"""
+    _materials_result("containers", project_id)
+
+
+@materials_commands.command("list")
+@click.option("--project", "project_id", required=True, help="精确项目 ID")
+@click.option("--container", "container_id", required=True, help="完整的 64 位容器 ID，不接受名称或短 ID")
+@click.option("--path", default=None, help="材料子目录或文件；省略只列支持的入口，不递归下载根目录")
+def materials_list(project_id: str, container_id: str, path: str | None):
+    """有界读取材料索引；仅支持 paused/exited/created/dead 现场。"""
+    _materials_result("list", project_id, container_id, path)
+
+
+@materials_commands.command("save")
+@click.option("--project", "project_id", required=True, help="精确项目 ID")
+@click.option("--container", "container_id", required=True, help="完整的 64 位容器 ID")
+@click.option("--path", required=True, help="允许材料区域内的单个普通文件")
+@click.option("--output", required=True, type=click.Path(dir_okay=False, path_type=Path), help="新建的宿主输出文件，绝不覆盖")
+def materials_save(project_id: str, container_id: str, path: str, output: Path):
+    """按原字节保存单文件；不 exec、启动、解冻或删除容器。"""
+    _materials_result("save", project_id, container_id, path, output)
+
+
 @main.group("auth")
 def authentication_commands():
     """Bootstrap and maintain authenticated users."""

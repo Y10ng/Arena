@@ -122,7 +122,9 @@ function deferred<T>() {
 }
 function button(text: string) {
   const found = [...document.body.querySelectorAll<HTMLButtonElement>('button')].find(
-    (item) => item.textContent?.trim() === text,
+    (item) =>
+      item.textContent?.trim() === text ||
+      item.querySelector('.sc-title')?.textContent?.replace(/\s/g, '') === text.replace(/\s/g, ''),
   )
   if (!found) throw new Error(`找不到按钮：${text}`)
   return found
@@ -143,6 +145,10 @@ async function mountPage() {
   return wrapper
 }
 async function edit() {
+  if (!document.querySelector('.scenario-reader')) {
+    document.querySelector<HTMLButtonElement>('[data-scenario-key="default"]')!.click()
+    await flushPromises()
+  }
   button('编辑场景').click()
   await flushPromises()
 }
@@ -213,6 +219,10 @@ describe('探索场景阅读与弹窗草稿', () => {
   it('默认阅读原文，不加载纯展示总览或显示报告开关', async () => {
     const wrapper = await mountPage()
     expect(wrapper.findAll('button.scenario-list-item')).toHaveLength(2)
+    expect(wrapper.find('.scenario-reader').exists()).toBe(false)
+    await wrapper.get('[data-scenario-key="default"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.scenario-directory').exists()).toBe(false)
     expect(wrapper.find('.scenario-template-content').element.textContent).toBe(
       '  原始背景\n保留换行  ',
     )
@@ -232,19 +242,34 @@ describe('探索场景阅读与弹窗草稿', () => {
 
   it('新建只创建内存草稿，取消和关闭都不产生 PUT 或占位场景', async () => {
     await mountPage()
-    button('新建场景').click()
+    const trigger = button('新建场景')
+    trigger.click()
     await flushPromises()
     expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain('新建场景')
     expect(document.body.querySelectorAll('.ui-select__trigger')).toHaveLength(1)
     inputValue(labelInput(), '未保存的新场景')
+    const origin = document.body.querySelector<HTMLTextAreaElement>('textarea')!
+    const longDraft = Array.from({ length: 35 }, (_, index) => `未保存本地草稿第 ${index + 1} 行`).join('\n')
+    inputValue(origin, longDraft)
+    await flushPromises()
     button('取消').click()
     await flushPromises()
+    expect(document.body.querySelector('[role="alertdialog"]')).not.toBeNull()
+    button('继续编辑').click()
+    await flushPromises()
+    expect(origin.value).toBe(longDraft)
+    button('取消').click()
+    await flushPromises()
+    button('放弃修改').click()
+    await flushPromises()
     expect(document.body.querySelector('[role="dialog"]')).toBeNull()
-    button('新建场景').click()
+    await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
+    trigger.click()
     await flushPromises()
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     await flushPromises()
     expect(document.body.querySelector('[role="dialog"]')).toBeNull()
+    await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
     expect(mocks.api).not.toHaveBeenCalled()
     expect(scenariosData.value).toHaveLength(2)
   })
@@ -257,16 +282,22 @@ describe('探索场景阅读与弹窗草稿', () => {
     inputValue(origin, '  新的背景\n\n')
     await flushPromises()
     expect(scenariosData.value[0]?.label).toBe('默认探索')
-    vi.mocked(window.confirm).mockReturnValueOnce(false)
     button('取消').click()
+    await flushPromises()
+    button('继续编辑').click()
     await flushPromises()
     expect(labelInput().value).toBe('未保存名称')
     expect(origin.value).toBe('  新的背景\n\n')
-    expect(mocks.onBeforeRouteLeave.mock.calls[0]?.[0]()).toBe(true)
+    const leaving = mocks.onBeforeRouteLeave.mock.calls[0]?.[0]()
+    await flushPromises()
+    button('继续编辑').click()
+    expect(await leaving).toBe(false)
     button('取消').click()
     await flushPromises()
+    button('放弃修改').click()
+    await flushPromises()
     expect(document.body.querySelector('[role="dialog"]')).toBeNull()
-    expect(button('编辑场景')).toBeTruthy()
+    await vi.waitFor(() => expect(document.activeElement).toBe(button('编辑场景')))
     expect(scenariosData.value[0]?.origin_template).toBe('  原始背景\n保留换行  ')
     expect(mocks.api).not.toHaveBeenCalled()
   })

@@ -106,19 +106,19 @@ defineOptions({ name: 'UiDropdownMenu' })
 <style>
 .ui-dropdown-menu__content {
   min-width: 180px;
-  max-width: min(320px, calc(100vw - var(--space-4)));
-  border: calc(var(--space-1) / 4) solid var(--border-strong);
-  border-radius: var(--radius-md);
+  max-width: min(320px, calc(100 * var(--ui-vw) - var(--space-4)));
+  border: calc(var(--space-1) / 4) solid var(--border);
+  border-radius: var(--radius-lg);
   padding: var(--space-1);
   z-index: var(--z-overlay-child);
-  max-height: min(var(--reka-dropdown-menu-content-available-height), 70dvh);
+  max-height: min(calc(var(--reka-dropdown-menu-content-available-height) / var(--ui-scale)), calc(70 * var(--ui-dvh)));
   overflow-y: auto;
   overscroll-behavior: contain;
   background: var(--bg-elevated);
   box-shadow: var(--shadow-pop);
   color: var(--text);
   font-family: var(--font-sans);
-  font-size: var(--text-md);
+  font-size: var(--text-control);
   line-height: var(--leading-normal);
   transform-origin: var(--reka-dropdown-menu-content-transform-origin);
 }
@@ -135,7 +135,7 @@ defineOptions({ name: 'UiDropdownMenu' })
 }
 
 .ui-dropdown-menu__item {
-  min-height: var(--control-height);
+  min-height: var(--control-height-filter);
   border-radius: var(--radius-sm);
   padding: calc(var(--space-1) * 1.5) var(--space-3);
   display: flex;
@@ -143,14 +143,16 @@ defineOptions({ name: 'UiDropdownMenu' })
   gap: var(--space-2);
   outline: none;
   color: var(--text);
-  font-size: var(--text-md);
+  font-size: var(--text-control);
   line-height: var(--leading-normal);
   cursor: default;
   user-select: none;
 }
 
 .ui-dropdown-menu__item[data-highlighted] {
-  background: var(--surface-selected);
+  background: var(--surface-hover);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .ui-dropdown-menu__item[data-disabled] {
@@ -167,7 +169,7 @@ defineOptions({ name: 'UiDropdownMenu' })
 }
 
 .ui-dropdown-menu__icon {
-  width: var(--space-4);
+  width: 20px;
   flex: none;
   display: inline-flex;
   align-items: center;
@@ -185,6 +187,7 @@ defineOptions({ name: 'UiDropdownMenu' })
 }
 
 .ui-dropdown-menu__description {
+  font-size: var(--text-sm);
   color: var(--text-muted);
   font-weight: var(--font-normal);
 }
@@ -204,7 +207,7 @@ defineOptions({ name: 'UiDropdownMenu' })
 @keyframes ui-dropdown-menu-enter {
   from {
     opacity: 0;
-    transform: scale(0.98);
+    transform: translateY(var(--space-1));
   }
 }
 

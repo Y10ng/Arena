@@ -7,7 +7,7 @@ import re
 import uuid
 from typing import Any, NoReturn
 
-from cairn.report_segments import REPORT_MAX_MANIFEST_BYTES, REPORT_SEGMENT_ADAPTER
+from cairn.report_segments import REPORT_MAX_MANIFEST_BYTES, REPORT_SEGMENT_ADAPTER, MARKDOWN_SEGMENT_ADAPTER
 from cairn.server.schemas.candidates import CANDIDATE_MAX_MANIFEST_BYTES
 from cairn.dispatcher.config import WorkerConfig, is_sensitive_env_key
 from cairn.dispatcher.worker_protocol.candidate_authority import (
@@ -67,9 +67,10 @@ class PiDriver:
         session: str | None,
         *,
         phase: str,
-        project_id: str,
+        project_id: str | None,
         task_run_id: str,
         timeout_seconds: int,
+        conversation_id: str | None = None,
         conclude_timeout_seconds: int = 0,
         binding: dict[str, Any] | None = None,
         inputs: dict[str, Any] | None = None,
@@ -80,6 +81,7 @@ class PiDriver:
         task_execution: dict[str, object] | None = None,
         project_tools_socket_path: str | None = None,
         project_tools_workspace_path: str | None = None,
+        project_tools_allowed_tools: list[str] | None = None,
         session_root: str = "/home/kali/workspace/.cairn/pi",
     ) -> DriverResult:
         chat = phase == "chat_turn"
@@ -95,11 +97,15 @@ class PiDriver:
         for name, value in (
             ("prompt", prompt),
             ("phase", phase),
-            ("project_id", project_id),
+            ("conversation_id" if chat else "project_id", conversation_id if chat else project_id),
             ("task_run_id", task_run_id),
         ):
             if not isinstance(value, str) or not value:
                 reject(name, f"pi execution requires a non-empty string {name}")
+        if chat and project_id is not None and (not isinstance(project_id, str) or not project_id):
+            reject("project_id", "chat context must be null or a project identity")
+        if not chat and conversation_id is not None:
+            reject("conversation_id", "research execution cannot own a conversation")
         if type(timeout_seconds) is not int or timeout_seconds <= 0:
             reject("timeout_seconds", "pi execution requires a positive integer remaining timeout")
         if (
@@ -225,10 +231,12 @@ class PiDriver:
             segment_manifest_path = f"/tmp/cairn-prompts/pi-report-segments-{capture_id}.json"
             capabilities["report_segments"] = {
                 "binding": segment_binding,
-                "segment_schema": REPORT_SEGMENT_ADAPTER.json_schema(),
+                "segment_schema": (MARKDOWN_SEGMENT_ADAPTER if inputs and inputs.get("report_content_contract") == "markdown"
+                                   else REPORT_SEGMENT_ADAPTER).json_schema(),
                 "manifest_path": segment_manifest_path,
             }
-            if inputs and inputs.get("frozen_materials_path"):
+            # 自由 Markdown 只消费快照中已有的同源图片，不生成尚无成品消费者的新图片。
+            if inputs and inputs.get("frozen_materials_path") and inputs.get("report_content_contract") != "markdown":
                 image_manifest_path = f"/tmp/cairn-prompts/pi-http-evidence-{capture_id}.json"
                 capabilities["http_evidence_render"] = {
                     "frozen_materials_path": inputs["frozen_materials_path"],
@@ -242,16 +250,29 @@ class PiDriver:
                 or session_root != "/home/kali/.cairn/pi"
                 or binding is not None or continuation is not None or conclude_only or enable_checkpoints):
                 reject("capabilities.project_tools", "聊天需要独立私有工具通道与 chat session")
+            if (not isinstance(project_tools_allowed_tools, list)
+                or any(not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,100}", name) for name in project_tools_allowed_tools)
+                or len(set(project_tools_allowed_tools)) != len(project_tools_allowed_tools)):
+                reject("capabilities.project_tools.allowed_tools", "聊天工具必须来自服务端 claim 的明确集合")
             capabilities = {"project_tools": {
                 "protocol": "cairn-project-tools-v1", "socket_path": project_tools_socket_path,
                 "workspace_path": project_tools_workspace_path,
+                "allowed_tools": list(project_tools_allowed_tools),
+                "research_execution": {"protocol": "cairn-conversation-research-v1",
+                                       "conversation_id": conversation_id, "task_run_id": task_run_id},
                 "forbidden_literals": _candidate_forbidden_literals(worker, phase),
             }}
         elif project_tools_socket_path is not None:
             reject("capabilities.project_tools", "项目工具只能由 chat_turn 装载")
+        consumption_id = str(uuid.uuid4())
+        consumption_path = f"/tmp/cairn-prompts/pi-consumption-{consumption_id}.jsonl"
+        capabilities["consumption"] = {
+            "protocol": "cairn-consumption-v1", "id": consumption_id, "spool_path": consumption_path,
+        }
         request = {
             "protocol": "cairn-agent-request-v1",
             "project_id": project_id,
+            **({"conversation_id": conversation_id} if chat else {}),
             "task_run_id": task_run_id,
             "phase": phase,
             "prompt": prompt,
@@ -293,6 +314,7 @@ class PiDriver:
         path = f"/tmp/cairn-prompts/pi-request-{uuid.uuid4().hex}.json"
         input_files = [
             WorkerInputFile(path=path, content=json.dumps(request, ensure_ascii=False)),
+            WorkerInputFile(path=consumption_path, content=""),
             # 预创建 0600 regular file，让 runner 只能追加到本次随机 binary spool。
             *(() if chat else (WorkerInputFile(path=candidate_spool.path, content=""),)),
         ]
@@ -307,6 +329,8 @@ class PiDriver:
             argv=["cairn-agent", "--request", path],
             session=session,
             input_files=tuple(input_files),
+            consumption_id=consumption_id,
+            consumption_spool_path=consumption_path,
             checkpoint_spool=checkpoint_spool,
             candidate_spool=None if chat else candidate_spool,
             project_tools_socket_path=project_tools_socket_path,

@@ -34,6 +34,7 @@ export type ProjectResourceBatchOperation =
 
 export type PendingResourceUpload = {
   id: number
+  uploadId: string
   file: File
   path: string
   mode: 'file' | 'zip'
@@ -52,6 +53,13 @@ export const useProjectResourceBatch = (
   const batch = ref<ProjectResourceBatch | null>(initialBatch)
   const operation = ref<ProjectResourceBatchOperation>('')
   const uploads = ref<PendingResourceUpload[]>([])
+  const oversized = ref<{ name: string; limit: number; member: boolean }[]>([])
+  const sizeRejected = (file: File, mode: 'file' | 'zip', limits: ProjectResourceConfig['limits']) => {
+    const limit = mode === 'zip' ? limits.max_zip_upload_bytes : limits.max_file_bytes
+    if (file.size <= limit) return false
+    oversized.value.push({ name: file.name, limit, member: false })
+    return true
+  }
   const batchCreationUnknown = ref(false)
   const unresolvedMemberChange = ref<{
     id: string
@@ -118,6 +126,7 @@ export const useProjectResourceBatch = (
   const addUpload = (file: File, mode: 'file' | 'zip') => {
     const item: PendingResourceUpload = {
       id: ++nextUploadId,
+      uploadId: `prm_${crypto.randomUUID().replaceAll('-', '')}`,
       file,
       path: projectResourceFilePath(file),
       mode,
@@ -140,11 +149,11 @@ export const useProjectResourceBatch = (
     try {
       const activeConfig = config.value || (await getProjectResourceConfig())
       config.value = activeConfig
-      if (item.mode === 'zip') {
-        if (item.file.size > activeConfig.limits.max_zip_upload_bytes) {
-          throw new Error('ZIP 上传大小超过服务器配置限制')
-        }
-      } else {
+      if (sizeRejected(item.file, item.mode, activeConfig.limits)) {
+        uploads.value = uploads.value.filter((entry) => entry.id !== item.id)
+        return
+      }
+      if (item.mode !== 'zip') {
         const error = projectResourceFileError(item.file, item.path, activeConfig)
         if (error) throw new Error(error)
         if (
@@ -171,7 +180,7 @@ export const useProjectResourceBatch = (
       if (item.mode === 'zip') {
         setBatch(await importProjectResourceBatchZip(current.id, item.file))
       } else {
-        const member = await uploadProjectResourceBatchFile(current.id, item.file, item.path)
+        const member = await uploadProjectResourceBatchFile(current.id, item.file, item.path, undefined, undefined, item.uploadId)
         setBatch({
           ...batch.value!,
           resource_count: batch.value!.resource_count + 1,
@@ -181,6 +190,14 @@ export const useProjectResourceBatch = (
       }
       uploads.value = uploads.value.filter((entry) => entry.id !== item.id)
     } catch (error) {
+      const detail = error instanceof ApiError
+        ? (error.data as { detail?: { code?: string; limit_bytes: number; category: string; path?: string } })?.detail
+        : undefined
+      if (error instanceof ApiError && error.status === 413 && detail?.code === 'project_resource_file_too_large') {
+        oversized.value.push({ name: detail.path || item.file.name, limit: detail.limit_bytes, member: detail.category === 'zip_entry' })
+        uploads.value = uploads.value.filter((entry) => entry.id !== item.id)
+        return
+      }
       const unknown = batchCreationUnknown.value || (requestSent && !explicitlyRejected(error))
       item.state = unknown ? 'unknown' : 'failed'
       item.error = error instanceof Error ? error.message : '资料操作失败'
@@ -198,9 +215,14 @@ export const useProjectResourceBatch = (
     existingPaths: string[] = [],
   ) => {
     if (busy.value || hasUnknown.value || !files.length) return
-    const entries = files.map((file) => addUpload(file, 'file'))
+    oversized.value = []
     operation.value = 'uploading-files'
     try {
+      const activeConfig = config.value || (await getProjectResourceConfig())
+      config.value = activeConfig
+      // 整批预检后才入队，拒绝项不会阻塞创建或清掉其他 File。
+      const entries = files.filter((file) => !sizeRejected(file, 'file', activeConfig.limits))
+        .map((file) => addUpload(file, 'file'))
       for (const item of entries) await runUpload(item, existingCount, existingBytes, existingPaths)
     } finally {
       operation.value = ''
@@ -209,10 +231,13 @@ export const useProjectResourceBatch = (
 
   const importZip = async (file: File) => {
     if (busy.value || hasUnknown.value) return
-    const item = addUpload(file, 'zip')
+    oversized.value = []
     operation.value = 'importing-zip'
     try {
-      await runUpload(item, 0, 0, [])
+      const activeConfig = config.value || (await getProjectResourceConfig())
+      config.value = activeConfig
+      if (sizeRejected(file, 'zip', activeConfig.limits)) return
+      await runUpload(addUpload(file, 'zip'), 0, 0, [])
     } finally {
       operation.value = ''
     }
@@ -225,6 +250,7 @@ export const useProjectResourceBatch = (
     existingPaths: string[] = [],
   ) => {
     if (busy.value || hasUnknown.value || !['waiting', 'failed'].includes(item.state)) return
+    oversized.value = []
     operation.value = item.mode === 'zip' ? 'importing-zip' : 'uploading-files'
     try {
       await runUpload(item, existingCount, existingBytes, existingPaths)
@@ -252,17 +278,14 @@ export const useProjectResourceBatch = (
       )) {
         const member = current.members.find(
           (entry) =>
+            entry.id === item.uploadId &&
             entry.path === item.path &&
             entry.source === 'file' &&
             entry.size_bytes === item.file.size,
         )
-        if (!member) continue
-        // 唯一路径只能定位候选，仍用原始字节摘要确认本次上传，不按文件名猜测内容。
-        const digest = await crypto.subtle.digest('SHA-256', await item.file.arrayBuffer())
-        const sha256 = Array.from(new Uint8Array(digest), (byte) =>
-          byte.toString(16).padStart(2, '0'),
-        ).join('')
-        if (sha256 === member.sha256)
+        // 随机请求身份经原批次的租户／所有者鉴权返回，摘要由接收端对实际字节计算。
+        // 不按名称猜成功，也不再次把整个本地 File 读入内存。
+        if (member)
           uploads.value = uploads.value.filter((entry) => entry.id !== item.id)
       }
       const change = unresolvedMemberChange.value
@@ -358,6 +381,7 @@ export const useProjectResourceBatch = (
     operation,
     busy,
     uploads,
+    oversized,
     pending,
     hasUnknown,
     syncBatch,

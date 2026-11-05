@@ -34,14 +34,14 @@ from .verification_purge import remove_owned_directory
 
 PROJECT_RESOURCE_ROOT_ENV = "CAIRN_PROJECT_RESOURCE_ROOT"
 DEFAULT_PROJECT_RESOURCE_ROOT = "datas/cairn/project-resources"
-PROJECT_RESOURCE_MAX_FILE_BYTES = 10 * 1024 * 1024
+PROJECT_RESOURCE_MAX_FILE_BYTES = 500_000_000
 PROJECT_RESOURCE_MAX_COUNT = 200
-PROJECT_RESOURCE_MAX_TOTAL_BYTES = 100 * 1024 * 1024
-PROJECT_RESOURCE_MAX_ZIP_UPLOAD_BYTES = 50 * 1024 * 1024
+PROJECT_RESOURCE_MAX_TOTAL_BYTES = 2_000_000_000
+PROJECT_RESOURCE_MAX_ZIP_UPLOAD_BYTES = 500_000_000
 PROJECT_RESOURCE_MAX_ZIP_ENTRIES = 1000
 PROJECT_RESOURCE_MAX_COMPRESSION_RATIO = 100
 PROJECT_RESOURCE_MAX_OPEN_BATCHES_PER_USER = 4
-PROJECT_RESOURCE_MAX_STAGED_BYTES_PER_USER = 200 * 1024 * 1024
+PROJECT_RESOURCE_MAX_STAGED_BYTES_PER_USER = 4_000_000_000
 PROJECT_RESOURCE_BATCH_TTL_SECONDS = 24 * 60 * 60
 PROJECT_RESOURCE_MAX_PATH_BYTES = 1024
 PROJECT_RESOURCE_MAX_SEGMENT_BYTES = 255
@@ -59,7 +59,7 @@ PROJECT_RESOURCE_TEXT_EXTENSIONS = {
 
 @dataclass(frozen=True, slots=True)
 class ProjectResourceContent:
-    content: bytes
+    disk_path: Path
     path: str
 
 
@@ -122,6 +122,11 @@ def project_resource_batch_ttl_seconds() -> int:
         "CAIRN_PROJECT_RESOURCE_BATCH_TTL_SECONDS",
         PROJECT_RESOURCE_BATCH_TTL_SECONDS,
     )
+
+
+def _file_size_error(limit: int, *, category: str = "file", path: str | None = None) -> HTTPException:
+    return HTTPException(413, {"code": "project_resource_file_too_large", "category": category,
+                               "limit_bytes": limit, "path": path, "message": "文件超过单文件大小限制"})
 
 
 def project_resource_config() -> ProjectResourceConfig:
@@ -302,10 +307,10 @@ def read_project_resource_content(project_id: str, resource_id: str) -> ProjectR
     disk_path = _project_resource_disk_path(project_id, resource_id)
     if not disk_path.is_file():
         raise HTTPException(404, f"Project resource {resource_id} content not found")
-    content = disk_path.read_bytes()
-    if len(content) != row["size_bytes"] or sha256(content).hexdigest() != row["sha256"]:
-        raise HTTPException(409, f"Project resource {resource_id} content integrity check failed")
-    return ProjectResourceContent(content=content, path=row["path"])
+    validate_resource_content(
+        disk_path, path=row["path"], size_bytes=row["size_bytes"], digest_sha256=row["sha256"]
+    )
+    return ProjectResourceContent(disk_path=disk_path, path=row["path"])
 
 
 def create_project_resource_record(
@@ -364,7 +369,7 @@ def check_resource_collection(prepared: Sequence[tuple[str, str, int]]) -> None:
         if size_bytes < 0:
             raise HTTPException(409, "Project resource size is invalid")
         if size_bytes > limits.max_file_bytes:
-            raise HTTPException(413, f"Project resource exceeds the {limits.max_file_bytes}-byte file limit")
+            raise _file_size_error(limits.max_file_bytes)
         collision = _find_path_collision(path, paths)
         if collision is not None:
             raise _path_collision_error(path, collision)
@@ -686,6 +691,7 @@ async def upload_project_resource_batch_file(
     tenant_id: str,
     user_id: str | None,
     integration_id: str | None = None,
+    upload_id: str | None = None,
 ) -> ProjectResourceBatchMember:
     path = validate_project_resource_path(path)
     kind = kind or infer_project_resource_kind(path)
@@ -703,14 +709,17 @@ async def upload_project_resource_batch_file(
                 continue
             size_bytes += len(chunk)
             if size_bytes > limits.max_file_bytes:
-                raise HTTPException(413, f"Project resource exceeds the {limits.max_file_bytes}-byte file limit")
+                raise _file_size_error(limits.max_file_bytes)
             output.write(chunk)
             digest.update(chunk)
         output.flush()
         with get_conn() as conn:
             batch = _lock_owned_open_batch(conn, batch_id, tenant_id=tenant_id, user_id=user_id, integration_id=integration_id)
             _check_batch_additions(conn, batch["id"], [(path, size_bytes)])
-            member_id = f"prm_{uuid4().hex}"
+            # 请求身份只在已授权批次内核对；重复身份明确拒绝，不覆盖任何已发布原件。
+            member_id = upload_id or f"prm_{uuid4().hex}"
+            if conn.execute("SELECT 1 FROM project_resource_batch_members WHERE id = ?", (member_id,)).fetchone():
+                raise HTTPException(409, "Upload identity already exists")
             final_path = _batch_member_disk_path(batch_id, member_id, create_parent=True)
             os.replace(temp_path, final_path)
             try:
@@ -757,7 +766,7 @@ async def import_project_resource_batch_zip(
                 continue
             upload_bytes += len(chunk)
             if upload_bytes > limits.max_zip_upload_bytes:
-                raise HTTPException(413, f"ZIP upload exceeds the {limits.max_zip_upload_bytes}-byte limit")
+                raise _file_size_error(limits.max_zip_upload_bytes, category="zip")
             output.write(chunk)
         output.flush()
         prepared = _preflight_zip(archive_path, limits)
@@ -1098,7 +1107,7 @@ def _check_batch_additions(conn: Any, batch_id: str, additions: Sequence[tuple[s
     paths = [row["path"] for row in existing]
     for path, size_bytes in additions:
         if size_bytes > limits.max_file_bytes:
-            raise HTTPException(413, f"Project resource exceeds the {limits.max_file_bytes}-byte file limit")
+            raise _file_size_error(limits.max_file_bytes)
         collision = _find_path_collision(path, paths)
         if collision is not None:
             raise _path_collision_error(path, collision)
@@ -1136,7 +1145,7 @@ def _preflight_zip(
                 raise _path_collision_error(path, collision)
             paths.append(path)
             if info.file_size > limits.max_file_bytes:
-                raise HTTPException(413, f"ZIP entry exceeds the file limit: {path}")
+                raise _file_size_error(limits.max_file_bytes, category="zip_entry", path=path)
             if info.file_size and info.file_size > max(info.compress_size, 1) * limits.max_compression_ratio:
                 raise HTTPException(413, f"ZIP entry compression ratio is too high: {path}")
             total_bytes += info.file_size

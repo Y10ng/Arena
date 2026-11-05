@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from cairn.server.auth import RequestPrincipal
+from cairn.server.auth import RequestPrincipal, hash_secret
 from cairn.server.db import get_conn
 from cairn.server.schemas.models import (
     DiscoverTenantModelRequest,
@@ -18,6 +18,7 @@ from cairn.server.schemas.models import (
     TestTenantModelRequest,
 )
 
+from .direct_consumption import record_direct_consumption
 from .model_credentials import decrypt_active_credential, validate_plaintext_credential
 from .model_transport import request_json, resolve_model_endpoint
 from .tenant_models import get_tenant_model_row, normalize_model_base_url
@@ -135,18 +136,22 @@ def test_model_draft(
     if not body.model_name:
         raise HTTPException(422, "Model name is required for testing")
     tenant_id = _principal_tenant(principal)
-    credential = _resolve_credential(body, tenant_id=tenant_id)
     base_url = normalize_model_base_url(body.base_url)
     validate_custom_headers(body)
     _, inference_default = _PROTOCOL_DEFAULTS[body.protocol]
     endpoint = resolve_model_endpoint(base_url, body.inference_endpoint, inference_default)
-    response = request_json(
-        "POST",
-        endpoint,
-        headers=_request_headers(body, credential),
-        payload=_request_payload(body),
-        timeout_seconds=body.timeout_seconds,
-    )
+    credential, snapshot, source = _test_model_binding(body, tenant_id=tenant_id, endpoint=endpoint)
+    with record_direct_consumption(
+        tenant_id=tenant_id, owner_id=principal.subject_id, source=source, model=snapshot,
+    ) as recording:
+        response = request_json(
+            "POST",
+            endpoint,
+            headers=_request_headers(body, credential),
+            payload=_request_payload(body),
+            timeout_seconds=body.timeout_seconds,
+        )
+        recording.observe_response(body.protocol, response.body)
     text = _response_text(response.body, credential)
     success = 200 <= response.status_code < 300
     if success:
@@ -158,6 +163,56 @@ def test_model_draft(
         endpoint=response.url,
         response_body=text,
     )
+
+
+def _test_model_binding(
+    body: TestTenantModelRequest, *, tenant_id: str, endpoint: str,
+) -> tuple[str, dict[str, Any], str]:
+    draft = {"model_name": body.model_name, "display_name": body.display_name,
+             "protocol": body.protocol, "pricing": {}}
+    supplied = validate_plaintext_credential(body.api_key) if body.api_key is not None else None
+    if not body.model_id:
+        if supplied is None:
+            raise HTTPException(422, "API Key is required for an unsaved Model")
+        return supplied, draft, "model_test_draft"
+    with get_conn() as conn:
+        # 配置与活动凭据在同一短事务冻结，避免编辑／轮换穿插后错误借用费率。
+        row = conn.execute(
+            "SELECT * FROM tenant_models WHERE id = ? AND tenant_id = ? FOR SHARE",
+            (body.model_id, tenant_id),
+        ).fetchone()
+        if row is None:
+            if supplied is not None:
+                return supplied, draft, "model_test_draft"
+            raise HTTPException(404, "Model not found")
+        if supplied is None:
+            credential, _ = decrypt_active_credential(conn, tenant_id=tenant_id, model_id=body.model_id)
+            credential_matches = True
+        else:
+            credential = supplied
+            active = conn.execute(
+                "SELECT v.credential_fingerprint FROM model_credentials c "
+                "JOIN model_credential_versions v ON v.id=c.active_version_id "
+                "WHERE c.model_id=? AND c.tenant_id=?",
+                (body.model_id, tenant_id),
+            ).fetchone()
+            credential_matches = active is not None and active["credential_fingerprint"] == hash_secret(credential)
+        saved_endpoint = resolve_model_endpoint(
+            row["base_url"], row["inference_endpoint"], _PROTOCOL_DEFAULTS[row["protocol"]][1],
+        )
+        matches = (
+            credential_matches and body.protocol == row["protocol"]
+            and body.model_name == row["model_name"] and endpoint == saved_endpoint
+            and body.auth_header == row["auth_header"]
+            and [header.model_dump() for header in body.custom_headers] == json.loads(row["custom_headers_json"])
+        )
+        if not matches:
+            return credential, draft, "model_test_draft"
+        # 草稿提交的价格不参与核算，只有匹配实际请求的 Server 保存配置可计价。
+        snapshot = {"model_id": row["id"], "model_revision": int(row["revision"]),
+                    "model_name": row["model_name"], "display_name": row["display_name"],
+                    "protocol": row["protocol"], "pricing": json.loads(row["pricing_json"])}
+        return credential, snapshot, "model_test"
 
 
 def _resolve_credential(body: TenantModelConfig, *, tenant_id: str) -> str:

@@ -101,9 +101,10 @@ def resolve_task_test_egress(project_id: str, task_run_id: str, principal: Reque
             raise HTTPException(404, "test_egress_task_run_not_found")
         if json.loads(run["runtime_context_json"]).get("dispatcher_id") != principal.subject_id:
             raise HTTPException(403, "test_egress_dispatcher_mismatch")
-        if run["status"] not in {"queued", "running"} or run["execution_generation"] != project["execution_generation"]:
+        if run["status"] not in {"queued", "running"} or run["execution_generation"] != project["execution_generation"] or run["pause_requested"]:
             raise HTTPException(409, "test_egress_task_run_not_current")
-        if project["status"] != "active":
+        # 热暂停不撤销已准入 Run 的准备读取；新任务仍由独立 admission gate 阻断。
+        if project["status"] not in {"active", "paused"}:
             raise HTTPException(409, "test_egress_project_not_active")
         view = public_project_egress(project)
         result = view.model_dump(exclude={"auth_configured"})

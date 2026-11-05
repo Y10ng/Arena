@@ -1,44 +1,23 @@
 <template>
   <section class="report-management" aria-label="报告">
-    <header v-show="!isReading" class="page-header report-page-header">
-      <h1>报告</h1>
-    </header>
+    <h1 v-show="!isReading" class="sr-only">报告</h1>
     <div v-show="!isReading" class="report-filters">
-      <FilterBar label="报告筛选" class="report-filter-bar">
-        <FormField v-slot="{ controlAttrs }" label="搜索">
-          <Input v-model="searchSelection" v-bind="controlAttrs" placeholder="报告名或项目名" />
-        </FormField>
-        <FormField v-slot="{ controlAttrs }" label="项目 ID">
-          <Input v-model="projectSelection" v-bind="controlAttrs" placeholder="精确项目 ID" />
-        </FormField>
-        <template #status
-          >{{ total }} 份报告<span v-if="isFetching && reports.length"> · 同步中…</span></template
-        >
-        <template #actions>
-          <Button v-if="hasFilters" variant="ghost" size="sm" @click="clearFilters"
-            >清除筛选</Button
-          >
-          <Button variant="secondary" size="sm" :loading="isFetching" @click="refetch()"
-            >刷新</Button
-          >
-        </template>
-      </FilterBar>
-      <details class="report-extra-filters">
-        <summary>
-          模板与日期<span v-if="secondaryFilterSummary"> · {{ secondaryFilterSummary }}</span>
-        </summary>
-        <div class="report-extra-filter-fields">
-          <FormField v-slot="{ controlAttrs }" label="模板">
-            <Input v-model="templateSelection" v-bind="controlAttrs" placeholder="模板 key" />
-          </FormField>
-          <FormField v-slot="{ controlAttrs }" label="开始日期">
-            <Input v-model="dateFromSelection" v-bind="controlAttrs" type="date" />
-          </FormField>
-          <FormField v-slot="{ controlAttrs }" label="结束日期">
-            <Input v-model="dateToSelection" v-bind="controlAttrs" type="date" />
-          </FormField>
-        </div>
-      </details>
+      <div class="report-filter-bar" role="search" aria-label="报告筛选">
+        <Input v-model="searchSelection" aria-label="搜索报告" placeholder="报告名或项目名" />
+        <Input v-model="projectSelection" aria-label="项目 ID" placeholder="精确项目 ID" />
+        <Popover align="start" size="md">
+          <template #trigger><Button variant="secondary" size="sm">模板与日期{{ secondaryFilterSummary ? ' · 已筛选' : '' }}</Button></template>
+          <div class="report-extra-filter-fields">
+            <FormField v-slot="{ controlAttrs }" label="模板"><Input v-model="templateSelection" v-bind="controlAttrs" placeholder="模板 key" /></FormField>
+            <FormField v-slot="{ controlAttrs }" label="开始日期（UTC）"><Input v-model="dateFromSelection" v-bind="controlAttrs" type="date" /></FormField>
+            <FormField v-slot="{ controlAttrs }" label="结束日期（UTC）"><Input v-model="dateToSelection" v-bind="controlAttrs" type="date" /></FormField>
+          </div>
+        </Popover>
+        <Button v-if="hasFilters" variant="ghost" size="sm" @click="clearFilters">清除筛选</Button>
+        <span class="report-filter-count" role="status">{{ total }} 份报告<span v-if="isFetching && reports.length"> · 同步中…</span></span>
+        <Button variant="secondary" size="sm" :loading="isFetching" @click="refetch()">刷新</Button>
+      </div>
+      <p v-if="secondaryFilterSummary" class="report-filter-summary">{{ secondaryFilterSummary }}</p>
     </div>
 
     <div class="report-workspace" :class="{ 'report-workspace--reading': isReading }">
@@ -61,9 +40,6 @@
           <EmptyState
             v-else-if="!reports.length"
             :title="hasFilters ? '没有匹配的报告' : '暂无已完成报告'"
-            :description="
-              hasFilters ? '请调整或清除筛选条件。' : '项目报告生成完成后会出现在这里。'
-            "
           />
           <template v-else>
             <ErrorState
@@ -196,6 +172,7 @@
           </Popover>
         </template>
         <template #notice>
+          <div class="report-reading-context"><span>所属项目：{{ selectedReport.project_title }}</span><span>生成于 {{ dateTime(selectedReport.created_at) }}</span><span>已保存报告 · 不代表当前项目状态</span></div>
           <Alert
             v-if="validPreview?.truncated && fullMarkdown === null"
             class="report-preview-alert"
@@ -237,7 +214,7 @@ import { useQuery } from '@tanstack/vue-query'
 import { api, fetchBlob, fetchArtifactPreview, listReports, type ArtifactPreview } from '@/api/client'
 import type { ReportDisplayImage } from '@/features/reports/reportImages'
 import type { ReportInventoryFilters, ReportInventoryItem, ReportInventoryPage } from '@/api/types'
-import { DataTable, ErrorState, FilterBar } from '@/components/patterns'
+import { DataTable, ErrorState } from '@/components/patterns'
 import type { DataTableColumn } from '@/components/patterns/DataTable.vue'
 import {
   Alert,

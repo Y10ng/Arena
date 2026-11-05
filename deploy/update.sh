@@ -55,6 +55,9 @@ source = Path(sys.argv[1]).resolve(strict=True)
 target = Path(sys.argv[2]).expanduser().resolve(strict=True)
 if not target.is_dir():
     raise SystemExit("目标安装目录不存在")
+# Git 主工作区和 worktree 都不能由部署包覆盖；在暂存和停服务前拒绝。
+if (target / ".git").exists() or (target / ".git").is_symlink():
+    raise SystemExit("目标是 Git 工作区（含 worktree），请使用源码更新步骤，不能用部署包覆盖")
 if source == target or source in target.parents or target in source.parents:
     raise SystemExit("新版本目录和目标安装目录必须彼此独立，不能相同或互相嵌套")
 if target / "runtime" == source or target / "runtime" in source.parents:
@@ -323,7 +326,7 @@ EOF
 fi
 
 if [[ "${expected_state}" == "server-only" ]]; then
-  echo "按 --server-only 跳过 Worker 准备；本次不更新 Worker。"
+  echo "按 --server-only 跳过研究与采集镜像准备；本次不更新镜像。"
 # 必须在新 shell 加载目标的新 helper、环境和依赖，不能复用当前 shell 的旧函数。
 elif bash -c '
   set -euo pipefail
@@ -336,7 +339,7 @@ elif bash -c '
   require_docker_daemon
   ensure_dispatch_worker_image refresh
 ' arena-update-worker "${TARGET_ROOT}"; then
-  echo "Worker 镜像准备完成；自定义引用未自动更新，已有项目容器不受替换。"
+  echo "研究与采集镜像准备完成；自定义引用未自动更新，已有项目容器不受替换。"
 else
   worker_status=$?
   cat >&2 <<EOF

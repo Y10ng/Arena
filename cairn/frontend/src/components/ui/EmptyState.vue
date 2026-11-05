@@ -41,13 +41,12 @@ const hasDescription = computed(() => Boolean(props.description || slots.descrip
 <style scoped>
 .ui-empty-state {
   width: 100%;
-  border: calc(var(--space-1) / 4) dashed var(--border);
   border-radius: var(--radius-lg);
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: var(--space-2);
-  padding: var(--space-6) var(--space-5);
+  padding: var(--space-8) var(--space-5);
   color: var(--text-muted);
   text-align: center;
 }
@@ -67,6 +66,8 @@ const hasDescription = computed(() => Boolean(props.description || slots.descrip
 
 .ui-empty-state__description,
 .ui-empty-state__content {
+  max-width: 60ch;
+  overflow-wrap: anywhere;
   color: var(--text-muted);
   line-height: var(--leading-normal);
 }

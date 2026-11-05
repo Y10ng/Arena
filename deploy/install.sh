@@ -39,12 +39,9 @@ fi
 ensure_runtime_env
 chmod 600 "${DISPATCH_CONFIG}"
 
-# 迁移只处理 legacy secret:// 引用；失败时保留原配置，安装继续完成，Server 仍可单独启动。
-if "${ROOT_DIR}/cairn/.venv/bin/python" "${DEPLOY_DIR}/migrate_worker_config.py" --root "${ROOT_DIR}"; then
-  echo "Worker 配置迁移检查完成。"
-else
-  echo "警告：Worker 配置迁移未完成；原配置和旧 secret 文件均已保留。Server 可继续启动，请修复 runtime/secrets 后重跑迁移。" >&2
-fi
+# 独立 executor 配置与 legacy secret:// 一次转换；失败不继续启动或更新。
+"${PYTHON_BIN}" "${DEPLOY_DIR}/migrate_worker_config.py" --root "${ROOT_DIR}"
+echo "Worker 配置迁移检查完成。"
 
 cat <<EOF
 环境准备完成。
@@ -52,10 +49,12 @@ cat <<EOF
 前端静态资源已准备好后，运行：
   ${ROOT_DIR}/deploy/start.sh
 
-start.sh 会自动启动默认 DB-only PostgreSQL、同步本地数据库密码、构建缺失的默认 Worker image，
-然后初始化并启动 Server、UI 和 Dispatcher。直接运行 install.sh 只用于升级或刷新依赖，不启动服务。
+start.sh 会先准备并离线检查研究镜像（Worker 与 executor 共用）和独立采集镜像，
+再启动默认 DB-only PostgreSQL、同步本地数据库密码，初始化并启动 Server、UI 和 Dispatcher。
+直接运行 install.sh 只用于安装锁定依赖和迁移配置，不启动服务。
 源码安装或更新需先在 cairn/frontend 执行 npm ci 和 npm run build:server；部署 ZIP 已带静态资源。
-install.sh 不构建前端或镜像；已有 Worker 镜像更新需显式执行 docker build -t arena-worker:local container。
+install.sh 不构建前端或镜像；update.sh 统一用缓存构建默认本地镜像，离线检查通过才提升 tag。
+自定义镜像不自动构建或覆盖，需自行提供包含执行服务的配套研究镜像及采集镜像。
 
 首次启动会自动创建 Model keyring、Dispatcher machine credential 和超级管理员。
 交互终端立即显示一次随机管理员密码；非交互启动写入 owner-only secret 文件。配置完成后无需再次执行启动命令。

@@ -12,20 +12,18 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from cairn.server.auth import (
-    RequestPrincipal, SESSION_COOKIE, _project_access_exists, require_dispatcher,
-    protect_cookie_request, require_user_tenant_project, resolve_session,
+    RequestPrincipal, SESSION_COOKIE, require_dispatcher,
+    protect_cookie_request, resolve_session,
 )
 from cairn.server.db import get_conn
-from cairn.server.models import CreateTaskRunRequest
 from cairn.server.services import agent_conversations as service
 from cairn.server.services import project_agent_configuration as configuration
 from cairn.server.services import agent_attachments as attachments
 from cairn.server.services.project_resources import project_resource_limits
-from cairn.server.services.audit_artifacts import artifact_content_file
-from cairn.server.services.verification_requests import _artifact_deliverable, _platform_secrets
+from cairn.server.services.conversation_files import artifact_file
 
 router = APIRouter(tags=["agent-conversations"])
-BASE = "/projects/{project_id}/agent-conversations"
+BASE = "/agent-conversations"
 TURN = BASE + "/{conversation_id}/turns/{message_id}"
 
 
@@ -34,7 +32,7 @@ class Input(BaseModel):
 
 
 class CreateConversation(Input):
-    pass
+    project_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class AgentConfiguration(Input):
@@ -42,6 +40,7 @@ class AgentConfiguration(Input):
 
 
 class CreateMessage(Input):
+    project_id: str | None = Field(default=None, min_length=1, max_length=200)
     client_message_id: UUID
     text: str = Field(min_length=1, max_length=32000)
     attachment_ids: list[str] = Field(default_factory=list)
@@ -55,7 +54,7 @@ class CreateMessage(Input):
 
 
 class Claim(Input):
-    task_run: CreateTaskRunRequest
+    request_id: UUID
 
 
 class Turn(Input):
@@ -76,10 +75,12 @@ class Usage(Input):
 
 
 class Finish(Turn):
+    session_initialized: bool | None = None
     status: Literal["succeeded", "failed", "cancelled"]
     text: str | None = Field(default=None, max_length=1024 * 1024)
     error_code: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,100}$")
     usage: dict[str, int | None] | None = None
+    usage_missing_responses: int | None = Field(default=None, ge=0, strict=True)
 
     @field_validator("usage")
     @classmethod
@@ -106,91 +107,147 @@ def put_configuration(body: AgentConfiguration, principal=Depends(user_tenant)):
 
 
 @router.get(BASE)
-def list_conversations(project_id: str, _principal=Depends(require_user_tenant_project)):
+def list_conversations(_principal=Depends(user_tenant)):
     with get_conn() as conn:
-        return service.list_conversations(conn, project_id)
+        return service.list_conversations(conn, _principal)
 
 
 @router.post(BASE, status_code=201)
-def create_conversation(project_id: str, body: CreateConversation, principal=Depends(require_user_tenant_project)):
+def create_conversation(body: CreateConversation, principal=Depends(user_tenant)):
     with get_conn() as conn:
-        return service.create_conversation(conn, project_id, principal)
+        return service.create_conversation(conn, principal, body.project_id)
 
 
-@router.delete(BASE + "/{conversation_id}", status_code=204)
-def delete_conversation(project_id: str, conversation_id: str, _principal=Depends(require_user_tenant_project)):
+@router.get(BASE + "/cleanup-requests")
+def list_cleanup_requests(principal=Depends(user_tenant)):
+    from cairn.server.services.conversation_cleanup import list_requests
     with get_conn() as conn:
-        service.delete_conversation(conn, project_id, conversation_id)
-    return Response(status_code=204)
+        return list_requests(conn, principal)
+
+
+@router.delete(BASE + "/{conversation_id}", status_code=202)
+def delete_conversation(conversation_id: str, _principal=Depends(user_tenant)):
+    with get_conn() as conn:
+        return service.delete_conversation(conn, conversation_id, _principal)
+
+
+@router.post(BASE + "/{conversation_id}/messages/{message_id}/stop", status_code=202)
+def stop_turn(conversation_id: str, message_id: int, principal=Depends(user_tenant)):
+    with get_conn() as conn:
+        return service.stop_turn(conn, conversation_id, message_id, principal)
+
+
+@router.get(BASE + "/{conversation_id}/cleanup")
+def cleanup_status(conversation_id: str, principal=Depends(user_tenant)):
+    from cairn.server.services.conversation_cleanup import public_status
+    with get_conn() as conn:
+        row = service.require_owner(conn, conversation_id, principal, include_deleted=True)
+        value = json.loads(row["cleanup_request_json"]) if row["cleanup_request_json"] else None
+        return {"conversation_id": conversation_id, "cleanup": public_status(value)}
+
+
+class CleanupTarget(Input):
+    kind: Literal["container", "network"]
+    id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    conversation_id: str = Field(min_length=1, max_length=200)
+    machine_id: str = Field(min_length=1, max_length=200)
+    instance_id: str = Field(min_length=1, max_length=200)
+    daemon_id: str = Field(min_length=1, max_length=200)
+    resource_key: str = Field(min_length=1, max_length=200)
+    labels: dict[str, str]
+
+
+class CleanupUpdate(Input):
+    request_id: str = Field(min_length=1, max_length=200)
+    action: Literal["bind", "completed", "failed"]
+    targets: list[CleanupTarget] | None = Field(default=None, max_length=1000)
+    error_code: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,100}$")
+
+
+@router.get("/agent-conversation-cleanups/pending")
+def pending_cleanups(principal=Depends(require_dispatcher)):
+    from cairn.server.services import conversation_cleanup
+    with get_conn() as conn:
+        return conversation_cleanup.pending(conn, principal)
+
+
+@router.post(BASE + "/{conversation_id}/cleanup")
+def update_cleanup(conversation_id: str, body: CleanupUpdate, principal=Depends(require_dispatcher)):
+    from cairn.server.services import conversation_cleanup
+    with get_conn() as conn:
+        return conversation_cleanup.update(conn, conversation_id, body.request_id, body.action,
+                                           [target.model_dump() for target in body.targets] if body.targets is not None else None,
+                                           body.error_code, principal)
 
 
 @router.get(BASE + "/{conversation_id}/attachment-limits")
-def attachment_limits(project_id: str, conversation_id: str, _principal=Depends(require_user_tenant_project)):
+def attachment_limits(conversation_id: str, _principal=Depends(user_tenant)):
     with get_conn() as conn:
-        service._conversation(conn, project_id, conversation_id)
+        service.require_owner(conn, conversation_id, _principal)
     limits = project_resource_limits()
     return {"max_file_bytes": limits.max_file_bytes, "max_count": limits.max_active_count,
             "max_total_bytes": limits.max_active_total_bytes}
 
 
 @router.get(BASE + "/{conversation_id}/attachments")
-def list_attachments(project_id: str, conversation_id: str, _principal=Depends(require_user_tenant_project)):
+def list_attachments(conversation_id: str, _principal=Depends(user_tenant)):
     with get_conn() as conn:
-        service._conversation(conn, project_id, conversation_id)
-        return attachments.list_attachments(conn, project_id, conversation_id)
+        service.require_owner(conn, conversation_id, _principal)
+        return attachments.list_attachments(conn, conversation_id)
 
 
 @router.post(BASE + "/{conversation_id}/attachments", status_code=201)
-async def upload_attachment(project_id: str, conversation_id: str, request: Request,
+async def upload_attachment(conversation_id: str, request: Request,
                             filename: str = Query(min_length=1, max_length=1024),
-                            principal=Depends(require_user_tenant_project)):
-    return await attachments.upload_attachment(project_id, conversation_id, filename, request.stream(), principal)
+                            principal=Depends(user_tenant)):
+    return await attachments.upload_attachment(conversation_id, filename, request.stream(), principal)
 
 
 @router.delete(BASE + "/{conversation_id}/attachments/{attachment_id}", status_code=204)
-def remove_attachment(project_id: str, conversation_id: str, attachment_id: str, principal=Depends(require_user_tenant_project)):
+def remove_attachment(conversation_id: str, attachment_id: str, principal=Depends(user_tenant)):
     with get_conn() as conn:
-        attachments.remove_attachment(conn, project_id, conversation_id, attachment_id, principal)
+        attachments.remove_attachment(conn, conversation_id, attachment_id, principal)
     return Response(status_code=204)
 
 
 @router.get(BASE + "/{conversation_id}/attachments/{attachment_id}/content")
-def download_attachment(project_id: str, conversation_id: str, attachment_id: str, _principal=Depends(require_user_tenant_project)):
+def download_attachment(conversation_id: str, attachment_id: str, _principal=Depends(user_tenant)):
     with get_conn() as conn:
-        service._conversation(conn, project_id, conversation_id)
-        row = attachments.attachment_row(conn, project_id, conversation_id, attachment_id)
+        service.require_owner(conn, conversation_id, _principal)
+        row = attachments.attachment_row(conn, conversation_id, attachment_id)
         path = attachments.attachment_file(conn, row)
     return FileResponse(path, filename=row["filename"], media_type="application/octet-stream",
                         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @router.get(BASE + "/{conversation_id}/messages")
-def get_messages(project_id: str, conversation_id: str, after: int = Query(0, ge=0), _principal=Depends(require_user_tenant_project)):
+def get_messages(conversation_id: str, after: int = Query(0, ge=0), _principal=Depends(user_tenant)):
     with get_conn() as conn:
-        return service.messages(conn, project_id, conversation_id, after=after)
+        service.require_owner(conn, conversation_id, _principal)
+        return service.messages(conn, conversation_id, after=after)
 
 
 @router.get(BASE + "/{conversation_id}/actions")
-def get_actions(project_id: str, conversation_id: str, principal=Depends(require_user_tenant_project)):
+def get_actions(conversation_id: str, principal=Depends(user_tenant)):
     with get_conn() as conn:
-        return service.action_works(conn, project_id, conversation_id, principal)
+        return service.action_works(conn, conversation_id, principal)
 
 
 @router.post(BASE + "/{conversation_id}/messages")
-def post_message(project_id: str, conversation_id: str, body: CreateMessage, _principal=Depends(require_user_tenant_project)):
+def post_message(conversation_id: str, body: CreateMessage, _principal=Depends(user_tenant)):
     with get_conn() as conn:
-        return service.submit_message(conn, project_id, conversation_id, str(body.client_message_id), body.text, _principal, body.attachment_ids)
+        return service.submit_message(conn, conversation_id, str(body.client_message_id), body.text, _principal, body.attachment_ids, project_id=body.project_id)
 
 
 @router.get(BASE + "/{conversation_id}/events")
-def events(project_id: str, conversation_id: str, request: Request, after: int = Query(0, ge=0),
-           last_event_id: str | None = Header(None), _principal=Depends(require_user_tenant_project)):
+def events(conversation_id: str, request: Request, after: int = Query(0, ge=0),
+           last_event_id: str | None = Header(None), _principal=Depends(user_tenant)):
     if last_event_id is not None:
         if not last_event_id.isdecimal():
             raise HTTPException(422, "agent_event_cursor_invalid")
         after = max(after, int(last_event_id))
     with get_conn() as conn:
-        service._conversation(conn, project_id, conversation_id)
+        service.require_owner(conn, conversation_id, _principal)
     token = request.cookies.get(SESSION_COOKIE)
 
     def stream():
@@ -202,13 +259,11 @@ def events(project_id: str, conversation_id: str, request: Request, after: int =
                 yield 'event: error\ndata: {"status":401,"detail":"登录已失效，请重新登录。"}\n\n'
                 return
             with get_conn() as conn:
-                if not _project_access_exists(conn, project_id, resolved[0]):
-                    yield 'event: error\ndata: {"status":403,"detail":"当前项目已无访问权限。"}\n\n'
-                    return
                 try:
-                    items = service.messages(conn, project_id, conversation_id, revision=cursor)
+                    service.require_owner(conn, conversation_id, resolved[0])
+                    items = service.messages(conn, conversation_id, revision=cursor)
                 except HTTPException as exc:
-                    if exc.status_code != 404:
+                    if exc.status_code not in {403, 404}:
                         raise
                     yield 'event: error\ndata: {"status":404,"detail":"会话已删除或不可访问。"}\n\n'
                     return
@@ -224,44 +279,41 @@ def events(project_id: str, conversation_id: str, request: Request, after: int =
 
 
 @router.get(BASE + "/{conversation_id}/artifacts/{artifact_id}")
-def download(project_id: str, conversation_id: str, artifact_id: str, _principal=Depends(require_user_tenant_project)):
+def download(conversation_id: str, artifact_id: str, _principal=Depends(user_tenant)):
     with get_conn() as conn:
-        row = service.conversation_artifact(conn, project_id, conversation_id, artifact_id)
-        if not _artifact_deliverable(conn, row):
-            raise HTTPException(403, "agent_artifact_not_deliverable")
-        file = artifact_content_file(project_id, artifact_id)
-        service._admit_public(file.disk_path.read_text(encoding="utf-8"), _platform_secrets(conn, project_id, row["task_run_id"]))
-        title = json.loads(row["metadata_json"])["title"]
-    return FileResponse(file.disk_path, filename=title, media_type="text/markdown; charset=utf-8",
+        row = service.conversation_artifact(conn, conversation_id, artifact_id, _principal)
+        path = artifact_file(conn, row)
+        title = json.loads(row["metadata_json"]).get("title", artifact_id)
+    return FileResponse(path, filename=title, media_type="application/octet-stream",
                         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @router.get("/agent-turns/pending")
-def pending(_principal=Depends(require_dispatcher)):
+def pending(after: str = Query("", max_length=200), _principal=Depends(require_dispatcher)):
     with get_conn() as conn:
-        return service.pending_conversations(conn)
+        return service.pending_conversations(conn, after=after)
 
 
 @router.post(BASE + "/{conversation_id}/claim")
-def claim(project_id: str, conversation_id: str, body: Claim, principal: RequestPrincipal = Depends(require_dispatcher)):
+def claim(conversation_id: str, body: Claim, principal: RequestPrincipal = Depends(require_dispatcher)):
     with get_conn() as conn:
-        result = service.claim_turn(conn, project_id, conversation_id, body.task_run, principal)
+        result = service.claim_turn(conn, conversation_id, str(body.request_id), principal)
     return result if result is not None else Response(status_code=204)
 
 
 @router.post(TURN + "/heartbeat")
-def heartbeat(project_id: str, conversation_id: str, message_id: int, body: Turn, principal=Depends(require_dispatcher)):
+def heartbeat(conversation_id: str, message_id: int, body: Turn, principal=Depends(require_dispatcher)):
     with get_conn() as conn:
-        return service.heartbeat(conn, project_id, conversation_id, message_id, body.task_run_id, principal)
+        return service.heartbeat(conn, conversation_id, message_id, body.task_run_id, principal)
 
 
 @router.post(TURN + "/tools")
-def tool(project_id: str, conversation_id: str, message_id: int, body: Tool, principal=Depends(require_dispatcher)):
-    return service.call_tool(project_id, conversation_id, message_id, body.task_run_id, body.method, body.params, principal,
+def tool(conversation_id: str, message_id: int, body: Tool, principal=Depends(require_dispatcher)):
+    return service.call_tool(conversation_id, message_id, body.task_run_id, body.method, body.params, principal,
                              tool_call_id=body.tool_call_id)
 
 
 @router.post(TURN + "/finish")
-def finish(project_id: str, conversation_id: str, message_id: int, body: Finish, principal=Depends(require_dispatcher)):
+def finish(conversation_id: str, message_id: int, body: Finish, principal=Depends(require_dispatcher)):
     with get_conn() as conn:
-        return service.finish_turn(conn, project_id, conversation_id, message_id, body, principal)
+        return service.finish_turn(conn, conversation_id, message_id, body, principal)

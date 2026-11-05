@@ -2,23 +2,20 @@
   <Dialog
     :open="open"
     :title="schedule ? '编辑未来配置' : '新建项目'"
-    :description="
-      schedule
-        ? '仅影响尚未生成的项目，已生成项目及其资料不变。'
-        : '描述背景与目标，准备项目资料。'
-    "
-    size="lg"
+    :description="schedule ? '仅影响尚未生成的项目，已生成项目及其资料不变。' : ''"
+    size="editor"
     :dismissible="!isSubmitting && !resourceBusy && !isCancelling"
     :close-on-outside="false"
+    :unmount-on-hide="false"
     @update:open="requestClose"
     @open-auto-focus="focusTitle"
     @close-auto-focus="restoreFocus"
-    @escape-key-down="closeSettingsOnEscape"
   >
     <Alert v-if="creationUnknown" tone="warning" title="保存结果未确认">
       请求可能已被服务端接受，不要另建请求或取消可能已消费的资料。可正常导航；正文及原始请求仅在本次页面会话内保留，刷新后只能查询请求结果。
       <p v-if="formError">{{ formError }}</p>
       <p v-if="recoveryMessage">{{ recoveryMessage }}</p>
+      <router-link v-if="workerConfigurationError" to="/console/workers" target="_blank" rel="noopener">前往 Worker 配置</router-link>
       <template #actions>
         <Button
           v-if="pendingSubmission?.operation !== 'update'"
@@ -41,6 +38,14 @@
         <Button variant="secondary" size="sm" @click="emit('update:open', false)"
           >查看列表，保留内容</Button
         >
+      </template>
+    </Alert>
+    <Alert v-if="creationRejected" tone="danger" title="请求被拒绝">
+      {{ formError }}。可按原请求重试，或明确修改内容并使用新请求。
+      <router-link v-if="workerConfigurationError" to="/console/workers" target="_blank" rel="noopener">前往 Worker 配置</router-link>
+      <template #actions>
+        <Button size="sm" variant="secondary" :loading="isSubmitting" @click="restoreSubmission">按原请求重试</Button>
+        <Button size="sm" variant="secondary" @click="editRejectedSubmission">修改内容并使用新请求</Button>
       </template>
     </Alert>
     <Alert v-if="creationDeleted" tone="warning" title="原请求已保存，但项目已删除">
@@ -70,49 +75,8 @@
       @input="userEdited = true"
       @change="userEdited = true"
     >
-      <div id="np-section-basic" class="creation-content">
-        <details
-          class="scenario-settings"
-          :open="scenarioExpanded"
-          @toggle="scenarioExpanded = ($event.target as HTMLDetailsElement).open"
-        >
-          <summary :aria-label="scenarioExpanded ? '收起探索场景' : '展开探索场景'" :aria-expanded="scenarioExpanded">
-            <span class="scenario-name">探索场景</span>
-            <span class="summary-action"><ChevronDown :size="14" aria-hidden="true" /></span>
-          </summary>
-          <div>
-            <div v-if="scenariosLoading" class="skeleton-scenarios" aria-label="正在加载场景">
-              <Skeleton v-for="i in 2" :key="i" class="skeleton-card" />
-            </div>
-            <ErrorState
-              v-else-if="scenariosError"
-              title="场景目录加载失败"
-              description="场景目录暂不可用，无法创建项目。"
-              @retry="refetchScenarios()"
-            />
-            <EmptyState
-              v-else-if="scenarios.length === 0"
-              title="暂无可用场景"
-              description="场景目录为空，暂时无法创建项目。"
-            />
-            <div v-else class="scenarios-grid">
-              <button
-                v-for="sc in scenarios"
-                :key="sc.key"
-                type="button"
-                class="scenario-card"
-                :class="{ selected: form.scenario === sc.key }"
-                :aria-pressed="form.scenario === sc.key"
-                @click="selectScenario(sc, true)"
-              >
-                <span class="scenario-header">
-                  <span class="scenario-title">{{ sc.label }}</span>
-                  <Badge v-if="sc.is_default" tone="info" size="sm">默认项</Badge>
-                </span>
-              </button>
-            </div>
-          </div>
-        </details>
+      <div class="creation-content">
+        <div id="np-section-basic" class="creation-main">
         <div class="project-identity">
           <FormField label="项目名称" for="np-title" required :error="validationErrors.title">
             <Input
@@ -123,160 +87,179 @@
             />
           </FormField>
 
+          <FormField label="探索场景" for="np-scenario" required>
+            <Select
+              id="np-scenario"
+              :model-value="form.scenario"
+              :options="scenarios.map((sc) => ({ value: sc.key, label: sc.label }))"
+              :disabled="scenariosLoading || scenariosError || !scenarios.length"
+              :placeholder="scenariosLoading ? '正在加载场景…' : '选择场景'"
+              @update:model-value="selectScenarioByKey"
+            />
+          </FormField>
         </div>
 
-        <FormField
-          id="np-origin"
-          class="validation-anchor"
-          label="Origin（已知信息）"
-          for="np-origin-input"
-          required
-          :error="validationErrors.origin"
-        >
-          <Textarea
-            id="np-origin-input"
-            v-model="form.origin"
-            placeholder="描述已知信息、研究对象、授权范围与排除项；例如：核验订单审批资料，不访问生产环境。"
-            :rows="4"
-            @input="scenarioTemplateMeta.origin.userTouched = true"
-          />
-        </FormField>
+        <ErrorState
+          v-if="scenariosError"
+          title="场景目录加载失败"
+          description="场景目录暂不可用，无法创建项目。"
+          @retry="refetchScenarios()"
+        />
+        <EmptyState
+          v-else-if="!scenariosLoading && !scenarios.length"
+          title="暂无可用场景"
+          description="场景目录为空，暂时无法创建项目。"
+        />
+        <div class="project-brief">
+          <FormField
+            id="np-origin"
+            class="validation-anchor"
+            label="Origin（已知信息）"
+            for="np-origin-input"
+            required
+            :error="validationErrors.origin"
+          >
+            <Textarea
+              id="np-origin-input"
+              v-model="form.origin"
+              placeholder="描述已知信息、研究对象、授权范围与排除项；例如：核验订单审批资料，不访问生产环境。"
+              :rows="4"
+              @input="scenarioTemplateMeta.origin.userTouched = true"
+            />
+          </FormField>
 
-        <FormField
-          id="np-goal"
-          class="validation-anchor"
-          label="Goal（目标）"
-          for="np-goal-input"
-          required
-          :error="validationErrors.goal"
-        >
-          <Textarea
-            id="np-goal-input"
-            v-model="form.goal"
-            placeholder="例如：重点检查普通用户之间的数据隔离及审批流程。"
-            :rows="4"
-            @input="scenarioTemplateMeta.goal.userTouched = true"
-          />
-        </FormField>
+          <FormField
+            id="np-goal"
+            class="validation-anchor"
+            label="Goal（目标）"
+            for="np-goal-input"
+            required
+            :error="validationErrors.goal"
+          >
+            <Textarea
+              id="np-goal-input"
+              v-model="form.goal"
+              placeholder="例如：重点检查普通用户之间的数据隔离及审批流程。"
+              :rows="4"
+              @input="scenarioTemplateMeta.goal.userTouched = true"
+            />
+          </FormField>
 
-        <details ref="materialsDetails" class="project-materials" aria-label="项目资料">
-          <summary>
-            <Paperclip :size="16" />
-            <span class="materials-summary" aria-live="polite"
-              >资料 · {{ resourceSummary }} · 资料库 {{ form.library_keys.length
-              }}{{ schedule ? ` · 保留原件 ${retainedResourceIds.length}` : '' }}</span
-            >
-            <span class="summary-action">管理资料 <ChevronDown :size="14" /></span>
-          </summary>
-          <div class="materials-content">
-            <div v-if="schedule" class="selected-libraries">
-              <div
-                v-for="resource in schedule.resources"
-                :key="resource.id"
-                class="selected-library"
-              >
-                <label
-                  ><Checkbox
-                    :model-value="retainedResourceIds.includes(resource.id)"
-                    @update:model-value="retainResource(resource.id, $event)"
-                  />
-                  {{ resource.path }} · {{ bytes(resource.size_bytes) }} ·
-                  {{
-                    retainedResourceIds.includes(resource.id) ? '保留服务器原件' : '未来移除'
-                  }}</label
-                >
-              </div>
-              <p class="section-desc">
-                已有原件无需重新上传；取消保留仅从未来配置移除，不改变历史项目。
-              </p>
+          <section id="np-materials" class="project-materials" aria-label="项目资料">
+            <div class="materials-summary">
+              <strong>项目资料</strong>
+              <span aria-live="polite">{{ resourceSummary }}{{ schedule ? ` · 保留原件 ${retainedResourceIds.length}` : '' }}</span>
+              <label class="safety-toggle">
+                <input :checked="safetySelected || safetyPending" type="checkbox" role="switch" aria-label="安全限制"
+                  @change="setSafetySelection(($event.target as HTMLInputElement).checked)" />
+                安全限制
+              </label>
             </div>
+            <p v-if="safetyError" class="material-error" role="alert">{{ safetyError }}</p>
+            <p v-else-if="safetyPending" class="section-desc">正在加入执行安全约束…</p>
+            <div v-if="legacySelectionState !== 'explicit'" class="legacy-materials">
+              <p v-if="legacySelectionState === 'preserve'" class="section-desc">
+                此计划沿用历史场景默认资料，具体范围未确认；不更改选择时继续保留。
+              </p>
+              <p v-else class="material-error" role="alert">
+                服务未提供计划的资料选择状态，无法确认是否存在历史默认资料。
+              </p>
+              <label><input v-model="clearLegacyMaterials" type="checkbox" /> 不再使用历史默认资料</label>
+              <p v-if="selectionEdited" class="section-desc">修改文件选择后，未来运行将使用新的明确选择。</p>
+            </div>
+            <section v-if="schedule" class="selected-libraries" aria-label="未来配置保留原件">
+              <h3 class="materials-heading">已有原件</h3>
+              <div v-for="resource in schedule.resources" :key="resource.id" class="selected-library">
+                <label><Checkbox :model-value="retainedResourceIds.includes(resource.id)"
+                  @update:model-value="retainResource(resource.id, $event)" />
+                  {{ resource.path }} · {{ bytes(resource.size_bytes) }} ·
+                  {{ retainedResourceIds.includes(resource.id) ? '保留服务器原件' : '未来移除' }}
+                </label>
+              </div>
+              <p class="section-desc">取消保留仅影响未来配置，不改变历史项目。</p>
+            </section>
             <ProjectResourceBatchUploader
               ref="resourceUploader"
               v-model="resourceBatch"
-              :disabled="
-                isSubmitting ||
-                creationUnknown ||
-                Boolean(createdProjectId || createdScheduleId || creationDeleted) ||
-                isCancelling
-              "
+              :disabled="formDisabled"
               @busy="resourceBusy = $event"
               @pending="resourcePending = $event"
               @summary="resourceSummary = $event"
             >
               <template #actions>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  :disabled="
-                    isSubmitting ||
-                    creationUnknown ||
-                    Boolean(createdProjectId || createdScheduleId || creationDeleted) ||
-                    isCancelling
-                  "
-                  @click="libraryPickerOpen = true"
-                  >从资料库选择</Button
-                >
+                <Button id="np-library-picker-trigger" size="sm" variant="secondary"
+                  :disabled="formDisabled" @click="libraryPickerOpen = true">从资料库选择</Button>
               </template>
             </ProjectResourceBatchUploader>
-            <div v-if="form.library_keys.length" class="selected-libraries">
-              <div v-for="key in form.library_keys" :key="key" class="selected-library">
-                <span
-                  >资料库 · {{ libraryCatalog.find((item) => item.key === key)?.name || key }}</span
-                >
-                <span v-if="existingLibraryBinding(key)" class="section-desc">{{
-                  refreshLibraryKeys.includes(key)
-                    ? '保存时更新为当前版本'
-                    : `固定 v${existingLibraryBinding(key)!.version}`
-                }}</span>
-                <Button
-                  v-if="existingLibraryBinding(key)"
-                  size="sm"
-                  variant="ghost"
-                  @click="toggleLibraryRefresh(key)"
-                  >{{ refreshLibraryKeys.includes(key) ? '保留原版本' : '更新为当前版本' }}</Button
-                >
-                <Button size="sm" variant="ghost" @click="toggleLibrary(key)">取消关联</Button>
+            <section v-if="selections.length || invalidBindings.length" aria-label="已选资料库文件">
+              <div v-for="binding in invalidBindings" :key="binding.library_key" class="material-error">
+                {{ binding.library_name }} 的原绑定范围未知，无法安全保存。
+                <Button size="sm" variant="ghost" @click="removeInvalidBinding(binding.library_key)">移除该绑定</Button>
               </div>
-            </div>
-          </div>
-        </details>
+              <div v-for="selection in selections" :key="selection.library_key" class="library-selection-status">
+                <template v-if="!selectionManifest(selection)">
+                  <span v-if="boundLoading[selection.library_key]">正在读取 {{ selection.library_key }} 的已绑定文件…</span>
+                  <span v-else class="material-error">{{ boundErrors[selection.library_key] || `无法读取 ${selection.library_key} 的文件清单` }}</span>
+                  <Button v-if="boundErrors[selection.library_key]" size="sm" variant="ghost" @click="loadBoundManifest(selection.library_key)">重试</Button>
+                  <Button size="sm" variant="ghost" @click="removeLibrary(selection.library_key)">移除该绑定</Button>
+                </template>
+                <template v-else-if="selectionManifest(selection)?.files.length === 0">
+                  <span>{{ existingLibraryBinding(selection.library_key)?.library_name || selection.library_key }} ({{ selection.library_key }}) · 历史空整库绑定</span>
+                  <Button size="sm" variant="ghost" @click="removeLibrary(selection.library_key)">移除该绑定</Button>
+                </template>
+                <Button size="sm" variant="ghost" :disabled="currentLoading[selection.library_key] || !selectionManifest(selection)"
+                  @click="updateLibraryVersion(selection.library_key)">更新为当前资料</Button>
+                <span v-if="updateErrors[selection.library_key]" class="material-error" role="alert">{{ updateErrors[selection.library_key] }}</span>
+              </div>
+              <div v-if="selectedFiles.length" class="selected-file-tags">
+                <div v-for="file in selectedFiles" :key="file.identity" class="selected-file-tag">
+                  <details>
+                    <summary>{{ file.label }}</summary>
+                    <span>{{ file.libraryName }} ({{ file.libraryKey }}) · {{ file.path }}</span>
+                  </details>
+                  <button type="button" :aria-label="`移除 ${file.libraryKey} ${file.path}`"
+                    @click="setPaths(file.libraryKey, [file.path], false)"><X :size="14" aria-hidden="true" /></button>
+                </div>
+              </div>
+            </section>
+          </section>
+        </div>
+        </div>
 
-        <section
-          v-show="settingsPanel === 'proxy'"
-          id="np-proxy-settings"
-          class="settings-panel"
-          aria-label="代理设置"
-        >
-          <div class="settings-panel-heading">
-            <h3>代理设置</h3>
-            <Button size="sm" variant="ghost" @click="closeSettings">完成设置</Button>
-          </div>
-          <TestEgressFields v-model="egress" :auth-configured="schedule?.project?.test_egress?.auth_configured" :disabled="formDisabled" :error="egressError" @update:model-value="userEdited = true" />
-        </section>
-        <section
-          v-show="settingsPanel === 'timing'"
-          id="np-timing-settings"
-          class="settings-panel"
-          aria-label="时间设置"
-        >
-          <div class="settings-panel-heading">
-            <h3>时间设置</h3>
-            <Button size="sm" variant="ghost" @click="closeSettings">完成设置</Button>
-          </div>
-          <ScheduleTiming
-            ref="scheduleTiming"
-            v-model="scheduleDraft"
-            :show-mode="false"
-            :locked-mode="Boolean(schedule)"
-            :editing="Boolean(schedule)"
-            :boundary-hint="boundaryHint"
-            :project="previewProject"
-          />
+        <aside class="creation-settings" aria-label="启动与代理设置">
+        <section id="np-timing-settings" class="creation-section" aria-label="启动安排">
+          <div class="creation-section-heading"><h3>启动安排</h3></div>
+          <fieldset class="schedule-mode-options" role="radiogroup" aria-label="启动方式">
+            <label v-for="option in modeOptions" :key="option.value">
+              <input
+                type="radio"
+                :name="scheduleModeGroup"
+                :value="option.value"
+                :checked="scheduleDraft.mode === option.value"
+                :disabled="formDisabled || Boolean(schedule && scheduleDraft.mode === 'once')"
+                :aria-label="option.label"
+                @change="setScheduleMode(option.value)"
+              />
+              <span>{{ modeLabels[option.value as ScheduleDraft['mode']] }}</span>
+            </label>
+          </fieldset>
+          <div v-show="scheduleDraft.mode !== 'immediate' || Boolean(schedule?.project)">
+            <ScheduleTiming
+              ref="scheduleTiming"
+              v-model="scheduleDraft"
+              :show-mode="false"
+              :locked-mode="Boolean(schedule)"
+              :editing="Boolean(schedule)"
+              :boundary-hint="boundaryHint"
+              :project="previewProject"
+            />
             <div v-if="schedule?.project" class="advanced-subsection">
               <div class="section-title-row compact-title-row">
                 <div>
                   <h3>既有期限</h3>
-                  <p class="section-desc">未修改时保留原期限；清空输入才明确取消，仅影响未来项目。日期按浏览器本地时区显示。</p>
+                  <p class="section-desc">
+                    未修改时保留原期限；清空输入才明确取消，仅影响未来项目。日期按浏览器本地时区显示。
+                  </p>
                 </div>
               </div>
               <div class="deadline-settings-grid">
@@ -306,74 +289,47 @@
                 </FormField>
               </div>
             </div>
+          </div>
         </section>
+        <section id="np-proxy-settings" class="creation-section" aria-label="代理设置">
+          <div class="creation-section-heading"><h3>代理设置</h3></div>
+          <TestEgressFields
+            v-model="egress"
+            :auth-configured="schedule?.project?.test_egress?.auth_configured"
+            :disabled="formDisabled"
+            :error="egressError"
+            @update:model-value="userEdited = true"
+          />
+        </section>
+        </aside>
       </div>
     </fieldset>
 
     <template #footer>
       <div class="creation-footer">
-        <div
-          class="creation-settings"
-          v-if="!createdProjectId && !createdScheduleId && !creationDeleted"
-        >
-          <Button
-            id="np-proxy-trigger"
-            class="proxy-trigger"
-            variant="ghost"
-            :disabled="formDisabled"
-            :aria-expanded="settingsPanel === 'proxy'"
-            aria-controls="np-proxy-settings"
-            @click="toggleSettings('proxy')"
-          >
-            <template #icon><SlidersHorizontal :size="16" /></template>
-            <span class="setting-summary"
-              ><span>代理设置</span
-              ><span class="summary-hint">{{ proxySummary }}</span></span
-            >
-          </Button>
-          <div class="start-settings">
-            <Select
-              id="schedule-mode"
-              :model-value="scheduleDraft.mode"
-              :options="modeOptions"
-              :disabled="formDisabled || Boolean(schedule && scheduleDraft.mode === 'once')"
-              aria-label="启动安排"
-              @update:model-value="setScheduleMode"
-            />
-            <Button
-              v-if="scheduleDraft.mode !== 'immediate'"
-              id="np-timing-trigger"
-              class="timing-trigger"
-              variant="ghost"
-              :disabled="formDisabled"
-              :aria-expanded="settingsPanel === 'timing'"
-              aria-controls="np-timing-settings"
-              @click="toggleSettings('timing')"
-              ><span class="setting-summary"
-                ><span>{{ timingSummary }}</span
-                ><span class="summary-hint"
-                  >{{ scheduleDraft.timezone || '未设置时区' }} · 编辑时间</span
-                ></span
-              ></Button
-            >
-          </div>
-        </div>
         <p v-if="creationUnknown" class="section-desc">
           保存结果未确认，仅能查询或按原请求恢复；不要换键重复创建。
         </p>
-        <p v-else class="section-desc">
+        <p
+          v-else-if="submitBlockReason || scheduleDraft.mode !== 'immediate'"
+          class="section-desc creation-footer-notice"
+        >
           {{
             submitBlockReason ||
-            (scheduleDraft.mode === 'immediate'
-              ? '资料绑定成功后进入执行调度，不代表模型已启动。'
-              : schedule
-                ? '保存仅影响未来项目，不会重写已生成项目。'
-                : '保存计划后由后台在计划时刻处理，不会立即启动研究。')
+            (schedule
+              ? '保存仅影响未来项目，不会重写已生成项目。'
+              : '保存计划后在计划时刻处理，不会立即启动研究。')
           }}
         </p>
-        <Alert v-if="formError && !creationUnknown" tone="danger" title="请检查当前操作">
+        <Alert v-if="formError && !creationUnknown && !creationRejected" tone="danger" title="请检查当前操作">
           {{ formError }}
-          <router-link v-if="workerConfigurationError" to="/console/workers" target="_blank" rel="noopener">前往 Worker 配置</router-link>
+          <router-link
+            v-if="workerConfigurationError"
+            to="/console/workers"
+            target="_blank"
+            rel="noopener"
+            >前往 Worker 配置</router-link
+          >
         </Alert>
         <div class="creation-footer-actions">
           <Button
@@ -392,34 +348,62 @@
     <Dialog
       :open="libraryPickerOpen"
       title="从资料库选择"
-      description="仅关联本次项目，不会删除资料库原件。创建时冻结当前版本。"
+      description="选择本次使用的资料文件，取消选择不会删除资料库原件。"
       @update:open="libraryPickerOpen = $event"
+      @close-auto-focus="restoreLibraryPickerFocus"
     >
-      <Input v-model="librarySearch" placeholder="搜索资料库" aria-label="搜索资料库" />
-      <Skeleton v-if="libraryCatalogLoading" />
-      <ErrorState
-        v-else-if="libraryCatalogError"
-        title="资料库目录加载失败"
-        description="可重试；资料库为可选项。"
-        @retry="refetchLibraryCatalog()"
-      />
-      <div v-else-if="filteredLibraries.length" class="library-options">
-        <button
-          v-for="library in filteredLibraries"
-          :key="library.key"
-          type="button"
-          class="library-option"
-          :class="{ selected: form.library_keys.includes(library.key) }"
-          :aria-pressed="form.library_keys.includes(library.key)"
-          @click="toggleLibrary(library.key)"
-        >
-          <span class="library-option-title">{{ library.name }}</span>
-          <span class="mono"
-            >{{ library.key }} · v{{ library.latest_version }} · {{ library.file_count }} 文件</span
-          >
-        </button>
-      </div>
-      <EmptyState v-else title="暂无匹配资料库" description="可不选择资料库创建项目。" />
+        <Input v-model="librarySearch" placeholder="搜索资料库或文件路径" aria-label="搜索资料库或文件路径" />
+        <Skeleton v-if="libraryCatalogLoading && !pickerLibraries.length" />
+        <ErrorState
+          v-if="libraryCatalogError"
+          title="资料库目录加载失败"
+          description="可重试；资料库为可选项。"
+          @retry="refetchLibraryCatalog()"
+        />
+        <div v-if="pickerLibraries.length" class="library-tree" aria-label="资料库文件选择">
+          <section v-for="library in pickerLibraries" :key="library.key" class="library-tree-root"
+            :style="{ marginLeft: library.builtin ? '0' : '20px' }">
+            <div class="library-tree-row">
+              <button type="button" class="tree-arrow" :disabled="!library.manifest"
+                :aria-label="`${isExpanded(library.key,'') ? '折叠' : '展开'} ${library.name}`"
+                :aria-expanded="isExpanded(library.key,'')"
+                @click="toggleExpanded(library.key,'')">
+                <ChevronRight :size="16" :class="{ expanded: isExpanded(library.key,'') || Boolean(librarySearch.trim()) }" />
+              </button>
+              <Checkbox v-if="library.manifest" :label="library.name"
+                :aria-label="`选择资料库 ${library.name} (${library.key})`"
+                :model-value="selectionState(library.key, library.manifest.files.map((file) => file.path)).checked"
+                :indeterminate="selectionState(library.key, library.manifest.files.map((file) => file.path)).indeterminate"
+                :disabled="!library.manifest.files.length"
+                @update:model-value="setPaths(library.key, library.manifest!.files.map((file) => file.path), $event, library.manifest!)" />
+              <span v-else>{{ library.name }}</span>
+              <span v-if="library.manifest" class="tree-meta">{{ library.key }} · {{ library.manifest.files.length }} 文件{{ library.limited ? ' · 已绑定范围' : '' }}</span>
+              <Button v-if="existingLibraryBinding(library.key) && !selectionFor(library.key)" size="sm" variant="ghost"
+                :disabled="library.loading" @click="browseCurrentManifest(library.key)">查看当前资料</Button>
+            </div>
+            <p v-if="library.loading" class="tree-status" role="status">正在读取文件清单…</p>
+            <div v-else-if="library.error" class="tree-status material-error" role="alert">
+              {{ library.error }}
+              <Button size="sm" variant="ghost" @click="retryLibrary(library.key)">重试</Button>
+            </div>
+            <p v-else-if="library.manifest && !library.manifest.files.length" class="tree-status">没有可选文件。</p>
+            <div v-for="row in library.rows" :key="row.path" class="library-tree-row"
+              :style="{ paddingLeft: `${(row.depth + 1) * 20}px` }">
+              <button v-if="row.directory" type="button" class="tree-arrow"
+                :aria-label="`${isExpanded(library.key,row.path) ? '折叠' : '展开'} ${row.path}`"
+                :aria-expanded="isExpanded(library.key,row.path)"
+                @click="toggleExpanded(library.key,row.path)">
+                <ChevronRight :size="16" :class="{ expanded: isExpanded(library.key,row.path) || Boolean(librarySearch.trim()) }" />
+              </button>
+              <span v-else class="tree-arrow-placeholder"></span>
+              <Checkbox :label="row.name" :aria-label="`选择${row.directory ? '目录' : '文件'} ${library.key} ${row.path}`"
+                :model-value="selectionState(library.key, row.paths).checked"
+                :indeterminate="selectionState(library.key, row.paths).indeterminate"
+                @update:model-value="setPaths(library.key, row.paths, $event, library.manifest!)" />
+            </div>
+          </section>
+        </div>
+        <EmptyState v-else-if="!libraryCatalogLoading && !libraryCatalogError" title="暂无匹配资料库" description="可不选择资料库创建项目。" />
       <template #footer><Button @click="libraryPickerOpen = false">完成选择</Button></template>
     </Dialog>
 
@@ -441,18 +425,17 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, useId, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { isNavigationFailure, onBeforeRouteLeave, useRouter } from 'vue-router'
-import {
-  api,
-  ApiError,
-  createProject,
-  listLibraryCatalog,
-} from '@/api/client'
+import { api, ApiError, createProject, getLibraryCatalogManifest, listLibraryCatalog } from '@/api/client'
+import { ChevronRight, X } from '@lucide/vue'
 import type {
   AdvisoryLibrary,
   CreateProjectRequest,
+  LibraryManifest,
+  LibrarySelection,
+  ProjectLibraryBinding,
   ProjectResourceBatch,
   ScenarioCatalogEntry,
 } from '@/api/types'
@@ -460,7 +443,6 @@ import { useUIStore } from '@/stores/ui'
 import { ConfirmAction, ErrorState } from '@/components/patterns'
 import {
   Alert,
-  Badge,
   Button,
   Dialog,
   Checkbox,
@@ -484,14 +466,13 @@ import {
   ScheduleTimeError,
   type ScheduleDraft,
 } from './scheduleTiming'
-import { weekdayLabels } from '@/api/projectSchedules'
-import { ChevronDown, Paperclip, SlidersHorizontal } from '@lucide/vue'
 import { bytes } from '@/lib/format'
 import {
   createCreationRequestId,
   createProjectSchedule,
   updateProjectSchedule,
   getCreationRequest,
+  getScheduleLibraryManifest,
   rememberCreationRequest,
   forgetCreationRequest,
   type CreateScheduleRequest,
@@ -519,7 +500,12 @@ const cleanupError = ref('')
 const formError = ref('')
 const workerConfigurationError = ref(false)
 const creationUnknown = ref(false)
+const creationRejected = ref(false)
 const creationDeleted = ref(false)
+// 默认意图只消费一次；用户关闭后，迟到的清单不能重新加入安全文件。
+const safetyPending = ref(!props.schedule)
+const safetyError = ref('')
+let safetyGeneration = 0
 const createdProjectId = ref<string | null>(null)
 const navigationError = ref('')
 const libraryPickerOpen = ref(false)
@@ -537,7 +523,6 @@ const form = reactive({
   origin: '',
   goal: '',
   scenario: '',
-  library_keys: [] as string[],
   explore_deadline: '',
   authorization_expires_at: '',
 })
@@ -545,7 +530,6 @@ const egress = ref(testEgressDraft(props.schedule?.project?.test_egress))
 const egressError = ref('')
 const scheduleDraft = ref(props.schedule ? draftFromSchedule(props.schedule) : newScheduleDraft())
 const retainedResourceIds = ref(props.schedule?.resources.map((resource) => resource.id) || [])
-const refreshLibraryKeys = ref<string[]>([])
 watch(
   scheduleDraft,
   () => {
@@ -561,58 +545,31 @@ type PendingSubmission =
   | { operation: 'schedule'; payload: CreateScheduleRequest }
   | { operation: 'update'; scheduleId: string; payload: UpdateScheduleRequest }
 const pendingSubmission = ref<PendingSubmission | null>(null)
-const scenarioExpanded = ref(true)
 const scheduleTiming = ref<InstanceType<typeof ScheduleTiming> | null>(null)
-const materialsDetails = ref<HTMLDetailsElement | null>(null)
+const scheduleModeGroup = useId()
+const modeLabels: Record<ScheduleDraft['mode'], string> = {
+  immediate: '立即', once: '定时', daily: '每日', weekly: '每周',
+}
+
+function restoreLibraryPickerFocus(event: Event) {
+  event.preventDefault()
+  if (props.open) document.getElementById('np-library-picker-trigger')?.focus()
+}
+
 const resourceSummary = ref('本地文件 0')
-const settingsPanel = ref<'proxy' | 'timing' | null>(null)
 const formDisabled = computed(
   () =>
     isSubmitting.value ||
     isCancelling.value ||
     creationUnknown.value ||
+    creationRejected.value ||
     Boolean(createdProjectId.value || createdScheduleId.value || creationDeleted.value),
 )
 const modeOptions = computed(() =>
   scheduleModeOptions(scheduleDraft.value.mode, Boolean(props.schedule)),
 )
-const proxySummary = computed(() => ({ direct: '直接连接', http: 'HTTP 代理', socks5: 'SOCKS5 代理' })[egress.value.mode])
-const timingSummary = computed(() => {
-  const draft = scheduleDraft.value
-  const start = draft.startLocal.replace('T', ' ')
-  if (draft.mode === 'once') return `${start || '未设置启动时间'} · ${draft.stopMode === 'specified' ? `停止 ${draft.stopLocal.replace('T', ' ') || '未设置'}` : '不限制停止时间'}`
-  const days =
-    draft.mode === 'weekly'
-      ? [...draft.weekdays]
-          .sort()
-          .map((day) => weekdayLabels[day])
-          .join('、') || '未选择执行日'
-      : '每天'
-  return `${days} ${draft.localTime || '未设置时刻'} · ${start ? `起始 ${start}` : '未设置起始边界'}${draft.endDate ? ` · 结束 ${draft.endDate}` : ''}${draft.maxRuns ? ` · 最多 ${draft.maxRuns} 次` : ''}`
-})
-async function showSettings(panel: 'proxy' | 'timing', anchor?: string) {
-  settingsPanel.value = panel
-  await nextTick()
-  document.getElementById(anchor || `np-${panel}-settings`)?.scrollIntoView({ block: 'start' })
-}
-function closeSettings() {
-  const panel = settingsPanel.value
-  settingsPanel.value = null
-  if (panel) document.getElementById(`np-${panel}-trigger`)?.focus()
-}
-function toggleSettings(panel: 'proxy' | 'timing') {
-  if (settingsPanel.value === panel) closeSettings()
-  else void showSettings(panel)
-}
 function setScheduleMode(value: string | number) {
   scheduleDraft.value.mode = value as ScheduleDraft['mode']
-  if (value === 'immediate') closeSettings()
-  else void showSettings('timing')
-}
-function closeSettingsOnEscape(event: KeyboardEvent) {
-  if (!settingsPanel.value) return
-  event.preventDefault()
-  closeSettings()
 }
 const submitLabel = computed(() =>
   props.schedule
@@ -635,7 +592,6 @@ if (props.schedule?.project) {
     origin: project.origin,
     goal: project.goal,
     scenario: project.scenario,
-    library_keys: props.schedule.library_bindings.map((binding) => binding.library_key),
     explore_deadline: inputLocalTime(project.explore_deadline),
     authorization_expires_at: inputLocalTime(project.authorization_expires_at),
   })
@@ -647,12 +603,6 @@ function inputLocalTime(value?: string | null) {
 }
 const existingLibraryBinding = (key: string) =>
   props.schedule?.library_bindings.find((binding) => binding.library_key === key)
-function toggleLibraryRefresh(key: string) {
-  userEdited.value = true
-  refreshLibraryKeys.value = refreshLibraryKeys.value.includes(key)
-    ? refreshLibraryKeys.value.filter((item) => item !== key)
-    : [...refreshLibraryKeys.value, key]
-}
 function retainResource(id: string, keep: boolean) {
   userEdited.value = true
   retainedResourceIds.value = keep
@@ -699,17 +649,370 @@ const {
 })
 const libraryCatalog = computed(() => libraryCatalogData.value || [])
 
-const filteredLibraries = computed(() =>
-  libraryCatalog.value.filter((library) =>
-    `${library.name} ${library.key}`.toLowerCase().includes(librarySearch.value.toLowerCase()),
-  ),
+// 已保存的选择是唯一权威状态；清单只提供该版本的可选文件元数据。
+const originalBindings = props.schedule?.library_bindings || []
+const legacySelectionState = !props.schedule || originalBindings.length || props.schedule.library_selection_explicit === true
+  ? 'explicit' : props.schedule.library_selection_explicit === false ? 'preserve' : 'unknown'
+const selectionEdited = ref(false)
+const clearLegacyMaterials = ref(false)
+const explicitLibrarySelection = computed(() =>
+  legacySelectionState === 'explicit' || selectionEdited.value || clearLegacyMaterials.value,
 )
+const validBinding = (binding: ProjectLibraryBinding) =>
+  originalBindings.filter((item) => item.library_key === binding.library_key).length === 1 &&
+  Number.isInteger(binding.version) && binding.version > 0 &&
+  Number.isInteger(binding.file_count) && binding.file_count >= 0 &&
+  (binding.paths === null ||
+    (Array.isArray(binding.paths) && binding.file_count > 0 && binding.paths.length === binding.file_count &&
+      binding.paths.every((path) => typeof path === 'string' && path.length > 0) &&
+      new Set(binding.paths).size === binding.paths.length))
+const invalidBindings = ref(originalBindings.filter((binding) => !validBinding(binding)))
+const selections = ref<LibrarySelection[]>(originalBindings.filter(validBinding).map((binding) => ({
+  library_key: binding.library_key,
+  source: 'saved',
+  paths: binding.paths === null ? null : [...binding.paths],
+})))
+const boundManifests = reactive<Record<string, LibraryManifest>>(Object.create(null))
+const currentManifests = reactive<Record<string, LibraryManifest>>(Object.create(null))
+const browsedManifests = reactive<Record<string, LibraryManifest>>(Object.create(null))
+const boundLoading = reactive<Record<string, boolean>>(Object.create(null))
+const currentLoading = reactive<Record<string, boolean>>(Object.create(null))
+const boundErrors = reactive<Record<string, string>>(Object.create(null))
+const currentErrors = reactive<Record<string, string>>(Object.create(null))
+const updateErrors = reactive<Record<string, string>>(Object.create(null))
+const boundRequests: Record<string, number> = Object.create(null)
+const currentRequests: Record<string, number> = Object.create(null)
+const selectionChanges: Record<string, number> = Object.create(null)
+let selectionDisposed = false
+const selectionFor = (key: string) => selections.value.find((item) => item.library_key === key)
+// 已选清单与浏览清单分开，后台刷新不能悄悄接受新的正文摘要。
+const selectionManifest = (selection: LibrarySelection) => selection.source === 'current'
+  ? currentManifests[selection.library_key]
+  : boundManifests[selection.library_key]
+
+function validateManifest(manifest: LibraryManifest, key: string, binding?: ProjectLibraryBinding) {
+  if (!manifest || manifest.library_key !== key ||
+      !Array.isArray(manifest.files) || manifest.file_count !== manifest.files.length ||
+      manifest.files.some((file) => !file || typeof file.path !== 'string' || !file.path ||
+        typeof file.size_bytes !== 'number' || typeof file.sha256 !== 'string') ||
+      new Set(manifest.files.map((file) => file.path)).size !== manifest.files.length) {
+    throw new Error('文件清单不完整或身份不匹配')
+  }
+  if (binding) {
+    const paths = manifest.files.map((file) => file.path)
+    if (manifest.file_count !== binding.file_count ||
+        (binding.paths !== null && (!Array.isArray(binding.paths) ||
+          binding.paths.length !== paths.length || binding.paths.some((path) => !paths.includes(path))))) {
+      throw new Error('已绑定文件清单与计划不一致')
+    }
+  }
+}
+
+async function loadBoundManifest(key: string) {
+  const binding = existingLibraryBinding(key)
+  if (!props.schedule || !binding) return
+  const request = boundRequests[key] = (boundRequests[key] || 0) + 1
+  boundLoading[key] = true
+  boundErrors[key] = ''
+  try {
+    const manifest = await getScheduleLibraryManifest(props.schedule.id, key)
+    validateManifest(manifest, key, binding)
+    if (!selectionDisposed && boundRequests[key] === request) {
+      boundManifests[key] = manifest
+      if (!browsedManifests[key]) browsedManifests[key] = manifest
+    }
+  } catch (error) {
+    if (!selectionDisposed && boundRequests[key] === request)
+      boundErrors[key] = error instanceof Error ? error.message : '读取已绑定文件失败'
+  } finally {
+    if (!selectionDisposed && boundRequests[key] === request) boundLoading[key] = false
+  }
+}
+
+async function loadCurrentManifest(key: string): Promise<LibraryManifest | undefined> {
+  const request = currentRequests[key] = (currentRequests[key] || 0) + 1
+  currentLoading[key] = true
+  currentErrors[key] = ''
+  try {
+    const manifest = await getLibraryCatalogManifest(key)
+    validateManifest(manifest, key)
+    if (selectionDisposed || currentRequests[key] !== request) return undefined
+    if (!selectionFor(key) && !browsedManifests[key]) browsedManifests[key] = manifest
+    return manifest
+  } catch (error) {
+    if (!selectionDisposed && currentRequests[key] === request)
+      currentErrors[key] = error instanceof Error ? error.message : '读取当前资料失败'
+  } finally {
+    if (!selectionDisposed && currentRequests[key] === request) currentLoading[key] = false
+  }
+}
+
+function removeLibrary(key: string) {
+  userEdited.value = true
+  selectionEdited.value = true
+  selectionChanges[key] = (selectionChanges[key] || 0) + 1
+  selections.value = selections.value.filter((item) => item.library_key !== key)
+  updateErrors[key] = ''
+}
+function removeInvalidBinding(key: string) {
+  userEdited.value = true
+  selectionEdited.value = true
+  invalidBindings.value = invalidBindings.value.filter((item) => item.library_key !== key)
+}
+function selectionState(key: string, paths: string[]) {
+  const selection = selectionFor(key)
+  const manifest = selection && selectionManifest(selection)
+  const selected = !selection || !manifest ? 0 : paths.filter((path) =>
+    selection.paths === null || selection.paths.includes(path),
+  ).length
+  return { checked: paths.length > 0 && selected === paths.length, indeterminate: selected > 0 && selected < paths.length }
+}
+function setPaths(key: string, paths: string[], checked: boolean, supplied?: LibraryManifest) {
+  const previous = selectionFor(key)
+  const manifest = previous ? selectionManifest(previous) : supplied
+  if (!manifest) return
+  const available = new Set(manifest.files.map((file) => file.path))
+  const selected = new Set(previous ? (previous.paths ?? [...available]) : [])
+  for (const path of paths) {
+    if (!available.has(path)) continue
+    if (checked) selected.add(path)
+    else selected.delete(path)
+  }
+  userEdited.value = true
+  selectionEdited.value = true
+  selectionChanges[key] = (selectionChanges[key] || 0) + 1
+  updateErrors[key] = ''
+  if (!selected.size) {
+    removeLibrary(key)
+    return
+  }
+  const source = previous?.source ?? (boundManifests[key] === manifest ? 'saved' : 'current')
+  const original = existingLibraryBinding(key)
+  // 已绑定子集全选只代表保持该范围，不能扩大为原库的全部文件。
+  const whole = selected.size === available.size && (source === 'current' || original?.paths === null)
+  const next: LibrarySelection = {
+    library_key: key, source,
+    paths: whole ? null : manifest.files.map((file) => file.path).filter((path) => selected.has(path)),
+    ...(source === 'current' ? { expected_files: Object.fromEntries(
+      manifest.files.filter((file) => selected.has(file.path)).map((file) => [file.path, file.sha256]),
+    ) } : {}),
+  }
+  if (source === 'current') currentManifests[key] = manifest
+  selections.value = [...selections.value.filter((item) => item.library_key !== key), next]
+}
+
+async function updateLibraryVersion(key: string) {
+  const previous = selectionFor(key)
+  if (!previous || !selectionManifest(previous) || currentLoading[key]) return
+  updateErrors[key] = ''
+  // 旧空整库不能转成空路径数组，也不能借版本更新自动选中新文件。
+  if (selectionManifest(previous)!.files.length === 0) {
+    updateErrors[key] = '历史空整库绑定不能直接更新，请先移除后重新选择。'
+    return
+  }
+  const manifest = await loadCurrentManifest(key)
+  if (!manifest || selectionFor(key) !== previous) {
+    if (!manifest && selectionFor(key) === previous) updateErrors[key] = currentErrors[key] || '读取当前资料失败'
+    return
+  }
+  if (!manifest.files.length) {
+    updateErrors[key] = '当前资料没有文件，原绑定未改变。'
+    return
+  }
+  const available = new Set(manifest.files.map((file) => file.path))
+  const previousPaths = previous.paths ?? selectionManifest(previous)!.files.map((file) => file.path)
+  const missing = previousPaths.filter((path) => !available.has(path))
+  if (missing.length) {
+    updateErrors[key] = `当前资料缺少原选文件：${missing.join('、')}。请先处理原选择，原绑定未改变。`
+    return
+  }
+  userEdited.value = true
+  selectionChanges[key] = (selectionChanges[key] || 0) + 1
+  selectionEdited.value = true
+  browsedManifests[key] = manifest
+  currentManifests[key] = manifest
+  selections.value = selections.value.map((item) => item === previous ? {
+    library_key: key, source: 'current',
+    paths: previous.paths === null && previousPaths.length === available.size ? null : [...previousPaths],
+    expected_files: Object.fromEntries(manifest.files.filter((file) => previousPaths.includes(file.path))
+      .map((file) => [file.path, file.sha256])),
+  } : item)
+}
+
+async function browseCurrentManifest(key: string) {
+  const revision = selectionChanges[key] || 0
+  const manifest = await loadCurrentManifest(key)
+  if (manifest && !selectionFor(key) && (selectionChanges[key] || 0) === revision)
+    browsedManifests[key] = manifest
+}
+
+const expandedNodes = ref(new Set<string>())
+const nodeId = (key: string, path: string) => JSON.stringify([key, path])
+let rootExpandedOnce = false
+watch(libraryCatalog, (libraries) => {
+  const root = libraries.find((library) => library.builtin)
+  if (!root || rootExpandedOnce) return
+  rootExpandedOnce = true
+  expandedNodes.value = new Set([...expandedNodes.value, nodeId(root.key, '')])
+}, { immediate: true })
+const isExpanded = (key: string, path: string) =>
+  Boolean(librarySearch.value.trim()) || expandedNodes.value.has(nodeId(key, path))
+function toggleExpanded(key: string, path: string) {
+  const next = new Set(expandedNodes.value)
+  const id = nodeId(key, path)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  expandedNodes.value = next
+}
+interface TreeRow { path: string; name: string; directory: boolean; depth: number; paths: string[] }
+function treeRows(key: string, manifest: LibraryManifest, rootMatches: boolean): TreeRow[] {
+  const rows = new Map<string, TreeRow>()
+  for (const file of manifest.files) {
+    const parts = file.path.split('/')
+    parts.forEach((name, index) => {
+      const path = parts.slice(0, index + 1).join('/')
+      const row = rows.get(path) || { path, name, directory: index < parts.length - 1, depth: index, paths: [] }
+      row.paths.push(file.path)
+      rows.set(path, row)
+    })
+  }
+  const search = librarySearch.value.trim().toLowerCase()
+  return [...rows.values()].sort((a, b) =>
+    Number(b.path === manifest.safety_path) - Number(a.path === manifest.safety_path) || a.path.localeCompare(b.path),
+  ).filter((row) => {
+    if (search) return rootMatches || row.path.toLowerCase().includes(search) ||
+      row.paths.some((path) => path.toLowerCase().includes(search))
+    if (!isExpanded(key,'')) return false
+    const parts = row.path.split('/')
+    return parts.slice(0, -1).every((_, index) =>
+      isExpanded(key,parts.slice(0, index + 1).join('/')),
+    )
+  })
+}
+const pickerLibraries = computed(() => {
+  const libraries = new Map(libraryCatalog.value.map((item) => [item.key, { key: item.key, name: item.builtin ? '根目录' : item.name, builtin: item.builtin }]))
+  for (const selection of selections.value) {
+    const binding = existingLibraryBinding(selection.library_key)
+    if (!libraries.has(selection.library_key)) libraries.set(selection.library_key, {
+      key: selection.library_key, name: binding?.library_name || selection.library_key, builtin: false,
+    })
+  }
+  const search = librarySearch.value.trim().toLowerCase()
+  const root = libraryCatalog.value.find((library) => library.builtin)
+  return [...libraries.values()].sort((a, b) => Number(b.builtin) - Number(a.builtin)).flatMap((library) => {
+    if (!library.builtin && root && !isExpanded(root.key, '')) return []
+    const selection = selectionFor(library.key)
+    const manifest = selection ? selectionManifest(selection) : browsedManifests[library.key]
+    const bound = selection ? selection.source === 'saved' : manifest === boundManifests[library.key]
+    const loading = bound ? boundLoading[library.key] || currentLoading[library.key] : currentLoading[library.key]
+    const error = bound ? boundErrors[library.key] || currentErrors[library.key] : currentErrors[library.key]
+    const limited = bound && existingLibraryBinding(library.key)?.paths !== null
+    const rootMatches = !search || `${library.name} ${library.key}`.toLowerCase().includes(search)
+    const rows = manifest ? treeRows(library.key, manifest, rootMatches) : []
+    if (search && !library.builtin && !rootMatches && !rows.length && manifest) return []
+    return [{ ...library, manifest, loading, error, rows, limited }]
+  })
+})
+function retryLibrary(key: string) {
+  const selection = selectionFor(key)
+  if (existingLibraryBinding(key) && (!selection || selection.source === 'saved') && boundErrors[key]) void loadBoundManifest(key)
+  else void browseCurrentManifest(key)
+}
+watch([libraryPickerOpen, libraryCatalog, selections], () => {
+  if (!libraryPickerOpen.value) return
+  for (const library of libraryCatalog.value) {
+    if (!selectionFor(library.key) && !existingLibraryBinding(library.key) && !browsedManifests[library.key] &&
+        !currentLoading[library.key] && !currentErrors[library.key]) void loadCurrentManifest(library.key)
+  }
+}, { immediate: true })
+for (const selection of selections.value) void loadBoundManifest(selection.library_key)
+
+const selectedFiles = computed(() => {
+  const files = selections.value.flatMap((selection) => {
+    const manifest = selectionManifest(selection)
+    if (!manifest) return []
+    return manifest.files.filter((file) => selection.paths === null || selection.paths.includes(file.path))
+      .map((file) => ({
+        identity: JSON.stringify([selection.library_key, file.path]),
+        libraryKey: selection.library_key, libraryName: manifest.library_name,
+        path: file.path, name: file.path.split('/').at(-1)!, label: '',
+      }))
+  })
+  for (const file of files) {
+    const duplicates = files.filter((other) => other.name === file.name)
+    if (duplicates.length === 1) { file.label = file.name; continue }
+    const parts = file.path.split('/')
+    let suffix = file.name
+    for (let count = 2; count <= parts.length; count++) {
+      suffix = parts.slice(-count).join('/')
+      if (duplicates.every((other) => other === file || !other.path.endsWith(`/${suffix}`) && other.path !== suffix)) break
+    }
+    const collisions = duplicates.filter((other) => other !== file && (other.path === suffix || other.path.endsWith(`/${suffix}`)))
+    file.label = collisions.length ? `${file.libraryName} (${file.libraryKey}) · ${suffix}` : suffix
+  }
+  return files
+})
+
+const safetySelected = computed(() => selections.value.some((selection) => {
+  const manifest = selectionManifest(selection)
+  return Boolean(manifest?.safety_path && manifest.files.some((file) => file.path === manifest.safety_path) &&
+    (selection.paths === null || selection.paths.includes(manifest.safety_path)))
+}))
+async function setSafetySelection(checked: boolean, automatic = false) {
+  const generation = ++safetyGeneration
+  safetyPending.value = checked
+  safetyError.value = ''
+  if (!automatic) userEdited.value = true
+  if (!checked) {
+    for (const selection of [...selections.value]) {
+      const path = selectionManifest(selection)?.safety_path
+      if (path) setPaths(selection.library_key, [path], false)
+    }
+    return
+  }
+  const root = libraryCatalog.value.find((library) => library.builtin)
+  if (!root) {
+    safetyError.value = '根目录暂不可用，请重试加载或关闭本次安全资料选择。'
+    return
+  }
+  const previous = selectionFor(root.key)
+  const change = selectionChanges[root.key] || 0
+  const manifest = previous ? selectionManifest(previous) : await loadCurrentManifest(root.key)
+  if (selectionDisposed || generation !== safetyGeneration) return
+  if ((selectionChanges[root.key] || 0) !== change) {
+    safetyPending.value = false
+    return
+  }
+  if (!manifest?.safety_path || !manifest.files.some((file) => file.path === manifest.safety_path)) {
+    safetyError.value = previous?.source === 'saved'
+      ? '计划已保存资料不含安全文件；请明确更新该库资料后再选择。'
+      : '无法读取执行安全约束，请重试或关闭本次选择。'
+    return
+  }
+  const wasEdited = userEdited.value
+  setPaths(root.key, [manifest.safety_path], true, manifest)
+  if (automatic) userEdited.value = wasEdited
+  safetyPending.value = false
+}
+let defaultSafetyStarted = false
+watch(libraryCatalog, (libraries) => {
+  if (props.schedule || defaultSafetyStarted || !safetyPending.value || !libraries.some((item) => item.builtin)) return
+  defaultSafetyStarted = true
+  void setSafetySelection(true, true)
+}, { immediate: true })
+
 const submitBlockReason = computed(() => {
   if (creationDeleted.value) return '原请求已保存但项目已删除，不能用此请求重新创建。'
+  if (creationRejected.value) return '请处理已拒绝的原请求。'
+  if (safetyPending.value) return safetyError.value || '正在加入执行安全约束，请稍候或关闭本次选择。'
+  if (legacySelectionState === 'unknown' && !explicitLibrarySelection.value)
+    return '计划的历史资料选择状态未知，请核实或明确不再使用历史默认资料。'
+  if (invalidBindings.value.length) return '部分计划绑定范围未知，请核实或移除该绑定。'
+  if (selections.value.some((item) => currentLoading[item.library_key])) return '正在读取所选资料库的当前资料，请稍候。'
+  if (selections.value.some((item) => !selectionManifest(item))) return '已选资料文件清单未能确认，请重试或移除绑定。'
   if (resourceBusy.value) return '资料操作尚未完成，请稍候。'
   if (resourcePending.value) return '仍有未完成或结果未确认的资料，请处理或明确移除后再创建。'
-  if (scenariosLoading.value)
-    return '正在加载创建所需配置。'
+  if (scenariosLoading.value) return '正在加载创建所需配置。'
   if (scenariosError.value || !selectedScenarioExists.value)
     return '请选择可用场景，或重试加载场景目录。'
   return ''
@@ -751,6 +1054,11 @@ const selectScenario = (scenario: ScenarioCatalogEntry, userSelected = false) =>
   scenarioTemplateMeta.goal.lastAutoApplied = nextState.goal.lastAutoApplied
 }
 
+function selectScenarioByKey(key: string | number) {
+  const scenario = scenarios.value.find((item) => item.key === key)
+  if (scenario) selectScenario(scenario, true)
+}
+
 watch(
   scenarios,
   (list) => {
@@ -766,13 +1074,6 @@ watch(
   { immediate: true },
 )
 
-const toggleLibrary = (key: string) => {
-  userEdited.value = true
-  const index = form.library_keys.indexOf(key)
-  if (index >= 0) form.library_keys.splice(index, 1)
-  else form.library_keys.push(key)
-}
-
 function retainedDeadline(value: string, original?: string | null) {
   if (!value) return null
   return original && value === inputLocalTime(original) ? original : new Date(value).toISOString()
@@ -780,24 +1081,26 @@ function retainedDeadline(value: string, original?: string | null) {
 function effectiveDeadlines() {
   if (props.schedule?.project) {
     return {
-      explore_deadline: retainedDeadline(form.explore_deadline, props.schedule.project.explore_deadline),
-      authorization_expires_at: retainedDeadline(form.authorization_expires_at, props.schedule.project.authorization_expires_at),
+      explore_deadline: retainedDeadline(
+        form.explore_deadline,
+        props.schedule.project.explore_deadline,
+      ),
+      authorization_expires_at: retainedDeadline(
+        form.authorization_expires_at,
+        props.schedule.project.authorization_expires_at,
+      ),
     }
   }
   return {
-    explore_deadline: scheduleDraft.value.mode === 'once'
-      ? scheduleTimesFromDraft(scheduleDraft.value).deadline
-      : null,
+    explore_deadline:
+      scheduleDraft.value.mode === 'once'
+        ? scheduleTimesFromDraft(scheduleDraft.value).deadline
+        : null,
     authorization_expires_at: null,
   }
 }
 const previewProject = computed<CreateProjectRequest | undefined>(() => {
-  if (
-    !form.title.trim() ||
-    !form.origin.trim() ||
-    !form.goal.trim() ||
-    !form.scenario
-  )
+  if (!form.title.trim() || !form.origin.trim() || !form.goal.trim() || !form.scenario)
     return undefined
   let deadlines
   try {
@@ -854,9 +1157,11 @@ const validateForm = (): { valid: boolean; firstErrorAnchor: string | null } => 
     return ''
   }
   validationErrors.exploreDeadline = props.schedule?.project
-    ? validateFutureDate(form.explore_deadline, '执行停止时间') : ''
+    ? validateFutureDate(form.explore_deadline, '执行停止时间')
+    : ''
   validationErrors.authorizationExpiresAt = props.schedule?.project
-    ? validateFutureDate(form.authorization_expires_at, '授权到期时间') : ''
+    ? validateFutureDate(form.authorization_expires_at, '授权到期时间')
+    : ''
   if (validationErrors.exploreDeadline || validationErrors.authorizationExpiresAt) {
     valid = false
     firstErrorAnchor = firstErrorAnchor || 'np-timing-settings'
@@ -875,6 +1180,7 @@ const submitProject = async () => {
     isSubmitting.value ||
     isCancelling.value ||
     creationUnknown.value ||
+    creationRejected.value ||
     creationDeleted.value ||
     createdProjectId.value ||
     createdScheduleId.value ||
@@ -885,12 +1191,15 @@ const submitProject = async () => {
     return
   formError.value = ''
   workerConfigurationError.value = false
+  if (safetyPending.value || (legacySelectionState === 'unknown' && !explicitLibrarySelection.value) ||
+      invalidBindings.value.length || selections.value.some((item) => currentLoading[item.library_key] || !selectionManifest(item))) {
+    formError.value = submitBlockReason.value
+    document.getElementById('np-materials')?.scrollIntoView({ block: 'start' })
+    return
+  }
   if (resourcePending.value) {
     formError.value = '仍有未完成的资料，请补传、核对或明确移除后再创建。'
-    if (materialsDetails.value) {
-      materialsDetails.value.open = true
-      materialsDetails.value.scrollIntoView({ block: 'start' })
-    }
+    document.getElementById('np-materials')?.scrollIntoView({ block: 'start' })
     return
   }
   if (!selectedScenarioExists.value) {
@@ -907,13 +1216,12 @@ const submitProject = async () => {
 
   try {
     const { valid, firstErrorAnchor } = validateForm()
-    const timing = scheduleDraft.value.mode !== 'immediate' ? scheduleTiming.value!.validate() : null
+    const timing =
+      scheduleDraft.value.mode !== 'immediate' ? scheduleTiming.value!.validate() : null
     if (!valid || (scheduleDraft.value.mode !== 'immediate' && !timing)) {
       uiStore.showToast('请检查表单必填项和时间安排', 'danger')
-      // 只展开首个错误所在区域，最终滚动在同一处完成，避免后续时间错误抢走正文定位。
+      // 只滚动到首个错误所在区域，避免后续时间错误抢走正文定位。
       const anchor = firstErrorAnchor || 'np-timing-settings'
-      if (anchor === 'np-proxy-settings') settingsPanel.value = 'proxy'
-      else if (anchor === 'np-timing-settings') settingsPanel.value = 'timing'
       await nextTick()
       document.getElementById(anchor)?.scrollIntoView({ block: 'start' })
       return
@@ -924,8 +1232,10 @@ const submitProject = async () => {
       request_id: _requestId,
       resource_batch_id: _batchId,
       resources: _resources,
+      library_keys: _legacyLibraryKeys,
+      library_selections: _oldSelections,
       ...retainedInput
-    } = props.schedule?.project || ({} as Partial<CreateProjectRequest>)
+    } = (props.schedule?.project || {}) as Partial<CreateProjectRequest> & { library_keys?: unknown }
     // 旧计划原显式 targets（包括空数组）随原输入保留，新建不补数组或重解释来源。
     const payload: CreateProjectRequest = {
       ...retainedInput,
@@ -936,7 +1246,9 @@ const submitProject = async () => {
       scenario: form.scenario,
       ...effectiveDeadlines(),
       ...(resourceBatch.value ? { resource_batch_id: resourceBatch.value.id } : {}),
-      library_keys: [...form.library_keys],
+      ...(explicitLibrarySelection.value ? { library_selections: selections.value.map((item) => ({
+        ...item, paths: item.paths === null ? null : [...item.paths],
+      })) } : {}),
     }
     if (props.schedule && rules) {
       pendingSubmission.value = {
@@ -947,7 +1259,8 @@ const submitProject = async () => {
           project: payload,
           version: props.schedule.version,
           resource_ids: [...retainedResourceIds.value],
-          refresh_library_keys: refreshLibraryKeys.value.filter((key) => form.library_keys.includes(key)),
+          ...(legacySelectionState !== 'explicit' && explicitLibrarySelection.value
+            ? { library_selection_explicit: true } : {}),
         },
       }
     } else {
@@ -985,26 +1298,47 @@ async function sendPendingSubmission() {
         const response = await createProject(submission.payload)
         createdProjectId.value = response.project.id
       } else {
-        savedSchedule = submission.operation === 'update'
-          ? await updateProjectSchedule(submission.scheduleId, submission.payload)
-          : await createProjectSchedule(submission.payload)
+        savedSchedule =
+          submission.operation === 'update'
+            ? await updateProjectSchedule(submission.scheduleId, submission.payload)
+            : await createProjectSchedule(submission.payload)
         createdScheduleId.value = savedSchedule.id
       }
     } catch (error) {
+      // 新合同可能在收据重放前拒绝旧 payload；先按原请求 ID 查询，不能据 422 换键重发。
+      if (submission.operation !== 'update' && error instanceof ApiError && error.status === 422) {
+        formError.value = error.message
+        workerConfigurationError.value = error.message.includes('Worker')
+        creationRejected.value = false
+        creationUnknown.value = true
+        await queryCreationResult(true)
+        return
+      }
       // 恢复请求的拒绝不证明最初请求未提交，仍保留原键和原内容供查询。
       const definiteRejection =
-        error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408
+        error instanceof ApiError &&
+        error.status >= 400 &&
+        error.status < 500 &&
+        error.status !== 408
       formError.value = error instanceof Error ? error.message : '未收到可确认的保存结果'
       workerConfigurationError.value = definiteRejection && formError.value.includes('Worker')
       if (definiteRejection && !creationUnknown.value) {
-        if (submission.operation !== 'update') {
-          const cache = forgetCreationRequest(submission.payload.request_id)
-          if (cache.warning) cacheWarning.value = cache.warning
+        if (submission.operation !== 'update' && (error.status === 422 || creationRejected.value)) {
+          creationRejected.value = true
+        } else {
+          if (submission.operation !== 'update') {
+            const cache = forgetCreationRequest(submission.payload.request_id)
+            if (cache.warning) cacheWarning.value = cache.warning
+          }
+          pendingSubmission.value = null
         }
-        pendingSubmission.value = null
-      } else creationUnknown.value = true
+      } else {
+        creationRejected.value = false
+        creationUnknown.value = true
+      }
       return
     }
+    creationRejected.value = false
     creationUnknown.value = false
     pendingSubmission.value = null
     egress.value = { ...egress.value, username: '', password: '', auth_action: 'keep' }
@@ -1027,12 +1361,21 @@ async function sendPendingSubmission() {
   }
 }
 async function restoreSubmission() {
-  // 未知结果恢复只使用内存中的原始 payload，绝不读取修改后的表单或换请求 ID。
+  // 恢复只使用内存中的原始 payload，绝不读取修改后的表单或换请求 ID。
   await sendPendingSubmission()
 }
-async function queryCreationResult() {
+function editRejectedSubmission() {
   const submission = pendingSubmission.value
-  if (!submission || submission.operation === 'update' || isSubmitting.value) return
+  if (!creationRejected.value || !submission || submission.operation === 'update' || isSubmitting.value) return
+  const cache = forgetCreationRequest(submission.payload.request_id)
+  if (cache.warning) cacheWarning.value = cache.warning
+  pendingSubmission.value = null
+  creationRejected.value = false
+  formError.value = ''
+}
+async function queryCreationResult(fromSubmission: boolean | Event = false) {
+  const submission = pendingSubmission.value
+  if (!submission || submission.operation === 'update' || (isSubmitting.value && fromSubmission !== true)) return
   isSubmitting.value = true
   try {
     const result = await getCreationRequest({
@@ -1102,6 +1445,10 @@ const discardProject = async () => {
   cleanupError.value = ''
   try {
     await resourceUploader.value?.cancel()
+    if (creationRejected.value && pendingSubmission.value && pendingSubmission.value.operation !== 'update') {
+      const cache = forgetCreationRequest(pendingSubmission.value.payload.request_id)
+      if (cache.warning) cacheWarning.value = cache.warning
+    }
     discardOpen.value = false
     emit('discarded')
   } catch (error) {
@@ -1115,7 +1462,16 @@ const focusTitle = (event: Event) => {
   event.preventDefault()
   void nextTick(() => titleInput.value?.focus())
 }
+watch(
+  () => props.open,
+  async (open, previous) => {
+    if (open || !previous) return
+    await nextTick()
+    if (props.returnFocus?.isConnected) props.returnFocus.focus()
+  },
+)
 const restoreFocus = (event: Event) => {
+  if (props.open) return
   if (props.returnFocus?.isConnected) {
     event.preventDefault()
     props.returnFocus.focus()
@@ -1162,6 +1518,8 @@ const handleKeydown = (event: KeyboardEvent) => {
   if (
     (event.metaKey || event.ctrlKey) &&
     event.key === 'Enter' &&
+    !event.isComposing &&
+    event.keyCode !== 229 &&
     props.open &&
     !libraryPickerOpen.value &&
     !discardOpen.value
@@ -1177,384 +1535,10 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  selectionDisposed = true
   window.removeEventListener('keydown', handleKeydown)
   window.removeEventListener('beforeunload', handleBeforeUnload)
 })
 </script>
 
 <style src="./NewProject.css" scoped></style>
-
-<style scoped>
-.new-project-form {
-  min-width: 0;
-  margin: var(--space-4) 0 0;
-  padding: 0;
-  border: 0;
-}
-
-.creation-content {
-  display: grid;
-  gap: var(--space-4);
-  min-width: 0;
-}
-.project-identity {
-  display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-  gap: var(--space-3);
-}
-.scenario-settings,
-.project-materials {
-  min-width: 0;
-}
-.scenario-settings summary,
-.project-materials summary {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding-block: var(--space-2);
-  cursor: pointer;
-  list-style: none;
-  font-size: var(--text-md);
-}
-.scenario-settings summary::-webkit-details-marker,
-.project-materials summary::-webkit-details-marker {
-  display: none;
-}
-.scenario-settings summary:focus-visible,
-.project-materials summary:focus-visible,
-.scenario-card:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-.scenario-name {
-  font-weight: var(--font-semibold);
-}
-.summary-action {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  flex-shrink: 0;
-  color: var(--text-muted);
-  font-size: var(--text-sm);
-}
-[open] > summary .summary-action svg {
-  transform: rotate(180deg);
-}
-.scenarios-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-.scenario-card {
-  width: auto;
-  min-width: 0;
-}
-.project-materials {
-  border-top: 1px solid var(--border);
-}
-.materials-summary {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.materials-content {
-  display: grid;
-  gap: var(--space-3);
-  padding-top: var(--space-2);
-}
-.settings-panel {
-  min-width: 0;
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--border);
-  scroll-margin-top: var(--space-3);
-}
-.settings-panel-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-}
-.settings-panel-heading h3 {
-  margin: 0;
-  font-size: var(--text-md);
-}
-.creation-settings {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: var(--space-3);
-}
-.proxy-trigger,
-.timing-trigger {
-  justify-content: flex-start;
-  text-align: left;
-  padding-block: var(--space-2);
-}
-.setting-summary {
-  display: grid;
-  gap: var(--space-1);
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-.proxy-trigger .setting-summary > span:first-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.start-settings {
-  display: grid;
-  min-width: 0;
-}
-.creation-footer :deep(.ui-alert) {
-  max-height: 140px;
-  overflow-y: auto;
-}
-@media (max-width: 700px) {
-  .project-identity,
-  .creation-settings,
-  .scenarios-grid {
-    grid-template-columns: 1fr;
-  }
-  .scenario-settings summary {
-    flex-wrap: wrap;
-  }
-  .selected-library {
-    flex-wrap: wrap;
-  }
-}
-
-.project-materials h3 {
-  margin: 0;
-  font-size: var(--text-md);
-}
-
-.project-materials > .section-desc {
-  margin-bottom: var(--space-3);
-}
-
-.selected-libraries {
-  display: grid;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-}
-
-.selected-library {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  overflow-wrap: anywhere;
-}
-
-.creation-footer {
-  width: 100%;
-  display: grid;
-  gap: var(--space-3);
-}
-
-.creation-footer-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: var(--space-2);
-}
-
-.new-project-header {
-  max-width: 860px;
-  margin-right: auto;
-  margin-left: auto;
-}
-
-.new-project-workflow {
-  width: min(100%, 860px);
-  margin: 0 auto;
-}
-
-.form-section {
-  padding: var(--space-5);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background-color: var(--bg-surface);
-  box-shadow: var(--shadow-sm);
-}
-
-.section-title-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-  margin-bottom: var(--space-4);
-}
-
-.section-title-row h2,
-.section-title-row h3,
-.resource-title-row h3 {
-  margin: 0;
-  color: var(--text);
-  font-size: 15px;
-}
-
-.section-desc {
-  margin: 4px 0 0;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.validation-anchor {
-  scroll-margin-top: 16px;
-}
-
-.field-hint {
-  display: block;
-  margin-top: var(--space-1);
-  color: var(--text-faint);
-  font-size: 11px;
-}
-
-.required-mark {
-  color: var(--danger);
-}
-
-.summary-hint {
-  color: var(--text-faint);
-  font-size: 11px;
-  font-weight: 400;
-}
-
-.advanced-subsection {
-  padding-top: var(--space-4);
-  border-top: 1px solid var(--border);
-}
-
-.compact-title-row {
-  margin-bottom: var(--space-3);
-}
-
-.deadline-settings-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-3);
-}
-
-.optional-badge {
-  margin-left: 6px;
-  padding: 1px 6px;
-  border: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
-  background: var(--accent-dim);
-  color: var(--accent);
-  font-size: 10px;
-  font-weight: 600;
-  vertical-align: middle;
-}
-
-.library-options {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-2);
-}
-
-.library-option {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-surface);
-  color: var(--text-muted);
-  cursor: pointer;
-  text-align: left;
-}
-
-.library-option:hover {
-  border-color: var(--border-strong);
-}
-
-.library-option.selected {
-  border-color: var(--accent);
-  background: var(--accent-dim);
-}
-
-.library-option-title {
-  color: var(--text);
-  font-weight: 700;
-}
-
-.resource-title-row {
-  display: flex;
-  align-items: start;
-  justify-content: space-between;
-  gap: var(--space-3);
-}
-
-.resource-title-row > div:first-child {
-  flex: 1;
-}
-
-.resource-file-input {
-  display: none;
-}
-
-.resource-guidance {
-  margin-bottom: var(--space-3);
-}
-
-.resource-editor-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.resource-editor-row {
-  display: grid;
-  grid-template-columns: 90px minmax(0, 1fr) 72px 28px;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.resource-size {
-  color: var(--text-faint);
-  font-size: 11px;
-  text-align: right;
-}
-
-.form-bottom-bar {
-  display: flex;
-  flex-direction: row;
-  justify-content: flex-end;
-  gap: var(--space-3);
-  margin-top: var(--space-4);
-  padding: var(--space-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background-color: var(--bg-surface);
-}
-
-.btn-link-action {
-  border: none;
-  background: transparent;
-  color: var(--accent);
-  cursor: pointer;
-  font-size: 12px;
-}
-
-@media (max-width: 700px) {
-  .form-section {
-    padding: var(--space-4);
-  }
-
-  .deadline-settings-grid,
-  .library-options {
-    grid-template-columns: 1fr;
-  }
-
-  .resource-editor-row {
-    grid-template-columns: 80px minmax(0, 1fr) 28px;
-  }
-
-  .resource-size {
-    display: none;
-  }
-}
-</style>

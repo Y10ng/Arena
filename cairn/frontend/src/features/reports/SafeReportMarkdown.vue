@@ -81,8 +81,8 @@ watch(document, (value) => emit('headings', value.headings), { immediate: true }
   min-width: 0;
   max-width: 100%;
   color: var(--color-text);
-  font-size: 0.875rem;
-  line-height: 1.7;
+  font-size: var(--text-reading);
+  line-height: var(--leading-reading);
   overflow-wrap: anywhere;
   user-select: text;
 }
@@ -103,8 +103,13 @@ watch(document, (value) => emit('headings', value.headings), { immediate: true }
 .safe-report-markdown :deep(h6) {
   margin: 1.5em 0 0.6em;
   color: var(--color-text);
-  line-height: 1.3;
+  line-height: 1.4;
+  font-weight: var(--font-semibold);
 }
+.safe-report-markdown :deep(h1) { font-size: 1.5em; }
+.safe-report-markdown :deep(h2) { font-size: 1.25em; }
+.safe-report-markdown :deep(h3) { font-size: 1.1em; }
+.safe-report-markdown :deep(h4), .safe-report-markdown :deep(h5), .safe-report-markdown :deep(h6) { font-size: 1em; }
 
 .safe-report-markdown :deep(p),
 .safe-report-markdown :deep(ul),
@@ -132,7 +137,8 @@ watch(document, (value) => emit('headings', value.headings), { immediate: true }
 
 .safe-report-markdown :deep(blockquote) {
   padding-left: var(--space-3);
-  border-left: 3px solid var(--color-border);
+  margin-inline: 0;
+  border-left: 2px solid var(--color-border);
   color: var(--color-text-secondary);
 }
 
@@ -140,13 +146,16 @@ watch(document, (value) => emit('headings', value.headings), { immediate: true }
   padding: 0.1em 0.3em;
   border-radius: var(--radius-sm);
   background: var(--color-surface-inset);
-  font-size: 0.9em;
+  font-family: var(--font-mono);
+  font-size: var(--text-body);
 }
 
 .safe-report-markdown :deep(pre) {
   max-width: 100%;
-  padding: var(--space-3);
+  padding: var(--space-4);
   overflow: auto;
+  border: 1px solid var(--border-subtle);
+  line-height: 1.7;
   border-radius: var(--radius-md);
   background: var(--color-surface-inset);
 }
@@ -168,7 +177,7 @@ watch(document, (value) => emit('headings', value.headings), { immediate: true }
 .safe-report-markdown :deep(th),
 .safe-report-markdown :deep(td) {
   padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
   text-align: left;
   vertical-align: top;
 }
@@ -186,11 +195,9 @@ watch(document, (value) => emit('headings', value.headings), { immediate: true }
   margin-block: var(--space-3);
 }
 
+.safe-report-markdown :deep(th) { background: var(--bg-inset); font-weight: var(--font-medium); }
+.safe-report-markdown :deep(a:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (max-width: 720px) {
-  .safe-report-markdown {
-    font-size: 0.8125rem;
-  }
-
   .safe-report-markdown :deep(th),
   .safe-report-markdown :deep(td) {
     padding: var(--space-2);

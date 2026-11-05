@@ -94,8 +94,8 @@ def create_tenant_model(
                 INSERT INTO tenant_models
                     (id, tenant_id, display_name, protocol, base_url, auth_header,
                      custom_headers_json, models_endpoint, inference_endpoint, model_name,
-                     enabled, revision, created_by, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                     enabled, revision, created_by, created_at, updated_at, pricing_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
                 """,
                 (
                     model_id,
@@ -112,6 +112,7 @@ def create_tenant_model(
                     principal.subject_id,
                     now,
                     now,
+                    body.pricing.model_dump_json(),
                 ),
             )
         except (sqlite3.IntegrityError, UniqueViolation) as exc:
@@ -162,7 +163,7 @@ def update_tenant_model(
                 UPDATE tenant_models
                 SET display_name = ?, protocol = ?, base_url = ?, auth_header = ?,
                     custom_headers_json = ?, models_endpoint = ?, inference_endpoint = ?,
-                    model_name = ?, enabled = ?, revision = revision + 1, updated_at = ?
+                    model_name = ?, enabled = ?, revision = revision + 1, updated_at = ?, pricing_json = ?
                 WHERE id = ? AND tenant_id = ? AND revision = ?
                 """,
                 (
@@ -176,6 +177,7 @@ def update_tenant_model(
                     body.model_name,
                     int(body.enabled),
                     now,
+                    body.pricing.model_dump_json(),
                     model_id,
                     tenant_id,
                     body.expected_revision,
@@ -329,6 +331,7 @@ def _model_from_row(conn: Any, row: Any) -> TenantModel:
         inference_endpoint=row["inference_endpoint"],
         model_name=row["model_name"],
         enabled=bool(row["enabled"]),
+        pricing=json.loads(row["pricing_json"]),
         revision=int(row["revision"]),
         **status,
         created_at=row["created_at"],

@@ -48,6 +48,7 @@ class KnowledgeSet(BaseModel):
     key: str
     path: str
     builtin: bool = False
+    safety_path: str | None = None
     file_count: int = 0
     referenced_by: list[str] = Field(default_factory=list)
 

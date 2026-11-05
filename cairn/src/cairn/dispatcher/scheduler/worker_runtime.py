@@ -650,14 +650,19 @@ class WorkerRuntimeMixin(DispatchDecisionsMixin):
                 raise RuntimeError("container activation registration failed")
             return token
 
-        def finish(token: str, container_id: str | None) -> None:
+        def finish(token: str, container_id: str) -> None:
             response = self.client.finish_container_activation(project_id, token, container_id)
             if not response.ok:
                 raise RuntimeError("container activation completion failed")
 
+        def abort(token: str, daemon_id: str) -> None:
+            response = self.client.abort_container_activation(project_id, token, daemon_id)
+            if not response.ok:
+                raise RuntimeError("container activation absence unconfirmed")
+
         try:
             container_name = self.container_manager.activate_for_readiness(
-                project_id, container_runtime, register=register, finish=finish,
+                project_id, container_runtime, register=register, finish=finish, abort=abort,
             )
         except ContainerInventoryUnresolvedError:
             self._container_inventory_blocked = getattr(self, "_container_inventory_blocked", set())

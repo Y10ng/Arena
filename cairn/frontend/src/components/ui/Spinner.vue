@@ -58,4 +58,9 @@ defineOptions({ name: 'UiSpinner', inheritAttrs: false })
     transform: rotate(360deg);
   }
 }
+@media (prefers-reduced-motion: reduce) {
+  .ui-spinner {
+    animation: none;
+  }
+}
 </style>

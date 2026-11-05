@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { enableAutoUnmount, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 import ToastHost from './ToastHost.vue'
@@ -15,6 +15,8 @@ const toast = (
   text,
 })
 
+enableAutoUnmount(afterEach)
+
 describe('ToastHost', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
@@ -22,6 +24,7 @@ describe('ToastHost', () => {
   })
 
   afterEach(() => {
+    useUIStore().$dispose()
     vi.restoreAllMocks()
     vi.useRealTimers()
   })
@@ -72,6 +75,62 @@ describe('ToastHost', () => {
 
     expect(text.text()).toContain('very-long-path-segment'.repeat(24))
     expect(text.text()).toContain('第二行通知内容')
+  })
+
+  it('expires after three seconds without moving keyboard focus', async () => {
+    vi.useFakeTimers()
+    const store = useUIStore()
+    const wrapper = mount(ToastHost)
+    const focused = document.activeElement
+    store.showToast('已保存', 'success')
+    await nextTick()
+    expect(document.activeElement).toBe(focused)
+    vi.advanceTimersByTime(2999)
+    expect(store.toasts).toHaveLength(1)
+    vi.advanceTimersByTime(1)
+    await nextTick()
+    expect(wrapper.find('.toast-card').exists()).toBe(false)
+  })
+
+  it('keeps hover and keyboard pauses independent and resumes remaining time', async () => {
+    vi.useFakeTimers()
+    const store = useUIStore()
+    store.showToast('可停留阅读', 'success')
+    const wrapper = mount(ToastHost)
+    vi.advanceTimersByTime(1000)
+    const card = wrapper.get('.toast-card')
+    await card.trigger('mouseenter')
+    await card.trigger('focusin')
+    vi.advanceTimersByTime(5000)
+    await card.trigger('mouseleave')
+    vi.advanceTimersByTime(5000)
+    expect(store.toasts).toHaveLength(1)
+    await card.trigger('focusout', { relatedTarget: wrapper.get('button').element })
+    vi.advanceTimersByTime(5000)
+    expect(store.toasts).toHaveLength(1)
+    await card.trigger('focusout', { relatedTarget: null })
+    vi.advanceTimersByTime(1999)
+    expect(store.toasts).toHaveLength(1)
+    vi.advanceTimersByTime(1)
+    await nextTick()
+    expect(wrapper.find('.toast-card').exists()).toBe(false)
+  })
+
+  it('closes a paused toast and releases pauses when the host unmounts', async () => {
+    vi.useFakeTimers()
+    const store = useUIStore()
+    store.showToast('先关闭')
+    const wrapper = mount(ToastHost)
+    await wrapper.get('.toast-card').trigger('mouseenter')
+    await wrapper.get('button').trigger('click')
+    expect(store.toasts).toHaveLength(0)
+    store.showToast('离开后继续计时')
+    await nextTick()
+    vi.advanceTimersByTime(1000)
+    await wrapper.get('.toast-card').trigger('focusin')
+    wrapper.unmount()
+    vi.advanceTimersByTime(2000)
+    expect(store.toasts).toHaveLength(0)
   })
 
   it('does not let a cleared timeout remove a later toast with the same id', () => {

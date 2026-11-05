@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
     updatePassword: vi.fn(),
     mustChangePassword: false,
   },
+  uiStore: { theme: 'light', toggleTheme: vi.fn() },
   route: { query: { redirect: '/projects' } },
   router: { replace: vi.fn() },
 }))
@@ -17,6 +18,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/stores/auth', () => ({
   useAuthStore: () => mocks.authStore,
 }))
+
+vi.mock('@/stores/ui', () => ({ useUIStore: () => mocks.uiStore }))
 
 vi.mock('vue-router', () => ({
   useRoute: () => mocks.route,
@@ -37,9 +40,9 @@ describe('authentication pilot pages', () => {
     const wrapper = mount(LoginPage)
     const inputs = wrapper.findAll('input')
 
-    expect(wrapper.get('.login-kicker').text()).toBe('Arena')
-    expect(wrapper.get('.login-logo').text()).toBe('A')
-    expect(wrapper.get('h1').text()).toBe('登录')
+    expect(wrapper.get('.auth-brand').text()).toContain('Arena')
+    expect(wrapper.get('.auth-mark').text()).toBe('A')
+    expect(wrapper.get('h1').text()).toBe('登录 Arena')
     expect(inputs).toHaveLength(2)
     expect(inputs[0]?.attributes()).toMatchObject({
       autocomplete: 'username',
@@ -72,14 +75,16 @@ describe('authentication pilot pages', () => {
     await flushPromises()
 
     expect(wrapper.get('[role="alert"]').text()).toContain('凭据无效')
+    expect((inputs[0]?.element as HTMLInputElement).value).toBe('alice')
+    expect((inputs[1]?.element as HTMLInputElement).value).toBe('bad-password')
   })
 
   it('preserves password hints, native semantics, and logout navigation', async () => {
     const wrapper = mount(ChangePasswordPage)
     const inputs = wrapper.findAll('input')
 
-    expect(wrapper.get('.login-kicker').text()).toBe('Arena')
-    expect(wrapper.get('.login-logo').text()).toBe('A')
+    expect(wrapper.get('.auth-brand').text()).toContain('Arena')
+    expect(wrapper.get('.auth-mark').text()).toBe('A')
     expect(inputs).toHaveLength(3)
     expect(inputs[0]?.attributes()).toMatchObject({
       autocomplete: 'current-password',
@@ -88,9 +93,14 @@ describe('authentication pilot pages', () => {
     })
     expect(inputs[1]?.attributes('autocomplete')).toBe('new-password')
     expect(inputs[2]?.attributes('autocomplete')).toBe('new-password')
-    expect(wrapper.get('.password-hint').text()).toContain('Arena@2026')
+    const hintId = inputs[1]?.attributes('aria-describedby')
+    expect(hintId).toBeTruthy()
+    expect(wrapper.get(`[id="${hintId}"]`).text()).toContain('Arena@2026')
 
-    await wrapper.findAll('button')[1]?.trigger('click')
+    await wrapper
+      .findAll('button')
+      .find((button) => button.text() === '退出登录')
+      ?.trigger('click')
     await flushPromises()
 
     expect(mocks.authStore.logout).toHaveBeenCalledOnce()

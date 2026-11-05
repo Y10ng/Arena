@@ -12,19 +12,15 @@ from fastapi.testclient import TestClient
 from cairn.server import db
 from cairn.server.app import app
 from cairn.server.auth import RequestPrincipal, create_machine_principal, create_user_with_personal_tenant
-from cairn.server.models import CreateArtifactRequest, CreateTaskRunRequest, CreateVulnerabilityRequest
+from cairn.server.models import CreateArtifactRequest, CreateVulnerabilityRequest
 from cairn.server.schemas.models import CreateTenantModelRequest
 from cairn.server.schemas.tenant_workers import UpdateTenantWorkerRequest
-from cairn.server.schemas.verification_requests import UpdateVerificationConfiguration, VerificationClaimRequest
 from cairn.server.services import model_credentials
 from cairn.server.services.audit_artifacts import create_artifact_record
 from cairn.server.services.tenant_models import create_tenant_model
 from cairn.server.services.tenant_workers import list_tenant_workers, update_tenant_worker
 from cairn.server.services.time_utils import utcnow
-from cairn.server.services.verification_configuration import update_verification_configuration
-from cairn.server.services.verification_requests import claim_verification_request, submit_verification_result
 from cairn.server.services.vulnerabilities import create_vulnerability, read_vulnerability_evidence
-from test_external_verification_evidence import _submission, _upload
 from test_postgres_bootstrap import empty_postgres_url, postgres_instance
 from test_report_templates import _seed_project
 
@@ -43,14 +39,9 @@ def test_agent_business_actions_use_real_actor_sources_and_generation(empty_post
     aid, _ = create_user_with_personal_tenant("r2a-admin", "local-test-password", role="super_admin")
     owner = RequestPrincipal("user", uid, tenant_id=tenant, role="user")
     machine_id, machine_token = create_machine_principal("r2a-dispatcher")
-    machine = RequestPrincipal("machine", machine_id)
-    with db.get_conn() as conn:
-        conn.execute("INSERT INTO dispatcher_status(id,status,updated_at,runtime_json) VALUES (?,'idle',?,?)",
-                     (machine_id, utcnow(), '{"verification_capacity":2}'))
     model = create_tenant_model(CreateTenantModelRequest(
         display_name="受控模型", protocol="openai-chat-completions", base_url="http://127.0.0.1:1",
         model_name="controlled", api_key="synthetic-r2a-secret"), principal=owner)
-    configuration = update_verification_configuration(UpdateVerificationConfiguration(model_id=model.id), owner)
     worker = list_tenant_workers(tenant_id=tenant)[0]
     worker = update_tenant_worker(worker.id, UpdateTenantWorkerRequest(model_id=model.id,
         enabled=True, max_running=2, priority=1, expected_revision=worker.revision), principal=owner)
@@ -100,39 +91,30 @@ def test_agent_business_actions_use_real_actor_sources_and_generation(empty_post
         response = client.post(turn + "/finish", json={"task_run_id": run["task_run_id"], "status": "succeeded", "text": "已受理，可继续聊天。"}, headers=machine_headers)
         assert response.status_code == 200, response.text
 
-    turn, run = start_turn(client, headers, "复测 v001，并生成项目综合报告")
+    turn, run = start_turn(client, headers, "查询旧动作并生成项目综合报告")
     params = {"vulnerability_id": vuln.id, "observation_id": observation}
-    first = call(turn, run, "request_vulnerability_retest", params, "sdk-retest")
-    assert first.status_code == 200, first.text
-    first = first.json()
-    assert first["source_project_id"] == "p1" and first["project_id"] != "p1"
-    assert first["source_observation_id"] == observation
-    assert first["work"]["status"] == "queued"
-    assert first["work"]["result"] is None  # 来源漏洞只是历史输入，不是本次复测结论。
-    replay = call(turn, run, "request_vulnerability_retest", params, "sdk-retest")
-    assert replay.status_code == 200 and replay.json()["verification_request_id"] == first["verification_request_id"]
-    new_target = "https://new.example.test/instance"
-    repeated = call(turn, run, "request_vulnerability_retest", {**params, "target_url": new_target}, "sdk-explicit-repeat")
-    assert repeated.status_code == 200, repeated.text
-    assert repeated.json()["verification_request_id"] != first["verification_request_id"]
-    target_detail = client.get("/api/v1/verification-requests/" + repeated.json()["verification_request_id"])
-    assert target_detail.status_code == 200 and target_detail.json()["target_url"] == new_target
-    target_conflict = call(turn, run, "request_vulnerability_retest", {**params, "target_url": new_target}, "sdk-retest")
-    assert target_conflict.status_code == 409 and target_conflict.json()["detail"]["code"] == "agent_action_conflict"
-    conflict = call(turn, run, "request_vulnerability_retest", {"vulnerability_id": vuln.id}, "sdk-retest")
-    assert conflict.status_code == 409 and conflict.json()["detail"]["code"] == "agent_action_conflict"
     with db.get_conn() as conn:
-        requests = conn.execute("SELECT caller_id,tenant_id,mode,source_project_id,source_vulnerability_id FROM verification_requests ORDER BY id").fetchall()
-        assert len(requests) == 2
-        assert all(row["caller_id"] == uid and row["tenant_id"] == tenant and row["mode"] == "retest" for row in requests)
-        assert all(row["source_project_id"] == "p1" and row["source_vulnerability_id"] == vuln.id for row in requests)
-        message = conn.execute("SELECT submitted_by,answer FROM agent_messages WHERE id = ?", (run["message_id"],)).fetchone()
-        assert message["submitted_by"] == uid and message["answer"] is None
-        assert conn.execute("SELECT created_by FROM agent_conversations WHERE id = ?", (created.json()["id"],)).fetchone()["created_by"] == aid
+        # 直接放入历史回执，不调用已关闭的创建入口或任何复测执行服务。
+        conn.execute("INSERT INTO agent_actions(id,message_id,tool_call_id,method,params_json,kind,verification_request_id,source_vulnerability_id) "
+                     "VALUES ('old-retest',?,'old-retest','request_vulnerability_retest',?,'verification','deleted-request',?)",
+                     (run["message_id"], json.dumps(params), vuln.id))
+        conn.execute("INSERT INTO agent_actions(id,message_id,tool_call_id,method,params_json,kind,business_project_id) "
+                     "VALUES ('old-project',?,'old-project','create_project','{}','project','p1')", (run["message_id"],))
+        conn.execute("INSERT INTO agent_actions(id,message_id,tool_call_id,method,params_json,kind,business_project_id,intent_id) "
+                     "VALUES ('old-intent',?,'old-intent','append_project_intent','{}','intent','p1','deleted-intent')", (run["message_id"],))
+    old_works = {}
+    for action_id in ('old-retest', 'old-project', 'old-intent'):
+        query = call(turn, run, "query_agent_work", {"action_id": action_id}, "sdk-query-" + action_id)
+        assert query.status_code == 200, query.text
+        old_works[action_id] = query.json()["work"]
+    assert old_works['old-retest']['status'] == 'unavailable'
+    assert old_works['old-project']['status'] == 'succeeded'
+    assert old_works['old-intent']['status'] == 'unavailable'
+    # 历史调用 ID 也不能重放已关闭动作。
+    denied = call(turn, run, "request_vulnerability_retest", params, "old-retest")
+    assert denied.status_code == 403 and denied.json()["detail"]["code"] == "agent_tool_not_available"
     history = client.get(path + "/messages").json()
-    assert len(history[0]["actions"]) == 2 and history[0]["status"] == "running"
-    query = call(turn, run, "query_agent_work", {"action_id": first["action_id"]}, "sdk-query")
-    assert query.status_code == 200 and query.json()["work"]["status"] == "queued"
+    assert len(history[0]["actions"]) == 3 and history[0]["status"] == "running"
 
     report = call(turn, run, "request_project_report", {}, "sdk-report")
     assert report.status_code == 200, report.text
@@ -206,25 +188,6 @@ def test_agent_business_actions_use_real_actor_sources_and_generation(empty_post
     assert superseded["status"] == "superseded" and superseded["next_attempt_at"] is None
     assert superseded["download_url"] is None
 
-    # 由真实复测 claim、原件登记和结果接受服务形成本轮结果，不调用执行模型。
-    vr_claim = claim_verification_request(first["verification_request_id"], VerificationClaimRequest(task_run=CreateTaskRunRequest(
-        task_type="external_verify", worker_type="pi", worker_name=configuration["tenant_worker_id"],
-        session_id=f"pi:{uuid4()}", expected_execution_generation=0, runtime_context={"dispatcher_id": machine_id})), machine)
-    artifact = _upload(first, vr_claim, "log", "r2a-observation.log", b"synthetic current-round observation")
-    submission = _submission(first, vr_claim, [artifact])
-    submission.result.outcome = "not_reproduced"
-    submission.result.reason_code = "synthetic_scope_only"
-    submit_verification_result(first["verification_request_id"], submission, machine)
-    work = call(turn, run, "query_agent_work", {"action_id": first["action_id"]}, "sdk-result").json()["work"]
-    assert work["download_url"]
-    assert work["result"] == {key: submission.result.model_dump()[key] for key in
-                              ("outcome", "summary", "tested_scope", "limitations", "reason_code")}
-    pending = call(turn, run, "query_agent_work", {"action_id": repeated.json()["action_id"]}, "sdk-pending-result").json()["work"]
-    assert pending["result"] is None and pending["download_url"] is None
-    downloaded = client.get(work["download_url"])
-    assert downloaded.status_code == 200, downloaded.text
-    assert "合成目标响应" in downloaded.text
-    assert TestClient(app).get(work["download_url"]).status_code == 401
     exported = call(turn, run, "export_vulnerability_report", {"vulnerability_id": vuln.id}, "sdk-export")
     assert exported.status_code == 200, exported.text
     assert client.get(exported.json()["artifact"]["download_url"]).status_code == 200
@@ -233,21 +196,21 @@ def test_agent_business_actions_use_real_actor_sources_and_generation(empty_post
     finish(turn, run)
 
     visible = {item["id"]: item for item in client.get(path + "/actions").json()}
-    assert visible[first["action_id"]] == work
-    assert len(visible) == 3
+    assert all(visible[key] == value for key, value in old_works.items())
+    assert len(visible) == 4
     assert TestClient(app).get(path + "/actions").status_code == 401
     create_user_with_personal_tenant("r2a-outsider", "local-test-password")
     outsider, _ = login("r2a-outsider")
     assert outsider.get(path + "/actions").status_code == 404
-    assert outsider.get(work["download_url"]).status_code == 404
+    assert outsider.get(exported.json()["artifact"]["download_url"]).status_code == 404
     outsider.close()
     final_turn, final_run = start_turn(client, headers, "查询复测结果")
-    restored = call(final_turn, final_run, "query_agent_work", {"action_id": first["action_id"]}, "sdk-restored-query")
-    assert restored.status_code == 200 and restored.json()["work"] == work
+    restored = call(final_turn, final_run, "query_agent_work", {"action_id": "old-project"}, "sdk-restored-query")
+    assert restored.status_code == 200 and restored.json()["work"] == old_works["old-project"]
     with db.get_conn() as conn:
         conn.execute("UPDATE agent_messages SET submitted_by=NULL,submitted_tenant_id=NULL WHERE id=?", (final_run["message_id"],))
     legacy = call(final_turn, final_run, "request_vulnerability_retest", params, "sdk-legacy")
     assert legacy.status_code == 403 and legacy.json()["detail"]["code"] == "agent_action_actor_unavailable"
-    assert len(client.get(path + "/actions").json()) == 3
+    assert len(client.get(path + "/actions").json()) == 4
     client.close()
     admin_client.close()

@@ -225,6 +225,9 @@ def _policy_from_project_row(row: Mapping[str, Any]) -> AssessmentPolicy:
         if "explore_deadline" in keys and row["explore_deadline"]
         else None
     )
+    from .project_execution_control import effective_explore_deadline
+
+    deadline = effective_explore_deadline(row, deadline)
     if protocol == GOAL_DRIVEN_PROTOCOL:
         contract_version = int(features.get("assessment_contract_version") or 0)
         return AssessmentPolicy(

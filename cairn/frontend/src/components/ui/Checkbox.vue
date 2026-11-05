@@ -73,6 +73,7 @@ defineOptions({ name: 'UiCheckbox', inheritAttrs: false })
 <style scoped>
 .ui-checkbox {
   width: fit-content;
+  max-width: 100%;
   min-height: var(--control-height);
   display: inline-flex;
   align-items: center;
@@ -80,14 +81,16 @@ defineOptions({ name: 'UiCheckbox', inheritAttrs: false })
   color: var(--text);
   cursor: pointer;
   font-size: var(--text-md);
+  line-height: var(--leading-normal);
 }
 
 .ui-checkbox__control {
   width: 1rem;
   height: 1rem;
   flex: 0 0 auto;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
+  margin: 0;
+  border: 1px solid var(--color-control-border);
+  border-radius: 3px;
   accent-color: var(--accent);
   cursor: inherit;
 }
@@ -95,6 +98,11 @@ defineOptions({ name: 'UiCheckbox', inheritAttrs: false })
 .ui-checkbox__control:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+.ui-checkbox__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .ui-checkbox--disabled {

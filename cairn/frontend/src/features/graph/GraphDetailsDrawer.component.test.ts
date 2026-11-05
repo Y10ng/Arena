@@ -81,6 +81,12 @@ function buttonByText(text: string) {
   return button
 }
 
+async function selectTab(label: string) {
+  const tab = buttonByText(label)
+  tab.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
+  await flushPromises()
+}
+
 function pressEscape() {
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
 }
@@ -103,6 +109,24 @@ afterEach(() => {
 })
 
 describe('GraphDetailsDrawer migration', () => {
+  it.each(['node', 'edge'])('关闭详情后立即回到 %s 入口', async (kind) => {
+    const entry =
+      kind === 'node'
+        ? document.createElement('div')
+        : document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    entry.setAttribute('tabindex', '0')
+    document.body.appendChild(entry)
+    const { wrapper } = mountDrawer({ showNodeDrawer: false })
+    entry.focus()
+    await wrapper.setProps(
+      kind === 'node' ? { showNodeDrawer: true } : { showEdgeDrawer: true, selectedEdge: edge },
+    )
+    await flushPromises()
+    expect(document.activeElement).not.toBe(entry)
+    await wrapper.setProps({ showNodeDrawer: false, showEdgeDrawer: false })
+    await vi.waitFor(() => expect(document.activeElement).toBe(entry))
+  })
+
   it('renders one inline accessible right-side node Drawer', async () => {
     const { graphPage, wrapper } = mountDrawer()
     await flushPromises()
@@ -111,17 +135,20 @@ describe('GraphDetailsDrawer migration', () => {
     expect(drawer).not.toBeNull()
     expect(wrapper.find('[role="dialog"]').exists()).toBe(true)
     expect(drawer?.classList.contains('ui-drawer__content--right')).toBe(true)
-    expect(drawer?.classList.contains('ui-drawer__content--md')).toBe(true)
+    expect(drawer?.classList.contains('ui-drawer__content--lg')).toBe(true)
     expect(drawer?.getAttribute('aria-labelledby')).toBeTruthy()
     expect(drawer?.getAttribute('aria-describedby')).toBeTruthy()
     expect(graphPage.querySelector('.ui-drawer__overlay')).not.toBeNull()
     expect(document.body.querySelectorAll('[role="dialog"]')).toHaveLength(1)
     expect(document.body.textContent).toContain('fact-a')
     expect(document.body.textContent).toContain('普通用户可以读取管理接口响应')
-    expect(document.body.textContent).toContain('admin-response.txt')
-    expect(document.body.textContent).toContain('Worker 结果协议无效')
     expect(wrapper.find('.graph-retry-button.ui-button').exists()).toBe(true)
     expect(wrapper.find('.btn-add-hint').exists()).toBe(false)
+    expect(document.body.querySelector('.graph-raw-json')).toBeNull()
+    await selectTab('关联')
+    expect(document.body.textContent).toContain('admin-response.txt')
+    expect(document.body.textContent).toContain('Worker 结果协议无效')
+    expect(document.body.textContent).not.toContain('Validated')
   })
 
   it('gives node selection priority when both drawer flags are active', async () => {
@@ -164,8 +191,9 @@ describe('GraphDetailsDrawer migration', () => {
     expect(document.body.textContent).toContain('intent-a')
     expect(document.body.textContent).toContain('验证管理接口授权边界')
     expect(document.body.textContent).toContain('Exploring')
-    expect(document.body.textContent).toContain('Blocked')
+    expect(document.body.textContent).toContain('受阻')
     expect(document.body.textContent).toContain('需要验证权限检查是否仅存在于前端。')
+    await selectTab('关联')
     expect(document.body.textContent).toContain('worker-b')
   })
 
@@ -211,7 +239,7 @@ describe('GraphDetailsDrawer migration', () => {
     expect(document.body.textContent).toContain('Reason 输出 / Dispatched Explore')
     expect(document.body.textContent).toContain('验证新入口')
     expect(document.body.textContent).toContain('explore-worker')
-    expect(document.body.textContent).toContain('Critical path')
+    expect(document.body.textContent).toContain('关键路径')
     buttonByText('explore-run').click()
     expect(wrapper.emitted('goToRun')).toContainEqual(['explore-run'])
   })
@@ -255,7 +283,8 @@ describe('GraphDetailsDrawer migration', () => {
     expect(document.body.textContent).toContain('84%')
     expect(document.body.textContent).toContain('fact-a')
     expect(document.body.textContent).toContain('pending:intent-b')
-    expect(document.body.textContent).not.toContain('证据列表')
+    await selectTab('关联')
+    expect(document.body.textContent).not.toContain('关联证据')
     expect(wrapper.find('.graph-retry-button').exists()).toBe(false)
   })
 
@@ -268,9 +297,12 @@ describe('GraphDetailsDrawer migration', () => {
     mountDrawer()
     await flushPromises()
 
+    await selectTab('原始 data')
+    expect(document.body.textContent).toContain('不是完整后端响应或资产原件')
     expect(document.body.querySelector('.graph-raw-json')?.textContent).toBe(
       JSON.stringify(node.data, null, 2),
     )
+    await selectTab('原始 data')
     buttonByText('复制 JSON').click()
     await flushPromises()
 
@@ -288,6 +320,7 @@ describe('GraphDetailsDrawer migration', () => {
     const { wrapper } = mountDrawer()
     await flushPromises()
 
+    await selectTab('原始 data')
     buttonByText('复制 JSON').click()
     await wrapper.setProps({
       selectedNode: {
@@ -317,6 +350,7 @@ describe('GraphDetailsDrawer migration', () => {
     const { wrapper } = mountDrawer()
     await flushPromises()
 
+    await selectTab('原始 data')
     buttonByText('复制 JSON').click()
     await wrapper.setProps({
       showNodeDrawer: false,
@@ -327,7 +361,10 @@ describe('GraphDetailsDrawer migration', () => {
     pendingCopy.resolve()
     await flushPromises()
     expect(showToast).not.toHaveBeenCalled()
+    expect(buttonByText('事实').getAttribute('aria-selected')).toBe('true')
+    expect(document.body.querySelector('.graph-raw-json')).toBeNull()
 
+    await selectTab('原始 data')
     buttonByText('复制 JSON').click()
     await flushPromises()
     expect(showToast).toHaveBeenCalledWith('复制失败，请手动选择文本复制', 'danger')
@@ -345,8 +382,9 @@ describe('GraphDetailsDrawer migration', () => {
     await flushPromises()
 
     buttonByText('换方向重试').click()
+    await selectTab('关联')
     document.body.querySelector<HTMLButtonElement>('.evidence-row-item')?.click()
-    buttonByText('run-a').click()
+    document.body.querySelector<HTMLButtonElement>('.run-mini-row')?.click()
     await flushPromises()
 
     expect(wrapper.emitted('retryFromFact')).toContainEqual(['fact-a'])

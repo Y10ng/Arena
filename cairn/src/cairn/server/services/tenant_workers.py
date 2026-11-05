@@ -168,7 +168,7 @@ def resolve_project_worker_execution_binding(
             raise HTTPException(422, "Worker is unavailable: engine_unsupported")
         project_status = str(row["project_status"])
         if task_type == "report":
-            if project_status not in {"completed", "stopped"}:
+            if project_status not in {"active", "paused", "completed", "stopped"}:
                 raise HTTPException(409, "Project is not eligible for report generation")
         elif project_status != "active":
             raise HTTPException(409, "Project is not active")
@@ -176,7 +176,7 @@ def resolve_project_worker_execution_binding(
             raise HTTPException(409, "Worker is disabled")
         task_types = json.loads(row["task_types_json"])
         if task_type == "report":
-            # Report 是完成后的执行用途，复用 reason/bootstrap 能力而不扩张 Worker 能力模型。
+            # Report 是独立写作用途，复用 reason/bootstrap 能力而不扩张 Worker 能力模型。
             if not any(capability in task_types for capability in ("reason", "bootstrap")):
                 raise HTTPException(422, "Worker does not support report generation")
         elif task_type not in task_types:

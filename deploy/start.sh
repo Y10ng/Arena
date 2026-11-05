@@ -56,13 +56,22 @@ resolve_server_endpoint
 configure_trusted_origins
 cd "${ROOT_DIR}"
 
+# bootstrap 已会执行 schema 迁移；必须提前加载原知识与资料路径，不能等 serve 时再设置。
+export CAIRN_KNOWLEDGE_ROOT="${CAIRN_KNOWLEDGE_ROOT:-${DATA_DIR}/knowledge}"
+export CAIRN_PROMPTS_ROOT="${DATA_DIR}/prompts"
+export CAIRN_ARTIFACT_ROOT="${CAIRN_ARTIFACT_ROOT:-${DATA_DIR}/artifacts}"
+export CAIRN_DISPATCH_CONFIG="${DISPATCH_CONFIG}"
+export CAIRN_DISPATCH_YAML_ALLOWED_ROOTS="${RUNTIME_DIR}"
+export CAIRN_KNOWLEDGE_DOCKER_SOURCE="${CAIRN_KNOWLEDGE_ROOT}"
+
+if [[ "${start_dispatcher}" == "1" ]]; then
+  require_docker_daemon
+  ensure_dispatch_worker_image
+fi
+
 if [[ -n "${CAIRN_DATABASE_URL:-}" ]]; then
   database_mode="external"
   validate_external_database_url
-  if [[ "${start_dispatcher}" == "1" ]]; then
-    require_docker_daemon
-    ensure_dispatch_worker_image
-  fi
 else
   database_mode="managed-local"
   require_docker_daemon
@@ -70,9 +79,6 @@ else
   ensure_managed_postgres_env
   validate_managed_postgres_env
   start_managed_postgres
-  if [[ "${start_dispatcher}" == "1" ]]; then
-    ensure_dispatch_worker_image
-  fi
   synchronize_managed_postgres_password
   derive_managed_database_url
 fi
@@ -122,13 +128,6 @@ elif [[ "${INITIAL_ADMIN_PASSWORD_STAGED}" == "1" ]]; then
   rm -f "${INITIAL_ADMIN_PASSWORD_FILE}"
 fi
 unset INITIAL_ADMIN_PASSWORD_STAGED
-
-export CAIRN_KNOWLEDGE_ROOT="${DATA_DIR}/knowledge"
-export CAIRN_PROMPTS_ROOT="${DATA_DIR}/prompts"
-export CAIRN_ARTIFACT_ROOT="${CAIRN_ARTIFACT_ROOT:-${DATA_DIR}/artifacts}"
-export CAIRN_DISPATCH_CONFIG="${DISPATCH_CONFIG}"
-export CAIRN_DISPATCH_YAML_ALLOWED_ROOTS="${RUNTIME_DIR}"
-export CAIRN_KNOWLEDGE_DOCKER_SOURCE="${DATA_DIR}/knowledge"
 
 requested_endpoint="${SERVER_HOST}:${SERVER_PORT}"
 if pid_is_running "${SERVER_PID_FILE}"; then

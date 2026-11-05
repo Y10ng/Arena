@@ -689,6 +689,10 @@ class TaskLifecycleMixin(TaskRunFinishMixin, DispatchDecisionsMixin):
         ]
         for future in done:
             task = self.futures[future]
+            if task.cancellation.detached:
+                # 宿主等待已退出，但原 cgroup、claim 与 TaskRun 仍在；不能写入业务终态。
+                self.futures.pop(future)
+                continue
             if task.task_type == "agent_chat":
                 self._reap_agent_turn(future, task)
                 continue
@@ -704,6 +708,9 @@ class TaskLifecycleMixin(TaskRunFinishMixin, DispatchDecisionsMixin):
                 status = self._task_run_status_for_outcome(outcome)
                 error_type = self._task_run_error_type_for_outcome(outcome, status)
                 error_message = failure.message if failure is not None else self._task_run_error_message_for_error_type(error_type)
+                if error_type == "cancelled" and isinstance(cancellation, TaskCancellation) and cancellation.reason == "pause_timeout":
+                    # 自动结束的 Run 保留超时原因，不被通用“任务取消”覆盖为人工结束或未知。
+                    error_message = cancellation.reason
                 if failure is None and error_type in {"worker_unhealthy", "healthcheck_timeout", "api_unreachable", "api_incompatible", "config_mismatch"}:
                     error_message = None
                 self._finish_task_run(

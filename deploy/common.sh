@@ -24,6 +24,7 @@ POSTGRES_COMPOSE_FILE="${DEPLOY_DIR}/postgres.compose.yaml"
 POSTGRES_PROJECT="arena-db"
 POSTGRES_SERVICE="arena-postgres"
 DEFAULT_WORKER_IMAGE="arena-worker:local"
+DEFAULT_GATEWAY_IMAGE="arena-traffic-gateway:local"
 
 ensure_runtime_dirs() {
   local dir
@@ -276,9 +277,10 @@ images = dict.fromkeys([
     *config.container.allowed_images,
     *(entry.image for entry in config.images),
 ])
-if any(not image or "\n" in image or "\r" in image for image in images):
-    raise SystemExit("runtime/dispatch.yaml 的 Worker 镜像引用不能为空或包含换行")
-print("\n".join(images))
+for role, image in [*(("worker", image) for image in images), ("gateway", config.container.traffic_gateway_image)]:
+    if not image or any(char in image for char in "\t\n\r"):
+        raise SystemExit("runtime/dispatch.yaml 的镜像引用不能为空或包含制表符、换行")
+    print(f"{role}\t{image}")
 PY
 }
 
@@ -296,53 +298,71 @@ verify_pi_worker_image_labels() {
   fi
 }
 
-build_default_dispatch_worker_image() (
-  local iid_file candidate
+verify_dispatch_image() {
+  local role="$1" image="$2"
+  if [[ "${role}" == "worker" ]]; then
+    verify_pi_worker_image_labels "${image}" || return
+  fi
+  "${PYTHON_BIN}" - "${DEPLOY_DIR}" "${role}" "${image}" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from verify_deployment import verify_image, verify_gateway_image, EXPECTED_CAIRN_AGENT_VERSION, EXPECTED_PI_SDK_VERSION
+
+try:
+    if sys.argv[2] == "worker":
+        verify_image(sys.argv[3], EXPECTED_CAIRN_AGENT_VERSION, EXPECTED_PI_SDK_VERSION)
+    else:
+        verify_gateway_image(sys.argv[3])
+except (RuntimeError, OSError) as exc:
+    raise SystemExit(f"镜像离线检查失败: {exc}") from None
+PY
+}
+
+build_default_dispatch_image() (
+  local role="$1" image="$2" context iid_file candidate
+  context="${ROOT_DIR}/container"
+  [[ "${role}" != "gateway" ]] || context="${context}/traffic-gateway"
   iid_file="$(mktemp "${RUNTIME_DIR}/.worker-image.XXXXXX")" || return
   trap 'rm -f -- "${iid_file}"' EXIT
   # 不直接覆盖可用 tag；构建或离线验收失败时保留原引用及所有构建缓存。
-  docker build \
-    -f "${ROOT_DIR}/container/Dockerfile" \
-    --iidfile "${iid_file}" \
-    "${ROOT_DIR}/container" || return
+  docker build -f "${context}/Dockerfile" --iidfile "${iid_file}" "${context}" || return
   candidate="$(<"${iid_file}")"
-  verify_pi_worker_image_labels "${candidate}" || return
-  "${PYTHON_BIN}" - "${DEPLOY_DIR}" "${candidate}" <<'PY'
-import sys
-sys.path.insert(0, sys.argv[1])
-from verify_deployment import verify_image, EXPECTED_CAIRN_AGENT_VERSION, EXPECTED_PI_SDK_VERSION
-
-verify_image(sys.argv[2], EXPECTED_CAIRN_AGENT_VERSION, EXPECTED_PI_SDK_VERSION)
-PY
-  local check_status=$?
-  [[ "${check_status}" == "0" ]] || return "${check_status}"
-  docker tag "${candidate}" "${DEFAULT_WORKER_IMAGE}" || return
-  printf '默认本地 Worker 已准备: %s (%s)；仅后续新建容器使用。\n' "${DEFAULT_WORKER_IMAGE}" "${candidate}"
+  verify_dispatch_image "${role}" "${candidate}" || return
+  docker tag "${candidate}" "${image}" || return
+  printf '默认本地镜像已准备: %s (%s)；仅后续新建容器使用。\n' "${image}" "${candidate}"
 )
 
 ensure_dispatch_worker_image() {
   local mode="${1:-missing}"
-  local images image build_default=0
+  local images role image default_image
+  local -a build_roles=() build_images=()
+  # 已初始化的安装也要执行一次转换，不能依赖是否存在 legacy 凭据。
+  "${PYTHON_BIN}" "${DEPLOY_DIR}/migrate_worker_config.py" --root "${ROOT_DIR}" || return
   images="$(resolve_dispatch_worker_images)" || return
-  while IFS= read -r image; do
-    if [[ "${image}" == "${DEFAULT_WORKER_IMAGE}" && "${mode}" == "refresh" ]]; then
-      build_default=1
+  while IFS=$'\t' read -r role image; do
+    default_image="${DEFAULT_WORKER_IMAGE}"
+    [[ "${role}" != "gateway" ]] || default_image="${DEFAULT_GATEWAY_IMAGE}"
+    if [[ "${image}" == "${default_image}" && "${mode}" == "refresh" ]]; then
+      build_roles+=("${role}")
+      build_images+=("${image}")
     elif docker image inspect "${image}" >/dev/null 2>&1; then
-      verify_pi_worker_image_labels "${image}" || return
-    elif [[ "${image}" == "${DEFAULT_WORKER_IMAGE}" ]]; then
-      build_default=1
+      verify_dispatch_image "${role}" "${image}" || return
+    elif [[ "${image}" == "${default_image}" ]]; then
+      build_roles+=("${role}")
+      build_images+=("${image}")
     else
-      printf 'runtime/dispatch.yaml 配置的 Worker image 不存在: %s；请先 pull、load 或 build 配套镜像。\n' "${image}" >&2
+      printf 'runtime/dispatch.yaml 配置的 %s 镜像不存在: %s；请自行提供配套研究镜像及采集镜像。\n' "${role}" "${image}" >&2
       return 1
     fi
-    if [[ "${mode}" == "refresh" && "${image}" != "${DEFAULT_WORKER_IMAGE}" ]]; then
-      printf '自定义 Worker 未自动更新: %s；需自行提供配套镜像，标签检查不证明版本配套。\n' "${image}" >&2
+    if [[ "${image}" != "${default_image}" ]]; then
+      printf '自定义 %s 镜像未自动构建或更新: %s；需自行提供配套研究镜像及采集镜像，离线检查不证明版本配套。\n' "${role}" "${image}" >&2
     fi
   done <<<"${images}"
-  if [[ "${build_default}" == "1" ]]; then
-    echo "使用本地缓存构建 ${DEFAULT_WORKER_IMAGE} 的新版候选镜像。"
-    build_default_dispatch_worker_image || return
-  fi
+  local index
+  for index in "${!build_images[@]}"; do
+    echo "使用本地缓存构建 ${build_images[index]} 的新版候选镜像。"
+    build_default_dispatch_image "${build_roles[index]}" "${build_images[index]}" || return
+  done
 }
 
 ensure_runtime_env() {

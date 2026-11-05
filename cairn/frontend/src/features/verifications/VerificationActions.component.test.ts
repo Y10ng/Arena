@@ -95,12 +95,13 @@ describe('复测永久删除操作', () => {
     expect(mocks.download).toHaveBeenCalledTimes(1)
   })
 
-  it('删除入口和禁用原因默认可见，详情菜单不重复再次复测', async () => {
+  it('禁用原因默认可见，危险菜单保留禁用且详情不重复再次复测', async () => {
     render({ ...summary, can_delete: false, delete_block_reason: '执行环境尚未回收' }, 'detail')
-    const remove = button('删除复测记录')
-    expect(remove.disabled).toBe(true)
-    expect(document.getElementById(remove.getAttribute('aria-describedby')!)?.textContent).toBe('执行环境尚未回收')
+    expect(document.body.textContent).toContain('执行环境尚未回收')
     await openMenu()
+    const remove = menuItem('删除复测记录')
+    expect(remove.getAttribute('data-disabled')).not.toBeNull()
+    expect(document.getElementById(remove.getAttribute('aria-describedby')!)?.textContent).toBe('执行环境尚未回收')
     expect(document.body.textContent).not.toContain('再次复测')
     remove.click()
     await flushPromises()
@@ -110,7 +111,8 @@ describe('复测永久删除操作', () => {
   it('严格清理失败不移除行，重读待清理投影，只有成功后才通知删除', async () => {
     const { wrapper, invalidate } = render()
     mocks.remove.mockRejectedValueOnce(new ApiError('文件清理失败，可重试', 503, null)).mockResolvedValueOnce(undefined)
-    button('删除复测记录').click()
+    await openMenu()
+    menuItem('删除复测记录').click()
     await flushPromises()
     expect(document.body.textContent).toContain('删除此轮复测及其产生的文件，不影响原漏洞和其他已受理复测；删除后无法恢复。')
     expect(document.body.textContent).not.toContain('底层原件仍保留')
@@ -131,7 +133,7 @@ describe('复测永久删除操作', () => {
     await openMenu()
     expect(menuItem('再次复测').getAttribute('data-disabled')).not.toBeNull()
     expect(menuItem('导出报告').getAttribute('data-disabled')).not.toBeNull()
-    expect(button('重试清理').disabled).toBe(false)
+    expect(menuItem('重试清理').getAttribute('data-disabled')).toBeNull()
     menuItem('再次复测').click()
     menuItem('导出报告').click()
     await flushPromises()

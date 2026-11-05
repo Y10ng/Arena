@@ -7,6 +7,7 @@
     <DialogPortal :disabled="portalDisabled">
       <DialogOverlay class="ui-dialog__overlay" :class="[`ui-dialog__overlay--${size}`, overlayClass]" />
       <DialogContent
+        v-bind="description || $slots.description ? {} : { 'aria-describedby': undefined }"
         class="ui-dialog__content"
         :class="[`ui-dialog__content--${size}`, contentClass]"
         @open-auto-focus="handleOpenAutoFocus"
@@ -19,7 +20,7 @@
             <DialogTitle class="ui-dialog__title">
               <slot name="title">{{ title }}</slot>
             </DialogTitle>
-            <DialogDescription class="ui-dialog__description">
+            <DialogDescription v-if="description || $slots.description" class="ui-dialog__description">
               <slot name="description">{{ description }}</slot>
             </DialogDescription>
           </div>
@@ -64,13 +65,13 @@ import {
 } from 'reka-ui'
 import IconButton from './IconButton.vue'
 
-export type DialogSize = 'sm' | 'md' | 'lg' | 'fullscreen'
+export type DialogSize = 'sm' | 'md' | 'lg' | 'editor' | 'fullscreen'
 
 const props = withDefaults(
   defineProps<{
     open: boolean
     title: string
-    description: string
+    description?: string
     size?: DialogSize
     dismissible?: boolean
     closeOnOutside?: boolean
@@ -133,10 +134,10 @@ defineOptions({ name: 'UiDialog' })
   z-index: var(--z-modal);
   top: 50%;
   left: 50%;
-  width: calc(100vw - var(--space-6));
-  max-height: calc(100dvh - var(--space-6));
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
+  width: calc(100 * var(--ui-vw) - var(--space-6));
+  max-height: calc(100 * var(--ui-dvh) - var(--space-6));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -161,6 +162,12 @@ defineOptions({ name: 'UiDialog' })
   max-width: var(--overlay-dialog-lg);
 }
 
+.ui-dialog__content--editor {
+  width: min(var(--overlay-dialog-editor), calc(100 * var(--ui-vw) - var(--space-8) * 2));
+  max-height: calc(100 * var(--ui-dvh) - var(--space-8) * 2);
+  border-radius: var(--radius-xl);
+}
+
 .ui-dialog__overlay--fullscreen,
 .ui-dialog__content--fullscreen {
   z-index: var(--z-fullscreen);
@@ -181,7 +188,7 @@ defineOptions({ name: 'UiDialog' })
 }
 
 .ui-dialog__header {
-  padding: var(--space-4) var(--space-5);
+  padding: var(--space-5) 28px;
   border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
   display: flex;
@@ -204,21 +211,19 @@ defineOptions({ name: 'UiDialog' })
 
 .ui-dialog__title {
   margin: 0;
+  overflow-wrap: anywhere;
   color: var(--text);
-  font-size: var(--text-xl);
+  font-size: var(--text-object);
   font-weight: var(--font-semibold);
   line-height: var(--leading-tight);
 }
 
 .ui-dialog__description {
+  overflow-wrap: anywhere;
   margin: var(--space-2) 0 0;
   color: var(--text-muted);
   font-size: var(--text-md);
   line-height: var(--leading-normal);
-}
-
-.ui-dialog__description:empty {
-  display: none;
 }
 
 .ui-dialog__close {
@@ -227,13 +232,14 @@ defineOptions({ name: 'UiDialog' })
 
 .ui-dialog__body {
   min-height: 0;
-  padding: var(--space-5);
+  padding: var(--space-5) 28px;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 
 .ui-dialog__footer {
-  padding: var(--space-4) var(--space-5);
+  background: var(--bg-inset);
+  padding: var(--space-4) 28px;
   border-top: 1px solid var(--border-subtle);
   flex-shrink: 0;
   display: flex;
@@ -264,21 +270,21 @@ defineOptions({ name: 'UiDialog' })
 @keyframes ui-dialog-content-enter {
   from {
     opacity: 0;
-    transform: translate(-50%, calc(-50% + var(--space-2))) scale(0.98);
+    transform: translate(-50%, calc(-50% + var(--space-1)));
   }
 }
 
 @keyframes ui-dialog-fullscreen-enter {
   from {
     opacity: 0;
-    transform: translateY(var(--space-2)) scale(0.99);
+    transform: translateY(var(--space-1));
   }
 }
 
 @media (max-width: 640px) {
   .ui-dialog__content {
-    width: calc(100vw - var(--space-4));
-    max-height: calc(100dvh - var(--space-4));
+    width: calc(100 * var(--ui-vw) - var(--space-4));
+    max-height: calc(100 * var(--ui-dvh) - var(--space-4));
   }
 
   .ui-dialog__content--fullscreen {

@@ -1,5 +1,6 @@
 <template>
-  <Dialog :open="true" :title="sourceId ? '再次复测' : fixedSource ? '复测漏洞' : '新建复测'" description="" size="lg" content-class="verification-theme verification-create-dialog" overlay-class="verification-create-overlay" :dismissible="!submitting && !copying && !resourceBusy && !materialsConfirm" :close-on-outside="false" @update:open="!$event && requestClose()" @close-auto-focus="emit('closeAutoFocus', $event)">
+  <Dialog :open="true" :title="sourceId ? '再次复测' : fixedSource ? '复测漏洞' : '新建复测'" description="" size="lg" content-class="retest-form-dialog" :dismissible="!submitting && !copying && !resourceBusy && !materialsConfirm && !discardOpen" :close-on-outside="false" @update:open="!$event && requestClose()" @close-auto-focus="emit('closeAutoFocus', $event)">
+    <div v-if="sourceLoading || sourceError || created || submissionError" class="verification-feedback verification-stack">
     <Skeleton v-if="sourceLoading" aria-label="正在读取上一轮信息" />
     <ErrorState v-else-if="sourceError" title="上一轮信息读取失败" :description="sourceError" @retry="loadSource" />
     <Alert v-if="created" tone="success" title="请求已受理">当前状态：{{ statusLabels[created.execution_status] }}。<template #actions><Button @click="enterCreated">进入已受理记录</Button></template></Alert>
@@ -8,25 +9,19 @@
       <p v-if="pending">请求 ID：{{ pending.request_id }}。<template v-if="acceptance === 'deleted'">原请求对应的记录已删除，不会重新创建。</template><template v-else-if="acceptance === 'source_deleted'">新一轮未受理，已复制的独立资料批次仍保留。请关闭表单，从原漏洞新建复测。</template><template v-else-if="!definitelyRejected">原请求已锁定，请用原请求重试；受理确认前不能关闭。</template><template v-else>原请求未受理，可以恢复编辑；正文和补充说明会保留。</template></p>
       <template v-if="pending" #actions><Button v-if="acceptance !== 'batch_expired' && acceptance !== 'deleted' && acceptance !== 'source_deleted'" variant="secondary" :loading="submitting" @click="submitPending">用原请求重试</Button><Button v-if="definitelyRejected && acceptance !== 'deleted' && acceptance !== 'source_deleted'" variant="secondary" :disabled="submitting" @click="editRejected">{{ acceptance === 'batch_expired' ? '更换过期资料并继续编辑' : '修改未受理的输入' }}</Button></template>
     </Alert>
+    </div>
     <form id="new-verification-form" class="verification-form" @submit.prevent="submit">
       <fieldset class="verification-stack" :disabled="locked || sourceLoading || Boolean(sourceError)" @input="dirty = true" @change="dirty = true">
         <div class="verification-grid verification-create-basics">
           <FormField label="任务名称" for="new-verification-title" required><Input id="new-verification-title" v-model="form.title" required placeholder="例如：订单访问控制修复后复测" /></FormField>
-          <FormField label="模式" for="new-verification-mode" required><Select content-class="verification-theme verification-select" id="new-verification-mode" v-model="form.mode" :options="modeOptions" :disabled="locked" /></FormField>
+          <FormField label="模式" for="new-verification-mode" required><Select id="new-verification-mode" v-model="form.mode" :options="modeOptions" :disabled="locked" /></FormField>
         </div>
-        <div v-if="configLoading || configError || !readiness?.ready" class="verification-readiness" role="status">
-          <span v-if="configLoading">正在读取执行配置…</span>
-          <span v-else-if="configError">配置读取失败：{{ configError }}</span>
-          <span v-else>{{ readiness?.message || '执行配置尚未读取' }}</span>
-          <Button v-if="!configLoading" variant="ghost" :disabled="locked" @click="loadConfig">重新核对</Button>
-          <RouterLink v-if="!configLoading && !readiness?.ready" :to="{ name: 'VerificationConfiguration' }">去配置复测执行</RouterLink>
-        </div>
-        <FormField v-if="!fixedSource" label="输入来源" for="new-verification-input-kind" required><Select content-class="verification-theme verification-select" id="new-verification-input-kind" :model-value="inputKind" :options="inputOptions" :disabled="locked || resourceBusy || copying || hasCopiedMaterials" @update:model-value="changeInputKind" /><p v-if="hasCopiedMaterials" class="verification-muted">已复制旧输入。若要改为当前漏洞或手工资料，请先在“资料”中重新准备本轮资料，避免混用两个版本。</p></FormField>
-        <div class="verification-editor">
+        <FormField v-if="!fixedSource" label="输入来源" for="new-verification-input-kind" required><Select id="new-verification-input-kind" :model-value="inputKind" :options="inputOptions" :disabled="locked || resourceBusy || copying || hasCopiedMaterials" @update:model-value="changeInputKind" /><p v-if="hasCopiedMaterials" class="verification-muted">已复制旧输入。若要改为当前漏洞或手工资料，请先在“资料”中重新准备本轮资料，避免混用两个版本。</p></FormField>
+        <section v-if="inputKind !== 'manual'" class="verification-source-context" aria-label="本轮来源">
           <template v-if="inputKind === 'platform'">
             <div class="verification-source-picker verification-stack">
-              <div v-if="!fixedSource" class="verification-grid"><FormField label="查找漏洞" for="verification-source-search"><Input id="verification-source-search" v-model="sourceSearch" placeholder="筛选漏洞名称、目标或项目" /></FormField><FormField label="严重程度" for="verification-source-severity"><Select id="verification-source-severity" v-model="sourceSeverity" content-class="verification-theme verification-select" :options="severityOptions" :disabled="locked" /></FormField></div>
-              <FormField v-if="!fixedSource" label="平台已有漏洞" for="verification-source-vulnerability" required><Select id="verification-source-vulnerability" :model-value="selectedVulnerabilityKey" content-class="verification-theme verification-select" :options="vulnerabilityOptions" :disabled="locked || vulnerabilitiesLoading" placeholder="选择来源项目与漏洞" @update:model-value="selectPlatformVulnerability" /></FormField>
+              <div v-if="!fixedSource" class="verification-grid"><FormField label="查找漏洞" for="verification-source-search"><Input id="verification-source-search" v-model="sourceSearch" placeholder="筛选漏洞名称、目标或项目" /></FormField><FormField label="严重程度" for="verification-source-severity"><Select id="verification-source-severity" v-model="sourceSeverity" :options="severityOptions" :disabled="locked" /></FormField></div>
+              <FormField v-if="!fixedSource" label="平台已有漏洞" for="verification-source-vulnerability" required><Select id="verification-source-vulnerability" :model-value="selectedVulnerabilityKey" :options="vulnerabilityOptions" :disabled="locked || vulnerabilitiesLoading" placeholder="选择来源项目与漏洞" @update:model-value="selectPlatformVulnerability" /></FormField>
               <p v-if="!fixedSource && vulnerabilitiesLoading" class="verification-muted">正在读取已有漏洞…</p><Alert v-if="!fixedSource && vulnerabilitiesError" tone="warning" title="漏洞列表读取失败">{{ errorMessage(vulnerabilitiesError) }}<template #actions><Button variant="secondary" size="sm" @click="refetchVulnerabilities()">重新读取</Button></template></Alert>
               <p v-if="!fixedSource && !vulnerabilitiesLoading && !vulnerabilitiesError && !vulnerabilityOptions.length" class="verification-muted">当前没有匹配漏洞，可调整筛选或使用手工资料。</p>
               <Skeleton v-if="platformLoading" aria-label="正在读取漏洞原文与历史证据" /><Alert v-else-if="platformError" tone="danger" title="来源资料尚未读取">{{ platformError }}<template #actions><Button variant="secondary" size="sm" @click="loadPlatformPreview">重新读取</Button></template></Alert>
@@ -40,37 +35,41 @@
             <p v-if="form.mainMemberId" class="verification-muted">主资料：{{ batch?.members.find((member) => member.id === form.mainMemberId)?.path }}</p>
             <Alert v-if="copyError" tone="warning" title="原件复制未完成">{{ copyError }}</Alert>
           </div>
-          <div v-else class="verification-editor-toolbar">
-            <div class="verification-segments" aria-label="主资料编辑模式"><Button size="sm" :variant="editorTab === 'edit' ? 'secondary' : 'ghost'" :aria-pressed="editorTab === 'edit'" @click="editorTab = 'edit'">编辑</Button><Button size="sm" :variant="editorTab === 'preview' ? 'secondary' : 'ghost'" :aria-pressed="editorTab === 'preview'" @click="editorTab = 'preview'">预览</Button></div>
-            <label class="verification-report-select">主资料<Select content-class="verification-theme verification-select" id="new-verification-report-type" v-model="form.reportType" :options="reportOptions" :disabled="locked" aria-label="主资料来源" /></label>
-          </div>
-          <template v-if="inputKind === 'manual' && form.reportType !== 'file'">
-            <Textarea v-show="editorTab === 'edit'" id="new-verification-content" v-model="form.content" class="verification-editor-input" :rows="9" :required="editorTab === 'edit'" aria-label="主资料正文" placeholder="漏洞描述、复现步骤、请求与响应" />
-            <div v-if="editorTab === 'preview'" class="verification-editor-preview"><SafeReportMarkdown v-if="form.reportType === 'markdown' && form.content" :content="form.content" /><p v-else class="verification-text">{{ form.content || '尚无主资料正文。' }}</p></div>
-          </template>
-          <div v-else-if="inputKind === 'manual'" class="verification-editor-file">
-            <FormField label="主资料文件" for="new-verification-main-file" required><Select content-class="verification-theme verification-select" id="new-verification-main-file" v-model="form.mainMemberId" :options="mainFileOptions" :disabled="locked || resourceBusy" placeholder="打开资料，上传或复制后选择主文件" /></FormField>
-            <p class="verification-muted">支持 MD、TXT、DOCX、PNG、JPEG 原件。</p>
-          </div>
-          <div class="verification-editor-materials">
-            <Popover v-model:open="materialsOpen" side="top" align="start" size="lg" content-class="verification-theme verification-materials-popover" :dismissible="!resourceBusy && !materialsConfirm">
-              <template #trigger><Button size="sm" variant="secondary" :disabled="locked || resourceBusy || materialsConfirm"><template #icon><Paperclip :size="14" /></template>资料{{ batch?.members.length || files.length ? `（${(batch?.members.length || 0) + files.length}）` : '' }}</Button></template>
-              <div class="verification-stack">
-                <header class="verification-heading"><h2>本轮资料</h2><Button size="sm" variant="ghost" :disabled="resourceBusy || materialsConfirm" @click="materialsOpen = false">收起</Button></header>
-                <VerificationMaterials :key="formScope" v-model="batch" v-model:files="files" :disabled="locked || copying" @busy="resourceBusy = $event" @confirming="materialsConfirm = $event" />
-              </div>
-            </Popover>
-            <span v-if="files.length" class="verification-muted">{{ files.length }} 个待上传{{ failedFiles ? `，${failedFiles} 个失败或待核对` : '' }}</span>
-            <span v-if="resourceBusy" class="verification-muted">资料操作中，请勿离开</span>
-          </div>
-        </div>
+        </section>
         <FormField label="本次目标地址（可选）" for="new-verification-target">
           <Input id="new-verification-target" v-model="form.target_url" placeholder="同题新实例的完整 HTTP(S) 地址；留空沿用原目标" />
         </FormField>
+        <section v-if="inputKind === 'manual'" class="verification-editor" aria-label="主资料">
+          <div class="verification-editor-toolbar">
+            <FormField label="主资料来源" for="new-verification-report-type"><Select id="new-verification-report-type" v-model="form.reportType" :options="reportOptions" :disabled="locked" /></FormField>
+            <div v-if="form.reportType !== 'file'" class="verification-segments" aria-label="主资料编辑模式"><Button size="sm" :variant="editorTab === 'edit' ? 'secondary' : 'ghost'" :aria-pressed="editorTab === 'edit'" @click="editorTab = 'edit'">编辑</Button><Button size="sm" :variant="editorTab === 'preview' ? 'secondary' : 'ghost'" :aria-pressed="editorTab === 'preview'" @click="editorTab = 'preview'">预览</Button></div>
+          </div>
+          <template v-if="inputKind === 'manual' && form.reportType !== 'file'">
+            <FormField v-show="editorTab === 'edit'" label="主资料正文" for="new-verification-content" required><Textarea id="new-verification-content" v-model="form.content" class="verification-editor-input" :rows="9" :required="editorTab === 'edit'" placeholder="漏洞描述、复现步骤、请求与响应" /></FormField>
+            <div v-if="editorTab === 'preview'" class="verification-editor-preview"><SafeReportMarkdown v-if="form.reportType === 'markdown' && form.content" :content="form.content" /><p v-else class="verification-text">{{ form.content || '尚无主资料正文。' }}</p></div>
+          </template>
+          <div v-else-if="inputKind === 'manual'" class="verification-editor-file">
+            <FormField label="主资料文件" for="new-verification-main-file" required><Select id="new-verification-main-file" v-model="form.mainMemberId" :options="mainFileOptions" :disabled="locked || resourceBusy" placeholder="打开资料，上传或复制后选择主文件" /></FormField>
+            <p class="verification-muted">支持 MD、TXT、DOCX、PNG、JPEG 原件。</p>
+          </div>
+        </section>
         <FormField label="环境变化与补充说明（可选）" for="new-verification-origin">
-          <Textarea id="new-verification-origin" v-model="form.origin" class="verification-origin" :rows="3" placeholder="修复或部署变化、必要身份与其他补充资料" />
+          <Textarea id="new-verification-origin" v-model="form.origin" class="verification-origin" :rows="5" placeholder="修复或部署变化、必要身份与其他补充资料" />
         </FormField>
-        <details class="verification-extra-settings"><summary>代理设置</summary><div class="verification-stack">
+        <section class="verification-editor-materials" aria-label="本轮补充资料">
+          <div class="verification-materials-summary"><h3>补充资料</h3><span class="verification-muted">{{ batch?.members.length ? `已准备 ${batch.members.length} 个文件` : '按需添加文件或目录' }}</span></div>
+            <Dialog v-model:open="materialsOpen" title="本轮资料" description="" size="md" content-class="retest-materials-dialog" overlay-class="retest-materials-overlay" :dismissible="!resourceBusy && !materialsConfirm" :close-on-outside="false">
+              <template #trigger><Button size="sm" variant="secondary" :disabled="locked || resourceBusy || materialsConfirm">资料{{ batch?.members.length || files.length ? `（${(batch?.members.length || 0) + files.length}）` : '' }}</Button></template>
+              <div class="verification-stack">
+                <VerificationMaterials :key="formScope" v-model="batch" v-model:files="files" :disabled="locked || copying" @busy="resourceBusy = $event" @confirming="materialsConfirm = $event" />
+              </div>
+              <template #footer><Button variant="secondary" :disabled="resourceBusy || materialsConfirm" @click="materialsOpen = false">返回复测表单</Button></template>
+            </Dialog>
+            <span v-if="files.length" class="verification-muted">{{ files.length }} 个待上传{{ failedFiles ? `，${failedFiles} 个失败或待核对` : '' }}</span>
+            <span v-if="resourceBusy" class="verification-muted">资料操作中，请勿离开</span>
+        </section>
+        <details class="verification-extra-settings"><summary>高级设置<span>代理、外部编号与期限</span></summary><div class="verification-stack">
+          <h3>代理设置</h3>
           <template v-if="inheritsProjectEgress">
             <p class="verification-muted">默认在受理时继承来源项目的当前代理设置；已受理复测保持自己的设置。</p>
             <FormField label="本轮代理设置" for="verification-egress-choice"><Select id="verification-egress-choice" :model-value="customEgress ? 'custom' : 'inherit'" :options="egressChoices" :disabled="locked || sourceLoading || platformLoading || egressLoading || Boolean(egressLoadError)" @update:model-value="changeEgressChoice" /></FormField>
@@ -78,23 +77,29 @@
           <p v-if="egressLoading || platformLoading" class="verification-muted">正在读取来源项目代理设置…</p>
           <Alert v-else-if="egressLoadError" tone="warning" title="来源代理设置尚未读取">{{ egressLoadError }}<template #actions><Button size="sm" variant="secondary" @click="loadCopiedEgress">重新读取</Button></template></Alert>
           <TestEgressFields v-else-if="!inheritsProjectEgress || egressPublic" v-model="egress" :auth-configured="egressPublic?.auth_configured" :disabled="locked || sourceLoading || (inheritsProjectEgress && !customEgress)" :error="egressError" @update:model-value="dirty = true" />
-        </div></details>
-        <details class="verification-extra-settings"><summary>外部编号与可选期限</summary><div class="verification-stack">
+          <h3>外部编号与可选期限</h3>
           <FormField label="外部漏洞编号（可选）" for="new-verification-external"><Input id="new-verification-external" v-model="form.external_id" placeholder="例如：ISSUE-123" /></FormField>
           <div class="verification-grid"><FormField label="授权到期时间（本地时间，可选）" for="new-verification-authorization"><Input id="new-verification-authorization" v-model="form.authorization" type="datetime-local" /></FormField><FormField label="执行停止时间（本地时间，可选）" for="new-verification-deadline"><Input id="new-verification-deadline" v-model="form.deadline" type="datetime-local" /></FormField></div>
         </div></details>
       </fieldset>
     </form>
     <template #footer>
-      <span class="verification-muted verification-footer-summary">{{ resourcePending ? '请先完成上传或移出待上传项' : '' }}</span>
+      <div v-if="configLoading || configError || !readiness?.ready" class="verification-readiness" role="status">
+        <span v-if="configLoading">正在读取执行配置…</span>
+        <span v-else-if="configError">配置读取失败：{{ configError }}</span>
+        <span v-else>{{ readiness?.message || '执行配置尚未读取' }}</span>
+        <Button v-if="!configLoading" variant="ghost" size="sm" :disabled="locked" @click="loadConfig">重新核对</Button>
+        <RouterLink v-if="!configLoading && !readiness?.ready" :to="{ name: 'VerificationConfiguration' }">去配置复测执行</RouterLink>
+      </div>
+      <span class="verification-muted verification-footer-summary" role="status">{{ resourcePending ? '请先完成上传或移出待上传项' : '' }}</span>
       <Button variant="secondary" :disabled="submitting || copying || resourceBusy" @click="requestClose">取消</Button>
       <Button type="submit" form="new-verification-form" :loading="submitting" :disabled="locked || copying || resourceBusy || resourcePending || sourceLoading || Boolean(sourceError) || (inputKind === 'platform' && (platformLoading || Boolean(platformError) || !platformPreview)) || configLoading || Boolean(configError) || !readiness?.ready">开始复测</Button>
     </template>
   </Dialog>
+  <ConfirmAction :open="discardOpen" title="放弃本次复测输入？" description="未提交的正文、补充说明与待上传文件将丢失；已保存的历史原件不受影响。" confirm-label="放弃并离开" cancel-label="继续编辑" tone="warning" content-class="retest-discard-confirm" overlay-class="retest-discard-overlay" @update:open="!$event && resolveDiscard(false)" @confirm="resolveDiscard(true)" />
 </template>
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { Paperclip } from '@lucide/vue'
 import { ApiError, getProjectDetail, listAllVulnerabilities } from '@/api/client'
 import type { TestEgressPublic } from '@/api/testEgress'
 import TestEgressFields from '@/components/patterns/TestEgressFields.vue'
@@ -104,14 +109,13 @@ import { vulnerabilityKeys } from '@/features/vulnerabilities/vulnerabilityQueri
 import { vulnerabilitySeverityMeta } from '@/features/vulnerabilities/vulnerabilityMetadata'
 import { createCreationRequestId } from '@/api/projectSchedules'
 import { createVerificationBatch, createVerificationRequest, getVerificationReadiness, getVerificationRequest, getVerificationSourcePreview, type CreateVerificationRequest, type VerificationBatch, type VerificationDetail, type VerificationMode, type VerificationReadiness, type VerificationReportInput, type VerificationSourcePreview as SourcePreview } from '@/api/verificationRequests'
-import { Alert, Button, Dialog, FormField, Input, Popover, Select, Skeleton, Textarea } from '@/components/ui'
-import { ErrorState } from '@/components/patterns'
+import { Alert, Button, Dialog, FormField, Input, Select, Skeleton, Textarea } from '@/components/ui'
+import { ConfirmAction, ErrorState } from '@/components/patterns'
 import { useAuthStore } from '@/stores/auth'
 import SafeReportMarkdown from '@/features/reports/SafeReportMarkdown.vue'
 import VerificationMaterials, { type PendingVerificationFile } from './VerificationMaterials.vue'
 import VerificationSourcePreview from './VerificationSourcePreview.vue'
 import { errorMessage, modeLabels, statusLabels } from './verificationPresentation'
-import './verifications.css'
 const props = withDefaults(defineProps<{ sourceRequestId?: string; sourceProjectId?: string; sourceVulnerabilityId?: string; sourceObservationId?: string; initialInput?: string; fixedSource?: boolean }>(), { sourceRequestId: '', sourceProjectId: '', sourceVulnerabilityId: '', sourceObservationId: '', initialInput: 'platform', fixedSource: false })
 const emit = defineEmits<{ (event: 'close'): void; (event: 'accepted', request: VerificationDetail): void; (event: 'closeAutoFocus', value: Event): void }>()
 const auth = useAuthStore()
@@ -403,17 +407,26 @@ function enterCreated() {
   if (created.value) emit('accepted', created.value)
 }
 let leaveApproved = false
-function canLeave() {
+const discardOpen = ref(false)
+let discardResolver: ((value: boolean) => void) | undefined
+function resolveDiscard(discard: boolean) {
+  discardOpen.value = false
+  leaveApproved = discard
+  discardResolver?.(discard)
+  discardResolver = undefined
+}
+function canLeave(): boolean | Promise<boolean> {
   if (submitting.value || copying.value || resourceBusy.value || sourceLoading.value || materialsConfirm.value) return false
   if (pending.value && !definitelyRejected.value) {
     submissionError.value = '受理结果未知，已保留原请求。请先用原请求重试确认。'
     return false
   }
   if (leaveApproved || created.value || acceptance.value === 'deleted' || acceptance.value === 'source_deleted' || (!dirty.value && !pending.value && !batch.value && !resourcePending.value)) return true
-  leaveApproved = window.confirm('离开将丢失未提交的正文、补充说明与待上传文件。仍要离开吗？')
-  return leaveApproved
+  if (discardOpen.value) return false
+  discardOpen.value = true
+  return new Promise<boolean>((resolve) => { discardResolver = resolve })
 }
-function requestClose() { if (canLeave()) emit('close') }
+async function requestClose() { if (await canLeave()) emit('close') }
 defineExpose({ canLeave })
 function beforeUnload(event: BeforeUnloadEvent) {
   if (created.value || acceptance.value === 'deleted' || acceptance.value === 'source_deleted' || (!dirty.value && !pending.value && !batch.value && !resourcePending.value && !resourceBusy.value)) return
@@ -421,11 +434,12 @@ function beforeUnload(event: BeforeUnloadEvent) {
   event.returnValue = ''
 }
 window.addEventListener('beforeunload', beforeUnload)
-onBeforeUnmount(() => { egressGeneration++; formGeneration++; configGeneration++; sourceGeneration++; sourceController?.abort(); platformGeneration++; platformController?.abort(); window.removeEventListener('beforeunload', beforeUnload) })
+onBeforeUnmount(() => { resolveDiscard(false); egressGeneration++; formGeneration++; configGeneration++; sourceGeneration++; sourceController?.abort(); platformGeneration++; platformController?.abort(); window.removeEventListener('beforeunload', beforeUnload) })
 watch(batch, (current) => {
   if (form.mainMemberId && !current?.members.some((member) => member.id === form.mainMemberId)) form.mainMemberId = ''
 })
 watch(formScope, () => {
+  resolveDiscard(false)
   formGeneration++; configGeneration++; sourceGeneration++; sourceController?.abort(); platformGeneration++; platformController?.abort(); leaveApproved = false
   source.value = null; batch.value = null; files.value = []; pending.value = null; created.value = null
   sourceLoading.value = false; sourceError.value = ''; submissionError.value = ''; copyError.value = ''; dirty.value = false; acceptance.value = 'rejected'
@@ -446,3 +460,43 @@ watch([inputKind, () => form.sourceProjectId, () => form.sourceVulnerabilityId, 
 watch(formScope, () => { void loadSource(); void loadConfig() }, { immediate: true })
 watch([formScope, inputKind, () => form.sourceProjectId, () => form.sourceVulnerabilityId, () => form.sourceObservationId], () => { void loadPlatformPreview() }, { immediate: true })
 </script>
+
+<style scoped>
+.verification-form, .verification-stack { display: flex; flex-direction: column; gap: var(--space-5); min-width: 0; }
+fieldset.verification-stack { margin: 0; padding: 0; border: 0; }
+.verification-feedback { margin-bottom: var(--space-5); }
+.verification-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
+.verification-create-basics { grid-template-columns: minmax(0, 1fr) 180px; }
+.verification-muted { margin: 0; color: var(--text-muted); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.verification-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: var(--leading-reading); }
+.verification-readiness { display: flex; flex: 1 0 100%; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding-bottom: var(--space-3); border-bottom: 1px solid var(--border-subtle); color: var(--text); font-size: var(--text-sm); overflow-wrap: anywhere; }
+.verification-readiness > span { flex: 1 1 100%; }
+.verification-readiness a { color: var(--link); }
+.verification-source-context { min-width: 0; padding: 18px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-inset); }
+.verification-editor { display: grid; gap: var(--space-3); min-width: 0; }
+.verification-editor-toolbar { display: flex; justify-content: space-between; align-items: flex-end; flex-wrap: wrap; gap: var(--space-3); }
+.verification-editor-toolbar > .ui-form-field { flex: 1; }
+.verification-segments { display: inline-flex; gap: var(--space-1); }
+.verification-editor-input { min-height: 220px; font-size: var(--text-reading); line-height: var(--leading-reading); }
+.verification-editor-preview { min-height: 220px; max-height: calc(45 * var(--ui-dvh)); overflow: auto; padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.verification-editor-preview :deep(.safe-report-markdown h1) { font-size: var(--text-object); }
+.verification-editor-preview :deep(.safe-report-markdown h2) { font-size: var(--text-section); }
+.verification-editor-file { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-3); padding-block: var(--space-4); }
+.verification-editor-file h3 { margin: 0; font-size: var(--text-section); }
+.verification-editor-materials { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); }
+.verification-materials-summary { display: grid; flex: 1; gap: var(--space-1); min-width: 0; }
+.verification-materials-summary h3, .verification-extra-settings h3 { margin: 0; font-size: var(--text-section); font-weight: var(--font-semibold); }
+.verification-editor-materials > .verification-muted { flex-basis: 100%; }
+.verification-extra-settings { border-block: 1px solid var(--border-subtle); }
+.verification-extra-settings > summary { padding-block: var(--space-3); cursor: pointer; font-weight: var(--font-medium); }
+.verification-extra-settings > summary > span { margin-left: var(--space-3); color: var(--text-muted); font-size: var(--text-sm); font-weight: normal; }
+.verification-extra-settings > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.verification-extra-settings > .verification-stack { padding-block: var(--space-3) var(--space-5); }
+.verification-footer-summary { flex: 1; min-width: 0; }
+@media (max-width: 640px) { .verification-grid { grid-template-columns: minmax(0, 1fr); } .verification-footer-summary { flex-basis: 100%; } }
+</style>
+
+<style>
+.retest-materials-dialog.ui-dialog__content, .retest-materials-overlay.ui-dialog__overlay { z-index: var(--z-overlay-child); }
+.retest-discard-confirm.ui-alert-dialog__content, .retest-discard-overlay.ui-alert-dialog__overlay { z-index: var(--z-overlay-child); }
+</style>

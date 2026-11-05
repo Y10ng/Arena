@@ -13,152 +13,173 @@
       资料绑定成功后进入执行调度，不代表模型已启动。
     </p>
     <template v-if="modelValue.mode !== 'immediate'">
-      <p class="timing-hint">
-        {{
-          modelValue.mode === 'once'
-            ? '保存待启动项目；关闭浏览器不影响预约。'
-            : '每轮自动创建独立项目，可能产生模型费用。上轮未结束则跳过，不补发错过轮次。暂停或编辑仅影响未来项目。'
-        }}
-      </p>
-      <div class="timing-grid">
-        <FormField
-          label="时区"
-          for="schedule-timezone"
-          hint="默认浏览器时区，可改为任意有效的 IANA 时区。"
-        >
-          <Input
-            id="schedule-timezone"
-            :model-value="modelValue.timezone"
-            placeholder="Asia/Shanghai"
-            @update:model-value="update('timezone', String($event ?? ''))"
-          />
-        </FormField>
-        <FormField
-          :label="modelValue.mode === 'once' ? '启动日期与本地时间' : '起始边界（含该时刻）'"
-          for="schedule-start"
-          :error="timeError?.field === 'start' ? timeError.message : ''"
-        >
-          <Input
-            id="schedule-start"
-            type="datetime-local"
-            :model-value="modelValue.startLocal"
-            @update:model-value="update('startLocal', String($event ?? ''))"
-          />
-        </FormField>
-        <FormField
-          v-if="candidates.length"
-          :label="candidates.length > 1 ? '该时刻出现两次，请选择偏移' : '启动边界的 UTC 偏移'"
-          for="schedule-offset"
-        >
-          <Select
-            id="schedule-offset"
-            :model-value="selectedOffset"
-            :options="candidates"
-            placeholder="请选择 UTC 偏移"
-            @update:model-value="update('startAt', $event)"
-          />
-        </FormField>
-        <FormField v-if="modelValue.mode !== 'once'" label="每轮本地时刻" for="schedule-local-time">
-          <Input
-            id="schedule-local-time"
-            type="time"
-            :model-value="modelValue.localTime"
-            @update:model-value="update('localTime', String($event ?? ''))"
-          />
-        </FormField>
-      </div>
-      <div v-if="modelValue.mode === 'once'" class="timing-grid">
-        <FormField label="停止时间" for="schedule-stop-mode">
-          <Select
-            id="schedule-stop-mode"
-            :model-value="modelValue.stopMode"
-            :options="stopModeOptions"
-            @update:model-value="update('stopMode', $event as ScheduleDraft['stopMode'])"
-          />
-        </FormField>
-        <FormField
-          v-if="modelValue.stopMode === 'specified'"
-          label="停止日期与本地时间"
-          for="schedule-stop"
-          required
-          :error="timeError?.field === 'stop' ? timeError.message : ''"
-        >
-          <Input
-            id="schedule-stop"
-            type="datetime-local"
-            :model-value="modelValue.stopLocal"
-            @update:model-value="update('stopLocal', String($event ?? ''))"
-          />
-        </FormField>
-        <FormField
-          v-if="modelValue.stopMode === 'specified' && stopCandidates.length"
-          :label="stopCandidates.length > 1 ? '停止时刻出现两次，请选择偏移' : '停止时间的 UTC 偏移'"
-          for="schedule-stop-offset"
-        >
-          <Select
-            id="schedule-stop-offset"
-            :model-value="selectedStopOffset"
-            :options="stopCandidates"
-            placeholder="请选择 UTC 偏移"
-            @update:model-value="update('stopAt', $event)"
-          />
-        </FormField>
-      </div>
-      <FormField v-if="modelValue.mode === 'weekly'" label="每周执行日">
-        <div class="weekday-options">
-          <label v-for="(label, day) in weekdayLabels" :key="day">
-            <Checkbox
-              :model-value="modelValue.weekdays.includes(day)"
-              @update:model-value="toggleDay(day, $event)"
-            />{{ label }}
-          </label>
+      <section class="timing-section" aria-label="启动时间与时区">
+        <div class="timing-section-heading">
+          <h3>{{ modelValue.mode === 'once' ? '启动时间' : '首次启动边界' }}</h3>
         </div>
-      </FormField>
-      <div v-if="modelValue.mode !== 'once'" class="timing-grid">
-        <FormField
-          label="结束日期（可选）"
-          for="schedule-end"
-          hint="按所选时区，该日结束后不再启动。"
-        >
-          <Input
-            id="schedule-end"
-            type="date"
-            :model-value="modelValue.endDate"
-            @update:model-value="update('endDate', String($event ?? ''))"
-          />
-        </FormField>
-        <FormField
-          label="成功生成次数上限（可选）"
-          for="schedule-max"
-          hint="跳过、错过、受阻不扣次数。留空不限制。"
-        >
-          <Input
-            id="schedule-max"
-            type="number"
-            min="1"
-            step="1"
-            :model-value="modelValue.maxRuns"
-            @update:model-value="update('maxRuns', String($event ?? ''))"
-          />
-        </FormField>
-      </div>
-      <p v-if="boundaryHint" class="timing-hint">{{ boundaryHint }}</p>
-      <Alert v-if="timeError?.field === 'rules' || previewError" tone="danger" title="时间安排需处理">{{
-        previewError || timeError?.message
-      }}</Alert>
-      <Button variant="secondary" size="sm" :loading="previewBusy" @click="previewTimes"
-        >预览未来时间</Button
-      >
-      <div v-if="preview" class="timing-preview" aria-live="polite">
-        <p v-for="time in preview.times" :key="time.at">
-          {{ time.local }}
-          <span class="timing-hint"
-            >{{ modelValue.timezone }} · {{ time.at }}{{ time.note ? ` · ${time.note}` : '' }}</span
+        <div class="timing-grid">
+          <FormField label="时区（IANA）" for="schedule-timezone">
+            <Input
+              id="schedule-timezone"
+              :model-value="modelValue.timezone"
+              placeholder="Asia/Shanghai"
+              @update:model-value="update('timezone', String($event ?? ''))"
+            />
+          </FormField>
+          <FormField
+            :label="modelValue.mode === 'once' ? '启动日期与本地时间' : '起始边界（含该时刻）'"
+            for="schedule-start"
+            :error="timeError?.field === 'start' ? timeError.message : ''"
           >
-        </p>
-        <p v-if="!preview.times.length">所选规则下没有未来执行时刻。</p>
-        <p v-if="preview.boundary" class="timing-hint">{{ preview.boundary }}</p>
-      </div>
+            <Input
+              id="schedule-start"
+              type="datetime-local"
+              :model-value="modelValue.startLocal"
+              @update:model-value="update('startLocal', String($event ?? ''))"
+            />
+          </FormField>
+          <FormField
+            v-if="candidates.length > 1"
+            label="该时刻出现两次，请选择偏移"
+            for="schedule-offset"
+          >
+            <Select
+              id="schedule-offset"
+              :model-value="selectedOffset"
+              :options="candidates"
+              placeholder="请选择 UTC 偏移"
+              @update:model-value="update('startAt', $event)"
+            />
+          </FormField>
+        </div>
+      </section>
+      <section v-if="modelValue.mode !== 'once'" class="timing-section" aria-label="重复规则">
+        <div class="timing-section-heading">
+          <h3>重复规则</h3>
+          <p class="timing-hint">
+            每轮可能产生模型费用；上轮未结束则跳过，错过与暂停期间不补跑。编辑仅影响未来项目。
+          </p>
+        </div>
+        <div class="timing-grid">
+          <FormField label="每轮本地时刻" for="schedule-local-time">
+            <Input
+              id="schedule-local-time"
+              type="time"
+              :model-value="modelValue.localTime"
+              @update:model-value="update('localTime', String($event ?? ''))"
+            />
+          </FormField>
+          <FormField v-if="modelValue.mode === 'weekly'" label="每周执行日">
+            <div class="weekday-options">
+              <label v-for="(label, day) in weekdayLabels" :key="day">
+                <Checkbox
+                  :model-value="modelValue.weekdays.includes(day)"
+                  @update:model-value="toggleDay(day, $event)"
+                />{{ label }}
+              </label>
+            </div>
+          </FormField>
+        </div>
+      </section>
+      <section
+        class="timing-section"
+        :aria-label="modelValue.mode === 'once' ? '执行停止边界' : '计划结束边界'"
+      >
+        <div class="timing-section-heading">
+          <h3>{{ modelValue.mode === 'once' ? '执行停止边界' : '计划结束边界' }}</h3>
+        </div>
+        <div v-if="modelValue.mode === 'once'" class="timing-grid">
+          <FormField label="停止时间" for="schedule-stop-mode">
+            <Select
+              id="schedule-stop-mode"
+              :model-value="modelValue.stopMode"
+              :options="stopModeOptions"
+              @update:model-value="update('stopMode', $event as ScheduleDraft['stopMode'])"
+            />
+          </FormField>
+          <FormField
+            v-if="modelValue.stopMode === 'specified'"
+            label="停止日期与本地时间"
+            for="schedule-stop"
+            required
+            :error="timeError?.field === 'stop' ? timeError.message : ''"
+          >
+            <Input
+              id="schedule-stop"
+              type="datetime-local"
+              :model-value="modelValue.stopLocal"
+              @update:model-value="update('stopLocal', String($event ?? ''))"
+            />
+          </FormField>
+          <FormField
+            v-if="modelValue.stopMode === 'specified' && stopCandidates.length > 1"
+            label="停止时刻出现两次，请选择偏移"
+            for="schedule-stop-offset"
+          >
+            <Select
+              id="schedule-stop-offset"
+              :model-value="selectedStopOffset"
+              :options="stopCandidates"
+              placeholder="请选择 UTC 偏移"
+              @update:model-value="update('stopAt', $event)"
+            />
+          </FormField>
+        </div>
+        <div v-if="modelValue.mode !== 'once'" class="timing-grid">
+          <FormField
+            label="结束日期（可选）"
+            for="schedule-end"
+            hint="按所选时区，该日结束后不再启动。"
+          >
+            <Input
+              id="schedule-end"
+              type="date"
+              :model-value="modelValue.endDate"
+              @update:model-value="update('endDate', String($event ?? ''))"
+            />
+          </FormField>
+          <FormField
+            label="成功生成次数上限（可选）"
+            for="schedule-max"
+            hint="跳过、错过、受阻不扣次数。留空不限制。"
+          >
+            <Input
+              id="schedule-max"
+              type="number"
+              min="1"
+              step="1"
+              :model-value="modelValue.maxRuns"
+              @update:model-value="update('maxRuns', String($event ?? ''))"
+            />
+          </FormField>
+        </div>
+        <p v-if="boundaryHint" class="timing-hint timing-boundary-note">{{ boundaryHint }}</p>
+      </section>
+      <section class="timing-preview-section" aria-label="服务端时间预览">
+        <div class="timing-preview-heading">
+          <h3>未来启动时间</h3>
+          <Button variant="secondary" :loading="previewBusy" @click="previewTimes"
+            >预览未来时间</Button
+          >
+        </div>
+        <Alert
+          v-if="timeError?.field === 'rules' || previewError"
+          tone="danger"
+          title="时间安排需处理"
+          >{{ previewError || timeError?.message }}</Alert
+        >
+        <div v-if="preview" class="timing-preview" aria-live="polite">
+          <ol v-if="preview.times.length">
+            <li v-for="time in preview.times" :key="time.at">
+              <span class="timing-preview-local">{{ time.local }}</span>
+              <span class="timing-hint">{{ modelValue.timezone }} · {{ time.at }}</span>
+              <span v-if="time.note" class="timing-hint">{{ time.note }}</span>
+            </li>
+          </ol>
+          <p v-else>所选规则下没有未来执行时刻。</p>
+          <p v-if="preview.boundary" class="timing-hint">{{ preview.boundary }}</p>
+        </div>
+      </section>
     </template>
   </section>
 </template>
@@ -254,9 +275,10 @@ function validate() {
       props.editing && props.modelValue.mode !== 'once',
     )
   } catch (error) {
-    timeError.value = error instanceof ScheduleTimeError
-      ? error
-      : new ScheduleTimeError(error instanceof Error ? error.message : '时间无效', 'rules')
+    timeError.value =
+      error instanceof ScheduleTimeError
+        ? error
+        : new ScheduleTimeError(error instanceof Error ? error.message : '时间无效', 'rules')
     return null
   }
 }
@@ -272,12 +294,14 @@ async function previewTimes() {
   try {
     const result = await previewProjectSchedule({
       ...rules,
-      ...(props.project ? {
-        project: {
-          ...props.project,
-          ...(props.modelValue.mode === 'once' ? { explore_deadline: deadline } : {}),
-        },
-      } : {}),
+      ...(props.project
+        ? {
+            project: {
+              ...props.project,
+              ...(props.modelValue.mode === 'once' ? { explore_deadline: deadline } : {}),
+            },
+          }
+        : {}),
     })
     if (currentRevision === revision) preview.value = result
   } catch (error) {
@@ -291,34 +315,100 @@ async function previewTimes() {
 <style scoped>
 .schedule-timing {
   display: grid;
-  gap: var(--space-3);
-  margin-block: var(--space-4);
+  gap: var(--space-5);
+  min-width: 0;
+}
+.timing-section {
+  min-width: 0;
+}
+.timing-section + .timing-section,
+.timing-preview-section {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-5);
+}
+.timing-section-heading {
+  display: grid;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+.schedule-timing h3 {
+  font-size: var(--text-section);
+  font-weight: var(--font-semibold);
+  margin: 0;
 }
 .timing-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-3);
+  gap: var(--space-4);
+  align-items: start;
 }
 .timing-hint {
   color: var(--text-muted);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
   margin: 0;
   overflow-wrap: anywhere;
+}
+.timing-boundary-note {
+  margin-top: var(--space-3);
 }
 .weekday-options {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
 .weekday-options label {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
+  gap: var(--space-2);
+  padding: var(--space-2);
+  min-height: var(--control-height-form);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+.weekday-options label:has([data-state='checked']) {
+  background: var(--surface-selected);
+  border-color: var(--accent);
+}
+.timing-preview-section {
+  display: grid;
+  gap: var(--space-4);
+}
+.timing-preview-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
 }
 .timing-preview {
-  border-left: 2px solid var(--border);
-  padding-left: var(--space-3);
   overflow-wrap: anywhere;
+}
+.timing-preview ol {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  border-top: 1px solid var(--border);
+}
+.timing-preview li {
+  display: grid;
+  gap: var(--space-1);
+  padding-block: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+.timing-preview-local {
+  font-size: var(--text-md);
+  font-variant-numeric: tabular-nums;
+}
+.timing-preview > p {
+  margin: var(--space-3) 0 0;
+}
+@container (max-width: 440px) {
+  .timing-grid {
+    grid-template-columns: 1fr;
+  }
 }
 @media (max-width: 700px) {
   .timing-grid {

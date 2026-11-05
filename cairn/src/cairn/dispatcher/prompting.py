@@ -310,7 +310,9 @@ def knowledge_base_runtime_context(
                     "sha256": item.get("sha256"),
                 }
             )
-    key = knowledge.strip() if isinstance(knowledge, str) and knowledge.strip() else None
+    # 以已物化的 manifest 为准，场景中的旧键不代表项目实际挂载了旧资料。
+    legacy_key = manifest.get("legacy_key") if enabled else None
+    key = legacy_key.strip() if isinstance(legacy_key, str) and legacy_key.strip() else None
     # 只公开容器内路径和不可变元数据，宿主机 staging 路径不会进入审计或 Prompt。
     return {
         "key": key,

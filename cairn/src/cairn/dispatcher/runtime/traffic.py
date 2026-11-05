@@ -17,6 +17,8 @@ import docker
 from docker.models.containers import Container
 import requests
 
+from cairn.server.schemas.traffic import TrafficOwner
+from .pause_clock import ExecutionSceneLost, PauseClock
 from .traffic_sync import _save_receipt
 
 
@@ -47,18 +49,26 @@ class TrafficScope:
 
 class ProjectTrafficRuntime:
     def __init__(
-        self, client: docker.DockerClient, *, project_id: str, root: Path,
+        self, client: docker.DockerClient, *, project_id: str | None, root: Path,
         gateway_image: str, executor_image: str, isolated: bool = False,
-        dispatcher_id: str = "isolated-fixture",
+        dispatcher_id: str = "isolated-fixture", pause_clock: PauseClock | None = None,
+        cancelled=None, conversation_id: str | None = None, workspace: Path | None = None,
+        instance_id: str | None = None,
     ) -> None:
         self.client = client
         self.project_id = project_id
+        self.conversation_id = conversation_id
+        self.traffic_owner = TrafficOwner(project_id=project_id, conversation_id=conversation_id)
         self.root = root.resolve()
         self.gateway_image = gateway_image
         self.executor_image = executor_image
         self.isolated = isolated
         self.dispatcher_id = dispatcher_id
-        self.workspace = self.root / "workspace"
+        self.instance_id = instance_id
+        self.daemon_id = client.info()["ID"] if conversation_id is not None else None
+        if conversation_id is not None and not instance_id:
+            raise ValueError("traffic_conversation_instance_required")
+        self.workspace = workspace.resolve() if workspace is not None else self.root / "workspace"
         self.control = self.root / "control"
         self.control_prompts = self.root / "control-prompts"
         self.execution = self.root / "execution"
@@ -67,7 +77,10 @@ class ProjectTrafficRuntime:
         self.upstream_ca = self.capture / "upstream-ca.pem"
         self.collector_arguments: list[str] = []
         self._lock = threading.RLock()
-        self._gate_lock = threading.Lock()
+        self._gate_lock = threading.RLock()
+        self._control_lock = threading.RLock()
+        self.pause_clock = pause_clock or PauseClock()
+        self._cancelled = cancelled or (lambda: False)
         self.manifest_path = self.root / "manifest.json"
         self.manifest: dict = {}
         self.containers: list[Container] = []
@@ -76,8 +89,11 @@ class ProjectTrafficRuntime:
         self.gateway: Container | None = None
         if self.manifest_path.is_file():
             self.manifest = json.loads(self.manifest_path.read_text())
-            if (self.manifest["project_id"] != project_id
+            if (self.manifest.get("project_id") != project_id or self.manifest.get("conversation_id") != conversation_id
                     or self.manifest["dispatcher_id"] != dispatcher_id):
+                raise RuntimeError("traffic_resource_owner_mismatch")
+            if conversation_id is not None and (self.manifest.get("instance_id") != instance_id
+                                                or self.manifest.get("daemon_id") != self.daemon_id):
                 raise RuntimeError("traffic_resource_owner_mismatch")
             if type(self.manifest.get("isolated")) is not bool:
                 raise RuntimeError("traffic_network_policy_missing")
@@ -85,13 +101,30 @@ class ProjectTrafficRuntime:
         self.owner = self.manifest.get("owner", uuid.uuid4().hex)
         self.labels = {
             "io.cairn.traffic.owner": self.owner,
-            "io.cairn.traffic.project": project_id,
+            **({"io.cairn.traffic.conversation": conversation_id} if conversation_id is not None else {"io.cairn.traffic.project": project_id}),
             "io.cairn.traffic.dispatcher": dispatcher_id,
+            **({"io.cairn.traffic.instance": instance_id} if conversation_id is not None else {}),
         }
         self._load_scopes()
 
     def _save(self) -> None:
-        _save_receipt(self.manifest_path, self.manifest)
+        with self._gate_lock:
+            _save_receipt(self.manifest_path, self.manifest)
+
+    def _start_container(self, container: Container, scope_id: str | None = None) -> None:
+        def cancelled():
+            return self._cancelled() or (scope_id is not None and self.manifest["scopes"][scope_id]["entry_closed"])
+
+        def start():
+            # 仅启动边界与关闭入口互斥，CA、HTTP、网络与 readiness 等待均在锁外。
+            with self._gate_lock:
+                if cancelled():
+                    return None
+                container.start()
+                return True
+
+        if self.pause_clock.start(start, cancelled) is None:
+            raise RuntimeError("traffic_task_cancelled")
 
     def _load_scopes(self) -> None:
         self.scopes = [TrafficScope(
@@ -144,6 +177,8 @@ class ProjectTrafficRuntime:
         return resource
 
     def _container(self, key: str, image: str, *, scope_id: str | None = None, **kwargs) -> Container:
+        if self._cancelled() or (scope_id is not None and self.manifest["scopes"][scope_id]["entry_closed"]):
+            raise RuntimeError("traffic_task_cancelled")
         entry = self._claim(key, "container", scope_id)
         container = self._resource(entry)
         if container is None:
@@ -179,6 +214,14 @@ class ProjectTrafficRuntime:
             else:
                 resource.remove()
                 self.networks = [item for item in self.networks if item.id != resource.id]
+        if resource is not None:
+            collection = self.client.containers if entry["kind"] == "container" else self.client.networks
+            try:
+                collection.get(resource.id)
+            except docker.errors.NotFound:
+                pass
+            else:
+                raise RuntimeError("traffic_resource_removal_unconfirmed")
         entry["removed"] = True
         self._save()
 
@@ -187,7 +230,8 @@ class ProjectTrafficRuntime:
             if not self.manifest:
                 self.root.mkdir(mode=0o700, parents=True, exist_ok=False)
                 self.manifest = {
-                    "owner": self.owner, "project_id": self.project_id, "dispatcher_id": self.dispatcher_id,
+                    "owner": self.owner, **self.traffic_owner.fields, "dispatcher_id": self.dispatcher_id,
+                    **({"instance_id": self.instance_id, "daemon_id": self.daemon_id} if self.conversation_id is not None else {}),
                     "resources": {}, "scopes": {}, "prepared": False, "isolated": self.isolated,
                 }
                 self._save()
@@ -210,7 +254,7 @@ class ProjectTrafficRuntime:
                     entrypoint=[], user=f"{COLLECTOR_UID}:{COLLECTOR_UID}", network_mode="none", cap_drop=["ALL"],
                     volumes={str(self.ca): {"bind": "/ca", "mode": "rw"}},
                 )
-                initializer.start()
+                self._start_container(initializer)
                 if initializer.wait(timeout=30)["StatusCode"] != 0:
                     raise RuntimeError("traffic_ca_initialization_failed")
                 self._remove("ca-initializer")
@@ -224,7 +268,7 @@ class ProjectTrafficRuntime:
             if self.internal.name not in self.gateway.attrs["NetworkSettings"]["Networks"]:
                 self.internal.connect(self.gateway)
             if self.gateway.status != "running":
-                self.gateway.start()
+                self._start_container(self.gateway)
             self.gateway.reload()
             self.gateway_address = self.gateway.attrs["NetworkSettings"]["Networks"][self.internal.name]["IPAddress"]
             self.internal.reload()
@@ -241,13 +285,19 @@ class ProjectTrafficRuntime:
             key, self.gateway_image, command=command, entrypoint=[], user="root",
             network_mode=f"container:{container.id}", cap_drop=["ALL"], cap_add=["NET_ADMIN"],
         )
-        helper.start()
+        scope_id = container.labels.get("io.cairn.traffic.scope")
+        self._start_container(helper, scope_id)
         if helper.wait(timeout=20)["StatusCode"] != 0:
             raise RuntimeError("traffic_network_initialization_failed")
         self._remove(key)
 
-    def prepare_scope(self, task_run_id: str, generation: int, *, test_egress: dict | None = None) -> TrafficScope:
+    def prepare_scope(
+        self, task_run_id: str, generation: int, *, test_egress: dict | None = None,
+        executor_image: str | None = None, claim=None, register=None,
+    ) -> TrafficScope:
         with self._lock:
+            if self._cancelled():
+                raise RuntimeError("traffic_task_cancelled")
             if self.gateway is None or type(generation) is not int or generation < 0:
                 raise ValueError("traffic_runtime_not_ready")
             if any(value["task_run_id"] == task_run_id for value in self.manifest["scopes"].values()):
@@ -262,14 +312,22 @@ class ProjectTrafficRuntime:
                 "test_stopped": None, "collector_stopped": None,
             }
             self._save()
+            if claim is not None:
+                claim(scope_id)
             try:
-                return self._start_scope(scope_id, task_run_id, generation, sockets, test_egress or {'mode': 'direct'})
+                return self._start_scope(
+                    scope_id, task_run_id, generation, sockets, test_egress or {'mode': 'direct'},
+                    executor_image if executor_image is not None else self.executor_image, register,
+                )
             except Exception:
                 # 准备失败也必须停止已经创建的执行者；原异常不携带目标内容。
                 self.stop_scope(scope_id, "traffic_prepare_failed")
                 raise
 
-    def _start_scope(self, scope_id: str, task_run_id: str, generation: int, sockets: Path, test_egress: dict) -> TrafficScope:
+    def _start_scope(
+        self, scope_id: str, task_run_id: str, generation: int, sockets: Path,
+        test_egress: dict, executor_image: str, register,
+    ) -> TrafficScope:
         proxied = test_egress['mode'] != 'direct'
         env = {
             "SSL_CERT_FILE": "/run/cairn-ca/project.pem", "REQUESTS_CA_BUNDLE": "/run/cairn-ca/project.pem",
@@ -282,7 +340,8 @@ class ProjectTrafficRuntime:
                        HTTP_PROXY='http://127.0.0.1:8081', HTTPS_PROXY='http://127.0.0.1:8081',
                        NO_PROXY='localhost,127.0.0.1,::1', no_proxy='localhost,127.0.0.1,::1')
         container = self._container(
-            f"executor:{scope_id}", self.executor_image, scope_id=scope_id,
+            f"executor:{scope_id}", executor_image, scope_id=scope_id,
+            entrypoint=["python3", "-u", "/opt/cairn/task-executor/server.py"],
             detach=True, init=True, network=self.internal.name, environment=env, working_dir=WORKSPACE,
             volumes={
                 str(self.workspace): {"bind": WORKSPACE, "mode": "rw"},
@@ -290,23 +349,27 @@ class ProjectTrafficRuntime:
                 str(self.ca / "mitmproxy-ca-cert.pem"): {"bind": "/run/cairn-ca/project.pem", "mode": "ro"},
             },
         )
-        container.start()
-        container.reload()
-        address = container.attrs["NetworkSettings"]["Networks"][self.internal.name]["IPAddress"]
-        ipaddress.ip_address(address)
-        scope = TrafficScope(scope_id, self.project_id, task_run_id, generation, container.id, address, sockets)
         state = self.manifest["scopes"][scope_id]
         public_egress = {
             'mode': test_egress['mode'], 'host': test_egress.get('host'), 'port': test_egress.get('port'),
             'revision': test_egress.get('revision', 0),
             'auth_configured': test_egress.get('username') is not None,
         }
-        state.update(container_id=container.id, address=address, test_stopped=False, test_egress=public_egress)
+        binding = {"id": scope_id, **self.traffic_owner.fields, "task_run_id": task_run_id,
+                   "generation": generation, "container_id": container.id, "test_egress": public_egress}
+        # durable scope 先于启动；准备尚未就绪时控制器也能核对精确归属。
+        if register is not None:
+            register(binding)
+        state.update(container_id=container.id, test_egress=public_egress)
+        self._save()
+        self._start_container(container, scope_id)
+        container.reload()
+        address = container.attrs["NetworkSettings"]["Networks"][self.internal.name]["IPAddress"]
+        ipaddress.ip_address(address)
+        scope = TrafficScope(scope_id, self.project_id, task_run_id, generation, container.id, address, sockets)
+        state.update(address=address, test_stopped=False)
         self._save()
         self.scopes.append(scope)
-        binding = {"id": scope.id, "project_id": scope.project_id, "task_run_id": scope.task_run_id,
-                   "generation": scope.generation, "container_id": scope.container_id,
-                   "test_egress": public_egress}
         spool = self.capture / scope.id
         spool.mkdir(mode=0o700)
         os.chown(spool, COLLECTOR_UID, COLLECTOR_UID)
@@ -331,7 +394,7 @@ class ProjectTrafficRuntime:
             user=f"{COLLECTOR_UID}:{COLLECTOR_UID}", cap_drop=["ALL"],
             network_mode=f"container:{container.id}", volumes=volumes,
         )
-        collector.start()
+        self._start_container(collector, scope_id)
         state["collector_stopped"] = False
         self._save()
         deadline = time.monotonic() + 30
@@ -355,10 +418,14 @@ class ProjectTrafficRuntime:
             commands = self._egress_rules(test_egress, proxy_addresses, address)
         self._initialize_network(container, ["sh", "-ec", "\n".join(shlex.join(command) for command in commands)])
         self.refresh_gate(scope.id)
-        deadline = time.monotonic() + 20
-        while not (sockets / "execute.sock").exists():
+        deadline = self.pause_clock.now() + 20
+        while not (sockets / "execute.sock").exists() or self.pause_clock.paused:
+            # readiness 不持控制锁，也不能把正常冻结误判为启动失败并清理原现场。
+            self.pause_clock.wait(lambda: self._cancelled() or state["entry_closed"])
+            if self._cancelled() or state["entry_closed"]:
+                raise RuntimeError("traffic_task_cancelled")
             container.reload()
-            if container.status != "running" or time.monotonic() >= deadline:
+            if container.status not in {"running", "paused"} or self.pause_clock.now() >= deadline:
                 raise RuntimeError("test_execution_start_failed")
             time.sleep(0.1)
         return scope
@@ -394,7 +461,7 @@ class ProjectTrafficRuntime:
             network_mode=f'container:{scope.container_id}',
             volumes={str(directory): {'bind': '/run/cairn-egress', 'mode': 'rw'}},
         )
-        bridge.start()
+        self._start_container(bridge, scope.id)
         deadline = time.monotonic() + 15
         while not (directory / 'ready').exists():
             bridge.reload()
@@ -444,11 +511,15 @@ class ProjectTrafficRuntime:
 
     def refresh_gate(self, scope_id: str) -> None:
         # 执行端拒绝过期许可，Dispatcher 崩溃后不会凭启动标记无限放行。
-        path = self.execution / scope_id / "traffic-ready"
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(str(time.time()))
-        temporary.chmod(0o444)
-        temporary.replace(path)
+        # 健康检查、准备和恢复共用同一写入边界，不能争用固定临时路径后误判采集故障。
+        with self._gate_lock:
+            if self.manifest["scopes"][scope_id]["entry_closed"]:
+                return
+            path = self.execution / scope_id / "traffic-ready"
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(str(time.time()))
+            temporary.chmod(0o444)
+            temporary.replace(path)
 
     def check_scope(self, scope_id: str) -> str | None:
         # 不持有项目创建锁：另一个 scope 启动期间仍须持续刷新现有执行许可。
@@ -460,7 +531,8 @@ class ProjectTrafficRuntime:
             roles.append('egress')
         for role in roles:
             resource = self._resource(self.manifest["resources"][f"{role}:{scope_id}"])
-            if resource is None or resource.status != "running":
+            expected = {"running", "paused"} if role == "executor" and state.get("hot_paused") else {"running"}
+            if resource is None or resource.status not in expected:
                 return f"traffic_{role}_stopped"
         try:
             observed = float((self.capture / scope_id / "heartbeat").read_text())
@@ -474,6 +546,75 @@ class ProjectTrafficRuntime:
             self.refresh_gate(scope_id)
         return None
 
+    def hot_control(self, paused: bool) -> list[dict[str, str]]:
+        """仅冻结测试生产者；采集与宿主上传继续接收在途材料。"""
+        resources = []
+        if paused:
+            self.pause_clock.pause()
+        with self._control_lock:
+            if not self.manifest:
+                return resources
+            if paused:
+                if not self.manifest.get("control_hot_paused"):
+                    self.manifest.update(control_hot_paused=True, control_pause_started=time.monotonic())
+                    self._save()
+            elif self.manifest.get("control_hot_paused") and self.execution.is_dir():
+                total = self.manifest.get("control_paused_seconds", 0.0) + time.monotonic() - self.manifest["control_pause_started"]
+                path = self.execution / "paused-seconds"
+                temporary = path.with_suffix(".tmp")
+                temporary.write_text(str(total))
+                temporary.chmod(0o444)
+                temporary.replace(path)
+                # 解冻失败可重试；只累计本次新窗口，研究域确认恢复后再清暂停标记。
+                self.manifest.update(control_pause_started=time.monotonic(), control_paused_seconds=total)
+                self._save()
+            for scope_id, state in tuple(self.manifest.get("scopes", {}).items()):
+                if state.get("termination_confirmed") or not state.get("container_id"):
+                    continue
+                entry = self.manifest["resources"][f"executor:{scope_id}"]
+                container = self._resource(entry)
+                if container is not None and container.status == "created" and state.get("address") is None:
+                    resources.append({"kind": "test", "container_id": container.id,
+                                      "scope_id": scope_id, "task_run_id": state["task_run_id"], "state": "created"})
+                    continue
+                if container is None or container.status not in {"running", "paused"}:
+                    raise ExecutionSceneLost("热暂停现场已丢失，不能原地恢复")
+                if paused:
+                    if not state.get("hot_paused"):
+                        state.update(hot_paused=True, pause_started=time.monotonic())
+                        self._save()
+                    if container.status == "running":
+                        container.pause()
+                else:
+                    # 先刷新许可与虚拟时钟，再解冻，避免 watchdog/deadline 在首个调度片内误杀。
+                    self.refresh_gate(scope_id)
+                    if state.get("hot_paused"):
+                        total = state.get("paused_seconds", 0.0) + time.monotonic() - state["pause_started"]
+                        path = self.execution / scope_id / "paused-seconds"
+                        temporary = path.with_suffix(".tmp")
+                        temporary.write_text(str(total))
+                        temporary.chmod(0o444)
+                        temporary.replace(path)
+                        state.update(paused_seconds=total, pause_started=time.monotonic())
+                        self._save()
+                    if container.status == "paused":
+                        container.unpause()
+                    state.update(hot_paused=False)
+                    self._save()
+                container.reload()
+                expected = "paused" if paused else "running"
+                if container.status != expected:
+                    raise RuntimeError("测试执行域物理状态尚未确认")
+                resources.append({"kind": "test", "container_id": container.id,
+                                  "scope_id": scope_id, "task_run_id": state["task_run_id"], "state": expected})
+        return resources
+
+    def hot_resume_completed(self) -> None:
+        with self._control_lock:
+            if self.manifest:
+                self.manifest["control_hot_paused"] = False
+                self._save()
+
     def _stop_container(self, key: str) -> bool:
         entry = self.manifest["resources"].get(key)
         if entry is None:
@@ -481,7 +622,10 @@ class ProjectTrafficRuntime:
         container = self._resource(entry)
         if container is None:
             return True
-        if container.status not in {"exited", "dead", "created"}:
+        if container.status == "paused":
+            container.kill(signal="SIGKILL")
+            container.reload()
+        elif container.status not in {"exited", "dead", "created"}:
             container.stop(timeout=2)
             container.reload()
         return container.status in {"exited", "dead", "created"}
@@ -495,7 +639,7 @@ class ProjectTrafficRuntime:
                 state.setdefault("failure_code", failure)
             state.update(entry_closed=True, code=reason)
             (self.execution / scope_id / "traffic-ready").unlink(missing_ok=True)
-        with self._lock:
+        with self._control_lock:
             self._save()
             roles = [('executor', 'test_stopped'), ('collector', 'collector_stopped')]
             if f'egress:{scope_id}' in self.manifest['resources']:
@@ -518,10 +662,7 @@ class ProjectTrafficRuntime:
             if confirmed:
                 # 只有消费进程已确认停止才清除该 scope 的私有认证；原始流量与公开快照保留。
                 (self.root / 'egress' / scope_id / 'private.json').unlink(missing_ok=True)
-                for role, _ in roles:
-                    key = f"{role}:{scope_id}"
-                    if key in self.manifest["resources"]:
-                        self._remove(key)
+                # 保留停机容器及原挂载；writable layer 也是项目材料。
             return dict(state)
 
     def _seal_interrupted(self, scope_id: str) -> None:
@@ -554,7 +695,10 @@ class ProjectTrafficRuntime:
 
     def recover(self) -> list[dict]:
         with self._lock:
-            results = [self.stop_scope(scope_id, "dispatcher_recovered") for scope_id in self.manifest.get("scopes", {})]
+            # 重启不能冒充原地恢复，也不能为 reconcile 销毁已冻结的现场。
+            results = [self.stop_scope(scope_id, "dispatcher_recovered")
+                       for scope_id, state in self.manifest.get("scopes", {}).items()
+                       if not state.get("hot_paused")]
             # 包括创建后尚未登记 ID 的初始化资源，均只按持久创建身份核对。
             for key, entry in self.manifest.get("resources", {}).items():
                 if key.startswith(("network-init:", "ca-initializer")) and not entry.get("removed"):
@@ -564,8 +708,8 @@ class ProjectTrafficRuntime:
             return results
 
     def close(self) -> None:
-        with self._lock:
-            for scope_id in self.manifest.get("scopes", {}):
+        with self._control_lock:
+            for scope_id in tuple(self.manifest.get("scopes", {})):
                 result = self.stop_scope(scope_id, "project_closed")
                 if not result["termination_confirmed"]:
                     raise RuntimeError("traffic_termination_unknown")
@@ -573,10 +717,15 @@ class ProjectTrafficRuntime:
                 if entry["kind"] == "container" and not entry.get("removed"):
                     if not self._stop_container(key):
                         raise RuntimeError("traffic_termination_unknown")
-                    self._remove(key)
-            for key, entry in list(self.manifest.get("resources", {}).items()):
-                if entry["kind"] == "network" and not entry.get("removed"):
-                    self._remove(key)
-            self.gateway = None
-            self.manifest["prepared"] = False
-            self._save()
+            if self.manifest:
+                self.manifest["prepared"] = False
+                self._save()
+
+    def destroy(self) -> None:
+        """仅项目删除调用；每个 Docker 对象仍须通过原持久身份核验。"""
+        self.close()
+        with self._lock:
+            for kind in ("container", "network"):
+                for key, entry in list(self.manifest.get("resources", {}).items()):
+                    if entry["kind"] == kind and not entry.get("removed"):
+                        self._remove(key)

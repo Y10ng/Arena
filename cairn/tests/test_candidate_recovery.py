@@ -132,6 +132,10 @@ class _Client:
     def __init__(self) -> None:
         self.updates: list[tuple[str, str, dict[str, object]]] = []
         self.run_status = "running"
+        self.project_status = "active"
+
+    def get_project(self, _project_id):
+        return SimpleNamespace(project=SimpleNamespace(status=self.project_status, execution_control={}))
 
     def list_task_runs(self, _project_id: str) -> ApiResult:
         return ApiResult(
@@ -195,6 +199,19 @@ def _outbox(tmp_path: Path, fence: CandidateExecutionFence | None = None):
     if fence is not None:
         outbox.persist_fence(fence)
     return outbox
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_paused_research_fence_is_retained_without_inspection(tmp_path, bound):
+    fence = _fence(bound=bound)
+    outbox = _outbox(tmp_path, fence)
+    manager = _ContainerManager(check=CandidateExecutionCheck("running", "exec_running"))
+    client = _Client()
+    client.project_status = "paused"
+    harness = _Harness(outbox, manager, client=client)
+    harness._recover_candidate_fence(fence)
+    assert outbox.fences() == [fence]
+    assert manager.inspections == manager.terminations == client.updates == []
 
 
 def _successful_replay(*_args: object, **_kwargs: object) -> CandidateIntakeSummary:

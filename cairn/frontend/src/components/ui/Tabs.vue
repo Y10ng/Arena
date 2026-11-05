@@ -106,6 +106,7 @@ defineOptions({ name: 'UiTabs' })
 }
 
 .ui-tabs__list--line {
+  gap: var(--space-5);
   border-bottom: calc(var(--space-1) / 4) solid var(--border);
 }
 
@@ -129,7 +130,7 @@ defineOptions({ name: 'UiTabs' })
   flex: none;
   background: transparent;
   color: var(--text-muted);
-  font-size: var(--text-md);
+  font-size: var(--text-control);
   font-weight: var(--font-medium);
   white-space: nowrap;
   cursor: pointer;
@@ -146,19 +147,25 @@ defineOptions({ name: 'UiTabs' })
   outline-offset: -2px;
 }
 
+.ui-tabs__list--line .ui-tabs__trigger {
+  min-height: var(--control-height-xl);
+  padding-inline: var(--space-1);
+  border-radius: 0;
+}
+
 .ui-tabs__list--line .ui-tabs__trigger[data-state='active'] {
-  color: var(--accent);
+  color: var(--text);
 }
 
 .ui-tabs__list--line .ui-tabs__trigger[data-state='active']::after {
   content: '';
   height: calc(var(--space-1) / 2);
   position: absolute;
-  right: var(--space-2);
+  right: 0;
   bottom: 0;
-  left: var(--space-2);
-  border-radius: var(--radius-full);
-  background: var(--accent);
+  left: 0;
+  border-radius: var(--radius-sm);
+  background: var(--color-primary);
 }
 
 .ui-tabs__list--pill .ui-tabs__trigger[data-state='active'] {
@@ -174,9 +181,9 @@ defineOptions({ name: 'UiTabs' })
 
 .ui-tabs__count {
   min-width: var(--space-4);
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-sm);
   padding: 0 var(--space-1);
-  background: var(--surface-selected);
+  background: var(--bg-inset);
   color: var(--text-faint);
   font-size: var(--text-xs);
   line-height: var(--leading-snug);
@@ -186,6 +193,10 @@ defineOptions({ name: 'UiTabs' })
   min-width: 0;
   padding-top: var(--space-4);
   outline: none;
+}
+
+.ui-tabs__content:empty {
+  padding-top: 0;
 }
 
 .ui-tabs__content:focus-visible {

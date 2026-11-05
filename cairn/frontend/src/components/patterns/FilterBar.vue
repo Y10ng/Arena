@@ -28,10 +28,15 @@ defineOptions({ name: 'FilterBar' })
 
 <style scoped>
 .filter-bar {
+  --field-control-height: var(--control-height-filter);
+  --field-font-size: var(--text-control);
+  --button-control-height: var(--control-height-filter);
   width: 100%;
   min-width: 0;
   display: flex;
-  align-items: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
+  padding-block: var(--space-3);
   gap: var(--space-3);
 }
 
@@ -41,7 +46,7 @@ defineOptions({ name: 'FilterBar' })
   flex: 1 1 auto;
   align-items: flex-end;
   flex-wrap: wrap;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
 
 .filter-bar__status {
@@ -56,6 +61,7 @@ defineOptions({ name: 'FilterBar' })
 
 .filter-bar__actions {
   flex: 0 0 auto;
+  margin-left: auto;
   display: flex;
   align-items: center;
   flex-wrap: wrap;

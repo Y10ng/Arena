@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from .common_base import *
 from dataclasses import replace
+from io import BytesIO
 from cairn.dispatcher.runtime.process import ManagedProcess
+from cairn.dispatcher.runtime.pause_clock import ExecutionDetached
 from cairn.dispatcher.runtime.traffic_reader import TrafficReadBinding, TrafficReader
 from cairn.dispatcher.runtime.project_tools import ProjectToolBinding
 
@@ -17,7 +19,7 @@ from .candidate_capture_outbox import (
 from .candidate_intake import CandidateIntakeSummary, intake_worker_candidates
 from .checkpoint_intake import intake_worker_checkpoints
 from .command_events import record_command_finished, record_command_started
-from .hook_records import record_pi_tool_events
+from .hook_records import PiToolEventRecorder, record_pi_tool_events
 from cairn.dispatcher.worker_result_gateway import WorkerResultFailure, decode_pi_result, worker_failure_error_type
 from .validation_records import record_validation_result
 from .payload_records import (
@@ -251,11 +253,11 @@ def build_report_readonly_input_references(
         ),
     )
     packet_reference = (
-        "The authoritative Report Packet is a Dispatcher-managed read-only input at:\n\n"
+        "本次冻结材料的写作索引（只读）：\n\n"
         f"{packet_path}\n\n"
-        "Read it with read_evidence before producing the result. The tool returns bounded chunks; "
-        "continue with next_offset until bytes_read is 0 so the entire packet is considered. "
-        "This input is not a new Artifact and must not be passed to register_artifact."
+        "先用 read_evidence 读取漏洞、来源和必要证据导航；分页未读完时按 next_offset 继续，不能遗漏本次漏洞。"
+        "frozen_materials_path 仅在当前索引不足以解释相关事实时按需查询，不必再通读全部研究状态。"
+        "字段用于关联和查询，不是正文章节清单；不逐项解释空字段。此输入不是新 Artifact，不得 register_artifact。"
     )
     graph_reference = (
         "The authoritative frozen graph YAML is a Dispatcher-managed read-only input at:\n\n"
@@ -328,6 +330,7 @@ def run_worker_process(
     payload_recorder_enabled: bool = False,
     candidate_outbox: CandidateCaptureOutbox | None = None,
     project_tools_binding: ProjectToolBinding | None = None,
+    conversation_id: str | None = None,
 ) -> ProcessResult:
     if type(timeout_seconds) is not int or timeout_seconds <= 0:
         raise ValueError("worker execution requires a positive integer timeout")
@@ -338,7 +341,7 @@ def run_worker_process(
     if invocation.task_execution_scope_id is not None:
         bridge = container_manager.traffic_execution
         traffic = bridge.task(project_id, task_run_id) if bridge is not None else None
-        if traffic is None or traffic.scope.id != invocation.task_execution_scope_id or cancellation is not traffic.cancellation:
+        if traffic is None or traffic.scope_id != invocation.task_execution_scope_id or cancellation is not traffic.cancellation:
             raise RuntimeError("traffic_execution_binding_mismatch")
     if invocation.candidate_spool is not None and (
         client is None
@@ -411,18 +414,53 @@ def run_worker_process(
                     project_id, task_run_id, type(restore_exc).__name__,
                 )
     oom_kill_count_before = _oom_kill_count(container_manager, container_name)
-    started = time.perf_counter()
+    execution_now = cancellation.pause_clock.now if cancellation is not None else time.perf_counter
+    started = execution_now()
     written_files: list[WorkerInputFile] = []
     process = None
     process_started = False
     process_start_attempted = False
+    consumption_retained = False
+    consumption_prepared = False
+    consumption_outbox = getattr(container_manager, 'consumption_outbox', None)
+
+    def finish_consumption(*, completed: bool) -> None:
+        nonlocal consumption_prepared
+        identifier = invocation.consumption_id
+        if identifier is None:
+            return
+        if not consumption_prepared and consumption_outbox is not None and task_run_id is not None:
+            try:
+                consumption_outbox.prepare(identifier, task_run_id=task_run_id, project_id=project_id,
+                                           conversation_id=conversation_id)
+                consumption_prepared = True
+            except Exception as exc:
+                LOG.warning('consumption registration not retained id=%s error=%s', identifier, type(exc).__name__)
+        if completed and consumption_outbox is not None and (consumption_prepared or consumption_retained):
+            try:
+                # 任务收口只保留本地终态；注册和网络交付交给原有恢复周期。
+                consumption_outbox.finish(identifier)
+            except Exception as exc:
+                LOG.warning('consumption terminal not retained id=%s error=%s', identifier, type(exc).__name__)
+
+    def retain_consumption_source() -> bool:
+        if not consumption_retained or consumption_outbox is None:
+            return True
+        try:
+            return consumption_outbox.has_external_source(invocation.consumption_id)
+        except Exception as exc:
+            LOG.warning('consumption source state unavailable id=%s error=%s',
+                        invocation.consumption_id, type(exc).__name__)
+            return True
+
     candidate_fence: CandidateExecutionFence | None = None
     traffic_reader = None
+    tool_recorder: PiToolEventRecorder | None = None
     try:
         if invocation.project_tools_socket_path is not None:
-            if not chat or project_tools_binding is None or project_tools_binding.project_id != project_id or project_tools_binding.task_run_id != task_run_id:
+            if not chat or not conversation_id or project_tools_binding is None or project_tools_binding.conversation_id != conversation_id or project_tools_binding.task_run_id != task_run_id:
                 raise RuntimeError("project_tools_binding_invalid")
-            directory = container_manager.chat_directory(project_id) / "prompts"
+            directory = container_manager.chat_directory(conversation_id) / "prompts"
             traffic_reader = TrafficReader(directory, PurePosixPath(invocation.project_tools_socket_path).name, project_tools_binding)
         if invocation.traffic_read_socket_path is not None:
             bridge = container_manager.traffic_execution
@@ -437,12 +475,41 @@ def run_worker_process(
                 directory, f"pi-traffic-{descriptor.capture_id}.sock",
                 TrafficReadBinding(client, project_id, task_run_id),
             )
+        spool_path = invocation.consumption_spool_path
         _write_worker_input_files(
             container_manager,
             container_name,
-            invocation.input_files,
+            tuple(item for item in invocation.input_files if item.path != spool_path),
             tracked=written_files,
         )
+        if invocation.consumption_id is not None:
+            # 计量文件是辅助输入；其故障不能阻止真正的请求文件和模型执行。
+            try:
+                _write_worker_input_files(
+                    container_manager, container_name,
+                    tuple(item for item in invocation.input_files if item.path == spool_path),
+                    tracked=written_files,
+                )
+            except Exception as exc:
+                LOG.warning('consumption spool creation failed id=%s error=%s',
+                            invocation.consumption_id, type(exc).__name__)
+            try:
+                if consumption_outbox is None or task_run_id is None:
+                    raise RuntimeError('consumption_identity_required')
+                consumption_outbox.prepare(invocation.consumption_id, task_run_id=task_run_id,
+                                           project_id=project_id, conversation_id=conversation_id)
+                consumption_prepared = True
+            except Exception as exc:
+                LOG.warning('consumption registration not retained id=%s error=%s',
+                            invocation.consumption_id, type(exc).__name__)
+            try:
+                if spool_path is None:
+                    raise RuntimeError('consumption_spool_required')
+                container_manager.retain_consumption_spool(container_name, invocation.consumption_id, spool_path)
+                consumption_retained = True
+            except Exception as exc:
+                LOG.warning('consumption spool not retained id=%s error=%s',
+                            invocation.consumption_id, type(exc).__name__)
         if invocation.candidate_spool is not None:
             assert candidate_outbox is not None
             assert project_id is not None
@@ -477,6 +544,11 @@ def run_worker_process(
         )
         if traffic is not None:
             traffic.process = process
+        if isinstance(process, ManagedProcess) and event_client is not None and project_id is not None and task_run_id is not None:
+            tool_recorder = PiToolEventRecorder(
+                event_client, project_id, task_run_id, phase=phase, session=invocation.session,
+            )
+            process.on_stderr_ready = tool_recorder.start
         if candidate_fence is not None:
             process.retain_execution_control()
 
@@ -512,7 +584,7 @@ def run_worker_process(
 
             def observe_start():
                 cancellation.observe_execution_start(process)
-                if client is not None and project_id is not None and task_run_id is not None:
+                if not chat and client is not None and project_id is not None and task_run_id is not None:
                     client.update_task_run(
                         project_id, task_run_id, status="running",
                         runtime_context={
@@ -532,6 +604,13 @@ def run_worker_process(
         process_start_attempted = True
         process.start()
         process_started = True
+    except ExecutionDetached:
+        if traffic_reader is not None:
+            traffic_reader.close()
+        if lease is not None:
+            lease.attach_process(None)
+        # 保留全部输入与 durable fence；脱离宿主不是失败清理或原进程终态。
+        raise
     except BaseException:
         if traffic_reader is not None:
             traffic_reader.close()
@@ -544,6 +623,11 @@ def run_worker_process(
             if process is not None:
                 cancellation.finish_execution(process)
         retained_paths: set[str] = set()
+        if invocation.consumption_spool_path is not None and process_start_attempted and (
+            process is None or not _execution_completed(process) or retain_consumption_source()
+        ):
+            # 启动 ACK 不明或尚无独立副本时，保留唯一可能的消费材料。
+            retained_paths.add(invocation.consumption_spool_path)
         if invocation.report_segment_manifest_path is not None and process_start_attempted:
             retained_paths.add(invocation.report_segment_manifest_path)
         if invocation.http_evidence_manifest_path is not None and process_start_attempted:
@@ -584,11 +668,16 @@ def run_worker_process(
             worker=worker,
             argv=command_argv,
             result=None,
-            duration_seconds=time.perf_counter() - started,
+            duration_seconds=execution_now() - started,
             status="failed",
         )
         raise
     finally:
+        if not process_started:
+            finish_consumption(completed=not process_start_attempted or
+                                (process is not None and _execution_completed(process)))
+        if not process_started and tool_recorder is not None:
+            tool_recorder.finish()
         if browser_session is not None:
             try:
                 # 部分启动失败也必须登记；未知 exec 身份会阻止后续冒险关闭浏览器。
@@ -606,7 +695,11 @@ def run_worker_process(
     execution_resources_resolved = False
     try:
         try:
-            result = process.communicate(timeout=communicate_timeout(timeout_seconds))
+            try:
+                result = process.communicate(timeout=communicate_timeout(timeout_seconds))
+            finally:
+                if tool_recorder is not None:
+                    tool_recorder.finish()
             if traffic is not None:
                 traffic.stop(result.cancel_reason or ("task_timeout" if did_timeout(result) else "control_finished"))
                 if not traffic.execution_completed:
@@ -616,6 +709,20 @@ def run_worker_process(
             execution_resources_resolved = (
                 _execution_completed(process)
             )
+            if execution_resources_resolved and invocation.consumption_id is not None and consumption_outbox is not None:
+                try:
+                    # 只摄取本次执行生成的缺口审计；原始 stderr 不进入消费账本。
+                    stream = open(result._stderr_path, 'rb') if result._stderr_path else BytesIO(result.stderr.encode())
+                    with stream:
+                        consumption_outbox.capture_gaps(
+                            invocation.consumption_id, stream, project_id=project_id, task_run_id=task_run_id,
+                            phase=phase, session=invocation.session,
+                        )
+                except Exception as exc:
+                    LOG.warning('consumption gap not retained id=%s error=%s',
+                                invocation.consumption_id, type(exc).__name__)
+        except ExecutionDetached:
+            raise
         except BaseException:
             execution_resources_resolved = (
                 _execution_completed(process)
@@ -628,7 +735,7 @@ def run_worker_process(
                 worker=worker,
                 argv=command_argv,
                 result=None,
-                duration_seconds=time.perf_counter() - started,
+                duration_seconds=execution_now() - started,
                 status="failed",
             )
             raise
@@ -741,6 +848,7 @@ def run_worker_process(
                         type(exc).__name__,
                     )
     finally:
+        finish_consumption(completed=execution_resources_resolved)
         if traffic_reader is not None:
             traffic_reader.close()
         if traffic is not None:
@@ -759,13 +867,16 @@ def run_worker_process(
                 retained_paths.add(invocation.report_segment_manifest_path)
             if invocation.http_evidence_manifest_path is not None:
                 retained_paths.add(invocation.http_evidence_manifest_path)
+            if invocation.consumption_spool_path is not None and retain_consumption_source():
+                # 尚无独立副本时保留原文件，不把待交付消费随临时输入清除。
+                retained_paths.add(invocation.consumption_spool_path)
         _remove_worker_input_files(
             container_manager,
             container_name,
             written_files,
             retained_paths=retained_paths,
         )
-        if cancellation is not None:
+        if cancellation is not None and not cancellation.detached:
             cancellation.finish_execution(process)
         if browser_session is not None:
             try:
@@ -799,7 +910,7 @@ def run_worker_process(
             worker=worker,
             argv=command_argv,
             result=result,
-            duration_seconds=time.perf_counter() - started,
+            duration_seconds=execution_now() - started,
         )
         if chat:
             if not execution_resources_resolved:
@@ -821,6 +932,7 @@ def run_worker_process(
         # 物理终态确认后即保留安全工具审计；业务失败不能抹掉导致重试的最后工具状态。
         record_pi_tool_events(
             client, project_id, task_run_id, phase=phase, session=invocation.session, result=result,
+            live_recorder=tool_recorder,
         )
         record_payload_operations(
             client,

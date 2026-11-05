@@ -53,14 +53,13 @@ def render_evidence_rows(sources: list[dict], artifacts: list[dict], contents: d
                 flow = (flow_evidence or {}).get(item["flow_id"])
                 if flow is None or flow["project_id"] != project_id:
                     raise ValueError("report_evidence_flow_missing")
-                sides, blocks = {}, [f"Flow {flow['flow_id']} · revision {flow['revision']} · {flow['state']} · 结构化重建，非原始字节流"]
+                sides, blocks = {}, ["HTTP 结构化重建，非原始字节流。"]
                 packet = {"project": {"id": project_id}, "flow_evidence": flow_evidence, "flow_contents": flow_contents}
                 for side, label in (("request", "请求"), ("response", "响应")):
                     projection = flow["projections"][side]
                     content = (flow_contents or {}).get(item["flow_id"], {}).get(side, {})
                     parts = []
                     if projection:
-                        parts.append(f"{flow['representation']} · SHA-256 {projection['sha256']} · Body Artifact {projection['body_artifact_id']}")
                         ranges = [content] if "text" in content else content.get("selections", [])
                         for value in ranges:
                             # 二进制占位只说明缺口，不以目标正文或报告证明呈现。
@@ -71,7 +70,7 @@ def render_evidence_rows(sources: list[dict], artifacts: list[dict], contents: d
                                 side=side, flow_id=flow["flow_id"], representation=flow["representation"],
                                 revision=flow["revision"], sha256=projection["sha256"], byte_start=value["offset"], byte_end=end,
                             ), packet)
-                            parts.append(f"utf8-bytes={value['offset']}:{end}\n\n" + _fenced(text, "http"))
+                            parts.append(_fenced(text, "http"))
                         if projection["body_display"] != "utf8":
                             parts.append("非文本或压缩正文未内嵌；请单独授权读取原件。")
                     if content.get("unavailable"):
@@ -166,6 +165,7 @@ def render_frozen_report(data: ReportData, packet: dict, template: str) -> str:
         )
         readable = readable_finding_context(finding, packet)
         verification = [statuses[item["id"]]["verification_status"] for item in own_observations]
+        limitations = finding_limitations(vulnerability["status"], verification, "\n".join(filter(None, [finding.limitations, data.limitations])))
         rows.append({
             **{"finding." + key: vulnerability.get(key) for key in ("id", "title", "severity", "status", "target")},
             "finding.verification_status": "; ".join(verification) or "未记录验证结论",
@@ -173,7 +173,7 @@ def render_frozen_report(data: ReportData, packet: dict, template: str) -> str:
             "finding.impact": "实际支持的影响见漏洞说明。",
             "finding.root_cause": "仅以漏洞说明中有依据的解释为准；未记录的根因不能补全。",
             "finding.regression_steps": "修复后的验证建议见修复建议；不代表已执行。",
-            "finding.limitations": finding_limitations(vulnerability["status"], verification, "\n".join(filter(None, [finding.limitations, data.limitations]))),
+            "finding.limitations": limitations,
             "finding.evidence_note": evidence_note(evidence),
             "finding.evidence": evidence,
         })

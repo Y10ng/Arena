@@ -1,5 +1,6 @@
 <template>
-  <article class="console-page report-templates-console">
+  <article ref="page" class="console-page report-templates-console">
+    <h1 class="sr-only">报告模板</h1>
     <Alert
       v-if="templatesQuery.isError.value && templates.length"
       tone="danger"
@@ -21,18 +22,17 @@
       {{ errorMessage(templatesQuery.error.value) }}
       <Button variant="secondary" size="sm" @click="templatesQuery.refetch()">重试</Button>
     </Alert>
-    <div v-else class="report-template-workspace" :class="{ 'is-reading': showEditor }">
+    <div v-else class="report-template-workspace">
       <aside class="report-template-directory" aria-label="模板目录">
         <header class="report-template-directory-heading">
-          <h1>报告模板</h1>
-          <Button size="sm" :disabled="isBusy" @click="openCreateTemplate"
-            ><Plus :size="16" aria-hidden="true" />新建</Button
-          >
+          <h2>模板文件</h2>
+          <Button data-template-create size="sm" variant="ghost" :disabled="isBusy" @click="openCreateTemplate"><Plus :size="16" aria-hidden="true" />新建</Button>
         </header>
         <div class="report-template-list">
           <button
             v-for="template in templates"
             :key="template.key"
+            :data-template-key="template.key"
             type="button"
             class="report-template-item"
             :class="{ active: !creating && selectedTemplateKey === template.key }"
@@ -40,15 +40,12 @@
             :disabled="isBusy"
             @click="selectTemplate(template.key)"
           >
-            <strong>{{ template.name }}{{ template.is_default ? ' · 系统默认' : '' }}</strong>
-            <span v-if="!template.markdown_content" class="report-template-item-note"
-              >待填写正文</span
-            >
+            <span class="report-template-item-main"><strong :title="fileName(template.name)">{{ fileName(template.name) }}</strong></span>
+            <span v-if="template.validation_error" class="report-template-item-note">正文待修正</span>
           </button>
           <EmptyState
             v-if="!templates.length"
             title="暂无报告模板"
-            description="新建一个模板开始编辑。"
           />
         </div>
       </aside>
@@ -56,22 +53,13 @@
         <EmptyState
           v-if="!creating && !selectedTemplateKey"
           title="选择报告模板"
-          description="选择模板或新建一项。"
         />
         <template v-else>
           <header class="report-template-heading">
-            <Button
-              class="report-template-back"
-              variant="ghost"
-              size="sm"
-              :disabled="isBusy"
-              @click="backToDirectory"
-            >
-              <ArrowLeft :size="16" aria-hidden="true" />返回模板列表
-            </Button>
+            <span v-if="creating" class="report-template-item-note">新建草稿</span>
             <FormField
               v-slot="{ controlAttrs }"
-              label="模板名称"
+              label="文件名"
               required
               class="report-template-name"
             >
@@ -83,9 +71,16 @@
                 :disabled="editorLocked"
               />
             </FormField>
-            <Button variant="ghost" :disabled="isBusy" @click="syntaxOpen = true">
-              <BookOpen :size="16" aria-hidden="true" />模板语法
-            </Button>
+            <Button :loading="isSaving" :disabled="!canSave" @click="saveTemplate">保存</Button>
+            <DropdownMenu
+              v-if="!creating && !currentTemplate?.is_default"
+              :items="[{ value: 'delete', label: '删除模板', tone: 'danger' }]"
+              @select="openDeleteTemplate"
+            >
+              <template #trigger>
+                <IconButton label="模板更多操作" :disabled="isBusy || isLoadingTemplate || Boolean(readError)"><Ellipsis :size="18" /></IconButton>
+              </template>
+            </DropdownMenu>
             <details class="report-template-description">
               <summary>说明{{ draft.description ? '（已填写）' : '' }}</summary>
               <FormField v-slot="{ controlAttrs }" label="模板说明">
@@ -99,6 +94,7 @@
               </FormField>
             </details>
           </header>
+          <Alert v-if="currentTemplate?.validation_error" class="report-template-notice" tone="warning" title="已保存正文需要修正">{{ currentTemplate.validation_error }}</Alert>
           <div v-if="isLoadingTemplate" class="report-template-loading" role="status">
             <Spinner /><span>正在读取模板…</span>
           </div>
@@ -131,7 +127,7 @@
                 :min-height="0"
                 :disabled="editorLocked"
               />
-              <div v-else class="report-template-preview">
+              <div v-else class="report-template-preview" tabindex="0" aria-label="模板文字预览">
                 <SafeReportMarkdown :content="draft.markdown_content" />
               </div>
             </template>
@@ -150,55 +146,18 @@
             </Alert>
             <Alert v-if="draftLimitError" tone="danger">{{ draftLimitError }}</Alert>
             <div class="report-template-save-actions">
-              <Button
-                v-if="!creating && !currentTemplate?.is_default"
-                variant="danger"
-                :disabled="isBusy || isLoadingTemplate || Boolean(readError)"
-                @click="openDeleteTemplate"
-                >删除模板</Button
-              >
               <span class="report-template-dirty" role="status">{{
                 isDirty ? '未保存更改' : ''
               }}</span>
               <Button variant="secondary" :disabled="!isDirty || editorLocked" @click="resetDraft"
                 >重置</Button
               >
-              <Button :loading="isSaving" :disabled="!canSave" @click="saveTemplate">{{
-                creating ? '创建模板' : '保存'
-              }}</Button>
             </div>
           </footer>
         </template>
       </section>
     </div>
-    <Dialog
-      v-model:open="syntaxOpen"
-      title="报告模板语法"
-      description="使用有限字段和重复区控制报告排版，原件按真实引用填入。"
-      size="lg"
-    >
-      <div class="report-template-syntax">
-        <p>
-          正文决定最终标题、标签、列表、表格和原件位置。生成时使用受理冻结的模板；保存不改变历史报告或已受理任务。
-        </p>
-        <p>
-          只支持下列字段与重复区，不支持条件、表达式或脚本。已有自由文本模板需人工转换，不能把示例漏洞或
-          HTTP 当作真实事实。
-        </p>
-        <section v-for="group in syntaxGroups" :key="group.title">
-          <h2>{{ group.title }}</h2>
-          <p v-if="group.description">{{ group.description }}</p>
-          <code>{{ group.fields }}</code>
-        </section>
-        <section>
-          <h2>原件与预览</h2>
-          <p>
-            finding.key_evidence 展示已接受内容选择的关键包／节选，无需额外围栏。evidence.content 与 request／response／artifact 保留完整原件含义，仅供自定义模板显式使用；后三者独占代码围栏内一行。模板文字预览不展开项目事实。
-          </p>
-          <pre><code>{{ evidenceSyntax }}</code></pre>
-        </section>
-      </div>
-    </Dialog>
+    <ConfirmAction :open="discardOpen" title="放弃模板草稿？" description="当前模板有未保存更改，放弃后无法恢复这些编辑；已保存版本不受影响。" confirm-label="放弃更改" tone="warning" @update:open="!$event && resolveDiscard(false)" @confirm="resolveDiscard(true)" />
     <ConfirmAction
       :open="Boolean(templateToDelete)"
       title="删除报告模板"
@@ -212,10 +171,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { ArrowLeft, BookOpen, Plus } from '@lucide/vue'
+import { Ellipsis, Plus } from '@lucide/vue'
 import {
   ApiError,
   createReportTemplate,
@@ -229,7 +188,8 @@ import { ConfirmAction } from '@/components/patterns'
 import {
   Alert,
   Button,
-  Dialog,
+  DropdownMenu,
+  IconButton,
   EmptyState,
   FormField,
   Input,
@@ -258,46 +218,12 @@ const isBusy = computed(() => busyOperation.value !== null)
 const isSaving = computed(() => busyOperation.value === 'save')
 const isDeleting = computed(() => busyOperation.value === 'delete')
 const templateToDelete = ref<ReportTemplate | null>(null)
-const showEditor = ref(false)
-const editorMode = ref('edit')
-const syntaxOpen = ref(false)
-const syntaxGroups = [
-  {
-    title: '报告字段',
-    description: '',
-    fields:
-      '{{ report_title }} · {{ executive_summary }} · {{ overall_remediation }} · {{ report_boundary }} · {{ limitations }} · {{ finding_count }}',
-  },
-  {
-    title: '逐漏洞重复区',
-    description: '{{#findings}} 与 {{/findings}} 之间按冻结漏洞顺序展开。字段使用 finding. 前缀。',
-    fields:
-      'id · title · severity · status · target · verification_status · description · recorded_steps · key_evidence · impact · root_cause · remediation · regression_steps · limitations · evidence_note',
-  },
-  {
-    title: '漏洞内的步骤解释',
-    description:
-      '{{#finding.steps}} 与 {{/finding.steps}} 之间逐项展开报告解释，不代表新执行或原包关联。',
-    fields: '{{ step.number }} · {{ step.explanation }} · {{ step.evidence_status }}',
-  },
-  {
-    title: '漏洞内的已有证据',
-    description: '{{#finding.evidence}} 与 {{/finding.evidence}} 之间只展开该漏洞的已记录交互。',
-    fields:
-      '{{ evidence.id }} · {{ evidence.title }} · {{ evidence.observation_id }} · {{ evidence.source }} · {{ evidence.association }} · {{ evidence.request }} · {{ evidence.response }} · {{ evidence.artifact }} · {{ evidence.content }}',
-  },
-  {
-    title: '原件索引',
-    description: '{{#artifacts}} 与 {{/artifacts}} 之间逐项展开冻结原件目录。',
-    fields: '{{ artifact.id }} · {{ artifact.kind }} · {{ artifact.sha256 }}',
-  },
-]
-const evidenceSyntax =
-  '{{#finding.evidence}}\n**{{ evidence.title }}**\n{{ evidence.association }}\n\n请求\n```http\n{{ evidence.request }}\n```\n\n响应\n```http\n{{ evidence.response }}\n```\n{{/finding.evidence}}'
+const editorMode = ref('preview')
 const editorOptions = [
-  { value: 'edit', label: '正文编辑' },
-  { value: 'preview', label: '模板文字预览' },
+  { value: 'preview', label: '预览' },
+  { value: 'edit', label: '编辑' },
 ]
+const fileName = (name: string) => /\.md$/i.test(name) ? name : `${name}.md`
 let active = true
 let loadGeneration = 0
 let operationGeneration = 0
@@ -346,23 +272,40 @@ const acceptDraft = (template?: ReportTemplate) => {
   })
   acceptedDraft.value = JSON.stringify(draft)
 }
-const confirmDiscard = () =>
-  !isBusy.value && (!isDirty.value || window.confirm('当前模板有未保存更改，是否放弃？'))
+const page = ref<HTMLElement>()
+const discardOpen = ref(false)
+let discardResolver: ((value: boolean) => void) | undefined
+function resolveDiscard(value: boolean) {
+  discardOpen.value = false
+  const resolve = discardResolver
+  discardResolver = undefined
+  resolve?.(value)
+}
+async function confirmDiscard() {
+  if (isBusy.value || discardResolver) return false
+  if (!isDirty.value) return true
+  discardOpen.value = true
+  const accepted = await new Promise<boolean>((resolve) => { discardResolver = resolve })
+  return accepted && active && !isBusy.value
+}
+async function focusEditor() {
+  await nextTick()
+  page.value?.querySelector<HTMLInputElement>('.report-template-name input')?.focus()
+}
 const cancelRead = () => {
   readAbort?.abort()
   loadGeneration += 1
   isLoadingTemplate.value = false
   readError.value = ''
 }
-const activateTemplate = async (key: string, reveal = true) => {
+const activateTemplate = async (key: string) => {
   cancelRead()
   creating.value = false
   selectedTemplateKey.value = key
   currentTemplate.value = null
   acceptDraft()
   writeError.value = ''
-  editorMode.value = 'edit'
-  showEditor.value = reveal
+  editorMode.value = 'preview'
   if (!key) return
   const controller = new AbortController()
   readAbort = controller
@@ -382,44 +325,36 @@ const activateTemplate = async (key: string, reveal = true) => {
     if (isCurrent()) isLoadingTemplate.value = false
   }
 }
-const selectTemplate = (key: string) => {
+const selectTemplate = async (key: string) => {
   if (isBusy.value) return
   if (!creating.value && key === selectedTemplateKey.value) {
-    showEditor.value = true
+    await focusEditor()
     return
   }
-  if (confirmDiscard()) void activateTemplate(key)
+  if (await confirmDiscard()) {
+    await activateTemplate(key)
+    if (selectedTemplateKey.value === key) await focusEditor()
+  }
 }
-const openCreateTemplate = () => {
-  if (!confirmDiscard()) return
-  const defaultTemplate = templates.value.find((template) => template.is_default)
-  if (!defaultTemplate?.markdown_content || defaultTemplate.validation_error) {
-    uiStore.showToast('系统默认模板不可用，请先修正默认模板后再新建。', 'danger')
-    return
-  }
+const openCreateTemplate = async () => {
+  if (!await confirmDiscard()) return
   cancelRead()
   creating.value = true
   selectedTemplateKey.value = ''
   currentTemplate.value = null
   writeError.value = ''
   editorMode.value = 'edit'
-  showEditor.value = true
   acceptDraft()
-  draft.markdown_content = defaultTemplate.markdown_content
   acceptedDraft.value = JSON.stringify(draft)
+  await focusEditor()
 }
-const resetDraft = () => {
-  if (editorLocked.value || !confirmDiscard()) return
+const resetDraft = async () => {
+  if (editorLocked.value || !await confirmDiscard()) return
   Object.assign(draft, JSON.parse(acceptedDraft.value))
   writeError.value = ''
 }
-const backToDirectory = () => {
-  if (!confirmDiscard()) return
-  Object.assign(draft, JSON.parse(acceptedDraft.value))
-  showEditor.value = false
-}
-const reloadTemplate = () => {
-  if (!creating.value && confirmDiscard()) void activateTemplate(selectedTemplateKey.value)
+const reloadTemplate = async () => {
+  if (!creating.value && await confirmDiscard()) void activateTemplate(selectedTemplateKey.value)
 }
 const syncDirectory = async () => {
   void queryClient.invalidateQueries({ queryKey: ['reportTemplateCatalog'] })
@@ -471,8 +406,8 @@ const saveTemplate = async () => {
     if (active && generation === operationGeneration) busyOperation.value = null
   }
 }
-const openDeleteTemplate = () => {
-  if (currentTemplate.value && confirmDiscard()) templateToDelete.value = currentTemplate.value
+const openDeleteTemplate = async () => {
+  if (currentTemplate.value && !currentTemplate.value.is_default && await confirmDiscard()) templateToDelete.value = currentTemplate.value
 }
 const handleDeleteOpenChange = (open: boolean) => {
   if (!open && !isBusy.value) templateToDelete.value = null
@@ -494,7 +429,7 @@ const handleDeleteTemplate = async () => {
     await syncDirectory()
     if (!isCurrent()) return
     templateToDelete.value = null
-    await activateTemplate(templates.value[0]?.key || '', false)
+    await activateTemplate(templates.value[0]?.key || '')
     uiStore.showToast(`报告模板「${target.name}」已删除`, 'success')
     if (templatesQuery.isError.value)
       writeError.value = '删除已完成，但目录同步失败。请重试读取目录。'
@@ -512,7 +447,7 @@ watch(
   (items) => {
     if (isBusy.value || isDirty.value || creating.value) return
     if (!items.some((item) => item.key === selectedTemplateKey.value))
-      void activateTemplate(items[0]?.key || '', false)
+      void activateTemplate(items[0]?.key || '')
   },
   { immediate: true },
 )
@@ -531,6 +466,7 @@ onBeforeRouteLeave(() => {
 onMounted(() => window.addEventListener('beforeunload', handleBeforeUnload))
 onUnmounted(() => {
   active = false
+  resolveDiscard(false)
   operationGeneration += 1
   cancelRead()
   window.removeEventListener('beforeunload', handleBeforeUnload)

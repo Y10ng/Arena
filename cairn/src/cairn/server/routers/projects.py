@@ -75,7 +75,9 @@ from cairn.server.services.assessment_reports import (
     list_assessment_report_finalizations,
 )
 
+from cairn.server.schemas.libraries import SelectableLibraryManifest
 from cairn.server.schemas.test_egress import TestEgressInput, TestEgressView
+from cairn.server.services.libraries import get_selectable_library_manifest
 from cairn.server.services.test_egress import resolve_task_test_egress, save_project_egress
 
 router = APIRouter(tags=["projects"])
@@ -106,6 +108,20 @@ def list_projects(principal: RequestPrincipal = Depends(require_dispatcher_proto
 def get_library_catalog(_principal: RequestPrincipal = Depends(require_user)):
     with get_conn() as conn:
         return list_selectable_current_libraries(conn)
+
+
+@router.get("/library-catalog/{key}/manifest", response_model=SelectableLibraryManifest)
+def get_library_catalog_manifest(
+    key: str, request: Request, response: Response,
+    principal: RequestPrincipal = Depends(require_user),
+):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    # 不接受版本参数；客户端不能误以为请求了历史版本却收到当前版本。
+    if request.query_params:
+        raise HTTPException(422, "Selectable library manifest accepts no query parameters")
+    with get_conn() as conn:
+        return get_selectable_library_manifest(conn, key)
 
 
 @router.post("/projects", response_model=ProjectDetail, status_code=201)

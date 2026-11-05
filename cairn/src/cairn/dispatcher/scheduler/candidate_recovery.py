@@ -167,6 +167,18 @@ class CandidateRecoveryMixin:
         if current is None:
             return
         fence = current
+        if fence.phase != "report_execute":
+            try:
+                project = self.client.get_project(fence.project_id).project
+            except requests.RequestException as exc:
+                if exc.response is None or exc.response.status_code != 404:
+                    return
+                # 精确项目已删除仍沿原 fence 清理，不能因查询 404 永久留下孤儿资源。
+            else:
+                control = project.execution_control
+                if project.status == "paused" or (control.get("action") in {"pause", "resume"} and control.get("state") != "running"):
+                    # 冻结现场与其未启动的 durable fence 均保留；重启不是业务终结许可。
+                    return
         if fence.recovery_status is not None:
             if (
                 fence.recovery_status == "stopped"
@@ -1019,9 +1031,11 @@ class CandidateRecoveryMixin:
     ) -> None:
         self._candidate_fence_invalid = invalid
         self._candidate_fences = tuple(fences)
+        self._candidate_unknown_projects = blocked_project_ids or set()
         self._candidate_fenced_projects = {
-            fence.project_id for fence in fences
-        } | (blocked_project_ids or set())
+            fence.project_id for fence in fences if fence.phase != "report_execute"
+        } | self._candidate_unknown_projects
+        self._candidate_report_projects = {fence.project_id for fence in fences if fence.phase == "report_execute"}
         self._candidate_fenced_task_runs = {
             (fence.project_id, fence.task_run_id) for fence in fences
         }
@@ -1043,6 +1057,13 @@ class CandidateRecoveryMixin:
         return bool(
             getattr(self, "_candidate_fence_invalid", False)
             or project_id in getattr(self, "_candidate_fenced_projects", set())
+        )
+
+    def _candidate_report_blocked(self, project_id: str) -> bool:
+        return bool(
+            getattr(self, "_candidate_fence_invalid", False)
+            or project_id in getattr(self, "_candidate_unknown_projects", set())
+            or project_id in getattr(self, "_candidate_report_projects", set())
         )
 
     def _candidate_container_blocked(self, container_name: str) -> bool:

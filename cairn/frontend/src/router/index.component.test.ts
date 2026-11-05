@@ -14,6 +14,7 @@ const inventoryRouteNames = () => routePageInventory.map((page) => page.routeNam
 async function routeComponentFile(routeName: string): Promise<string | undefined> {
   const route = router.getRoutes().find((candidate) => candidate.name === routeName)
   const source = route?.components?.default
+  if (route?.redirect) return 'src/router/index.ts'
   if (!source) return undefined
 
   const loaded =
@@ -27,6 +28,17 @@ async function routeComponentFile(routeName: string): Promise<string | undefined
 }
 
 describe('frontend route contracts', () => {
+  it('项目入口仅携带来源与会话深链进入同一个全局工作面', async () => {
+    const source = router.resolve('/projects/p1/agent?conversation=c1')
+    const redirect = source.matched.at(-1)!.redirect
+    expect(typeof redirect).toBe('function')
+    if (typeof redirect !== 'function') throw new Error('缺少项目入口重定向')
+    expect(redirect(source, router.currentRoute.value)).toEqual({ name: 'Agent', query: { project: 'p1', conversation: 'c1' } })
+    const global = router.resolve('/agent')
+    expect(global.matched).toHaveLength(2)
+    expect(await routeComponentFile('Agent')).toContain('ProjectAgent.vue')
+  })
+
   it('keeps named production routes aligned with the migration inventory', () => {
     expect(namedRouteNames()).toEqual(inventoryRouteNames())
   })

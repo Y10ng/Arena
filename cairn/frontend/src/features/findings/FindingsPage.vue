@@ -1,6 +1,6 @@
 <template>
   <div class="findings-page">
-    <header class="page-header"><h1>漏洞</h1></header>
+    <h1 class="sr-only">漏洞成果</h1>
     <VulnerabilityManagement />
   </div>
 </template>

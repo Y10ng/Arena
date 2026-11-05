@@ -5,6 +5,9 @@ from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
+import math
+
+from cairn.dispatcher.runtime.pause_clock import PauseClock
 
 from cairn.dispatcher.worker_protocol.candidate_authority import (
     candidate_authority_sha256,
@@ -41,12 +44,67 @@ def result_schema_digest(phase, binding, inputs=None) -> str:
     return candidate_authority_sha256(schema)
 
 
-def remaining_delivery_seconds(snapshot):
-    """准备 I/O 也消耗原截止时间；实际启动前重算，绝不重新分配 timeout。"""
+_RESEARCH_PHASES = {"bootstrap_execute", "reason_execute", "explore_execute", "verifier_execute"}
+_RESEARCH_DELIVERY_FIELDS = _DELIVERY_FIELDS | {"authorization_expires_at", "paused_seconds"}
+
+
+def _timestamp(value):
+    timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if timestamp.tzinfo is None:
+        raise ValueError("delivery_timestamp_timezone_required")
+    return timestamp
+
+
+def project_paused_seconds(control, *, now=None):
+    """与 Server 的累计暂停记录同源，登记时也包括尚未关闭的暂停窗口。"""
+    seconds = control.get("paused_seconds", 0)
+    if type(seconds) not in {int, float} or not math.isfinite(seconds) or seconds < 0:
+        raise ValueError("delivery_pause_clock_invalid")
+    if control.get("paused_at"):
+        seconds += max(0.0, ((now or datetime.now(timezone.utc)) - _timestamp(control["paused_at"])).total_seconds())
+    return float(seconds)
+
+
+def delivery_execution_deadline(snapshot, *, paused_seconds=None):
+    """只补回执行预算中的暂停；绝对授权期限不参与平移。"""
+    deadline = _timestamp(snapshot["deadline_at"])
+    if paused_seconds is not None:
+        baseline = snapshot["paused_seconds"]
+        if type(baseline) not in {int, float} or not math.isfinite(baseline) or baseline < 0:
+            raise ValueError("delivery_pause_clock_invalid")
+        deadline += timedelta(seconds=max(0.0, paused_seconds - baseline))
+    return deadline
+
+
+class ResearchDeliveryBudget:
+    """持久快照用项目暂停基线，同一 TaskRun 的准备等待用共享物理时钟增量。"""
+
+    def __init__(self, clock: PauseClock):
+        self.clock = clock
+
+    def bind(self, project):
+        self._local_baseline = self.clock.paused_seconds
+        self._project_baseline = project_paused_seconds(project.execution_control)
+        self.authorization_expires_at = project.authorization_expires_at
+
+    @property
+    def paused_seconds(self):
+        return self._project_baseline + self.clock.paused_seconds - self._local_baseline
+
+
+def remaining_delivery_seconds(snapshot, *, budget=None):
+    """准备 I/O 消耗执行预算，但热暂停不消耗；授权始终按真实时间检查。"""
     try:
-        deadline = datetime.fromisoformat(snapshot["deadline_at"].replace("Z", "+00:00"))
-        remaining = int((deadline - datetime.now(timezone.utc)).total_seconds())
-    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        now = datetime.now(timezone.utc)
+        deadline = delivery_execution_deadline(
+            snapshot, paused_seconds=budget.paused_seconds if budget is not None else None,
+        )
+        if snapshot["phase"] in _RESEARCH_PHASES:
+            for expiry in (snapshot["authorization_expires_at"], budget.authorization_expires_at):
+                if expiry is not None:
+                    deadline = min(deadline, _timestamp(expiry))
+        remaining = int((deadline - now).total_seconds())
+    except (KeyError, TypeError, ValueError, AttributeError, OverflowError) as exc:
         raise DeliveryUnavailable from exc
     if remaining <= 0:
         raise DeliveryUnavailable
@@ -59,17 +117,17 @@ def resume_delivery(
     worker,
     context,
     phase: str | Collection[str],
+    *, client=None, budget=None,
 ):
     snapshot = context.get("execution_delivery")
-    if (
-        not context.get("delivery_retry")
-        or not isinstance(snapshot, dict)
-        or set(snapshot) != _DELIVERY_FIELDS
-    ):
+    if not context.get("delivery_retry") or not isinstance(snapshot, dict):
         raise DeliveryUnavailable
     allowed_phases = {phase} if isinstance(phase, str) else set(phase)
     frozen_phase = snapshot.get("phase")
     if not isinstance(frozen_phase, str) or frozen_phase not in allowed_phases:
+        raise DeliveryUnavailable
+    fields = _RESEARCH_DELIVERY_FIELDS if frozen_phase in _RESEARCH_PHASES else _DELIVERY_FIELDS
+    if set(snapshot) != fields:
         raise DeliveryUnavailable
     try:
         expected_schema_sha256 = result_schema_digest(
@@ -85,11 +143,30 @@ def resume_delivery(
     ):
         raise DeliveryUnavailable
     try:
-        remaining_delivery_seconds(snapshot)
-        name = container_manager.container_name(project_id)
-        metadata = container_manager.runtime_metadata(name)
+        if frozen_phase in _RESEARCH_PHASES:
+            budget.bind(client.get_project(project_id).project)
+        remaining_delivery_seconds(snapshot, budget=budget)
+        if frozen_phase == "report_execute":
+            # 报告续交付只读取冻结的精确容器，不借研究域或新建容器补齐现场。
+            name = snapshot["container_id"]
+            if not isinstance(name, str) or not name:
+                raise DeliveryUnavailable
+            metadata = container_manager.runtime_metadata(name)
+            report_owner = snapshot["binding"]["report_segments"]["task_run_id"]
+            if (
+                not isinstance(report_owner, str)
+                or not report_owner
+                or metadata.get("project_id") != project_id
+                or metadata.get("container_role") != "report"
+                or metadata.get("report_task_run_id") != report_owner
+            ):
+                raise DeliveryUnavailable
+        else:
+            name = container_manager.container_name(project_id)
+            metadata = container_manager.runtime_metadata(name)
+        states = {"running", "paused"} if frozen_phase in _RESEARCH_PHASES else {"running"}
         if (
-            metadata.get("container_state") != "running"
+            metadata.get("container_state") not in states
             or metadata.get("container_id") != snapshot.get("container_id")
         ):
             raise DeliveryUnavailable
@@ -98,7 +175,7 @@ def resume_delivery(
     except (KeyError, TypeError, ValueError, AttributeError, OSError) as exc:
         raise DeliveryUnavailable from exc
     # 返回原精确容器 ID，避免名称随后被替换而在新工作区续交付。
-    return metadata["container_id"], snapshot, remaining_delivery_seconds(snapshot)
+    return metadata["container_id"], snapshot, remaining_delivery_seconds(snapshot, budget=budget)
 
 
 def _confirmed_running_activation(client, container_manager, project_id, generation, container_id, daemon_id=None):
@@ -190,6 +267,7 @@ def resume_continuation(client, container_manager, project_id, generation, conta
 def register_delivery(
     client, container_manager, container_name, project, task_run_id, worker,
     *, phase, session, timeout_seconds, binding=None, inputs=None, deadline_at=None,
+    deadline_paused_seconds=None, budget=None,
 ):
     """首次模型调用前由 owner 幂等登记；快照不含 prompt、凭据或业务原文。"""
     metadata = container_manager.runtime_metadata(container_name)
@@ -200,24 +278,26 @@ def register_delivery(
         or metadata.get("container_state") != "running"
     ):
         raise DeliveryUnavailable
+    research = phase in _RESEARCH_PHASES
+    current = client.get_project(project.project.id).project if research else project.project
+    if research:
+        if budget is None:
+            raise DeliveryUnavailable
+        budget.bind(current)
+    paused_seconds = budget.paused_seconds if research else None
     deadline = datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
     if deadline_at is not None:
-        deadline = min(deadline, datetime.fromisoformat(deadline_at.replace("Z", "+00:00")))
-    project_deadline = getattr(project.project, "explore_deadline", None)
-    authorization_expires_at = getattr(
-        project.project,
-        "authorization_expires_at",
-        None,
-    )
+        previous = {"deadline_at": deadline_at, "paused_seconds": deadline_paused_seconds}
+        deadline = min(deadline, delivery_execution_deadline(
+            previous, paused_seconds=paused_seconds if deadline_paused_seconds is not None else None,
+        ))
     if phase != "report_execute":
-        for absolute_deadline in (project_deadline, authorization_expires_at):
+        absolute_deadlines = (getattr(current, "explore_deadline", None),)
+        if not research:
+            absolute_deadlines += (getattr(current, "authorization_expires_at", None),)
+        for absolute_deadline in absolute_deadlines:
             if absolute_deadline:
-                deadline = min(
-                    deadline,
-                    datetime.fromisoformat(
-                        absolute_deadline.replace("Z", "+00:00")
-                    ),
-                )
+                deadline = min(deadline, _timestamp(absolute_deadline))
     try:
         schema_sha256 = result_schema_digest(phase, binding, inputs)
     except (KeyError, TypeError, ValueError) as exc:
@@ -232,14 +312,16 @@ def register_delivery(
         "binding": binding,
         "inputs": inputs or {},
     }
-    remaining_delivery_seconds(snapshot)
+    if research:
+        snapshot.update(authorization_expires_at=current.authorization_expires_at, paused_seconds=paused_seconds)
+    remaining_delivery_seconds(snapshot, budget=budget)
     response = client.update_task_run(
         project.project.id, task_run_id, status="running", session_id=session,
         runtime_context={"execution_delivery": snapshot},
     )
     if not response.ok:
         raise DeliveryUnavailable
-    remaining_delivery_seconds(snapshot)
+    remaining_delivery_seconds(snapshot, budget=budget)
     return snapshot
 
 

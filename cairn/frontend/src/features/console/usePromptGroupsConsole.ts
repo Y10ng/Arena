@@ -1,4 +1,5 @@
 import { computed, onScopeDispose, ref, watch } from 'vue'
+import { useDraftDiscardConfirm } from './useDraftDiscardConfirm'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import {
@@ -208,9 +209,10 @@ export const usePromptGroupsConsole = () => {
     promptFileSavedSnapshot.value = promptFileSnapshot()
   }
 
+  const { discardConfirmationOpen, requestDiscard, resolveDiscard } = useDraftDiscardConfirm()
   const confirmDiscardPromptChanges = () => {
     if (!isPromptFileDirty.value) return true
-    return window.confirm('Prompt 文件存在未保存修改，确定要放弃吗？')
+    return requestDiscard()
   }
 
   const syncPromptRoute = (group: string | null, file: string | null) => {
@@ -225,12 +227,12 @@ export const usePromptGroupsConsole = () => {
   const isCurrentPromptVisit = (key: string, visitGeneration: number) =>
     selectedPromptGroupKey.value === key && promptGroupVisitGeneration === visitGeneration
 
-  const selectPromptGroup = (
+  const selectPromptGroup = async (
     key: string,
     options: { force?: boolean; syncRoute?: boolean } = {},
   ) => {
     if (key === selectedPromptGroupKey.value) return true
-    if (!options.force && !confirmDiscardPromptChanges()) return false
+    if (!options.force && !(await confirmDiscardPromptChanges())) return false
     promptGroupVisitGeneration++
     abortPromptValidation()
     selectedPromptGroupKey.value = key
@@ -251,7 +253,7 @@ export const usePromptGroupsConsole = () => {
       if (pendingPromptFileName && pendingPromptFileName !== name) abortPromptFileRead()
       return true
     }
-    if (!options.force && !confirmDiscardPromptChanges()) return false
+    if (!options.force && !(await confirmDiscardPromptChanges())) return false
 
     const visitGeneration = promptGroupVisitGeneration
     const readGeneration = ++promptFileReadGeneration
@@ -467,13 +469,13 @@ export const usePromptGroupsConsole = () => {
     restoreActionTrigger(trigger)
   }
 
-  const openDeletePromptGroup = (trigger: HTMLElement | null = null) => {
+  const openDeletePromptGroup = async (trigger: HTMLElement | null = null) => {
     const target = selectedPromptGroup.value
     if (
       !target ||
       !promptGroupCapabilities(target).canDelete ||
       isPromptDestructivePending.value ||
-      !confirmDiscardPromptChanges()
+      !(await confirmDiscardPromptChanges())
     )
       return
     deletePromptGroupTarget.value = { ...target }
@@ -597,13 +599,13 @@ export const usePromptGroupsConsole = () => {
     if (key) void validatePromptGroupTarget(key, promptGroupVisitGeneration)
   })
 
-  const openRepairPromptGroup = (trigger: HTMLElement | null = null) => {
+  const openRepairPromptGroup = async (trigger: HTMLElement | null = null) => {
     const target = selectedPromptGroup.value
     if (
       !target ||
       !promptGroupCapabilities(target).canRepair ||
       isPromptDestructivePending.value ||
-      !confirmDiscardPromptChanges()
+      !(await confirmDiscardPromptChanges())
     )
       return
     repairPromptGroupTarget.value = { ...target }
@@ -652,13 +654,13 @@ export const usePromptGroupsConsole = () => {
     }
   }
 
-  const openRestorePromptGroup = (trigger: HTMLElement | null = null) => {
+  const openRestorePromptGroup = async (trigger: HTMLElement | null = null) => {
     const target = selectedPromptGroup.value
     if (
       !target ||
       !promptGroupCapabilities(target).canRestore ||
       isPromptDestructivePending.value ||
-      !confirmDiscardPromptChanges()
+      !(await confirmDiscardPromptChanges())
     )
       return
     restorePromptGroupTarget.value = { ...target }
@@ -776,6 +778,8 @@ export const usePromptGroupsConsole = () => {
     clonePromptGroupKey,
     clonePromptGroupSource,
     confirmDiscardPromptChanges,
+    discardConfirmationOpen,
+    resolveDiscard,
     deletePromptGroupTarget,
     formatError,
     handleClonePromptGroupOpenChange,

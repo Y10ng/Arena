@@ -1,12 +1,8 @@
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, toRefs, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { api, fetchText } from '@/api/client'
-import type {
-  ProjectSummary,
-  ReauthorizeProjectRequest,
-  Scenario,
-} from '@/api/types'
+import type { ProjectSummary, ReauthorizeProjectRequest, Scenario } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
 import { formatRelativeTime } from '@/lib/format'
@@ -16,6 +12,7 @@ import {
   projectRuntimeBatchKey,
   projectActionAllowed,
   useProjectLifecycle,
+  useRuntimeClock,
 } from './projectRuntime'
 import type { ProjectLifecycleAction } from '@/api/types'
 
@@ -76,6 +73,7 @@ export const useProjectsPage = () => {
   )
   const {
     data: runtimeBatch,
+    dataUpdatedAt: runtimeBatchUpdatedAt,
     isError: runtimeError,
     isFetching: runtimeFetching,
     refetch: refetchRuntime,
@@ -86,7 +84,9 @@ export const useProjectsPage = () => {
     refetchInterval: 8000,
     retry: false,
   })
-  const runtimeById = computed(
+  const runtimeNow = useRuntimeClock()
+  const refreshRuntimeObservation = () => refetchRuntime({ cancelRefetch: false })
+  const rawRuntimeById = computed(
     () =>
       new Map((runtimeBatch.value?.items || []).map((runtime) => [runtime.project_id, runtime])),
   )
@@ -97,7 +97,14 @@ export const useProjectsPage = () => {
     refetchInterval: 10000,
   })
 
-  const projects = computed(() => projectsData.value || [])
+  const { pendingProjectId, actionError, perform, projectFor, runtimeFor, runtimeUpdatedAtFor, unavailableFor, observationExpired } = useProjectLifecycle(
+    (id) => rawRuntimeById.value.get(id),
+    () => ({ dataUpdatedAt: runtimeBatchUpdatedAt.value, failed: runtimeError.value, now: runtimeNow.value }),
+    () => queryClient.invalidateQueries({ queryKey: ['projects'] }),
+    () => projectsData.value || [],
+  )
+  const projects = computed(() => (projectsData.value || []).map((project) => projectFor(project.id)!))
+  const runtimeById = computed(() => new Map(projects.value.map((project) => [project.id, runtimeFor(project.id)])))
   const hasProjectsSnapshot = computed(() => projectsData.value !== undefined)
   const hasStaleProjectsError = computed(() => isError.value && hasProjectsSnapshot.value)
   const showTenantAttribution = computed(() => authStore.isSuperAdmin)
@@ -113,13 +120,39 @@ export const useProjectsPage = () => {
     return new Map((scenariosData.value || []).map((scenario) => [scenario.key, scenario.label]))
   })
 
-  const activeSegment = ref('all')
-  const searchQuery = ref('')
-  const selectedTenantId = ref('all')
-  const sortBy = ref('created_desc')
+  if (uiStore.projectListView.authGeneration !== authStore.authGeneration) {
+    Object.assign(uiStore.projectListView, {
+      authGeneration: authStore.authGeneration,
+      activeSegment: 'all',
+      searchQuery: '',
+      selectedTenantId: 'all',
+      sortBy: 'created_desc',
+      scrollTop: 0,
+      scrollLeft: 0,
+    })
+  }
+  const { activeSegment, searchQuery, selectedTenantId, sortBy } = toRefs(uiStore.projectListView)
   const openDropdownId = ref<string | null>(null)
   const focusedIndex = ref(-1)
   const listElement = ref<HTMLElement | null>(null)
+  let restoredListPosition = false
+  watch(
+    listElement,
+    (element) => {
+      if (!element || restoredListPosition) return
+      restoredListPosition = true
+      const viewport = element.closest('.content-viewport')
+      if (viewport) viewport.scrollTop = uiStore.projectListView.scrollTop
+      element.scrollLeft = uiStore.projectListView.scrollLeft
+    },
+    { flush: 'post' },
+  )
+  onBeforeUnmount(() => {
+    const element = listElement.value
+    if (!element) return
+    uiStore.projectListView.scrollTop = element.closest('.content-viewport')?.scrollTop || 0
+    uiStore.projectListView.scrollLeft = element.scrollLeft
+  })
   const renameTarget = ref<ProjectSummary | null>(null)
   const renameNewTitle = ref('')
   const renameSaving = ref(false)
@@ -151,7 +184,8 @@ export const useProjectsPage = () => {
       if (
         runtimeProjectIds.value.length &&
         (previousIds === runtimeProjectIds.value.join(',') || runtimeFetching.value)
-      ) await refetchRuntime({ cancelRefetch: false })
+      )
+        await refetchRuntime({ cancelRefetch: false })
     } finally {
       retryingRefresh.value = false
     }
@@ -209,12 +243,6 @@ export const useProjectsPage = () => {
     router.push(`/projects/${id}`)
   }
 
-  const { pendingProjectId, actionError, perform } = useProjectLifecycle(
-    (id) => runtimeById.value.get(id),
-    () => runtimeError.value,
-    () => queryClient.invalidateQueries({ queryKey: ['projects'] }),
-    (id) => projects.value.find((project) => project.id === id),
-  )
   const finishTarget = ref<ProjectSummary | null>(null)
   const reauthorizationTarget = ref<ReauthorizationConfirmation | null>(null)
   const reauthorizationConfirmed = ref(false)
@@ -223,7 +251,7 @@ export const useProjectsPage = () => {
     projectActionAllowed(
       runtimeById.value.get(id),
       action,
-      runtimeError.value,
+      unavailableFor(id),
       projects.value.find((project) => project.id === id),
     )
   const changeStatus = async (id: string, action: DirectProjectLifecycleAction) => {
@@ -372,6 +400,12 @@ export const useProjectsPage = () => {
     formatRelativeTime,
     getProjectStatus,
     runtimeById,
+    runtimeUpdatedAtFor,
+    observationExpired,
+    runtimeError,
+    runtimeFetching,
+    runtimeNow,
+    refreshRuntimeObservation,
     getScenarioLabel,
     getSegmentCount,
     hasProjectsSnapshot,

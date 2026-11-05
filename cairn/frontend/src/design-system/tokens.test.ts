@@ -15,6 +15,11 @@ const requiredTokens = [
   '--color-border-subtle',
   '--color-border',
   '--color-border-strong',
+  '--color-control-border',
+  '--color-primary',
+  '--color-primary-hover',
+  '--color-primary-pressed',
+  '--color-primary-contrast',
   '--color-text',
   '--color-text-secondary',
   '--color-text-disabled',
@@ -39,6 +44,8 @@ const requiredTokens = [
   '--space-8',
   '--radius-2xl',
   '--control-height-xl',
+  '--control-height-form',
+  '--control-height-filter',
   '--shadow-xs',
   '--shadow-sm',
   '--shadow-md',
@@ -66,9 +73,19 @@ describe('design token contract', () => {
   it('keeps light theme and reduced-motion overrides explicit', () => {
     expect(tokenSource).toContain("[data-theme='light']")
     expect(tokenSource).toContain('--color-surface: #ffffff')
-    expect(tokenSource).toContain('--glass-bg: rgb(255 255 255 / 92%)')
+    expect(tokenSource).toContain('--glass-bg: var(--color-surface-raised)')
     expect(tokenSource).toContain('@media (prefers-reduced-motion: reduce)')
     expect(tokenSource).toContain('--dur-slow: 1ms')
+  })
+
+  it('shares neutral surfaces and restrained accents without a route-private theme', () => {
+    expect(tokenSource).toContain("[data-theme='dark']")
+    expect(tokenSource).toContain('--color-canvas: #131722')
+    expect(tokenSource).toContain('--color-canvas: #f5f6fa')
+    expect(tokenSource).toContain('--color-link: var(--color-accent)')
+    expect(tokenSource).toContain('--color-accent-soft: var(--color-surface-selected)')
+    expect(tokenSource).not.toContain('data-workbench')
+    expect(tokenSource).not.toContain('--workbench-canvas')
   })
 
   it('defines theme-aware severity colors and stable semantic aliases for charts', () => {

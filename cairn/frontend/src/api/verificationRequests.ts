@@ -1,6 +1,6 @@
 import { api, apiRaw, type ArtifactPreview } from './client'
 import type { EvidenceItem, EvidenceSource, EvidenceRef, ProjectResourceBatch, ProjectResourceBatchMember, ProjectResourceKind } from './types'
-import type { Vulnerability } from './client'
+import type { Vulnerability, VulnerabilityReadable } from './client'
 import type { TestEgressInput, TestEgressPublic } from './testEgress'
 
 export type VerificationMode = 'reproduce' | 'retest'
@@ -11,6 +11,7 @@ export type VerificationReportInput =
   | { type: 'file'; batch_member_id: string }
   | { type: 'platform_vulnerability'; project_id: string; vulnerability_id: string; observation_id?: string }
 export interface VerificationInputSource {
+  number: string
   type: 'platform_vulnerability'
   project_id: string
   vulnerability_id: string
@@ -20,18 +21,21 @@ export interface VerificationInputSource {
   availability_reason: string | null
 }
 export interface VerificationSourcePreview {
+  number: string
   test_egress?: TestEgressPublic
   project_id: string
   vulnerability_id: string
   project_title: string
   vulnerability: Pick<Vulnerability, 'id' | 'title' | 'severity' | 'status' | 'target' | 'remediation' | 'repro_steps'> & Record<string, unknown>
-  evidence: { observation_id: string | null; source: EvidenceSource; evidence_items: EvidenceItem[]; reproduction_steps: VerificationTestStep[] }
+  readable: VulnerabilityReadable
+  material_validation: 'checked' | 'on_acceptance'
+  evidence: { observation_id: string | null; source: EvidenceSource; evidence_items: EvidenceItem[]; supplemental_evidence_items: EvidenceItem[]; reproduction_steps: VerificationTestStep[] }
   project_context: Record<string, unknown>
   facts: { id: string; description: string; [key: string]: unknown }[]
   observations: { id: string; [key: string]: unknown }[]
   verifications: { id: string; outcome: VerificationOutcome; notes: string; [key: string]: unknown }[]
   fact_evidence: { fact_id: string; artifact_id: string; pointer: string; [key: string]: unknown }[]
-  artifacts: { artifact_id: string; filename?: string; kind?: string; size_bytes?: number; sha256?: string; available: boolean; input_path?: string; [key: string]: unknown }[]
+  artifacts: { artifact_id: string; filename?: string; kind?: string; size_bytes?: number; sha256?: string; available: boolean | null; input_path?: string; [key: string]: unknown }[]
   missing_materials: { code: string; source_type: string; source_id: string; artifact_id?: string; message: string }[]
 }
 export interface CreateVerificationRequest {
@@ -133,6 +137,7 @@ export interface VerificationDetail extends VerificationSummary {
   execution_message: string | null
 }
 export interface VerificationFilters {
+  source_number?: string
   external_id?: string
   mode?: VerificationMode
   execution_status?: VerificationStatus

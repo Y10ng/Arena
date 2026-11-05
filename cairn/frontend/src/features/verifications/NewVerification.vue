@@ -14,7 +14,7 @@ const router = useRouter()
 const ui = useUIStore()
 const form = ref<InstanceType<typeof VerificationForm> | null>(null)
 const queryValue = (key: string) => typeof route.query[key] === 'string' ? route.query[key] as string : ''
-const canLeave = () => Boolean(form.value?.canLeave())
+const canLeave = () => form.value?.canLeave() ?? false
 onBeforeRouteLeave(canLeave)
 onBeforeRouteUpdate((to) => {
   const stillOpen = to.name === 'NewVerification' || to.query.create === '1'

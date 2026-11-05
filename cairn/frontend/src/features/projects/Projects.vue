@@ -1,32 +1,65 @@
 <template>
   <div class="projects-page">
-    <div class="view-header view-header--actions">
-      <div class="segmented-control" aria-label="项目视图">
-        <button
-          type="button"
-          class="segment-btn"
+    <div v-if="!showSchedules" class="view-header">
+      <h1 class="sr-only">{{ showSchedules ? '启动计划' : '项目' }}</h1>
+      <nav class="project-views" aria-label="项目与计划视图">
+        <RouterLink
+          to="/projects"
           :class="{ active: !showSchedules }"
-          :aria-pressed="!showSchedules"
-          @click="setView(false)"
+          :aria-current="!showSchedules ? 'page' : undefined"
+          >项目</RouterLink
         >
-          项目
-        </button>
-        <button
-          type="button"
-          class="segment-btn"
+        <RouterLink
+          to="/project-schedules"
           :class="{ active: showSchedules }"
-          :aria-pressed="showSchedules"
-          @click="setView(true)"
+          :aria-current="showSchedules ? 'page' : undefined"
+          >启动计划</RouterLink
         >
-          计划任务
-        </button>
-      </div>
+      </nav>
+
       <div class="header-right">
         <Button @click="openNewProject($event)">
           <template #icon><Plus :size="14" /></template>
           新建项目
         </Button>
       </div>
+
+      <FilterBar v-if="!showSchedules" label="项目筛选" class="project-filter-bar">
+        <div class="project-search-field">
+          <Search :size="16" aria-hidden="true" />
+          <Input
+            id="project-search"
+            v-model="searchQuery"
+            aria-label="搜索项目"
+            :placeholder="showTenantAttribution ? '搜索名称、场景或账户…' : '搜索名称或场景…'"
+            @keydown.esc="searchQuery = ''"
+          />
+        </div>
+        <SearchFilter
+          v-model="activeSegment"
+          label="项目状态"
+          :options="segments"
+          clear-value="all"
+        />
+        <SearchFilter
+          v-if="showTenantAttribution && tenantOptions.length > 1"
+          v-model="selectedTenantId"
+          label="所属账户"
+          :options="tenantFilterOptions"
+          clear-value="all"
+        />
+        <Button v-if="hasFilters" variant="ghost" size="sm" @click="clearFilters">清除筛选</Button>
+        <template #actions>
+          <div class="project-sort-field">
+            <Select
+              id="project-sort"
+              v-model="sortBy"
+              aria-label="项目排序"
+              :options="sortOptions"
+            />
+          </div>
+        </template>
+      </FilterBar>
     </div>
 
     <CreationRequestRecovery v-if="!newProjectSession" />
@@ -46,58 +79,22 @@
       @discarded="closeNewProject"
     />
 
-    <ProjectSchedules v-if="showSchedules" />
+    <ProjectSchedules v-if="showSchedules">
+      <template #views>
+        <h1 class="sr-only">启动计划</h1>
+        <nav class="project-views" aria-label="项目与计划视图">
+          <RouterLink to="/projects">项目</RouterLink>
+          <RouterLink to="/project-schedules" class="active" aria-current="page">启动计划</RouterLink>
+        </nav>
+      </template>
+      <template #actions>
+        <Button @click="openNewProject($event)">
+          <template #icon><Plus :size="14" /></template>新建项目
+        </Button>
+      </template>
+    </ProjectSchedules>
     <div v-else class="projects-container">
-      <FilterBar class="toolbar" label="项目筛选">
-        <div class="segmented-control" aria-label="项目状态">
-          <button
-            v-for="seg in segments"
-            :key="seg.value"
-            type="button"
-            class="segment-btn"
-            :class="{ active: activeSegment === seg.value }"
-            :aria-pressed="activeSegment === seg.value"
-            @click="activeSegment = seg.value"
-          >
-            {{ seg.label }}
-            <Badge v-if="getSegmentCount(seg.value) > 0" size="sm">
-              {{ getSegmentCount(seg.value) }}
-            </Badge>
-          </button>
-        </div>
 
-        <FormField class="project-search-field" label="搜索" for="project-search">
-          <Input
-            id="project-search"
-            v-model="searchQuery"
-            :placeholder="
-              showTenantAttribution ? '搜索项目、Tenant或场景...' : '搜索项目或场景...'
-            "
-            @keydown.esc="searchQuery = ''"
-          />
-        </FormField>
-
-        <FormField
-          v-if="showTenantAttribution && tenantOptions.length > 1"
-          class="project-filter-field"
-          label="Tenant"
-          for="project-tenant-filter"
-        >
-          <Select
-            id="project-tenant-filter"
-            v-model="selectedTenantId"
-            :options="tenantFilterOptions"
-          />
-        </FormField>
-
-        <FormField class="project-filter-field" label="排序" for="project-sort">
-          <Select id="project-sort" v-model="sortBy" :options="sortOptions" />
-        </FormField>
-
-        <template #status>
-          <span>{{ filteredProjects.length }} 个项目</span>
-        </template>
-      </FilterBar>
 
       <Alert
         v-if="hasStaleProjectsError"
@@ -107,13 +104,15 @@
       >
         项目列表仍显示最近一次成功获取的数据。
         <template #actions>
-          <Button size="sm" variant="secondary" :loading="retryingRefresh" @click="retryRefresh()">重试刷新</Button>
+          <Button size="sm" variant="secondary" :loading="retryingRefresh" @click="retryRefresh()"
+            >重试刷新</Button
+          >
         </template>
       </Alert>
 
       <Alert v-if="actionError" tone="danger" title="项目操作失败">{{ actionError }}</Alert>
 
-      <!-- Projects List -->
+      <!-- 列表状态保留查询入口，刷新失败不清空已有结果。 -->
       <div class="projects-list-wrapper">
         <div
           v-if="isLoading && !hasProjectsSnapshot"
@@ -121,7 +120,6 @@
           aria-label="正在加载项目"
         >
           <div v-for="i in 5" :key="i" class="skeleton-row">
-            <Skeleton shape="circle" class="skeleton-circle" />
             <div class="skeleton-text-group">
               <Skeleton shape="text" class="skeleton-line title" />
               <Skeleton shape="text" class="skeleton-line subtitle" />
@@ -141,147 +139,129 @@
 
         <EmptyState
           v-else-if="filteredProjects.length === 0"
-          title="没有找到匹配的项目"
-          :description="
-            searchQuery || activeSegment !== 'all'
-              ? '尝试调整您的搜索关键字或状态筛选器。'
-              : '您还没有创建任何项目，开始创建一个新的探索工作空间吧！'
-          "
+          :title="hasFilters ? '没有匹配的项目' : '还没有项目'"
         >
-          <template v-if="!searchQuery && activeSegment === 'all'" #actions>
+          <template v-if="!hasFilters" #actions>
             <Button @click="openNewProject($event)">新建项目</Button>
           </template>
+          <template v-else #actions
+            ><Button variant="secondary" @click="clearFilters">清除筛选</Button></template
+          >
         </EmptyState>
 
-        <!-- Loaded Projects Table/List -->
-        <div v-else class="project-rows" role="list" ref="listElement">
-          <div
-            v-for="(p, index) in filteredProjects"
-            :key="p.id"
-            class="project-row"
-            :class="{ focused: index === focusedIndex, 'menu-open': openDropdownId === p.id }"
-            role="listitem"
-          >
-            <button
-              type="button"
-              class="project-row-main"
-              :aria-label="`进入工作空间 ${p.title}，${getProjectStatus(p).label}`"
-              @focus="focusedIndex = index"
-              @click="navigateToWorkspace(p.id)"
-              @keydown.down.prevent="moveFocus(1)"
-              @keydown.up.prevent="moveFocus(-1)"
-            >
-              <!-- Left Status + Title -->
-              <div class="row-left">
-                <span
-                  class="status-indicator"
-                  :class="`status-${getProjectStatus(p).tone}`"
-                  aria-hidden="true"
-                ></span>
-                <div class="title-section">
-                  <div class="title-row">
-                    <span class="project-title">{{ p.title }}</span>
-                    <span class="project-id mono text-faint">#{{ p.id }}</span>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Middle Meta Scenario & Stats -->
-              <div class="row-middle">
-                <div class="scenario-badge-wrapper">
-                  <Badge size="sm" :title="`场景方案: ${getScenarioLabel(p)}`">
-                    <Wrench :size="10" aria-hidden="true" />
-                    {{ getScenarioLabel(p) }}
-                  </Badge>
-                </div>
-
-                <div
-                  v-if="showTenantAttribution"
-                  class="tenant-attribution text-muted"
-                  :title="`Tenant: ${p.tenant_name} (${p.tenant_id})${p.tenant_owner_login ? ` · ${p.tenant_owner_login}` : ''}`"
-                >
-                  <span class="meta-label">Tenant</span>
-                  <span>{{ p.tenant_name }}</span>
-                  <span class="mono tenant-id">{{ p.tenant_id }}</span>
-                  <span v-if="p.tenant_owner_login" class="tenant-owner">{{
-                    p.tenant_owner_login
-                  }}</span>
-                </div>
-
-                <div class="stats-group mono">
-                  <span class="stat-item" title="事实数量">
-                    <span class="stat-num">{{ p.fact_count }}</span>
-                    <span class="stat-lbl">Facts</span>
-                  </span>
-                  <span class="stat-item" title="决策意图活跃/未领取">
-                    <span class="stat-num text-intent"
-                      >{{ p.working_intent_count }}<span class="separator">/</span
-                      >{{ p.unclaimed_intent_count }}</span
+        <div v-else class="project-table-scroll" ref="listElement">
+          <table class="project-table" aria-label="项目列表">
+            <thead>
+              <tr>
+                <th scope="col" class="project-name-column">项目名称</th>
+                <th scope="col" class="project-status-column">状态</th>
+                <th scope="col" class="project-scenario-column">探索场景</th>
+                <th v-if="showTenantAttribution" scope="col" class="project-tenant-column">
+                  所属账户
+                </th>
+                <th scope="col" class="project-token-column">累计 Token</th>
+                <th scope="col" class="project-time-column">创建时间</th>
+                <th scope="col" class="project-actions-column">
+                  <span class="sr-only">操作</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="(p, index) in filteredProjects"
+                :key="p.id"
+                class="project-row"
+                :class="{ focused: index === focusedIndex }"
+              >
+                <td>
+                  <RouterLink
+                    :to="`/projects/${p.id}`"
+                    class="project-row-main"
+                    :title="p.title"
+                    :aria-label="`进入工作空间 ${p.title}，${getProjectStatus(p).label}`"
+                    @focus="focusedIndex = index"
+                    @keydown.down.prevent="moveFocus(1)"
+                    @keydown.up.prevent="moveFocus(-1)"
+                  >
+                    {{ p.title }}
+                  </RouterLink>
+                </td>
+                <td>
+                  <div
+                    class="project-row-status"
+                    :class="{ 'project-row-status--scheduled': p.status === 'pending' }"
+                  >
+                    <ProjectStatusObservation
+                      :project="p"
+                      :control-waiting-expired="observationExpired(p.id)"
+                      :runtime="runtimeById.get(p.id)"
+                      :data-updated-at="runtimeUpdatedAtFor(p.id)"
+                      :failed="runtimeError"
+                      :fetching="runtimeFetching"
+                      :now="runtimeNow"
+                      @refresh="refreshRuntimeObservation"
+                    />
+                    <span v-if="isResumeRetry(p) && !canPerform(p.id, 'resume')">
+                      重试继续：{{ actionReasonText(runtimeError ? 'runtime_unavailable' : runtimeById.get(p.id)?.actions?.resume?.reason) }}
+                    </span>
+                    <RouterLink
+                      v-if="p.status === 'pending' && scheduleFor(p)"
+                      :to="`/project-schedules/${scheduleFor(p)!.id}`"
+                      class="pending-schedule-summary"
                     >
-                    <span class="stat-lbl">Intents</span>
-                  </span>
-                  <span class="stat-item" title="人工提示数量">
-                    <span class="stat-num">{{ p.hint_count }}</span>
-                    <span class="stat-lbl">Hints</span>
-                  </span>
-                </div>
-              </div>
-            </button>
-
-            <!-- Right Reason Claim & Actions -->
-            <div class="row-right">
-              <div
-                class="project-row-status"
-                :class="{ 'project-row-status--scheduled': p.status === 'pending' }"
-                aria-label="项目状态"
-              >
-                <Badge :tone="getProjectStatus(p).tone" size="sm">
-                  {{ getProjectStatus(p).label }}
-                </Badge>
-                <router-link
-                  v-if="p.status === 'pending' && scheduleFor(p)"
-                  :to="`/project-schedules/${scheduleFor(p)!.id}`"
-                  class="pending-schedule-summary"
-                  >{{ scheduleLocalTime(scheduleFor(p)!.next_run_at, scheduleFor(p)!.timezone) }} ·
-                  {{ scheduleFor(p)!.timezone }} ·
-                  {{ scheduleStatusLabels[scheduleFor(p)!.status] }}</router-link
+                      {{ scheduleLocalTime(scheduleFor(p)!.next_run_at, scheduleFor(p)!.timezone) }}
+                      · {{ scheduleFor(p)!.timezone }} ·
+                      {{ scheduleStatusLabels[scheduleFor(p)!.status] }}
+                    </RouterLink>
+                  </div>
+                </td>
+                <td class="project-scenario">{{ getScenarioLabel(p) }}</td>
+                <td
+                  v-if="showTenantAttribution"
+                  :title="`${p.tenant_name} (${p.tenant_id})${p.tenant_owner_login ? ` · ${p.tenant_owner_login}` : ''}`"
                 >
-              </div>
-
-              <div class="created-at text-faint" :title="p.created_at">
-                {{ formatRelativeTime(p.created_at) }}
-              </div>
-
-              <DropdownMenu
-                :open="openDropdownId === p.id"
-                :items="getProjectMenuItems(p)"
-                @update:open="handleProjectMenuOpenChange(p.id, $event)"
-                @select="handleProjectMenuSelect(p, $event)"
-              >
-                <template #trigger>
-                  <IconButton size="sm" label="项目操作菜单">
-                    <MoreHorizontal :size="16" aria-hidden="true" />
-                  </IconButton>
-                </template>
-                <template #icon="{ item }">
-                  <ExternalLink v-if="item.value === 'open'" :size="14" />
-                  <Pause v-else-if="item.value === 'stop'" :size="14" />
-                  <Play v-else-if="item.value === 'resume'" :size="14" />
-                  <ShieldCheck v-else-if="item.value === 'reauthorize'" :size="14" />
-                  <Pencil v-else-if="item.value === 'rename'" :size="14" />
-                  <Download v-else-if="item.value === 'export'" :size="14" />
-                  <Trash2 v-else-if="item.value === 'delete'" :size="14" />
-                </template>
-              </DropdownMenu>
-            </div>
-          </div>
+                  {{ p.tenant_name }}
+                </td>
+                <td class="project-token-column"><ProjectConsumption :consumption="p.consumption" /></td>
+                <td class="created-at" :title="p.created_at">
+                  {{ formatRelativeTime(p.created_at) }}
+                </td>
+                <td class="project-actions">
+                  <DropdownMenu
+                    :open="openDropdownId === p.id"
+                    :items="getProjectMenuItems(p)"
+                    @update:open="handleProjectMenuOpenChange(p.id, $event)"
+                    @select="handleProjectMenuSelect(p, $event)"
+                  >
+                    <template #trigger>
+                      <IconButton size="sm" label="项目操作菜单">
+                        <MoreHorizontal :size="16" aria-hidden="true" />
+                      </IconButton>
+                    </template>
+                    <template #icon="{ item }">
+                      <ExternalLink v-if="item.value === 'open'" :size="14" />
+                      <Pause v-else-if="item.value === 'stop'" :size="14" />
+                      <Play v-else-if="item.value === 'resume'" :size="14" />
+                      <ShieldCheck v-else-if="item.value === 'reauthorize'" :size="14" />
+                      <Pencil v-else-if="item.value === 'rename'" :size="14" />
+                      <Download v-else-if="item.value === 'export'" :size="14" />
+                      <Trash2 v-else-if="item.value === 'delete'" :size="14" />
+                    </template>
+                  </DropdownMenu>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
+
+      <p v-if="hasProjectsSnapshot" class="project-count" role="status" aria-live="polite">
+        {{ filteredProjects.length }} 个项目
+      </p>
 
       <Dialog
         :open="Boolean(renameTarget)"
         title="重命名项目"
-        description="更新项目在列表和工作空间中显示的名称。"
         :dismissible="!renameSaving"
         @update:open="handleRenameDialogOpenChange"
       >
@@ -305,9 +285,22 @@
       </Dialog>
 
       <ConfirmAction
+        :open="Boolean(resumeRetryTarget)"
+        title="重试继续项目"
+        description="将重新核验并恢复原现场，不重跑已成功的 Bootstrap。物理恢复确认后可能继续后续研究并产生模型费用。"
+        confirm-label="确认重试继续"
+        tone="warning"
+        :loading="Boolean(pendingProjectId)"
+        :confirm-disabled="!resumeRetryTarget || !canPerform(resumeRetryTarget.id, 'resume')"
+        @update:open="(open) => { if (!open && !pendingProjectId) resumeRetryTarget = null }"
+        @confirm="confirmResumeRetry"
+      >
+        <Alert v-if="actionError" tone="danger" title="项目操作失败">{{ actionError }}</Alert>
+      </ConfirmAction>
+      <ConfirmAction
         :open="Boolean(finishTarget)"
         title="结束评估"
-        description="结束后不能恢复本次评估；未完成工作将进入收尾，可基于已有证据生成部分报告。确认结束吗？"
+        description="结束后不能恢复本次评估。系统将终止所属研究执行，保留已保存材料；独立报告、聊天和复测不受影响，不会自动生成报告。确认结束吗？"
         confirm-label="确认结束评估"
         tone="danger"
         :loading="Boolean(pendingProjectId)"
@@ -386,9 +379,7 @@
         @confirm="saveDelete"
       />
     </div>
-    <!-- /.projects-container -->
   </div>
-  <!-- /.projects-page -->
 </template>
 
 <script setup lang="ts">
@@ -409,19 +400,18 @@ import {
   Play,
   Plus,
   ShieldCheck,
+  Search,
   Trash2,
-  Wrench,
 } from '@lucide/vue'
 import { ConfirmAction, ErrorState, FilterBar } from '@/components/patterns'
+import SearchFilter from '@/components/patterns/SearchFilter.vue'
 import {
   Alert,
-  Badge,
   Button,
   Checkbox,
   Dialog,
   DropdownMenu,
   EmptyState,
-  FormField,
   IconButton,
   Input,
   Select,
@@ -430,19 +420,18 @@ import {
 import type { DropdownMenuOption, SelectOption } from '@/components/ui'
 import type { ProjectSummary } from '@/api/types'
 import { useProjectsPage } from './useProjectsPage'
+import ProjectStatusObservation from './ProjectStatusObservation.vue'
+import ProjectConsumption from './ProjectConsumption.vue'
+import { actionReasonText, isResumeRetry, projectResumeLabel } from './projectRuntime'
 import NewProject from './NewProject.vue'
 import ProjectSchedules from './ProjectSchedules.vue'
 import CreationRequestRecovery from './CreationRequestRecovery.vue'
 
 const route = useRoute()
 const router = useRouter()
-const showSchedules = computed(() => route.query.view === 'schedules')
-function setView(schedules: boolean) {
-  const query = { ...route.query }
-  if (schedules) query.view = 'schedules'
-  else delete query.view
-  void router.replace({ path: '/projects', query })
-}
+const showSchedules = computed(
+  () => route.name === 'ProjectSchedules' || route.query.view === 'schedules',
+)
 const newProjectSession = ref(false)
 const newProjectOpen = ref(false)
 const newProjectTrigger = shallowRef<HTMLElement | null>(null)
@@ -480,8 +469,13 @@ const {
   formatRelativeTime,
   getProjectStatus,
   runtimeById,
+  runtimeUpdatedAtFor,
+  observationExpired,
+  runtimeError,
+  runtimeFetching,
+  runtimeNow,
+  refreshRuntimeObservation,
   getScenarioLabel,
-  getSegmentCount,
   hasProjectsSnapshot,
   hasStaleProjectsError,
   isError,
@@ -505,6 +499,12 @@ const {
   sortBy,
   tenantOptions,
 } = useProjectsPage()
+const hasFilters = computed(
+  () =>
+    Boolean(searchQuery.value.trim()) ||
+    activeSegment.value !== 'all' ||
+    selectedTenantId.value !== 'all',
+)
 const { data: pendingSchedules } = useQuery({
   queryKey: ['project-schedules'],
   queryFn: listProjectSchedules,
@@ -521,15 +521,21 @@ const sortOptions: SelectOption[] = [
   { value: 'created_desc', label: '最近创建' },
   { value: 'created_asc', label: '最早创建' },
   { value: 'facts_desc', label: '事实数量最多' },
-  { value: 'intents_desc', label: '活跃度最高' },
+  { value: 'intents_desc', label: '待处理与执行中工作最多' },
 ]
-const tenantFilterOptions = computed<SelectOption[]>(() => [
-  { value: 'all', label: '全部 Tenant' },
+const tenantFilterOptions = computed(() => [
+  { value: 'all', label: '全部账户' },
   ...tenantOptions.value.map((tenant) => ({
     value: tenant.id,
     label: `${tenant.name} (${tenant.id})`,
   })),
 ])
+
+function clearFilters() {
+  searchQuery.value = ''
+  activeSegment.value = 'all'
+  selectedTenantId.value = 'all'
+}
 
 const deleteProjectDescription = computed(() =>
   deleteTarget.value
@@ -555,6 +561,13 @@ function handleDeleteDialogOpenChange(open: boolean) {
   if (!open && !deleteSaving.value) deleteTarget.value = null
 }
 
+const resumeRetryTarget = ref<ProjectSummary | null>(null)
+async function confirmResumeRetry() {
+  if (!resumeRetryTarget.value) return
+  await changeStatus(resumeRetryTarget.value.id, 'resume')
+  if (!actionError.value) resumeRetryTarget.value = null
+}
+
 function getProjectMenuItems(project: ProjectSummary): DropdownMenuOption[] {
   const items: DropdownMenuOption[] = [{ value: 'open', label: '进入工作空间' }]
   if (project.schedule_id) items.push({ value: 'schedule', label: '查看启动计划' })
@@ -563,11 +576,14 @@ function getProjectMenuItems(project: ProjectSummary): DropdownMenuOption[] {
     items.push({
       value: 'stop',
       label: '暂停项目',
+      description: '暂停满12小时将自动结束，工作文件保留',
       disabled: !canPerform(project.id, 'pause'),
       separatorBefore: true,
     })
-  } else if (project.status === 'paused') {
-    if (runtimeById.value.get(project.id)?.actions?.reauthorize?.allowed) {
+  }
+  if (project.status === 'paused' || isResumeRetry(project) ||
+    project.execution_control?.action === 'resume' && project.execution_control.state === 'requested') {
+    if (project.status === 'paused' && runtimeById.value.get(project.id)?.actions?.reauthorize?.allowed) {
       items.push({
         value: 'reauthorize',
         label: '重新确认授权',
@@ -577,7 +593,7 @@ function getProjectMenuItems(project: ProjectSummary): DropdownMenuOption[] {
     }
     items.push({
       value: 'resume',
-      label: '继续项目',
+      label: projectResumeLabel(project),
       disabled: !canPerform(project.id, 'resume'),
       separatorBefore: !runtimeById.value.get(project.id)?.actions?.reauthorize?.allowed,
     })
@@ -589,11 +605,12 @@ function getProjectMenuItems(project: ProjectSummary): DropdownMenuOption[] {
       label: '结束评估',
       disabled: !canPerform(project.id, 'finish'),
       tone: 'danger',
+      separatorBefore: true,
     })
   }
 
   items.push(
-    { value: 'rename', label: '重命名项目' },
+    { value: 'rename', label: '重命名项目', separatorBefore: true },
     { value: 'export', label: '导出配置 (YAML)' },
     {
       value: 'delete',
@@ -614,7 +631,12 @@ function handleProjectMenuSelect(project: ProjectSummary, value: string) {
     void router.push(`/project-schedules/${project.schedule_id}`)
   else if (value === 'open') navigateToWorkspace(project.id)
   else if (value === 'stop') changeStatus(project.id, 'pause')
-  else if (value === 'resume') changeStatus(project.id, 'resume')
+  else if (value === 'resume') {
+    if (isResumeRetry(project) && canPerform(project.id, 'resume')) {
+      openDropdownId.value = null
+      resumeRetryTarget.value = project
+    } else void changeStatus(project.id, 'resume')
+  }
   else if (value === 'reauthorize') confirmReauthorization(project)
   else if (value === 'finish') confirmFinish(project)
   else if (value === 'rename') openRenameDialog(project)
@@ -628,11 +650,6 @@ void listElement
 <style src="./Projects.css" scoped></style>
 
 <style scoped>
-.view-header--actions {
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: var(--space-3);
-}
 .project-row-status--scheduled {
   display: grid;
   justify-items: start;

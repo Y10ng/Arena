@@ -1,17 +1,19 @@
 <template>
   <main class="login-page">
-    <Card as="section" padding="none" class="login-card" aria-labelledby="login-title">
-      <div class="login-brand">
-        <span class="login-logo" aria-hidden="true">A</span>
-        <div>
-          <p class="login-kicker">Arena</p>
-          <h1 id="login-title">登录</h1>
-        </div>
-      </div>
-
-      <p class="login-copy">使用管理员创建的账户访问你的个人 Tenant 与授权资源。</p>
-
-      <form class="login-form" @submit.prevent="submit">
+    <header class="auth-header">
+      <span class="auth-brand"><span class="auth-mark" aria-hidden="true">A</span>Arena</span>
+      <IconButton
+        :label="uiStore.theme === 'dark' ? '切换到浅色主题' : '切换到深色主题'"
+        @click="uiStore.toggleTheme"
+      >
+        <Sun v-if="uiStore.theme === 'dark'" :size="18" /><Moon v-else :size="18" />
+      </IconButton>
+    </header>
+    <section class="login-panel" aria-labelledby="login-title">
+      <header class="login-heading">
+        <h1 id="login-title">登录 Arena</h1>
+      </header>
+      <form class="login-form" :aria-busy="submitting" @submit.prevent="submit">
         <FormField v-slot="{ controlAttrs, invalid }" label="登录名" required>
           <Input
             v-model="loginName"
@@ -40,18 +42,21 @@
           {{ submitting ? '正在验证…' : '登录' }}
         </Button>
       </form>
-    </Card>
+    </section>
   </main>
 </template>
 
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Alert, Button, Card, FormField, Input } from '@/components/ui'
+import { Moon, Sun } from '@lucide/vue'
+import { Alert, Button, FormField, IconButton, Input } from '@/components/ui'
+import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
 import { safeRedirect } from './passwordValidation'
 
 const authStore = useAuthStore()
+const uiStore = useUIStore()
 const route = useRoute()
 const router = useRouter()
 const loginName = ref('')
@@ -81,76 +86,68 @@ const submit = async () => {
 
 <style scoped>
 .login-page {
-  min-height: 100vh;
+  min-height: calc(100 * var(--ui-dvh));
   display: grid;
-  place-items: center;
-  padding: var(--space-6);
-  background-color: var(--bg-base);
+  grid-template-rows: auto 1fr;
+  background: var(--color-canvas);
+  color: var(--text);
 }
-
-.login-card {
-  width: min(420px, 100%);
-  gap: 0;
-  padding: var(--space-6);
-  box-shadow: var(--shadow-xs);
-}
-
-.login-brand {
+.auth-header {
+  min-height: var(--layout-topbar-height);
   display: flex;
   align-items: center;
-  gap: var(--space-4);
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-7);
+  border-bottom: 1px solid var(--border);
 }
-
-.login-logo {
+.auth-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-object);
+  font-weight: var(--font-semibold);
+}
+.auth-mark {
   display: grid;
   place-items: center;
-  width: 64px;
-  height: 32px;
-  color: var(--text);
-  font-size: 28px;
-  font-weight: var(--font-semibold);
-  line-height: 1;
+  width: 31px;
+  height: 31px;
+  border-radius: var(--radius-md);
+  background: var(--color-primary);
+  color: var(--color-primary-contrast);
+  font-size: var(--text-lg);
 }
-
-.login-kicker {
-  color: var(--accent);
-  font-size: var(--text-sm);
-  font-weight: var(--font-semibold);
-  letter-spacing: 0.01em;
+.login-panel {
+  align-self: center;
+  width: min(440px, calc(100% - 48px));
+  margin: var(--space-8) auto;
 }
-
+.login-heading {
+  margin-bottom: var(--space-6);
+}
 h1 {
-  margin-top: 2px;
-  font-size: var(--text-2xl);
+  margin: 0;
+  font-size: var(--text-object);
   font-weight: var(--font-semibold);
-  line-height: var(--leading-snug);
+  line-height: 1.4;
   letter-spacing: var(--tracking-tight);
 }
-
-.login-copy {
-  margin: var(--space-5) 0;
-  color: var(--text-muted);
-}
-
 .login-form {
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: var(--space-5);
 }
-
 .login-error {
   font-size: var(--text-md);
+  overflow-wrap: anywhere;
 }
-
 @media (max-width: 520px) {
-  .login-page {
-    align-items: start;
-    padding: var(--space-4);
+  .auth-header {
+    padding-inline: var(--space-5);
   }
-
-  .login-card {
-    margin-top: 10vh;
-    padding: var(--space-5);
+  .login-panel {
+    align-self: start;
+    margin-top: calc(10 * var(--ui-vh));
   }
 }
 </style>

@@ -6,11 +6,13 @@
     tone="warning"
     :title="results[reference.request_id] ? '原请求已保存' : '有保存请求尚未确认'"
   >
-    {{ reference.operation === 'schedule' ? '计划' : '项目' }}请求 {{ reference.request_id }}。
-    <template v-if="!results[reference.request_id]">
-      刷新后不保留正文、文件或原
-      payload，只能查询；尚未查到不代表失败，不要按标题猜测或换键重复创建。
-    </template>
+    <p class="recovery-reference">
+      {{ reference.operation === 'schedule' ? '计划' : '项目' }}请求
+      <code>{{ reference.request_id }}</code>
+    </p>
+    <p v-if="!results[reference.request_id]" class="recovery-boundary">
+      刷新后仅保留请求引用，不保留正文、文件或原始提交内容。只能查询结果；尚未查到不代表失败，不要按标题猜测或重新创建。
+    </p>
     <p v-if="messages[reference.request_id]">{{ messages[reference.request_id] }}</p>
     <template #actions>
       <Button
@@ -89,3 +91,15 @@ async function enter(reference: CreationRequestReference) {
   }
 }
 </script>
+<style scoped>
+.recovery-reference {
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+}
+.recovery-reference code {
+  font-size: var(--text-sm);
+}
+.recovery-boundary {
+  margin: 0;
+}
+</style>

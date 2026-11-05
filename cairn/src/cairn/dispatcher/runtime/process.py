@@ -25,6 +25,7 @@ from cairn.dispatcher.runtime.exec_control import (
     EXEC_VERIFY_EXIT,
 )
 from cairn.dispatcher.runtime.temporary_files import runtime_temp_dir
+from cairn.dispatcher.runtime.pause_clock import ExecutionDetached
 
 LOG = logging.getLogger(__name__)
 EXEC_KILL_JOIN_TIMEOUT_SECONDS = 5.0
@@ -289,6 +290,7 @@ class ManagedProcess:
         self.on_execution_prepared = None
         self.on_execution_starting = None
         self.on_execution_started = None
+        self.on_stderr_ready: Callable[[str], None] | None = None
         self._terminal_confirmed = False
         self._returncode: int | None = None
         self._timed_out = False
@@ -308,6 +310,14 @@ class ManagedProcess:
         self._start_skipped = False
         self._control_path = f"/tmp/cairn-exec-{uuid.uuid4().hex}.json"
         self._retain_control_proof = False
+        self.pause_clock = None
+        self.command_timeout: float | None = None
+        self._container_stopped = threading.Event()
+
+    def confirm_container_stopped(self, container_id: str) -> None:
+        if container_id != self._container.id:
+            raise ValueError("container stop proof identity mismatch")
+        self._container_stopped.set()
 
     @property
     def execution_identity(self) -> tuple[str, str] | None:
@@ -338,7 +348,7 @@ class ManagedProcess:
     @property
     def execution_completed(self) -> bool:
         """只承认 supervisor 的 Docker 终态；输出传输错误另行阻止结果被接受。"""
-        return self._start_skipped or (
+        return self._start_skipped or self._container_stopped.is_set() or (
             not self._reader_abandoned
             and not self._terminator_abandoned
             and self._terminal_confirmed
@@ -355,15 +365,22 @@ class ManagedProcess:
                 self._result = ProcessResult(1, "", "", cancelled=True, cancel_reason=self._cancel_reason)
                 return
         container_id = self._container.id
-        exec_info = self._api.exec_create(
-            container_id,
-            ["python3", "-c", EXEC_SUPERVISOR, self._control_path, *self.command],
-            stdout=True,
-            stderr=True,
-            stdin=False,
-            tty=False,
-            environment=self.env,
+        def create_exec():
+            return self._api.exec_create(
+                container_id,
+                ["python3", "-c", EXEC_SUPERVISOR, self._control_path, *self.command],
+                stdout=True, stderr=True, stdin=False, tty=False, environment=self.env,
+            )
+
+        # 已准入任务在冻结后等待同一现场恢复；不能对 paused 容器 exec_create 后走失败清理。
+        exec_info = (
+            self.pause_clock.start(create_exec, lambda: self._cancel_reason is not None)
+            if self.pause_clock is not None else create_exec()
         )
+        if exec_info is None:
+            self._start_skipped = True
+            self._result = ProcessResult(1, "", "", cancelled=True, cancel_reason=self._cancel_reason)
+            return
         self._exec_id = _docker_exec_id(exec_info)
         self._execution_identity = (container_id, self._exec_id)
         # mandatory durable 绑定必须先于 reader/exec_start；回调失败时命令仍未执行。
@@ -376,6 +393,12 @@ class ManagedProcess:
         try:
             self._stdout_path, self._stdout_file = self._create_output_file("stdout")
             self._stderr_path, self._stderr_file = self._create_output_file("stderr")
+            if self.on_stderr_ready is not None:
+                try:
+                    # 观测者只接管独立读取，不在 Docker 输出排空线程发网络请求。
+                    self.on_stderr_ready(self._stderr_path)
+                except Exception as exc:
+                    LOG.warning("stderr observation start failed error=%s", type(exc).__name__)
             self._reader = threading.Thread(target=self._read_stream, daemon=True)
             self._reader.start()
         except Exception:
@@ -389,7 +412,23 @@ class ManagedProcess:
                 return self._result
             if self._reader is None:
                 raise RuntimeError("process has not been started")
-            self._reader.join(timeout=timeout)
+            # 宿主线程保持在线；被冻结的容器不能消耗平台执行预算。
+            clock = self.pause_clock.now if self.pause_clock is not None else time.monotonic
+            started = clock()
+            budget = min(value for value in (timeout, self.command_timeout) if value is not None) if any(value is not None for value in (timeout, self.command_timeout)) else None
+            while self._reader.is_alive():
+                if self.pause_clock is not None:
+                    try:
+                        self.pause_clock.check_attached()
+                    except ExecutionDetached:
+                        # 仅断开宿主输出等待，绝不发送信号或解析业务终态。
+                        self._reader_abandoned = True
+                        self._close_active_stream()
+                        self._finalize_output_files()
+                        raise
+                self._reader.join(timeout=0.1)
+                if self._cancel_reason is not None or (budget is not None and clock() - started >= budget):
+                    break
             if self._reader.is_alive():
                 # 超时时同时 kill 和关闭 HTTP stream，避免 reader 永久阻塞在迭代器中。
                 self._timed_out = self._cancel_reason is None
@@ -455,8 +494,8 @@ class ManagedProcess:
             self._terminator.start()
 
     def _terminate(self) -> None:
-        # 先关闭输出连接，不能让它无界排在 Docker kill 后；close 不是退出证明。
-        self._close_active_stream()
+        # 先给 runner 有界收口机会；提前断开 attach 会丢失 Docker 与 supervisor 一致的退出事实。
+        # communicate 仍独立限制等待，连接关闭本身始终不是退出证明。
         assert self._exec_id is not None
         running: bool | None = None
         try:
@@ -470,6 +509,7 @@ class ManagedProcess:
                 type(exc).__name__,
             )
         if running is False:
+            self._close_active_stream()
             return
         try:
             control_finished = self._signal_execution()
@@ -492,6 +532,8 @@ class ManagedProcess:
                 )
         except _DOCKER_TRANSPORT_ERRORS as exc:
             LOG.warning("exec termination failed exec_id=%s error=%s", self._exec_id, type(exc).__name__)
+        finally:
+            self._close_active_stream()
 
     def cancel(self, reason: str) -> None:
         with self._lifecycle_lock:
@@ -513,17 +555,23 @@ class ManagedProcess:
             # 启动尝试必须先跨过调用方 durable 边界；失败时 Docker exec 尚未启动。
             if self.on_execution_starting is not None:
                 self.on_execution_starting()
-            with self._lifecycle_lock:
-                self._execution_start_attempted = True
             try:
                 # demux=True 将 stdout/stderr 分离，便于 artifact 和监控分别记录。
-                stream = self._api.exec_start(
-                    self._exec_id,
-                    detach=False,
-                    tty=False,
-                    stream=True,
-                    demux=True,
+                def start_exec():
+                    with self._lifecycle_lock:
+                        self._execution_start_attempted = True
+                    return self._api.exec_start(
+                        self._exec_id, detach=False, tty=False, stream=True, demux=True,
+                    )
+
+                stream = (
+                    self.pause_clock.start(start_exec, lambda: self._cancel_reason is not None)
+                    if self.pause_clock is not None else start_exec()
                 )
+                if stream is None and self._cancel_reason is not None:
+                    self._start_skipped = True
+                    self._returncode = 1
+                    return
             except BaseException:
                 with self._lifecycle_lock:
                     self._exec_start_finished = True
@@ -553,6 +601,8 @@ class ManagedProcess:
                 if stderr:
                     self._write_output(self._stderr_file, self._stderr_preview, stderr)
             self._stream_completed = True
+        except ExecutionDetached:
+            self._reader_abandoned = True
         except Exception as exc:
             # reader 异常不能静默丢失；若 stderr 为空，将诊断写入同一受控输出文件。
             self._read_error = str(exc)
@@ -565,21 +615,27 @@ class ManagedProcess:
             self._close_stream(stream)
             # 即使调用方已放弃等待，也只能通过 inspect 获取晚到的明确终态；
             # 已返回的超时结果与 browser unmanaged fence 不因此被重新解释。
-            exit_code = 137 if self._timed_out else 1
-            try:
-                exit_code = (
-                    1 if self._start_skipped else self._resolve_exit_code()
-                )
-            except BaseException as exc:
-                self._read_error = self._read_error or (
-                    "Docker exec terminal resolution failed: "
-                    f"{type(exc).__name__}"
-                )
-            finally:
-                if not self._reader_abandoned:
-                    self._returncode = exit_code
+            if self.pause_clock is not None and self.pause_clock.detached:
+                # 冻结的原执行仍由 durable fence 保护，不能 exec 终态助手或清理其凭据。
+                self._reader_abandoned = True
                 self._finalize_output_files()
                 self._done.set()
+            else:
+                exit_code = 137 if self._timed_out else 1
+                try:
+                    exit_code = (
+                        1 if self._start_skipped else self._resolve_exit_code()
+                    )
+                except BaseException as exc:
+                    self._read_error = self._read_error or (
+                        "Docker exec terminal resolution failed: "
+                        f"{type(exc).__name__}"
+                    )
+                finally:
+                    if not self._reader_abandoned:
+                        self._returncode = exit_code
+                    self._finalize_output_files()
+                    self._done.set()
 
     def _write_output(self, output: BinaryIO | None, preview: _BoundedPreview, data: bytes) -> None:
         with self._output_lock:

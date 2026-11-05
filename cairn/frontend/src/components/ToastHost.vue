@@ -8,7 +8,12 @@
       :role="liveRole(toast.type)"
       :aria-live="livePoliteness(toast.type)"
       aria-atomic="true"
+      @mouseenter="uiStore.pauseToast(toast.id, 'hover')"
+      @mouseleave="uiStore.resumeToast(toast.id, 'hover')"
+      @focusin="uiStore.pauseToast(toast.id, 'focus')"
+      @focusout="resumeAfterFocus(toast.id, $event)"
     >
+      <span class="toast-icon"><component :is="toastIcon(toast.type)" :size="18" aria-hidden="true" /></span>
       <span class="toast-text">{{ toast.text }}</span>
       <button
         class="toast-close"
@@ -16,17 +21,39 @@
         aria-label="关闭通知"
         @click="uiStore.removeToast(toast.id)"
       >
-        <span aria-hidden="true">&times;</span>
+        <X :size="16" aria-hidden="true" />
       </button>
     </div>
   </TransitionGroup>
 </template>
 
 <script setup lang="ts">
+import { onBeforeUnmount } from 'vue'
+import { CircleAlert, CircleCheck, Info, TriangleAlert, X } from '@lucide/vue'
 import type { ToastMessage } from '@/stores/ui'
 import { useUIStore } from '@/stores/ui'
 
 const uiStore = useUIStore()
+
+function resumeAfterFocus(id: string, event: FocusEvent) {
+  if (event.relatedTarget instanceof Node && (event.currentTarget as HTMLElement).contains(event.relatedTarget)) return
+  uiStore.resumeToast(id, 'focus')
+}
+
+onBeforeUnmount(() => {
+  // 宿主卸载不应让悬停／焦点暂停永久留在全局 store。
+  for (const toast of uiStore.toasts) {
+    uiStore.resumeToast(toast.id, 'hover')
+    uiStore.resumeToast(toast.id, 'focus')
+  }
+})
+
+const toastIcon = (type: ToastMessage['type']) => {
+  if (type === 'danger') return CircleAlert
+  if (type === 'warn') return TriangleAlert
+  if (type === 'success') return CircleCheck
+  return Info
+}
 
 const liveRole = (type: ToastMessage['type']): 'alert' | 'status' =>
   type === 'danger' || type === 'warn' ? 'alert' : 'status'
@@ -38,67 +65,78 @@ const livePoliteness = (type: ToastMessage['type']): 'assertive' | 'polite' =>
 <style scoped>
 .toast-stack {
   position: fixed;
-  inset-block-end: max(var(--space-4), env(safe-area-inset-bottom));
+  inset-block-start: max(calc(var(--layout-topbar-height) + var(--space-3)), env(safe-area-inset-top));
   inset-inline-end: max(var(--space-4), env(safe-area-inset-right));
   z-index: var(--z-toast);
-  width: min(var(--overlay-toast-width), calc(100vw - var(--space-8)));
+  width: min(var(--overlay-toast-width), calc(100 * var(--ui-vw) - var(--space-8)));
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  max-height: calc(100 * var(--ui-dvh) - var(--layout-topbar-height) - var(--space-6));
+  overflow-y: auto;
   pointer-events: none;
 }
 
 .toast-card {
   --toast-tone: var(--color-info);
-  --toast-tone-soft: var(--color-info-soft);
 
   width: 100%;
   min-width: 0;
-  border: 1px solid var(--border-strong);
-  border-inline-start: var(--space-1) solid var(--toast-tone);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
-  overflow: hidden;
+  max-height: min(calc(40 * var(--ui-dvh)), 360px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   pointer-events: auto;
-  background:
-    linear-gradient(90deg, var(--toast-tone-soft), transparent var(--space-8)), var(--bg-elevated);
-  box-shadow: var(--shadow-pop);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-sm);
   color: var(--text);
 }
 
 .toast-card--success {
   --toast-tone: var(--color-success);
-  --toast-tone-soft: var(--color-success-soft);
 }
 
 .toast-card--warn {
   --toast-tone: var(--color-warning);
-  --toast-tone-soft: var(--color-warning-soft);
 }
 
 .toast-card--danger {
   --toast-tone: var(--color-danger);
-  --toast-tone-soft: var(--color-danger-soft);
+}
+
+.toast-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--toast-tone) 10%, transparent);
+  color: var(--toast-tone);
 }
 
 .toast-text {
   min-width: 0;
   flex: 1 1 auto;
+  align-self: center;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   color: var(--text);
-  font-size: var(--text-sm);
-  font-weight: var(--font-medium);
+  font-size: var(--text-md);
+  font-weight: var(--font-normal);
   line-height: var(--leading-normal);
 }
 
 .toast-close {
-  width: var(--control-height-xs);
-  height: var(--control-height-xs);
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
   flex: 0 0 auto;
   border-radius: var(--radius-sm);
   display: inline-flex;
@@ -139,14 +177,13 @@ const livePoliteness = (type: ToastMessage['type']): 'assertive' | 'polite' =>
 .toast-enter-from,
 .toast-leave-to {
   opacity: 0;
-  transform: translateY(var(--space-2));
+  transform: translateY(calc(-1 * var(--space-1)));
 }
 
 @media (max-width: 640px) {
   .toast-stack {
     inset-inline: max(var(--space-3), env(safe-area-inset-left))
       max(var(--space-3), env(safe-area-inset-right));
-    inset-block-end: max(var(--space-3), env(safe-area-inset-bottom));
     width: auto;
   }
 

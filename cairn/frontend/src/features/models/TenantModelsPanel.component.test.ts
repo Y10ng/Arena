@@ -142,6 +142,23 @@ afterEach(() => {
 })
 
 describe('TenantModelsPanel', () => {
+  it('saves exact decimal pricing, explicit zero and blank without calling a model', async () => {
+    mocks.models = [{ ...model, pricing: { currency: 'USD', input: '2.5000', output: '3', cache_read: '1' } }]
+    mountPanel()
+    await edit()
+    expect(input('非缓存输入').value).toBe('2.5000')
+    await setInput('非缓存输入', '0')
+    await setInput('输出', '0.000000000001')
+    await setInput('缓存读取', '')
+    button('保存模型').click()
+    await flushPromises()
+    expect(mocks.updateTenantModel).toHaveBeenCalledWith(model.id, expect.objectContaining({
+      pricing: { currency: 'USD', input: '0', output: '0.000000000001', cache_read: null },
+      api_key: undefined,
+    }))
+    expect(mocks.testTenantModelDraft).not.toHaveBeenCalled()
+    expect(mocks.discoverTenantModelDraft).not.toHaveBeenCalled()
+  })
   it('opens an editor only on demand and saves a blank Key without discovery or testing', async () => {
     const wrapper = mountPanel()
     await flushPromises()

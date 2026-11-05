@@ -110,8 +110,8 @@ def claim_project_reason_record(project_id: str, body: ReasonClaimRequest) -> Pr
 
 def heartbeat_project_reason_record(project_id: str, body: HeartbeatRequest) -> ProjectMeta:
     with get_conn() as conn:
-        row = check_project_active(conn, project_id)
-        if _goal_driven_policy(row):
+        row = check_project_active(conn, project_id, task_run_id=body.task_run_id)
+        if _goal_driven_policy(row) and row["status"] == "active":
             stop_reason = advance_goal_driven_convergence(conn, project_id)
             if stop_reason is not None:
                 conn.commit()
@@ -150,7 +150,7 @@ def heartbeat_project_reason_record(project_id: str, body: HeartbeatRequest) -> 
 
 def release_project_reason_record(project_id: str, body: HeartbeatRequest) -> ProjectMeta:
     with get_conn() as conn:
-        check_project_active(conn, project_id)
+        check_project_active(conn, project_id, task_run_id=body.task_run_id)
         validate_execution_lease(conn, project_id, body.task_run_id, body.worker)
         expire_reason_leases(conn, project_id)
         row = get_project_or_404(conn, project_id)
@@ -227,7 +227,7 @@ def accept_depth_review(project_id: str, body):
                 raise HTTPException(409, "depth_review_already_accepted")
             intents = conn.execute("SELECT * FROM intents WHERE project_id = ? AND depth_review_fact_id = ? ORDER BY id", (project_id, accepted_id)).fetchall()
             return DepthReviewResponse(fact=Fact(**dict(accepted), assessment_record=record), intents=[intent_to_model(conn, row, project_id) for row in intents], project=project_meta_from_row(conn, project))
-        check_project_active(conn, project_id)
+        check_project_active(conn, project_id, task_run_id=body.task_run_id)
         if not policy_from_project_row(project).phased or progress.get("phase") != "depth_review":
             raise HTTPException(409, "depth_review_not_pending")
         expire_reason_leases(conn, project_id)

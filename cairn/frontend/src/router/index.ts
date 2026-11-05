@@ -47,7 +47,9 @@ const routes = [
         name: 'Reports',
         component: () => import('@/features/findings/ReportManagement.vue'),
       },
+      { path: 'agent', name: 'Agent', component: () => import('@/features/projects/ProjectAgent.vue') },
       { path: 'projects', name: 'Projects', component: Projects },
+      { path: 'project-schedules', name: 'ProjectSchedules', component: Projects },
       {
         path: 'verifications',
         name: 'Verifications',
@@ -72,11 +74,13 @@ const routes = [
         path: 'projects/:id',
         component: ProjectWorkspace,
         children: [
-          { path: '', name: 'WorkspaceGraph', component: GraphPage },
+          { path: '', redirect: (to: RouteLocation) => ({ name: 'WorkspaceOverview', params: to.params, query: to.query, hash: to.hash }) },
+          { path: 'overview', name: 'WorkspaceOverview', component: () => import('@/features/projects/WorkspaceOverview.vue') },
+          { path: 'graph', name: 'WorkspaceGraph', component: GraphPage },
           {
             path: 'agent',
             name: 'WorkspaceAgent',
-            component: () => import('@/features/projects/ProjectAgent.vue'),
+            redirect: (to: RouteLocation) => ({ name: 'Agent', query: { ...to.query, project: String(to.params.id) } }),
           },
           { path: 'runs', name: 'WorkspaceRuns', component: RunsPage },
           { path: 'hints', name: 'WorkspaceHints', component: HintsPage },

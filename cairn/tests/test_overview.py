@@ -9,6 +9,7 @@ import pytest
 
 from cairn.server.auth import RequestPrincipal, protect_cookie_request, verification_project_access_clause
 from cairn.server.routers import overview as router_module
+from cairn.server.services import overview as overview_service
 from cairn.server.services.overview import get_overview
 from cairn.server.services.vulnerabilities import vulnerability_read_scope, vulnerabilities_summary
 
@@ -16,6 +17,14 @@ from cairn.server.services.vulnerabilities import vulnerability_read_scope, vuln
 _NOW = "2026-10-27T00:00:00Z"
 _USER = RequestPrincipal(kind="user", subject_id="u1", tenant_id="t1", role="user")
 _ADMIN = RequestPrincipal(kind="user", subject_id="admin", tenant_id="ta", role="super_admin")
+
+
+@pytest.fixture(autouse=True)
+def consumption_projection(monkeypatch):
+    # 消费 SQL 与权限在隔离 PostgreSQL 接缝测试验证，此处只核对工作台复用同一来源。
+    projection = Mock(return_value={'coverage': 'recorded_only'})
+    monkeypatch.setattr(overview_service, 'overview_consumption', projection)
+    return projection
 
 
 def _connection(*results):
@@ -37,9 +46,11 @@ def _populated_connection():
 
 
 @pytest.mark.parametrize("principal", [_USER, _ADMIN])
-def test_overview_uses_shared_scope_bounded_projection_and_no_business_writes(principal):
+def test_overview_uses_shared_scope_bounded_projection_and_no_business_writes(principal, consumption_projection):
     conn = _populated_connection()
     result = get_overview(conn, principal)
+    consumption_projection.assert_called_once_with(conn, principal)
+    assert result.consumption == consumption_projection.return_value
     assert result.projects.total == 10
     assert result.projects.by_status == {"active": 7, "pending": 2, "paused": 1}
     assert result.vulnerabilities.total == 8

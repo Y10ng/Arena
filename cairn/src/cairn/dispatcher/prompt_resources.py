@@ -477,7 +477,8 @@ def required_prompt_tokens_for_contents(
 
 def validate_prompt_submission_tools(group: str, name: str, content: str) -> None:
     """旧受管模板仍可读取，但必须由用户显式更新为 SDK 工具提交才能执行。"""
-    missing = [tool for tool in ("submit_result", "register_artifact") if tool not in content]
+    required = ("submit_result", "save_report_segment") if name == "report.md" else ("submit_result", "register_artifact")
+    missing = [tool for tool in required if tool not in content]
     if missing:
         raise ValueError(
             f"prompt group {group} resource {name} missing SDK tools: " + ", ".join(missing)

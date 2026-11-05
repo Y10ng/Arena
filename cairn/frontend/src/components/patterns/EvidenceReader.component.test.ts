@@ -8,7 +8,7 @@ import type { EvidenceItem, TrafficFlowDetail, TrafficProjection, TrafficReadabl
 const api = vi.hoisted(() => ({ getTrafficFlow: vi.fn(), getTrafficReadable: vi.fn(), getTrafficProjection: vi.fn(), getTrafficBodyPreview: vi.fn() }))
 vi.mock('@/api/client', async (original) => ({ ...await original<typeof import('@/api/client')>(), ...api }))
 const Editor = defineComponent({
-  props: ['modelValue', 'readingState', 'readingView', 'httpDensity', 'variant'],
+  props: ['modelValue', 'readingState', 'readingView', 'variant'],
   setup(_props, { expose }) {
     const textarea = ref<HTMLTextAreaElement>()
     const selectTextRange = vi.fn((_start: number, _end: number) => { textarea.value!.scrollTop = 0 })
@@ -81,6 +81,29 @@ function render(items: EvidenceItem[] = [flowItem], slots = {}) {
   return wrapper
 }
 
+it('成对放大通知父工作区，已处理的 Esc 不收起，收起保留编辑器并回焦', async () => {
+  const reader = render()
+  await reader.setProps({ fillHeight: true })
+  await flushPromises()
+  const editor = reader.getComponent(Editor).vm
+  editor.$emit('overflow-change', true)
+  await flushPromises()
+  await reader.get('[aria-label="放大成对报文"]').trigger('click')
+  expect(reader.emitted('expandedChange')?.at(-1)).toEqual([true])
+  const handled = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+  handled.preventDefault()
+  reader.element.dispatchEvent(handled)
+  await flushPromises()
+  expect(reader.find('[aria-label="收起成对报文"]').exists()).toBe(true)
+  editor.$emit('overflow-change', false)
+  await flushPromises()
+  await reader.trigger('keydown', { key: 'Escape' })
+  await flushPromises()
+  expect(reader.emitted('expandedChange')?.at(-1)).toEqual([false])
+  expect(reader.getComponent(Editor).vm.selectTextRange).toBe(editor.selectTextRange)
+  expect(document.activeElement).toBe(reader.get('[aria-label="放大成对报文"]').element)
+})
+
 it('公共头整合父插槽、采集状态和可聚焦重建说明，诊断不重复占据正文', async () => {
   const reader = render([flowItem], { 'header-context': '<span>当前选择 · 页外</span>', 'header-actions': '<button>详情</button>' })
   await flushPromises()
@@ -91,7 +114,7 @@ it('公共头整合父插槽、采集状态和可聚焦重建说明，诊断不�
   expect(reader.findAll('.evidence-reader__notice')).toHaveLength(0)
   expect(reader.text()).not.toContain('revision')
   expect(reader.text()).not.toContain('SHA-256')
-  expect(reader.findAllComponents(Editor).every((editor) => editor.props('httpDensity') === 'compact')).toBe(true)
+  expect(reader.findAllComponents(Editor).every((editor) => editor.props('variant') === 'http')).toBe(true)
   const info = reader.get('button[aria-label="结构化重建说明"]')
   ;(info.element as HTMLButtonElement).focus()
   expect(document.activeElement).toBe(info.element)
@@ -103,14 +126,14 @@ it('公共头整合父插槽、采集状态和可聚焦重建说明，诊断不�
   expect(reader.findAll('.evidence-reader__content').every((body) => !body.text().includes('SHA-256'))).toBe(true)
 })
 
-it('非HTTP和空选择也保留公共头插槽，普通文本不启用HTTP密度', async () => {
+it('非HTTP和空选择也保留公共头插槽，普通文本使用原件阅读器', async () => {
   const reader = render([{ id: 'text', kind: 'text', title: '记录', role: 'primary', source: 'manual', text: '合成记录' }], {
     'header-context': '<span>证据上下文</span>', 'header-actions': '<button>返回步骤</button>',
   })
   await reader.setProps({ presentation: 'step' })
   await flushPromises()
   expect(reader.get('.evidence-reader__header').text()).toBe('证据上下文返回步骤')
-  expect(reader.getComponent(Editor).props('httpDensity')).toBeUndefined()
+  expect(reader.getComponent(Editor).props('variant')).toBe('packet')
   await reader.setProps({ items: [] })
   expect(reader.get('.evidence-reader__header').text()).toContain('返回步骤')
   expect(reader.text()).toContain('未记录关键证据')

@@ -344,7 +344,7 @@ def _runtime_attempt(row) -> RuntimeAttempt:
     )
     if confirmed_generation and lifecycle.get("termination_confirmed") is True:
         stage = "stopped"
-    if "pause_requested" in row.keys() and row["pause_requested"]:
+    if "pause_requested" in row.keys() and row["pause_requested"] and stage != "stopped":
         stage = "stopping"
     return RuntimeAttempt(
         id=row["id"], task_type=row["task_type"], status=row["status"],
@@ -364,10 +364,9 @@ def _report_retry_decision(conn, project, now: str):
     failed = conn.execute(
         """
         SELECT runtime_context_json FROM task_runs
-        WHERE project_id = ? AND execution_generation = ?
-          AND task_type = 'report' AND status IN ('failed', 'timed_out')
+        WHERE project_id = ? AND task_type = 'report' AND status IN ('failed', 'timed_out')
         """,
-        (project["id"], project["execution_generation"]),
+        (project["id"],),
     ).fetchall()
     if not any(
         isinstance((claim := _object(row["runtime_context_json"]).get("report_claim")), dict)
@@ -411,11 +410,10 @@ def _current_report_attempts(conn, project) -> list[RuntimeAttempt]:
         """
         SELECT * FROM task_runs
         WHERE project_id = ? AND task_type = 'report'
-          AND execution_generation = ?
         ORDER BY CASE WHEN status IN ('queued', 'running') THEN 0 ELSE 1 END,
                  COALESCE(ended_at, started_at) DESC, id DESC
         """,
-        (project["id"], project["execution_generation"]),
+        (project["id"],),
     ).fetchall()
     for row in rows:
         context = _object(row["runtime_context_json"])
@@ -860,6 +858,17 @@ def _runtime_axes(
     else:
         resource_state, resource_code = "unconfirmed", "resource_state_unconfirmed"
 
+    from .project_execution_control import execution_control
+
+    control = execution_control(project)
+    if run["task_type"] in {"bootstrap", "reason", "explore"}:
+        if control.get("state") == "paused":
+            process_state, process_code = "paused", "hot_pause_confirmed"
+            resource_state, resource_code = "retained", "hot_scene_retained"
+        elif control.get("action") == "finish" and control.get("state") == "stopped":
+            process_state, process_code, termination_confirmed = "terminated", "execution_domain_stopped", True
+            resource_state, resource_code = "retained", "project_materials_retained"
+
     return RuntimeAxes(
         task_run_id=run["id"],
         execution=execution,
@@ -945,6 +954,7 @@ def _runtime_recovery(
     runtime: ProjectRuntime,
     *,
     candidate_recovery: dict | None = None,
+    resume_retry: bool = False,
 ) -> RuntimeRecovery:
     code = runtime.code
     if runtime.project_status == "paused" and runtime.actions.reauthorize.allowed:
@@ -952,9 +962,12 @@ def _runtime_recovery(
             route="reauthorize",
             code=code,
         )
-    if runtime.project_status == "paused" and runtime.actions.resume.allowed:
-        return RuntimeRecovery(route="resume", code="project_paused")
-    if code in {"cleanup_pending", "project_finish_draining", "project_pause_draining"}:
+    if runtime.actions.resume.allowed and (
+        runtime.project_status == "paused"
+        or resume_retry
+    ):
+        return RuntimeRecovery(route="resume", code="project_paused" if runtime.project_status == "paused" else code)
+    if code in {"cleanup_pending", "project_finish_draining", "project_pause_draining", "project_resuming"}:
         return RuntimeRecovery(route="wait", code=code)
     if code == "candidate_recovery_unknown" and candidate_recovery is not None:
         return RuntimeRecovery(
@@ -1051,29 +1064,10 @@ def build_project_runtime(
                 elif candidate_recovery["status"] == "running":
                     message = "已要求结束评估，但原执行仍在运行；正在等待其退出后保留候选并完成收尾"
     elif status == "paused":
-        draining = actions["resume"]["reason"] == "project_pause_draining" or bool(runs)
-        state = "pausing" if draining else "paused"
-        if draining:
-            code = "project_pause_draining"
-            message = "正在暂停，等待原执行退出及资源清理确认"
-            if candidate_recovery is not None:
-                if candidate_recovery["status"] == "unknown":
-                    state, code = "blocked", "candidate_recovery_unknown"
-                    message = _candidate_recovery_message(candidate_recovery)
-                elif candidate_recovery["status"] == "running":
-                    message = "评估已暂停，但原执行仍在运行；正在等待其退出后保留候选并完成收尾"
-            if code == "project_pause_draining" and conn.execute(
-                "SELECT 1 FROM project_container_activations WHERE project_id = ? AND state = 'inventory' LIMIT 1",
-                (project_id,),
-            ).fetchone() is not None:
-                code = "container_inventory_unresolved"
-                message = "暂停尚未确认：升级前容器的原 Docker 环境未知，请管理员核查；不能把当前缺席当成已停止"
-        elif actions["reauthorize"]["allowed"]:
+        state, code, message = "blocked", "execution_scene_unavailable", "没有原执行的热暂停回执；保留文件不等于可恢复的进程现场"
+        if actions["reauthorize"]["allowed"]:
             code = authorization_reason or "project_reauthorization_required"
             message = AUTHORIZATION_DECISIONS[code][1]
-        else:
-            code = "project_paused"
-            message = "评估已暂停，已保存的进度和证据保留"
     elif (
         authorization_reason is not None
         and not runs
@@ -1106,9 +1100,52 @@ def build_project_runtime(
     elif scheduling is not None:
         code = scheduling.code
         state, message = DECISIONS[code]
+    from .project_execution_control import execution_control, is_resume_retry
+
+    control = execution_control(project)
+    action, physical = control.get("action"), control.get("state")
+    if action and status in {"active", "paused", "stopped"}:
+        # 控制回执优先于历史 Run 的 running 标记；独立报告的运行不代表研究还未冻结或结束。
+        if physical in {"failed", "lost"}:
+            state = "blocked"
+            code = "execution_scene_lost" if physical == "lost" else "execution_control_failed"
+            message = "未能核验原执行现场，物理状态未确认；已保存材料保留，不会自动重建或重跑" if physical == "lost" else "物理控制尚未成功，不能宣称已暂停、恢复或结束；原归属与材料保留"
+            if action == "resume" and actions["resume"]["allowed"]:
+                message += "；可重试继续，重新核验原现场后才放行研究"
+        elif physical == "requested":
+            state, code, message = {
+                "pause": ("pausing", "project_pause_draining", "暂停已受理，正在冻结原执行域；不等待模型返回或销毁现场"),
+                "resume": ("starting", "project_resuming", "恢复已受理，正在恢复原执行域；物理确认前不派发新研究"),
+                "finish": ("stopping", "project_finish_draining", "结束已受理，正在终止研究执行域全部进程；材料保留"),
+            }[action]
+            if control.get("owner_unknown"):
+                state, code, message = "blocked", "project_execution_owner_unknown", "原研究执行归属未知，无法确认物理控制；未释放归属或重建现场"
+        elif action == "pause" and physical == "paused":
+            state, code, message = "paused", "project_paused", "研究执行域已物理暂停，原进程与内存现场保留；独立报告不受影响"
+            if not control.get("resources"):
+                message = "已暂停新研究派发，当前无在途执行现场；已保存材料保留"
+            if authorization_reason:
+                code = authorization_reason
+                message += "；真实授权已失效，不能直接恢复执行"
+        elif action == "finish" and physical == "stopped":
+            state, code, message = "stopped", "stopped", "研究执行域已确认结束，证据与工作文件保留；独立报告不受影响"
+        if physical != "running":
+            research = conn.execute(
+                "SELECT id FROM task_runs WHERE project_id = ? AND task_type IN ('bootstrap', 'reason', 'explore') "
+                "ORDER BY CASE WHEN status IN ('queued', 'running') THEN 0 ELSE 1 END, "
+                "COALESCE(ended_at, started_at) DESC, id DESC LIMIT 1", (project_id,),
+            ).fetchone()
+            preferred_axis_task_run_id = research["id"] if research else None
+            scheduling = None
+    if status == "stopped" and project["coverage_stop_reason"] == "pause_timeout":
+        message = "连续暂停满12小时，已自动请求结束；" + message
+        if action == "finish" and physical == "stopped":
+            code = "pause_timeout"
+            message = "连续暂停满12小时，研究执行域已确认自动结束，工作文件保留；独立报告与周期计划不受影响"
     runtime_view = ProjectRuntime(
         project_id=project_id, observed_at=now, execution_generation=generation,
         project_status=status, state=state, code=code, message=message,
+        execution_control=control,
         dispatcher=dispatcher, scheduling=scheduling, active_runs=runs,
         last_error=error, last_activity=_last_activity(conn, project_id), actions=actions,
     )
@@ -1128,6 +1165,7 @@ def build_project_runtime(
         recovery=_runtime_recovery(
             runtime_view,
             candidate_recovery=candidate_recovery,
+            resume_retry=is_resume_retry(project),
         ),
     )
 

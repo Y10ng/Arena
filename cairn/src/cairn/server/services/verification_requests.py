@@ -111,8 +111,8 @@ def _delete_block_reason(row, runs: list, project) -> str | None:
     if (row["terminal_kind"] is None or not all(_run_ended(run) for run in runs)
             or any(run["execution_generation"] != project["execution_generation"] for run in runs)):
         return "请先停止并等待执行结束"
-    if runs and _cleanup(runs)["status"] != "removed":
-        return "执行环境尚未回收，请等待回收完成后再删除"
+    if runs and _cleanup(runs)["status"] not in {"stopped", "removed"}:
+        return "执行环境尚未确认停机，请等待停机完成后再删除"
     return None
 
 
@@ -146,10 +146,13 @@ def _source(conn, row) -> dict:
 
 
 def _input_source(row, *, conn=None, principal: RequestPrincipal | None = None) -> dict | None:
+    from cairn.vulnerability_number import vulnerability_number
+
     if row["source_project_id"] is None:
         return None
     source = {"type": "platform_vulnerability", "project_id": row["source_project_id"],
               "vulnerability_id": row["source_vulnerability_id"],
+              "number": vulnerability_number(row["source_project_id"], row["source_vulnerability_id"]),
               "input_mode": "current_vulnerability" if row["report_type"] == "platform_vulnerability" else "copied_snapshot"}
     if principal is not None:
         from cairn.server.auth import _project_access_exists
@@ -225,27 +228,32 @@ def _materials(conn, project_id: str) -> list[dict]:
 
 
 def _platform_secrets(conn, project_id: str, task_run_id: str | None = None) -> list[bytes]:
-    from .model_credentials import (
-        CredentialConfigurationError, CredentialDecryptionError, decrypt_credential_version,
-    )
     project = get_project_or_404(conn, project_id)
-    secrets = []
     runs = conn.execute(
         "SELECT * FROM task_runs WHERE project_id = ? AND " + ("id = ?" if task_run_id else "task_type = 'external_verify'"),
         (project_id, task_run_id) if task_run_id else (project_id,),
     ).fetchall()
     if task_run_id and not runs:
         raise HTTPException(409, "verification_execution_secrets_unavailable")
+    return _execution_secrets(conn, project["tenant_id"], runs)
+
+
+def _execution_secrets(conn, tenant_id, runs):
+    """按实际运行的租户及不可变凭据版本核对准出，研究与会话共用。"""
+    from .model_credentials import (
+        CredentialConfigurationError, CredentialDecryptionError, decrypt_credential_version,
+    )
+    secrets = []
     for run in runs:
         binding = raw_task_run_runtime_context(run).get("execution_binding") or {}
         model = conn.execute("SELECT * FROM tenant_models WHERE tenant_id = ? AND id = ?",
-                             (project["tenant_id"], binding.get("model_id"))).fetchone()
+                             (tenant_id, binding.get("model_id"))).fetchone()
         # 无法还原当次来源时拒绝新交付，不假称已检查历史凭据，也不改写已有档案。
         if model is None or not binding.get("credential_version_id"):
             raise HTTPException(409, "verification_execution_secrets_unavailable")
         try:
             secret, credential = decrypt_credential_version(
-                conn, tenant_id=project["tenant_id"], model_id=binding["model_id"],
+                conn, tenant_id=tenant_id, model_id=binding["model_id"],
                 version_id=binding["credential_version_id"],
             )
         except (HTTPException, CredentialConfigurationError, CredentialDecryptionError) as exc:
@@ -282,6 +290,9 @@ def _is_bound_session_file(conn, artifact, prefix: bytes) -> bool:
         owner = value
     else:
         return False
+    # 会话可能持有迁移前项目 header 或从材料复制的内部 session；变更归属不解除准出限制。
+    if artifact.get("conversation_id"):
+        return True
     if owner.get("project_id") != artifact["project_id"] or not isinstance(owner.get("session"), str):
         return False
     return conn.execute(
@@ -290,8 +301,8 @@ def _is_bound_session_file(conn, artifact, prefix: bytes) -> bool:
     ).fetchone() is not None
 
 
-def _artifact_input_allowed(conn, artifact) -> bool:
-    return _artifact_allowed(conn, artifact, public=False)
+def _artifact_input_allowed(conn, artifact, *, content: bytes | None = None, source_checks: dict | None = None) -> bool:
+    return _artifact_allowed(conn, artifact, public=False, content=content, source_checks=source_checks)
 
 
 def _artifact_deliverable(conn, artifact, *, content: bytes | None = None,
@@ -303,8 +314,9 @@ def _artifact_allowed(conn, artifact, *, public: bool, content: bytes | None = N
                       source_checks: dict | None = None) -> bool:
     if not artifact_is_verification_material(artifact):
         return False
-    # 只复用本次只读链的副本来源判断，不缓存凭据、内容或最终交付许可。
-    identity = (artifact["project_id"], artifact["sha256"], artifact["size"])
+    # 仅在本次操作内复用来源和项目边界；不跨请求缓存最终许可。
+    owner_field = "conversation_id" if artifact.get("conversation_id") else "project_id"
+    identity = (artifact[owner_field], artifact["sha256"], artifact["size"])
     internal = source_checks.get(identity) if source_checks is not None else None
     if internal is None:
         # 在 PostgreSQL 中投影并去重来源，避免装载同内容原件的全部 metadata。
@@ -314,7 +326,7 @@ def _artifact_allowed(conn, artifact, *, public: bool, content: bytes | None = N
             "'source_path', NULLIF(metadata_json, '')::json -> 'source_path', "
             "'registered_path', NULLIF(metadata_json, '')::json -> 'registered_path'"
             ")::text AS metadata_json FROM artifacts "
-            "WHERE project_id = ? AND sha256 = ? AND size = ?",
+            f"WHERE {owner_field} = ? AND sha256 = ? AND size = ?",
             identity,
         ).fetchall()
         internal = any(artifact_is_internal_file(original) for original in originals)
@@ -322,19 +334,31 @@ def _artifact_allowed(conn, artifact, *, public: bool, content: bytes | None = N
             source_checks[identity] = internal
     if internal:
         return False
-    # Prompt 复用冻结审计，指引复用 Runner 实际加载字节的审计；均不保存明文。
-    for event in conn.execute(
-        "SELECT e.payload_json FROM agent_events e JOIN task_runs r "
-        "ON r.project_id = e.project_id AND r.id = e.task_run_id "
-        "WHERE e.project_id = ? AND e.kind = 'prompt_rendered'",
-        (artifact["project_id"],),
-    ).fetchall():
-        prompt = json.loads(event["payload_json"])
-        if prompt.get("prompt_hash") == artifact["sha256"] and prompt.get("prompt_bytes") == artifact["size"]:
-            return False
-    try:
-        secrets = _platform_secrets(conn, artifact["project_id"], artifact["task_run_id"])
-    except HTTPException:
+    checks = source_checks if source_checks is not None else {}
+    prompt_key = ("prompts", owner_field, artifact[owner_field])
+    if prompt_key not in checks:
+        checks[prompt_key] = {
+            (prompt.get("prompt_hash"), prompt.get("prompt_bytes"))
+            for event in conn.execute(
+                "SELECT e.payload_json FROM agent_events e JOIN task_runs r "
+                f"ON r.{owner_field} = e.{owner_field} AND r.id = e.task_run_id "
+                f"WHERE e.{owner_field} = ? AND e.kind = 'prompt_rendered'", (artifact[owner_field],),
+            ).fetchall() for prompt in [json.loads(event["payload_json"])]
+        }
+    if (artifact["sha256"], artifact["size"]) in checks[prompt_key]:
+        return False
+    secret_key = ("secrets", owner_field, artifact[owner_field], artifact["task_run_id"])
+    if secret_key not in checks:
+        try:
+            if owner_field == "conversation_id":
+                from .agent_conversations import conversation_secrets
+                checks[secret_key] = conversation_secrets(conn, artifact["conversation_id"], artifact["task_run_id"])
+            else:
+                checks[secret_key] = _platform_secrets(conn, artifact["project_id"], artifact["task_run_id"])
+        except HTTPException:
+            checks[secret_key] = None
+    secrets = checks[secret_key]
+    if secrets is None:
         return False
     if content is not None:
         # 报告检查的必须是即将内嵌的同一份字节，不能重新开文件后检查另一份内容。
@@ -344,18 +368,26 @@ def _artifact_allowed(conn, artifact, *, public: bool, content: bytes | None = N
     return _file_input_allowed(conn, _artifact_disk_path_from_row(artifact), artifact["project_id"], secrets, public=public)
 
 
-def _resource_input_allowed(conn, resource) -> bool:
-    secrets = []
-    for run in conn.execute("SELECT id FROM task_runs WHERE project_id = ?", (resource["project_id"],)).fetchall():
+def _resource_input_allowed(conn, resource, *, source_checks: dict | None = None) -> bool:
+    checks = source_checks if source_checks is not None else {}
+    key = ("resource_boundaries", resource["project_id"])
+    if key not in checks:
+        secrets = []
         try:
-            secrets.extend(_platform_secrets(conn, resource["project_id"], run["id"]))
+            for run in conn.execute("SELECT id FROM task_runs WHERE project_id = ?", (resource["project_id"],)).fetchall():
+                secrets.extend(_platform_secrets(conn, resource["project_id"], run["id"]))
         except HTTPException:
-            return False
-    for event in conn.execute("SELECT payload_json FROM agent_events WHERE project_id = ? AND kind = 'prompt_rendered'",
-                              (resource["project_id"],)).fetchall():
-        prompt = json.loads(event["payload_json"])
-        if prompt.get("prompt_hash") == resource["sha256"] and prompt.get("prompt_bytes") == resource["size_bytes"]:
-            return False
+            checks[key] = None
+        else:
+            prompts = { (prompt.get("prompt_hash"), prompt.get("prompt_bytes"))
+                for event in conn.execute("SELECT payload_json FROM agent_events WHERE project_id = ? AND kind = 'prompt_rendered'", (resource["project_id"],)).fetchall()
+                for prompt in [json.loads(event["payload_json"])] }
+            checks[key] = (secrets, prompts)
+    if checks[key] is None:
+        return False
+    secrets, prompts = checks[key]
+    if (resource["sha256"], resource["size_bytes"]) in prompts:
+        return False
     return _file_input_allowed(conn, _project_resource_disk_path(resource["project_id"], resource["id"]),
                                resource["project_id"], secrets, public=False)
 
@@ -405,8 +437,10 @@ def _cleanup(runs: list) -> dict:
     if not runs:
         return {"status": "not_allocated", "error": None}
     cleanup = [raw_task_run_runtime_context(run).get("external_verification_cleanup") for run in runs]
-    if all(isinstance(item, dict) and item.get("status") == "removed" for item in cleanup):
-        return {"status": "removed", "error": None}
+    if all(isinstance(item, dict) and item.get("status") in {"stopped", "removed"} for item in cleanup):
+        # 历史真实 removed 不重写；只要还有停机保留资源，就不声称整体已移除。
+        status = "removed" if all(item["status"] == "removed" for item in cleanup) else "stopped"
+        return {"status": status, "error": None}
     error = next((item.get("error") for item in reversed(cleanup) if isinstance(item, dict) and item.get("error")), None)
     return {"status": "pending", "error": error}
 
@@ -524,8 +558,8 @@ def _detail(conn, row, principal: RequestPrincipal) -> dict:
     }
 
 
-def get_verification_request(request_id: str, principal: RequestPrincipal) -> dict:
-    with get_conn() as conn:
+def get_verification_request(request_id: str, principal: RequestPrincipal, *, conn=None) -> dict:
+    with (nullcontext(conn) if conn is not None else get_conn()) as conn:
         return _detail(conn, _owned_request(conn, request_id, principal, allow_pending=True), principal)
 
 
@@ -592,8 +626,18 @@ def delete_verification_request(request_id: str, principal: RequestPrincipal) ->
 
 def list_verification_requests(principal: RequestPrincipal, *, limit: int, offset: int,
                                external_id=None, mode=None, execution_status=None, outcome=None,
-                               source_project_id=None, source_vulnerability_id=None) -> dict:
+                               source_project_id=None, source_vulnerability_id=None, source_number=None, conn=None) -> dict:
     caller_scope(principal)
+    if source_number:
+        from cairn.vulnerability_number import parse_vulnerability_number
+
+        try:
+            source_project_id, parsed_id = parse_vulnerability_number(source_number, source_project_id)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if source_vulnerability_id and source_vulnerability_id != parsed_id:
+            raise HTTPException(422, "来源编号与漏洞身份不一致")
+        source_vulnerability_id = parsed_id
     if (source_project_id is None) != (source_vulnerability_id is None):
         raise HTTPException(422, "来源筛选必须同时指定 source_project_id 和 source_vulnerability_id")
     if source_project_id is not None:
@@ -607,7 +651,7 @@ def list_verification_requests(principal: RequestPrincipal, *, limit: int, offse
         if value is not None:
             sql += f" AND {column} = ?"
             params.append(value)
-    with get_conn() as conn:
+    with (nullcontext(conn) if conn is not None else get_conn()) as conn:
         items = [_summary(conn, row, principal) for row in conn.execute(sql + " ORDER BY created_at DESC, id DESC", tuple(params)).fetchall()]
     if execution_status is not None:
         items = [item for item in items if item["purge_state"] == "pending" or item["execution_status"] == execution_status]
@@ -623,7 +667,7 @@ def preview_platform_vulnerability(project_id: str, vulnerability_id: str, princ
         snapshot, _artifacts = read_platform_vulnerability_source(
             conn, project_id, vulnerability_id, principal, artifact_allowed=_artifact_input_allowed,
             resource_allowed=_resource_input_allowed,
-            observation_id=observation_id,
+            observation_id=observation_id, check_materials=False,
         )
         return snapshot | {"test_egress": public_project_egress(get_project_or_404(conn, project_id)).model_dump()}
 
@@ -750,9 +794,12 @@ def create_verification_request(body: CreateVerificationRequest, principal: Requ
             if platform_source is None and Path(main["path"]).suffix.casefold() not in {".md", ".txt", ".docx", ".png", ".jpg", ".jpeg"}:
                 raise HTTPException(422, "主资料仅支持 MD、TXT、DOCX、PNG 或 JPEG；平台快照必须通过上次请求复制")
         elif body.report.type == "platform_vulnerability":
+            source_checks = {}
             source_snapshot, source_artifacts = read_platform_vulnerability_source(
                 conn, body.report.project_id, body.report.vulnerability_id, principal,
-                artifact_allowed=_artifact_input_allowed, resource_allowed=_resource_input_allowed,
+                artifact_allowed=lambda connection, artifact, **kwargs: _artifact_input_allowed(
+                    connection, artifact, source_checks=source_checks, **kwargs),
+                resource_allowed=lambda connection, resource: _resource_input_allowed(connection, resource, source_checks=source_checks),
                 observation_id=body.report.observation_id, for_creation=True,
                 include_context_materials=target_url is None,
             )
@@ -1058,8 +1105,8 @@ def submit_verification_failure(request_id: str, body: VerificationFailureSubmis
         return _detail(conn, _owned_request(conn, request_id, principal), principal)
 
 
-def cancel_verification_request(request_id: str, principal) -> dict:
-    with schedule_transaction() as conn:
+def cancel_verification_request(request_id: str, principal, *, conn=None) -> dict:
+    with (nullcontext(conn) if conn is not None else schedule_transaction()) as conn:
         row = _locked_request(conn, request_id, principal)
         runs = conn.execute("SELECT * FROM task_runs WHERE project_id = ?", (row["project_id"],)).fetchall()
         if row["terminal_kind"] is not None and all(_run_ended(run) for run in runs):
@@ -1144,31 +1191,40 @@ def _read_utf8_preview(path: Path, size: int) -> tuple[str, int]:
     return text, len(content)
 
 
-def _report_artifact(conn, row, ref: dict) -> list[str]:
+def _report_artifact(conn, row, ref: dict, *, side: str = "artifact", excerpts=()) -> list[str]:
+    from cairn.report_readable import ReportSelection, _fenced, recorded_evidence_selections, selected_original
+
     artifact = conn.execute("SELECT * FROM artifacts WHERE project_id = ? AND id = ? AND task_run_id = ?",
                             (row["project_id"], ref["artifact_id"], row["current_task_run_id"])).fetchone()
     if artifact is None:
         return ["本轮原件不存在或归属不符，无法内嵌。", ""]
-    link = (f"/api/v1/verification-requests/{quote(row['id'], safe='')}/artifacts/"
-            f"{quote(artifact['id'], safe='')}")
-    controlled = f"[受控查看原件]({link})（需登录，不是离线证据包）"
     try:
         content = _artifact_disk_path_from_row(artifact).read_bytes()
     except OSError:
-        return [f"原件不可读取；{controlled}。", ""]
+        return ["原件不可读取，未内嵌。", ""]
     if len(content) != artifact["size"] or sha256(content).hexdigest() != artifact["sha256"]:
-        return [f"原件大小或 SHA256 不符，未内嵌；{controlled}。", ""]
+        return ["原件完整性校验失败，未内嵌。", ""]
     if not _artifact_deliverable(conn, artifact, content=content):
-        return [f"原件不允许内嵌交付；{controlled}。", ""]
+        return ["原件不允许内嵌交付。", ""]
     if artifact["kind"] == "screenshot" or _binary_content(content):
-        return [f"图片或二进制原件未内嵌；{controlled}。", ""]
+        return ["图片或二进制原件未内嵌。", ""]
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
-        return [f"原件不是 UTF-8 文本，未内嵌；{controlled}。", ""]
-    # 原件里的 fence 不能关闭报告代码块；只加展示边界，不改原文。
-    fence = "`" * max(3, max((len(match[0]) + 1 for match in re.finditer(r"`+", text)), default=3))
-    return [fence + "text", text, fence, ""]
+        return ["原件不是 UTF-8 文本，未内嵌。", ""]
+    selections = recorded_evidence_selections({side: ref, "excerpts": list(excerpts)}, {artifact["id"]: artifact})
+    if not selections:
+        return ["未记录关键选段；本导出不含该原件全文，不能据此补全证明。", ""]
+    packet = {"project": {"id": row["project_id"]}, "artifacts": [artifact],
+              "artifact_contents": {artifact["id"]: {"text": text}}}
+    lines = []
+    for selection in selections:
+        selected, complete = selected_original(ReportSelection.model_validate(selection), packet)
+        if not complete:
+            lines.extend(["关键节选；其余内容省略。", ""])
+        # 展示围栏由共用函数生成，原件中的 Markdown 仍逐字保留。
+        lines.extend([_fenced(selected, "text"), ""])
+    return lines
 
 
 def _report_flow_evidence(conn, row, item: dict) -> list[str]:
@@ -1176,34 +1232,36 @@ def _report_flow_evidence(conn, row, item: dict) -> list[str]:
     from .flow_evidence import freeze_report_flows
 
     # 复用已有确定性投影、准出与选段规则，不重抓包或把 flow 当成空 Artifact 槽。
-    flows, contents = freeze_report_flows(conn, row["project_id"], [{"evidence_items": [item]}])
+    try:
+        flows, contents = freeze_report_flows(conn, row["project_id"], [{"evidence_items": [item]}])
+    except HTTPException as exc:
+        if exc.status_code not in {404, 409}:
+            raise
+        return ["本交互原件缺失、尚未就绪或完整性校验失败，未补写内容。", ""]
     flow = flows[item["flow_id"]]
     if flow["scope"]["task_run_id"] != row["current_task_run_id"]:
         raise HTTPException(409, "verification_flow_execution_mismatch")
     packet = {"project": {"id": row["project_id"]}, "flow_evidence": flows, "flow_contents": contents}
     selections = recorded_evidence_selections(item, {}, flows, contents)
-    lines = [f"Flow {item['flow_id']} · revision {flow['revision']} · {flow['state']} · 结构化重建，非原始网络字节流", ""]
+    lines = ["以下为采集记录的结构化重建，非原始网络字节流。", ""]
     for side, label in (("request", "请求"), ("response", "响应")):
         projection = flow["projections"][side]
         if projection is None:
             lines.extend([f"本交互未记录{label}材料。", ""])
             continue
-        link = (f"/api/v1/projects/{quote(row['project_id'], safe='')}/traffic/"
-                f"{quote(item['flow_id'], safe='')}/bodies/{side}")
-        lines.extend([
-            f"**{label}** · {flow['representation']} · SHA-256 {projection['sha256']} · Body Artifact {projection['body_artifact_id']}", "",
-            f"[受控查看{label}原件]({link})（需登录，不是离线证据包）", "",
-        ])
+        lines.extend([f"**{label}**", ""])
         own = [selection for selection in selections if selection["side"] == side]
         for selection in own:
             text, complete = selected_original(ReportSelection.model_validate(selection), packet)
             lines.extend([
-                f"{'完整投影' if complete else '关键节选；其余内容省略'} · utf8-bytes={selection['byte_start']}:{selection['byte_end']}", "",
+                "完整重建文本" if complete else "关键节选；其余内容省略", "",
                 _fenced(text, "http"), "",
             ])
         if not own:
-            lines.extend([contents[item["flow_id"]][side].get("unavailable")
-                          or "未记录可交付关键选段；完整原件须单独授权读取。", ""])
+            content = contents[item["flow_id"]][side]
+            note = ("长流量未记录可交付关键选段，未补写其余内容。" if "selections" in content
+                    else content.get("unavailable") or "未记录可交付关键选段，不能据此补全本侧内容。")
+            lines.extend([note, ""])
     return lines
 
 
@@ -1215,8 +1273,6 @@ def _report_evidence_item(conn, row, item: dict, display_images: list[dict]) -> 
             lines.extend([image["unavailable_reason"], ""])
         else:
             lines.extend([f"![{image['caption']}](arena-image:{image['artifact_id']})", ""])
-    if item["kind"] == "http" and not images:
-        lines.extend(["本交互未提供可选数据包图片；请阅读以下正文与原始证据。", ""])
     if item.get("flow_id"):
         return lines + _report_flow_evidence(conn, row, item)
     sides = (("request", "请求"), ("response", "响应")) if item["kind"] == "http" else (("artifact", "原件"),)
@@ -1225,7 +1281,8 @@ def _report_evidence_item(conn, row, item: dict, display_images: list[dict]) -> 
         if item.get(side) is None:
             lines.extend([f"本条未记录{label}。", ""])
         else:
-            lines.extend(_report_artifact(conn, row, item[side]))
+            lines.extend(_report_artifact(conn, row, item[side], side=side,
+                                          excerpts=[excerpt for excerpt in item.get("excerpts", []) if excerpt["side"] == side]))
     return lines
 
 

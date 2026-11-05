@@ -7,14 +7,14 @@ from hashlib import sha256
 import json
 from typing import Any, Mapping
 
-from cairn.report_readable import REPORT_DATA_SCHEMA_VERSION
+from cairn.report_markdown import REPORT_MARKDOWN_SCHEMA_VERSION as REPORT_DATA_SCHEMA_VERSION
 from cairn.dispatcher.prompt_resources import DEFAULT_PROMPT_GROUP, validate_report_prompt_resources
 from cairn.dispatcher.prompting import load_prompt
 from .assessment_policy import execution_rejection_reason
 
 REPORT_POLICY_VERSION = 1
 REPORT_PACKET_VERSION = 2
-REPORT_OUTPUT_CONTRACT_VERSION = 4
+REPORT_OUTPUT_CONTRACT_VERSION = 5
 REPORT_COMPLETENESS_RULE_VERSION = 1
 REPORT_TEMPLATE_PROFILE = "assessment-report-packet-v1"
 DEFAULT_REPORT_PROMPT_GROUP = DEFAULT_PROMPT_GROUP
@@ -170,8 +170,8 @@ def parse_report_execution_plan(value: str) -> ReportExecutionPlan:
         or loaded.get("execution_contract_version") != 1
         or loaded.get("execution_engine") != "pi"
         or loaded.get("packet_version") != REPORT_PACKET_VERSION
-        or loaded.get("output_contract_version") != REPORT_OUTPUT_CONTRACT_VERSION
-        or loaded.get("report_data_schema_version") != REPORT_DATA_SCHEMA_VERSION
+        or (loaded.get("output_contract_version"), loaded.get("report_data_schema_version"))
+        not in {(4, 4), (REPORT_OUTPUT_CONTRACT_VERSION, REPORT_DATA_SCHEMA_VERSION)}
     ):
         raise ValueError("report_execution_contract_unsupported")
     return ReportExecutionPlan(**loaded)

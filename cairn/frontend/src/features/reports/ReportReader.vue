@@ -1,10 +1,11 @@
 <template>
-  <section class="report-reader" aria-label="报告阅读">
+  <section class="report-reader" :class="{ 'report-reader--embedded': embedded }" :aria-label="`${documentLabel}阅读`">
     <header class="report-reader-toolbar">
       <div class="report-reader-title"><slot name="title" /></div>
       <div class="report-reader-actions">
         <Button
           v-if="ready && mode === 'rendered' && headings.length"
+          ref="directoryToggle"
           class="report-reader-directory-toggle"
           variant="secondary"
           size="sm"
@@ -29,14 +30,15 @@
     <div
       v-else
       class="report-reader-body"
-      :class="{ 'report-reader-body--with-directory': mode === 'rendered' && headings.length }"
+      :class="{ 'report-reader-body--with-directory': mode === 'rendered' && headings.length && !embedded, 'report-reader-body--directory-open': directoryOpen && embedded }"
     >
       <nav
-        v-if="mode === 'rendered' && headings.length"
+        v-if="mode === 'rendered' && headings.length && (!embedded || directoryOpen)"
         :id="`${readerId}-directory`"
         class="report-reader-directory"
         :class="{ 'report-reader-directory--open': directoryOpen }"
-        aria-label="当前报告章节目录"
+        :aria-label="`当前${documentLabel}章节目录`"
+        @keydown.esc="closeDirectory"
       >
         <strong>章节目录</strong>
         <ol>
@@ -56,7 +58,7 @@
         ref="scrollPane"
         class="report-reader-scroll"
         tabindex="0"
-        :aria-label="mode === 'raw' ? '报告原文' : '报告正文'"
+        :aria-label="`${documentLabel}${mode === 'raw' ? '原文' : '正文'}`"
         @scroll="updateCurrentHeading"
         @click="handleContentClick"
       >
@@ -79,6 +81,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue'
 import { Button } from '@/components/ui'
+import { toLogicalPixels } from '@/lib/uiScale'
 import SafeReportMarkdown from './SafeReportMarkdown.vue'
 import type { ReportHeading } from './safeReportMarkdown'
 import type { ReportDisplayImage, ReportImageLoader } from './reportImages'
@@ -90,8 +93,10 @@ const props = withDefaults(
     images?: ReportDisplayImage[]
     loadImage?: ReportImageLoader
     ready?: boolean
+    embedded?: boolean
+    documentLabel?: '报告' | '文件'
   }>(),
-  { ready: true },
+  { ready: true, embedded: false, documentLabel: '报告' },
 )
 const mode = defineModel<'rendered' | 'raw'>('mode', { default: 'rendered' })
 const readerId = `report-${useId()}`
@@ -99,6 +104,14 @@ const headings = ref<ReportHeading[]>([])
 const firstLevel = computed(() => Math.min(...headings.value.map((heading) => heading.level)))
 const activeHeading = ref('')
 const directoryOpen = ref(false)
+const directoryToggle = ref<InstanceType<typeof Button> | null>(null)
+function closeDirectory(event: KeyboardEvent) {
+  if (!directoryOpen.value) return
+  event.preventDefault()
+  event.stopPropagation()
+  directoryOpen.value = false
+  directoryToggle.value?.$el.focus()
+}
 const scrollPane = ref<HTMLElement | null>(null)
 const positions = { rendered: 0, raw: 0 }
 let mounted = true
@@ -122,7 +135,7 @@ function jumpToHeading(id: string) {
   const heading = headingElement(id)
   if (!pane || !heading) return
   // 只移动正文所属滚动区，不能用 hash 锚点覆盖业务路由。
-  pane.scrollTop += heading.getBoundingClientRect().top - pane.getBoundingClientRect().top - 16
+  pane.scrollTop += toLogicalPixels(heading.getBoundingClientRect().top - pane.getBoundingClientRect().top) - 16
   heading.focus({ preventScroll: true })
   activeHeading.value = id
   directoryOpen.value = false
@@ -133,11 +146,11 @@ function updateCurrentHeading() {
   if (!pane) return
   positions[mode.value] = pane.scrollTop
   if (mode.value !== 'rendered') return
-  const top = pane.getBoundingClientRect().top + 24
+  const top = pane.getBoundingClientRect().top
   let current = headings.value[0]?.id ?? ''
   for (const heading of headings.value) {
     const element = headingElement(heading.id)
-    if (element && element.getBoundingClientRect().top <= top) current = heading.id
+    if (element && toLogicalPixels(element.getBoundingClientRect().top - top) <= 24) current = heading.id
   }
   activeHeading.value = current
 }
@@ -214,7 +227,7 @@ onBeforeUnmount(() => {
 .report-reader-title :deep(h1),
 .report-reader-title :deep(h2) {
   margin: 0;
-  font-size: var(--text-md);
+  font-size: var(--text-object);
   font-weight: var(--font-semibold);
   overflow-wrap: anywhere;
 }
@@ -227,7 +240,7 @@ onBeforeUnmount(() => {
   position: relative;
 }
 .report-reader-body--with-directory {
-  grid-template-columns: minmax(160px, 208px) minmax(0, 1fr);
+  grid-template-columns: 250px minmax(0, 1fr);
 }
 .report-reader-directory {
   min-width: 0;
@@ -256,8 +269,9 @@ onBeforeUnmount(() => {
   background: transparent;
   color: var(--text-muted);
   font: inherit;
-  font-size: var(--text-sm);
+  font-size: var(--text-body);
   line-height: var(--leading-normal);
+  transition: background-color var(--dur), color var(--dur);
   text-align: left;
   overflow-wrap: anywhere;
   cursor: pointer;
@@ -282,26 +296,17 @@ onBeforeUnmount(() => {
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--space-5);
+  padding: var(--space-5) var(--space-6);
   overscroll-behavior-y: contain;
   scrollbar-gutter: stable;
 }
 .report-reader-scroll :deep(.safe-report-markdown) {
   max-width: none;
-  font-size: 14px;
-  line-height: 23px;
+  font-size: var(--text-reading);
+  line-height: var(--leading-reading);
 }
 .report-reader-scroll :deep(.safe-report-markdown > div > :is(p, ul, ol, blockquote)) {
   max-width: 55em;
-}
-.report-reader-scroll :deep(h1) {
-  font-size: 20px;
-}
-.report-reader-scroll :deep(h2) {
-  font-size: 18px;
-}
-.report-reader-scroll :deep(h3) {
-  font-size: 16px;
 }
 .report-reader-scroll :deep([tabindex='-1']:focus) {
   outline: none;
@@ -309,7 +314,7 @@ onBeforeUnmount(() => {
 .report-reader-raw {
   margin: 0;
   color: var(--text);
-  font: var(--text-sm)/1.75 var(--font-mono);
+  font: var(--text-body)/var(--leading-reading) var(--font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -347,4 +352,14 @@ onBeforeUnmount(() => {
     padding: var(--space-4);
   }
 }
+.report-reader--embedded { background: transparent; }
+.report-reader--embedded .report-reader-toolbar { padding: var(--space-3) 0; }
+.report-reader--embedded .report-reader-directory-toggle.ui-button { display: inline-flex; }
+.report-reader--embedded .report-reader-body--directory-open { grid-template-rows: auto minmax(0, 1fr); }
+.report-reader--embedded .report-reader-directory { position: static; display: block; width: auto; max-height: 180px; padding: var(--space-2) 0; border-right: 0; border-bottom: 1px solid var(--border-subtle); background: transparent; box-shadow: none; }
+.report-reader--embedded .report-reader-directory > strong { display: none; }
+.report-reader--embedded .report-reader-scroll { padding: var(--space-4) 0; }
+.report-reader--embedded .report-reader-state { padding-inline: 0; }
+.report-reader--embedded .report-reader-title :deep(h2) { font-size: var(--text-section); }
+@media (prefers-reduced-motion: reduce) { .report-reader-directory button { transition: none; } }
 </style>

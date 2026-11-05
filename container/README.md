@@ -2,17 +2,18 @@
 
 统一执行入口为 `cairn-agent --request FILE`，使用独立的 [pi SDK 子项目](pi-agent/README.md)。旧 Claude Code、Codex、全局 pi CLI 不再安装或注入专属配置。默认镜像聚焦 Web 发现、深测与取证，保留 Playwright CLI/Chromium；Playwright MCP 和 Chrome DevTools MCP 预装备选但不默认启动，不安装 Kali 全套工具元包。
 
-默认本地镜像为 `arena-worker:local`，从仓库根目录构建，context 为 `container/`：
+Worker 与 executor 共用研究镜像 `arena-worker:local`，从仓库根目录构建，context 为 `container/`。主 Worker 仍以 `sleep infinity` 维持项目容器；每个 TaskRun 的 executor 显式以 `python3 -u /opt/cairn/task-executor/server.py` 启动，不给整个镜像设置执行服务入口。网关、collector 与网络 helper 使用独立的 `arena-traffic-gateway:local`，不运行 Worker 命令。两个镜像的构建命令：
 
 ```bash
-docker build -t arena-worker:local container
+docker build -t arena-worker:local container &&
+  docker build -t arena-traffic-gateway:local container/traffic-gateway
 ```
 
-镜像名可自定义，在 `runtime/dispatch.yaml` 中设置 `container.image`；默认 `images: []` 会引用该镜像。已有显式 `images[]` 时，实际执行由画像的 `image_ref` 指向注册项的 `image`，按使用的映射修改即可。
+镜像名可自定义，在 `runtime/dispatch.yaml` 中设置 `container.image`；默认 `images: []` 会引用该镜像。已有显式 `images[]` 时，实际执行由画像的 `image_ref` 指向注册项的 `image`，Worker 和 executor 都使用该研究镜像，不回退全局默认值。网关由 `container.traffic_gateway_image` 指定。自定义研究镜像也须提供执行服务与证书工具；旧 `task_executor_image` 不再是运行配置，差异化定制先合并再移除旧字段，不静默覆盖。
 
-完整应用安装、使用已有镜像、端口配置与更新统一见[部署指南](../docs/deployment-linux-zh.md)。`start.sh` 仅在默认镜像不存在时自动构建，不会因源码变化重建已有同名镜像；源码更新后须显式重新构建。**新部署包的 `deploy/update.sh --target OLD` 会在 install 后、start 及数据库迁移前，用新版代码带缓存构建配置中引用的默认本地镜像**，候选通过标签和无网络应用自检后才更新 tag。自定义引用保持不变并提示自行配套更新，缺失或无效引用明确失败；`-- --server-only` 明确跳过 Worker，不代表配套升级完成。部署 ZIP 仍不含 Worker 镜像或多阶段构建缓存。
+完整应用安装、使用已有镜像、端口配置、旧标准配置转换与更新统一见[部署指南](../docs/deployment-linux-zh.md)。`start.sh` 统一准备缺失的默认研究与网关镜像，已有镜像仅做各自离线检查，不会因源码变化刷新同名 tag；源码更新后须显式重新构建。**新部署包的 `deploy/update.sh --target OLD` 会在 install 后、start 及数据库迁移前，用新版代码带缓存构建配置引用的两个默认本地镜像**，候选通过各自无网络检查后才更新对应 tag。研究镜像检查 pi runner、执行服务和 certutil，网关检查采集依赖及入口，不套用 pi 标签。自定义引用保持不变并提示自行配套更新，缺失或无效引用明确失败；`-- --server-only` 跳过执行环境准备，不代表配套升级完成。部署 ZIP 仍不含镜像或多阶段构建缓存。
 
-Dockerfile 从固定 Node 24.16.0 分发层提供二进制。pi builder 与最终运行镜像继承相同的 Kali/Node 基础层，builder 内执行 `npm ci`、TypeScript 编译和离线 SDK 自检，再复制生产依赖和 `dist`；不复制宿主 `node_modules`。与应用无关的工具 / MCP 安装、补丁和用户初始化均位于应用复制前，`node_modules` 在 `dist` 前，应用复制后仍执行自检。基础镜像 / 架构、安装输入一致且缓存有效时，源码 / 指引变化不会触发未变工具的安装，lock 不变则复用 `npm ci`；首次跨版、层重排、历史 timeout 变化或缺缓存仍可能下载，不保证旧机器首次零下载。`.dockerignore` 排除宿主依赖、构建输出、运行目录与旧 CLI 配置。`AGENTS.md` 靠后复制到 `/opt/cairn/AGENTS.md`，由 runner 显式加载，不依赖 CLAUDE.md 自动发现。
+Dockerfile 从固定 Node 24.16.0 分发层提供二进制，Node 和 Kali 基础均固定实际 digest；普通应用构建不跟随浮动 latest。pi builder 与最终运行镜像继承相同的 Kali/Node 基础层，builder 内执行 `npm ci`、TypeScript 编译和离线 SDK 自检，再复制生产依赖和 `dist`；不复制宿主 `node_modules`。与应用无关的工具 / MCP 安装、补丁、用户初始化、libnss3-tools 和字体均位于执行服务及应用复制前，`node_modules` 在 `dist` 前，应用复制后仍执行自检。基础镜像 / 架构、安装输入一致且缓存有效时，源码 / 指引变化不会触发未变工具的安装，lock 不变则复用 `npm ci`；首次跨版、层重排、历史 timeout 变化或缺缓存仍可能下载，不保证旧机器首次零下载。`.dockerignore` 排除宿主依赖、构建输出、运行目录与旧 CLI 配置。`AGENTS.md` 靠后复制到 `/opt/cairn/AGENTS.md`，由 runner 显式加载，不依赖 CLAUDE.md 自动发现。
 
 离线自检命令为 `cairn-agent --version`、`cairn-agent --self-check`。Dispatcher readiness 只执行 `--self-check`，不创建普通请求、session 或候选结果，也不调用 provider；模型可用性由实际获准任务的正常执行结果体现。
 

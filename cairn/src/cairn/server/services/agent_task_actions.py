@@ -31,6 +31,7 @@ def validate_task_action_params(method, params):
 
         validate_attachment_ids(params.get("attachment_ids", []))
         body = {key: value for key, value in params.items() if key != "attachment_ids"}
+        body["library_selections"] = []
         model = CreateProjectRequest
     else:
         body, model = params, CreateIntentRequest

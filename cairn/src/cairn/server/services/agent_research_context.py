@@ -310,4 +310,6 @@ def admit_research_session_page(conn, project_id, params):
             "entries": entries, "missing": missing, "next_offset": page["next_offset"], "offset_unit": "jsonl_lines",
             "observed_bytes": page["observed_bytes"], "modified_at": page["modified_at"],
             "incomplete_tail": page["incomplete_tail"],
-            "scope": "读取时已落盘的完整 JSONL 行；运行中尚未落盘的内容和认证材料不可读，未修改原件。"}
+            "scope": "读取时已落盘的完整 JSONL 行；运行中尚未落盘的内容和认证材料不可读，未修改原件。",
+            "source_verification": "unverified",
+            "source_limitation": "Server 无法在发布时直接复核相同 session 页；只能作为未核验来源声明，不能填入 source_references。"}

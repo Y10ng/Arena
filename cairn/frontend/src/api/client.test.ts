@@ -36,7 +36,6 @@ import {
   getReportTemplate,
   getTenantMonitoringSummary,
   listAdminUsers,
-  listAdvisoryLibraryRevisions,
   listAllVulnerabilities,
   listKnowledgeFiles,
   listKnowledgeSets,
@@ -58,7 +57,7 @@ import {
   listVulnerabilities,
   importProjectResourceBatchZip,
   readKnowledgeFile,
-  readProjectResource,
+  projectResourceUrl,
   readPromptFile,
   projectInjectionPayloadExportUrl,
   requestAssessmentReportFinalization,
@@ -800,7 +799,6 @@ describe('console request cancellation', () => {
     await listKnowledgeSets(controller.signal)
     await listKnowledgeFiles('knowledge / one', controller.signal)
     await readKnowledgeFile('knowledge / one', 'nested/file.md', controller.signal)
-    await listAdvisoryLibraryRevisions('knowledge / one', controller.signal)
     await listPromptGroups(controller.signal)
     await listPromptFiles('prompt / one', controller.signal)
     await readPromptFile('prompt / one', 'reason.md', controller.signal)
@@ -810,7 +808,6 @@ describe('console request cancellation', () => {
       '/knowledge',
       '/knowledge/knowledge%20%2F%20one/files',
       '/knowledge/knowledge%20%2F%20one/files/nested/file.md',
-      '/libraries/knowledge%20%2F%20one/versions',
       '/prompt-groups',
       '/prompt-groups/prompt%20%2F%20one/files',
       '/prompt-groups/prompt%20%2F%20one/files/reason.md',
@@ -1123,7 +1120,7 @@ describe('project resources client', () => {
     await getProjectResourceConfig()
     await createProjectResourceBatch()
     await getProjectResourceBatch('batch / one')
-    await uploadProjectResourceBatchFile('batch / one', file, 'docs/diagram one.png')
+    await uploadProjectResourceBatchFile('batch / one', file, 'docs/diagram one.png', undefined, undefined, 'prm_' + 'a'.repeat(32))
     await importProjectResourceBatchZip('batch / one', zip)
     await updateProjectResourceBatchMember('batch / one', 'member / one', {
       path: 'docs/renamed.png',
@@ -1137,7 +1134,7 @@ describe('project resources client', () => {
       '/project-resource-config',
       '/project-resource-batches',
       '/project-resource-batches/batch%20%2F%20one',
-      '/project-resource-batches/batch%20%2F%20one/files?path=docs%2Fdiagram+one.png',
+      '/project-resource-batches/batch%20%2F%20one/files?path=docs%2Fdiagram+one.png&upload_id=prm_' + 'a'.repeat(32),
       '/project-resource-batches/batch%20%2F%20one/zip',
       '/project-resource-batches/batch%20%2F%20one/members/member%20%2F%20one',
       '/project-resource-batches/batch%20%2F%20one/members/member%20%2F%20one',
@@ -1177,12 +1174,6 @@ describe('project resources client', () => {
         jsonResponse({ project: { id: 'project / one' }, resources: [resource] }),
       )
       .mockResolvedValueOnce(jsonResponse([resource]))
-      .mockResolvedValueOnce({
-        status: 200,
-        ok: true,
-        headers: new Headers({ 'content-type': 'text/plain; charset=utf-8' }),
-        text: async () => content,
-      } as Response)
       .mockResolvedValueOnce(jsonResponse(resource))
       .mockResolvedValueOnce({ status: 204, ok: true, headers: new Headers() } as Response)
     vi.stubGlobal('fetch', fetchMock)
@@ -1199,7 +1190,7 @@ describe('project resources client', () => {
       project: { id: 'project / one' },
     })
     await expect(listProjectResources('project / one')).resolves.toHaveLength(1)
-    await expect(readProjectResource('project / one', 'resource / one')).resolves.toBe(content)
+    expect(projectResourceUrl('project / one', 'resource / one')).toBe('/projects/project%20%2F%20one/resources/resource%20%2F%20one')
     await expect(
       createProjectResource('project / one', request.resources[0]),
     ).resolves.toMatchObject({ id: 'resource / one' })
@@ -1208,7 +1199,6 @@ describe('project resources client', () => {
     expect(fetchMock.mock.calls.map(([path]) => path)).toEqual([
       '/projects',
       '/projects/project%20%2F%20one/resources',
-      '/projects/project%20%2F%20one/resources/resource%20%2F%20one',
       '/projects/project%20%2F%20one/resources',
       '/projects/project%20%2F%20one/resources/resource%20%2F%20one',
     ])
@@ -1218,14 +1208,13 @@ describe('project resources client', () => {
         body: JSON.stringify(request),
       }),
     )
-    expect(fetchMock.mock.calls[2][1]).toEqual({ credentials: 'same-origin' })
-    expect(fetchMock.mock.calls[3][1]).toEqual(
+    expect(fetchMock.mock.calls[2][1]).toEqual(
       expect.objectContaining({
         method: 'POST',
         body: JSON.stringify(request.resources[0]),
       }),
     )
-    expect(fetchMock.mock.calls[4][1]).toEqual(expect.objectContaining({ method: 'DELETE' }))
+    expect(fetchMock.mock.calls[3][1]).toEqual(expect.objectContaining({ method: 'DELETE' }))
   })
 
   it('lists tenant reports with encoded filters, pagination, and AbortSignal support', async () => {

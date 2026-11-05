@@ -84,7 +84,7 @@ vi.mock('@/components/patterns/TextEditor.vue', () => ({
     props: ['modelValue', 'fileName', 'disabled'],
     emits: ['update:modelValue'],
     template:
-      '<textarea data-testid="prompt-editor" :value="modelValue" :data-file-name="fileName" :disabled="disabled" @input="$emit(\'update:modelValue\', $event.target.value)" />',
+      '<div><slot name="heading" /><textarea data-testid="prompt-editor" :value="modelValue" :data-file-name="fileName" :disabled="disabled" @input="$emit(\'update:modelValue\', $event.target.value)" /></div>',
   },
 }))
 
@@ -348,17 +348,23 @@ describe('PromptGroupsConsole Tabs migration', () => {
     editor.dispatchEvent(new Event('input', { bubbles: true }))
     await flushPromises()
 
-    vi.mocked(window.confirm).mockReturnValueOnce(false)
     selectTab('bootstrap.md')
     await flushPromises()
+    const confirmation = document.querySelector('[role="alertdialog"]')!
+    expect(confirmation.textContent).toContain('放弃未保存的 Prompt 修改')
+    const cancel = [...confirmation.querySelectorAll<HTMLButtonElement>('button')].find(
+      (item) => item.textContent?.trim() === '继续编辑',
+    )!
+    cancel.click()
+    await flushPromises()
 
-    expect(window.confirm).toHaveBeenCalledWith('Prompt 文件存在未保存修改，确定要放弃吗？')
+    expect(window.confirm).not.toHaveBeenCalled()
     expect(tabByName('reason.md').getAttribute('aria-selected')).toBe('true')
     expect(mocks.readPromptFile).toHaveBeenCalledTimes(1)
     expect(editor.value).toBe('Changed draft')
   })
 
-  it('retains synchronous dirty confirmation for route leave', async () => {
+  it('等待主题确认后才决定离开，取消保稿且确认不写入文件', async () => {
     mountPage()
     await flushPromises()
 
@@ -368,10 +374,22 @@ describe('PromptGroupsConsole Tabs migration', () => {
     editor.dispatchEvent(new Event('input', { bubbles: true }))
     await flushPromises()
 
-    vi.mocked(window.confirm).mockReturnValueOnce(false)
-    const leaveGuard = mocks.beforeRouteLeave.mock.calls[0]?.[0] as () => boolean
-    expect(leaveGuard()).toBe(false)
-    expect(window.confirm).toHaveBeenCalledWith('Prompt 文件存在未保存修改，确定要放弃吗？')
+    const leaveGuard = mocks.beforeRouteLeave.mock.calls[0]?.[0] as () => Promise<boolean>
+    const leaving = leaveGuard()
+    await flushPromises()
+    const answer = (text: string) =>
+      [...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')]
+        .find((item) => item.textContent?.trim() === text)!
+        .click()
+    answer('继续编辑')
+    expect(await leaving).toBe(false)
+    expect(editor.value).toBe('Dirty route draft')
+    const accepted = leaveGuard()
+    await flushPromises()
+    answer('放弃修改')
+    expect(await accepted).toBe(true)
+    expect(mocks.writePromptFile).not.toHaveBeenCalled()
+    expect(window.confirm).not.toHaveBeenCalled()
   })
 
   it('commits the selected tab only after the requested file finishes loading', async () => {
@@ -476,12 +494,15 @@ describe('PromptGroupsConsole Tabs migration', () => {
     editor.value = 'Dirty draft'
     editor.dispatchEvent(new Event('input', { bubbles: true }))
     await flushPromises()
-    vi.mocked(window.confirm).mockReturnValueOnce(false)
-
     mocks.route.query = { focus: 'other', file: 'bootstrap.md' }
     await flushPromises()
+    expect(document.querySelectorAll('[role="alertdialog"]')).toHaveLength(1)
+    ;[...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')]
+      .find((item) => item.textContent?.trim() === '继续编辑')!
+      .click()
+    await flushPromises()
 
-    expect(window.confirm).toHaveBeenCalledTimes(1)
+    expect(window.confirm).not.toHaveBeenCalled()
     expect(mocks.router.replace).toHaveBeenLastCalledWith({
       query: { focus: 'default', file: 'reason.md' },
     })
@@ -678,7 +699,9 @@ describe('PromptGroupsConsole Tabs migration', () => {
     const wrapper = mountPage()
     await flushPromises()
 
-    document.body.querySelector<HTMLButtonElement>('button[title="克隆当前模板组"]')?.click()
+    document.body
+      .querySelector<HTMLButtonElement>('button[data-console-action="clone-prompt-group"]')
+      ?.click()
     await flushPromises()
     const cancel = [...document.body.querySelectorAll<HTMLButtonElement>('button')].find(
       (button) => button.textContent?.trim() === '取消',
@@ -713,7 +736,9 @@ describe('PromptGroupsConsole Tabs migration', () => {
     const wrapper = mountPage()
     await flushPromises()
 
-    const trigger = document.body.querySelector<HTMLButtonElement>('button[title="克隆当前模板组"]')
+    const trigger = document.body.querySelector<HTMLButtonElement>(
+      'button[data-console-action="clone-prompt-group"]',
+    )
     trigger?.focus()
     trigger?.click()
     await flushPromises()

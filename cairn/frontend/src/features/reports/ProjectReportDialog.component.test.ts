@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { VueWrapper } from '@vue/test-utils'
 import { ApiError } from '@/api/client'
 import { useUIStore } from '@/stores/ui'
+import { Select } from '@/components/ui'
 import type {
   AssessmentReportFinalization,
   ReportCapability,
@@ -56,15 +57,15 @@ const catalog: ReportTemplateCatalogEntry[] = [
     name: '管理摘要报告',
     description: '管理层模板',
     digest_sha256: 'b'.repeat(64),
-    compatibility_profiles: ['assessment-report-packet-v1'],
+    compatibility_profiles: [],
   },
   {
     key: 'other-report',
     is_default: false,
     supports_single_vulnerability: true,
     validation_error: null,
-    name: '不兼容模板',
-    description: '其他 profile',
+    name: '自定义报告',
+    description: '其他 profile 不影响正文有效性',
     digest_sha256: 'c'.repeat(64),
     compatibility_profiles: ['other-profile-v1'],
   },
@@ -312,24 +313,27 @@ describe('ProjectReportDialog', () => {
     expect(mocks.getAssessmentReportFinalization).toHaveBeenCalledTimes(2)
   })
 
-  it('uses the explicit default rather than catalog order and explains an invalid previous template', async () => {
+  it('上次模板正文无效时选择明确默认模板而非目录首项，保留历史模板详情', async () => {
     mocks.listReportTemplateCatalog.mockResolvedValue([
       catalog[1],
       catalog[0],
       {
         ...catalog[2]!,
         key: 'old-free-text',
-        compatibility_profiles: ['assessment-report-packet-v1'],
-        validation_error: '模板缺少必要槽位',
+        validation_error: '模板正文为空',
       },
     ])
     mocks.getAssessmentReportFinalization.mockResolvedValue(
       finalization({ status: 'failed', template_key: 'old-free-text' }),
     )
-    await mountDialog()
+    const { wrapper } = await mountDialog()
     await flushPromises()
     expect(document.body.querySelector('[role="combobox"]')?.textContent).toContain('安全评估报告')
-    expect(document.body.textContent).toContain('上次使用的模板已不兼容')
+    expect(document.body.querySelector('.report-technical-details')?.textContent).toContain('old-free-text')
+    expect(wrapper.getComponent(Select).props('options')).toEqual([
+      { value: 'management-report', label: '管理摘要报告' },
+      { value: 'security-report', label: '安全评估报告' },
+    ])
     buttonByText('重试生成').click()
     await flushPromises()
     expect(mocks.requestAssessmentReportFinalization).toHaveBeenCalledWith('project-a', {
@@ -348,10 +352,12 @@ describe('ProjectReportDialog', () => {
     await flushPromises()
 
     const dialog = document.body.querySelector('[role="dialog"]')
-    expect(dialog?.getAttribute('aria-labelledby')).toBeTruthy()
-    expect(dialog?.getAttribute('aria-describedby')).toBeTruthy()
-    expect(dialog?.textContent).toContain('项目报告')
-    expect(dialog?.textContent).toContain('查看已有报告，或选择模板生成项目总报告。')
+    const titleId = dialog?.getAttribute('aria-labelledby')
+    expect(titleId).toBeTruthy()
+    expect(document.getElementById(titleId!)?.textContent).toBe('项目报告')
+    expect(dialog?.hasAttribute('aria-describedby')).toBe(false)
+    expect(dialog?.textContent).toContain('已有报告')
+    expect(dialog?.textContent).toContain('本次生成')
     expect(document.body.querySelector('button[aria-label="关闭项目报告"]')).not.toBeNull()
     expect(mocks.getAssessmentReportFinalization).toHaveBeenCalledWith(
       'project-a',
@@ -360,20 +366,25 @@ describe('ProjectReportDialog', () => {
     expect(mocks.listReportTemplateCatalog).toHaveBeenCalledWith(expect.any(AbortSignal))
   })
 
-  it('selects a compatible template from the versionless catalog and submits only its key', async () => {
-    const { queryClient } = await mountDialog()
+  it.each([
+    ['管理摘要报告', 'management-report'],
+    ['自定义报告', 'other-report'],
+  ])('显式选择%s并仅提交key，不依赖模板profiles或项目template_profile', async (label, key) => {
+    const { queryClient } = await mountDialog(true, {
+      capability: { ...capability, template_profile: null },
+    })
     await flushPromises()
 
     expect(document.body.textContent).toContain('安全评估报告')
-    await selectOption('管理摘要报告')
-    expect(document.body.querySelector('[role="combobox"]')?.textContent).toContain('管理摘要报告')
-    expect(document.body.textContent).not.toContain('不兼容模板')
+    await selectOption(label)
+    expect(document.body.querySelector('[role="combobox"]')?.textContent).toContain(label)
+    expect(mocks.requestAssessmentReportFinalization).not.toHaveBeenCalled()
 
     buttonByText('生成报告').click()
     await flushPromises()
 
     expect(mocks.requestAssessmentReportFinalization).toHaveBeenCalledWith('project-a', {
-      template_key: 'management-report',
+      template_key: key,
     })
     expect(
       queryClient.getQueryData<AssessmentReportFinalization>([
@@ -417,7 +428,7 @@ describe('ProjectReportDialog', () => {
     )
     await flushPromises()
 
-    expect(document.body.textContent).toContain('所选模板已删除或不再兼容，请重新选择。')
+    expect(document.body.textContent).toContain('所选模板已删除或正文无效，请重新选择。')
     expect(document.body.querySelector('[role="combobox"]')?.textContent).toContain('管理摘要报告')
     expect(document.body.querySelector('[role="combobox"]')?.textContent).not.toContain(
       '安全评估报告',
@@ -428,7 +439,7 @@ describe('ProjectReportDialog', () => {
     expect(mocks.requestAssessmentReportFinalization).not.toHaveBeenCalled()
 
     await selectOption('安全评估报告')
-    expect(document.body.textContent).not.toContain('所选模板已删除或不再兼容')
+    expect(document.body.textContent).not.toContain('所选模板已删除或正文无效')
     expect(buttonByText('生成报告').disabled).toBe(false)
     buttonByText('生成报告').click()
     await flushPromises()
@@ -460,36 +471,29 @@ describe('ProjectReportDialog', () => {
     await flushPromises()
   })
 
-  it('shows active-project guidance without querying report resources', async () => {
-    await mountDialog(true, { projectStatus: 'active' })
-    await flushPromises()
+  it.each(['active', 'paused', 'completed', 'stopped'] as const)(
+    '%s 项目打开弹窗只读取状态和模板，用户显式确认后才生成',
+    async (projectStatus) => {
+      await mountDialog(true, { projectStatus })
+      await flushPromises()
 
-    expect(document.body.textContent).toContain('请先结束评估或等待项目完成')
-    expect(mocks.getAssessmentReportFinalization).not.toHaveBeenCalled()
-    expect(mocks.listReportTemplateCatalog).not.toHaveBeenCalled()
-  })
+      expect(mocks.getAssessmentReportFinalization).toHaveBeenCalledWith(
+        'project-a',
+        expect.any(AbortSignal),
+      )
+      expect(mocks.listReportTemplateCatalog).toHaveBeenCalledWith(expect.any(AbortSignal))
+      expect(document.body.querySelector('[role="combobox"]')).not.toBeNull()
+      expect(buttonByText('生成报告').disabled).toBe(false)
+      expect(mocks.requestAssessmentReportFinalization).not.toHaveBeenCalled()
+      buttonByText('生成报告').click()
+      await flushPromises()
+      expect(mocks.requestAssessmentReportFinalization).toHaveBeenCalledExactlyOnceWith('project-a', {
+        template_key: 'security-report',
+      })
+    },
+  )
 
-  it('reads paused report state without exposing generation controls', async () => {
-    await mountDialog(true, { projectStatus: 'paused' })
-    await flushPromises()
-
-    expect(document.body.textContent).toContain('暂停仅保留未完成工作')
-    expect(mocks.getAssessmentReportFinalization).toHaveBeenCalledWith(
-      'project-a',
-      expect.any(AbortSignal),
-    )
-    expect(mocks.listReportTemplateCatalog).not.toHaveBeenCalled()
-    expect(mocks.requestAssessmentReportFinalization).not.toHaveBeenCalled()
-    expect(document.body.querySelector('[role="combobox"]')).toBeNull()
-    expect(document.body.textContent).not.toContain('暂无可用报告模板')
-    expect(
-      [...document.body.querySelectorAll('button')].some((button) =>
-        ['生成报告', '重试生成', '再次生成'].includes(button.textContent?.trim() || ''),
-      ),
-    ).toBe(false)
-  })
-
-  it('shows an existing ready report while paused without allowing regeneration', async () => {
+  it('暂停项目保留已有报告阅读入口，并允许显式再次生成', async () => {
     mocks.listReports.mockResolvedValue(inventory)
     mocks.getAssessmentReportFinalization.mockResolvedValue(
       finalization({ status: 'ready', artifact_id: 'report-artifact-a' }),
@@ -498,7 +502,6 @@ describe('ProjectReportDialog', () => {
     await flushPromises()
 
     const artifact = document.body.querySelector<HTMLAnchorElement>('.report-read-link')
-    expect(document.body.textContent).toContain('暂停仅保留未完成工作')
     expect(artifact?.textContent).toBe('阅读报告')
     expect(artifact?.closest('details')).toBeNull()
     expect(artifact?.getAttribute('href')).toBe(
@@ -507,9 +510,15 @@ describe('ProjectReportDialog', () => {
     expect(document.body.querySelector<HTMLDetailsElement>('.report-technical-details')?.open).toBe(
       false,
     )
-    expect(mocks.listReportTemplateCatalog).not.toHaveBeenCalled()
+    expect(mocks.listReportTemplateCatalog).toHaveBeenCalledWith(expect.any(AbortSignal))
     expect(mocks.requestAssessmentReportFinalization).not.toHaveBeenCalled()
-    expect(document.body.querySelector('[role="combobox"]')).toBeNull()
+    expect(buttonByText('再次生成').disabled).toBe(false)
+    await selectOption('管理摘要报告')
+    buttonByText('再次生成').click()
+    await flushPromises()
+    expect(mocks.requestAssessmentReportFinalization).toHaveBeenCalledExactlyOnceWith('project-a', {
+      template_key: 'management-report',
+    })
   })
 
   it.each([null, 3])(
@@ -560,7 +569,7 @@ describe('ProjectReportDialog', () => {
     },
   )
 
-  it('shows an existing failed report while paused without allowing retry', async () => {
+  it('暂停项目保留生成错误，并允许显式重试', async () => {
     mocks.getAssessmentReportFinalization.mockResolvedValue(
       finalization({ status: 'failed', last_error: 'generation failed' }),
     )
@@ -568,10 +577,15 @@ describe('ProjectReportDialog', () => {
     await flushPromises()
 
     expect(document.body.textContent).toContain('报告生成错误')
-    expect(document.body.textContent).toContain('generation failed')
-    expect(mocks.listReportTemplateCatalog).not.toHaveBeenCalled()
+    expect(document.body.querySelector('.report-technical-details')?.textContent).toContain('generation failed')
+    expect(mocks.listReportTemplateCatalog).toHaveBeenCalledWith(expect.any(AbortSignal))
     expect(mocks.requestAssessmentReportFinalization).not.toHaveBeenCalled()
-    expect(document.body.querySelector('[role="combobox"]')).toBeNull()
+    expect(buttonByText('重试生成').disabled).toBe(false)
+    buttonByText('重试生成').click()
+    await flushPromises()
+    expect(mocks.requestAssessmentReportFinalization).toHaveBeenCalledExactlyOnceWith('project-a', {
+      template_key: 'security-report',
+    })
   })
 
   it('defers paused report reads until the dialog opens', async () => {
@@ -588,31 +602,17 @@ describe('ProjectReportDialog', () => {
       'project-a',
       expect.any(AbortSignal),
     )
-    expect(mocks.listReportTemplateCatalog).not.toHaveBeenCalled()
-  })
-
-  it('allows stopped projects and explains the incomplete snapshot semantics', async () => {
-    await mountDialog(true, { projectStatus: 'stopped' })
-    await flushPromises()
-
-    expect(document.body.textContent).toContain('将生成结束时点报告')
-    expect(document.body.textContent).toContain('属于未完成评估报告')
-    expect(mocks.getAssessmentReportFinalization).toHaveBeenCalledWith(
-      'project-a',
-      expect.any(AbortSignal),
-    )
-
-    buttonByText('生成报告').click()
-    await flushPromises()
-    expect(mocks.requestAssessmentReportFinalization).toHaveBeenCalledTimes(1)
+    expect(mocks.listReportTemplateCatalog).toHaveBeenCalledWith(expect.any(AbortSignal))
+    expect(buttonByText('生成报告').disabled).toBe(false)
+    expect(mocks.requestAssessmentReportFinalization).not.toHaveBeenCalled()
   })
 
   it.each([
-    ['assessment_report_tasks_not_quiescent', '请等待 Worker 完全退出后重试'],
-    ['assessment_report_stopped_tasks_not_quiescent', '请等待 Worker 完全退出后重试'],
-    ['project_pause_draining', '请等待收尾完成后重试'],
+    ['report_template_not_found', '所选模板已不存在，请刷新目录后重新选择。'],
+    ['assessment_report_template_content_missing', '所选模板尚无正文，请联系管理员补全后再生成。'],
+    ['assessment_report_template_invalid', '所选模板正文无效，请检查非空内容和大小限制。'],
   ])(
-    'maps stopped-project eligibility failure %s to actionable guidance',
+    '模板请求失败%s展示明确错误且允许修正后重试',
     async (code, message) => {
       mocks.requestAssessmentReportFinalization.mockRejectedValueOnce(
         new ApiError(code, 409, { detail: code }),

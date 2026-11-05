@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, readFileSync } from "node:fs";
 import { copyFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -30,6 +30,8 @@ import { AgentFailure, candidateLimits, envelope, object, PHASE_RESULT_KINDS, ty
 import { acquireSession, type SessionLease } from "./session.js";
 import { createTaskBashOperations } from "./task-execution.js";
 import { requestModel, REQUEST_PROVIDER, SDK_AUTH_PLACEHOLDER } from "./model.js";
+import { emptyUsage, recordUsage, usageResult } from "./usage.js";
+import { ConsumptionSpool } from "./consumption.js";
 
 import { assertPublicText, CHAT_SYSTEM_PROMPT, createProjectTools, PROJECT_TOOL_NAMES } from "./project-tools.js";
 import { CHAT_FILE_TOOLS, createChatBashOperations, createChatFileTools } from "./chat-workspace.js";
@@ -48,6 +50,15 @@ const SCHEMA_ERROR_BUDGET = 256;
 const SCHEMA_DIAGNOSTIC_VIEW_LIMIT = 32;
 const SCHEMA_COLLECTED_ERROR_BUDGET = 4096;
 const DEFAULT_BASH_TOOL_TIMEOUT_SECONDS = 120;
+
+export function executionNow(): number {
+  // 研究域挂载该只读偏移；独立报告和聊天没有此挂载，仍按各自正常预算计时。
+  let paused = 0;
+  try { paused = Number(readFileSync("/run/cairn-exec/paused-seconds", "utf8")); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  if (!Number.isFinite(paused) || paused < 0) throw new Error("execution_clock_invalid");
+  return performance.now() - paused * 1000;
+}
 
 export function createRequestBashToolDefinition(
   cwd: string,
@@ -153,9 +164,12 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
   const chatForbidden = chat ? [request.model.api_key, ...request.model.custom_headers.map(({ value }) => value), ...request.capabilities.project_tools!.forbidden_literals, request.capabilities.project_tools!.socket_path, CHAT_SYSTEM_PROMPT] : [];
   const toolCwd = chat ? request.capabilities.project_tools!.workspace_path : request.cwd;
   let finalText: string | undefined;
-  const deadline = performance.now() + request.timeout_seconds * 1000;
-  const readonly = chat || request.conclude_only || request.phase.endsWith("_conclude") || request.phase === "report_execute";
-  const concludeTimeoutSeconds = readonly ? 0 : (request.conclude_timeout_seconds ?? 0);
+  const deadline = executionNow() + request.timeout_seconds * 1000;
+  const readonly = !chat && (request.conclude_only || request.phase.endsWith("_conclude") || request.phase === "report_execute");
+  // 聊天由私有桥惰性准入研究；自然回答与结构化任务收口不是同一个开关。
+  const bridgedChat = chat && request.capabilities.project_tools!.research_execution.task_run_id === request.task_run_id;
+  const limitedTools = bridgedChat || readonly;
+  const concludeTimeoutSeconds = limitedTools ? 0 : (request.conclude_timeout_seconds ?? 0);
   const remainingTimeNoticeAt = deadline - Math.min(request.timeout_seconds, concludeTimeoutSeconds) * 1000;
   const reportCapability = request.capabilities.report_segments;
   const trafficCapability = request.phase === "report_execute" ? undefined : request.capabilities.http_traffic;
@@ -189,29 +203,34 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
   let candidateCaptureError: AgentFailure | undefined;
   let providerError: AgentFailure | undefined;
   let outputLimitReached = false;
-  let usageKnown = true;
-  let usageSeen = false;
-  const usage = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 };
+  let usage = emptyUsage();
   const audit = (event: string, extra: JsonObject = {}) => {
     // 调用处只生成固定码、声明路径和计数；不复制原参数，也不事后替换而改写诊断事实。
     options.audit?.({ protocol: "cairn-agent-audit-v1", timestamp: new Date().toISOString(), project_id: request.project_id, task_run_id: request.task_run_id, phase: request.phase, session: request.session, event, ...extra });
   };
+  const consumption = request.capabilities.consumption
+    ? new ConsumptionSpool(request.capabilities.consumption.spool_path, receipt => {
+      audit("consumption_gap", { consumption_id: request.capabilities.consumption!.id, receipt });
+    }) : undefined;
   const stop = (reason: "cancelled" | "deadline_exceeded") => {
     cancelled ??= reason;
     session?.agent.abort();
   };
   const onAbort = () => stop("cancelled");
   options.signal?.addEventListener("abort", onAbort, { once: true });
-  const timer = setTimeout(() => stop("deadline_exceeded"), request.timeout_seconds * 1000);
+  // 解冻后先核对执行时钟，不能让已到期的 Node 墙钟 timer 直接中止原 session。
+  const timer = setInterval(() => {
+    if (executionNow() >= deadline) stop("deadline_exceeded");
+  }, 100);
   let remainingTimeTimer: NodeJS.Timeout | undefined;
   const ensureActive = () => {
     if (options.signal?.aborted) stop("cancelled");
-    if (performance.now() >= deadline) stop("deadline_exceeded");
+    if (executionNow() >= deadline) stop("deadline_exceeded");
     if (cancelled) throw new AgentFailure(cancelled, cancelled === "cancelled" ? "Request cancelled" : "Request deadline exceeded");
   };
   try {
     ensureActive();
-    if (!readonly && !request.capabilities.task_execution) throw new AgentFailure("execution_binding_missing", "Task-bound test execution is required");
+    if (!bridgedChat && !readonly && !request.capabilities.task_execution) throw new AgentFailure("execution_binding_missing", "Task-bound test execution is required");
     const model = requestModel(request);
     let validator;
     let diagnosticValidators;
@@ -268,7 +287,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
     };
     const notifyRemainingTime = () => {
       if (candidate || cancelled) return;
-      const remainingSeconds = Math.max(0, Math.floor((deadline - performance.now()) / 1000));
+      const remainingSeconds = Math.max(0, Math.floor((deadline - executionNow()) / 1000));
       audit("execution_time_notice", { remaining_seconds: remainingSeconds });
       // 收尾窗口只提示剩余时间，不撤销工具权限、不打断在途调用或延长硬截止。
       session?.agent.steer({ role: "user", content: `Approximately ${remainingSeconds} seconds remain before the original execution deadline. Prepare a truthful submission; authorized tools remain available until then.`, timestamp: Date.now() });
@@ -277,7 +296,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
     const bashTool = createRequestBashToolDefinition(
       toolCwd,
       bashToolTimeoutSeconds,
-      () => Math.max(0, (deadline - performance.now()) / 1000),
+      () => Math.max(0, (deadline - executionNow()) / 1000),
       chat ? createChatBashOperations({ ...request.capabilities.project_tools!, forbidden_literals: chatForbidden }, () => currentToolCallId) : request.capabilities.task_execution ? createTaskBashOperations(request.capabilities.task_execution) : {
         async exec() { throw new AgentFailure("execution_binding_missing", "Read-only delivery cannot execute target tools"); },
       },
@@ -428,7 +447,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
     }
     if (reportSegments) customTools.push({
       name: "save_report_segment", label: "Save report segment",
-      description: "Durably save one bounded structural report content unit against the frozen binding. key is idempotent within this execution: identical content returns its existing handle, different content is rejected. Use reuse_source (description, steps, remediation) to explicitly reuse available fields from the selected frozen Observation; the program resolves recorded evidence and excerpts without copying them through the model. Evidence-based rewrites remain allowed. Split long findings by their natural fields or ordered steps, never truncate content. At most 256 artifacts and 32 MiB total; each segment at most 1 MiB. Saved segments are local material, not accepted reports. Returns only artifact_handle and key. Final submit_result must reference saved handles, never resend their body.",
+      description: "Durably save one bounded structural report content unit against the frozen binding. key is idempotent within this execution: identical content returns its existing handle, different content is rejected. Follow the supplied content schema. For Markdown writing, follow the selected example's structure, style and length, preserving explicit frozen source identities. A short report may be saved whole; split long text at coherent boundaries as one continuous article, never as standalone reports. Evidence insertion belongs to verified source references. Never truncate content. At most 256 artifacts and 32 MiB total; each segment at most 1 MiB. Saved segments are local material, not accepted reports. Returns only artifact_handle and key. Final submit_result must reference saved handles, never resend their body.",
       parameters: reportSegments.parameters, executionMode: "sequential",
       prepareArguments(args) {
         if (invalidArgumentCalls.has(currentToolCallId) || truncatedReportUnit) throw new AgentFailure("report_segment_invalid", "Report segment requires complete strict JSON from a completed tool response");
@@ -460,12 +479,20 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
       cwd: request.cwd, agentDir: lease.directory, authStorage, modelRegistry: registry, model,
       thinkingLevel: "off", sessionManager: lease.manager,
       settingsManager: SettingsManager.inMemory({
-        retry: { enabled: false, provider: { maxRetries: 1, timeoutMs: Math.ceil(request.timeout_seconds * 1000), maxRetryDelayMs: 1000 } },
+        // SDK 使用墙钟 timer；执行截止由上面的可扣暂停时钟通过 AbortSignal 控制。
+        // 传输 timer 取 Node 上限，避免恢复时旧预算 timer 先触发并重发同一请求。
+        retry: { enabled: false, provider: { maxRetries: 1, timeoutMs: 2_147_483_647, maxRetryDelayMs: 1000 } },
         compaction: { enabled: false }, enableSkillCommands: false, enableInstallTelemetry: false,
       }),
-      resourceLoader: loader(systemPrompt), tools: readonly ? safeTools : executionTools, customTools,
+      resourceLoader: loader(systemPrompt), tools: limitedTools ? safeTools : executionTools, customTools,
     });
     session = created.session;
+    const meteredStream = session.agent.streamFn;
+    session.agent.streamFn = (streamModel, context, streamOptions) => {
+      // 先记可观察的 SDK 调用开始；内部网络重试不冒充可完整计量的响应。
+      consumption?.begin();
+      return meteredStream(streamModel, context, streamOptions);
+    };
     if (reportSegments) {
       const originalStream = session.agent.streamFn;
       // 报告显式传递实际输出预算；普通探索保留原 SDK 选值，避免静默扩大原有费用范围。
@@ -486,7 +513,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
           if (content.length) projected.push({ ...message, content });
         }
         const refs = reportSegments.references();
-        if (refs.length) projected.push({ role: "user", content: `Durably saved report segments (local material, not Server acceptance): ${JSON.stringify(refs)}. Do not recreate their content. Continue only unfinished units and submit these handles in the final manifest.`, timestamp: Date.now() });
+        if (refs.length) projected.push({ role: "user", content: `Durably saved report segments (local material, not Server acceptance): ${JSON.stringify(refs)}\n这些是同一篇报告的已保存部分，不是独立小报告。用 read_evidence 按 path 回读必要的已保存正文，核对整篇结构、章节顺序和重复内容；继续时承接前文，不重新起标题或下结论。不要重发未修改的正文；需修订时用新 key 保存，旧段保留。最终 segment_refs 只选择成品版本的 artifact_handle 并按正文顺序提交，不携带 path 或 key。`, timestamp: Date.now() });
         return projected;
       };
     }
@@ -505,7 +532,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
         }
         return { block: true, reason: submissionMessage() };
       }
-      if (readonly && !safeTools.includes(context.toolCall.name)) {
+      if (limitedTools && !safeTools.includes(context.toolCall.name)) {
         submission.reject("tool_permission");
         attempted = true;
         return { block: true, reason: "conclude_only: target actions are disabled" };
@@ -541,6 +568,12 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
     };
     // 订阅 Agent 内核事件；该订阅会被 SDK await，候选 fsync 完成后才可进入参数准备和工具执行。
     session.agent.subscribe(async (event) => {
+      // 用量必须先于候选／正文校验落盘；error、aborted 也保留已知部分。
+      if (event.type === "message_update" && event.message.role === "assistant") consumption?.observe(event.message.usage);
+      if (event.type === "message_end" && event.message.role === "assistant") {
+        consumption?.observe(event.message.usage, true);
+        usage = recordUsage(usage, event.message.usage);
+      }
       if (event.type === "message_start" && event.message.role === "assistant") {
         assistantTurn += 1;
         outputLimitReached = false;
@@ -566,7 +599,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
         // 已阻断调用的结果使用 SDK terminate 标记，避免 abort 后额外的 aborted 消息覆盖恢复依据。
         if (reportSegments && providerError?.code === "model_output_limit" && object(event.result)) event.result.terminate = true;
         const authorizedAtEntry = authorizedToolCalls.delete(event.toolCallId);
-        if (!candidate && !authorizedAtEntry && readonly && !safeTools.includes(event.toolName)) {
+        if (!candidate && !authorizedAtEntry && limitedTools && !safeTools.includes(event.toolName)) {
           attempted = true;
           submission.reject("tool_permission");
         }
@@ -633,11 +666,6 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
         }
         if (outputLimitReached) audit("model_output_limit", { stop_reason: "length", max_output_tokens: request.model.max_output_tokens, saved_segments: reportSegments?.references().length ?? 0 });
         if (message.stopReason === "error") providerError = providerFailure(message.errorMessage ?? "");
-        if (message.stopReason !== "aborted") {
-          const u = message.usage;
-          if (!u || u.input + u.output + u.cacheRead + u.cacheWrite <= 0) usageKnown = false;
-          else { usageSeen = true; usage.input_tokens += u.input; usage.output_tokens += u.output; usage.cache_read_tokens += u.cacheRead; usage.cache_write_tokens += u.cacheWrite; }
-        }
       } else if (event.type === "turn_end" && (attempted || providerError || candidateCaptureError)) {
         // 报告 length 的阻断 batch 已用 terminate 收束；不生成多余的 aborted 响应。
         if (reportSegments && providerError?.code === "model_output_limit") return;
@@ -646,9 +674,12 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
       }
     });
     if (concludeTimeoutSeconds > 0) {
-      const delay = remainingTimeNoticeAt - performance.now();
-      if (delay <= 0) notifyRemainingTime();
-      else remainingTimeTimer = setTimeout(notifyRemainingTime, delay);
+      if (remainingTimeNoticeAt <= executionNow()) notifyRemainingTime();
+      else remainingTimeTimer = setInterval(() => {
+        if (executionNow() < remainingTimeNoticeAt) return;
+        clearInterval(remainingTimeTimer);
+        notifyRemainingTime();
+      }, 100);
     }
     ensureActive();
     audit("session_start", { resume: request.resume, conclude_only: readonly, max_output_tokens: request.model.max_output_tokens });
@@ -657,14 +688,14 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
       while (!candidate && truncatedReportUnit && providerError?.code === "model_output_limit" && !candidateCaptureError && !conflict && reportOutputRecoveries < 2) {
         ensureActive();
         reportOutputRecoveries += 1;
-        audit("report_output_recovery", { recovery_round: reportOutputRecoveries, max_recovery_rounds: 2, saved_segments: reportSegments!.references().length, remaining_execution_seconds: Math.max(0, (deadline - performance.now()) / 1000) });
+        audit("report_output_recovery", { recovery_round: reportOutputRecoveries, max_recovery_rounds: 2, saved_segments: reportSegments!.references().length, remaining_execution_seconds: Math.max(0, (deadline - executionNow()) / 1000) });
         providerError = undefined;
         attempted = false;
-        await session!.prompt("The current unfinished report content unit reached the model output limit and was NOT saved or accepted. Recover only that unfinished unit: make it structurally smaller (one field, a shorter coherent paragraph, or fewer ordered steps per save_report_segment call). Do not repeat or overwrite already saved segment keys or their content. Do not resend the whole report or increase the output budget. Final submit_result contains only schema_version 5 and segment_refs. The original deadline and read-only authorization still apply.", { expandPromptTemplates: false });
+        await session!.prompt("The current unfinished report content unit reached the model output limit and was NOT saved or accepted. Recover only that unfinished unit: make it structurally smaller (a shorter coherent Markdown block per save_report_segment call). Do not repeat or overwrite already saved segment keys or their content. Do not resend the whole report or increase the output budget. Final submit_result contains only schema_version 5 and segment_refs. The original deadline and read-only authorization still apply.", { expandPromptTemplates: false });
       }
     };
     await promptWithReportRecovery(request.prompt);
-    while (truncatedWithoutToolCalls && !readonly && !attempted && !candidate
+    while (truncatedWithoutToolCalls && !limitedTools && !attempted && !candidate
       && !candidateCaptureError && !providerError && !conflict) {
       ensureActive();
       if (outputContinuations >= MAX_OUTPUT_CONTINUATIONS) {
@@ -674,7 +705,7 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
       outputContinuations += 1;
       audit("output_continuation", {
         stop_reason: "length", output_continuations: outputContinuations,
-        remaining_execution_seconds: Math.max(0, (deadline - performance.now()) / 1000),
+        remaining_execution_seconds: Math.max(0, (deadline - executionNow()) / 1000),
       });
       ensureActive();
       await session.prompt(OUTPUT_CONTINUATION_PROMPT, { expandPromptTemplates: false });
@@ -709,18 +740,20 @@ export async function runRequest(request: AgentRequest, options: RunnerOptions =
     audit("agent_error", { error: result.error, candidate_submission_id: candidateDigest });
   } finally {
     if (session) { await session.abort(); session.dispose(); }
-    try { await lease?.finish(); }
+    try {
+      const initialized = await lease?.finish();
+      if (chat) result.session_initialized = initialized ?? null;
+    }
     catch { result.status = "failed"; result.error = { code: "session_corrupt", message: "Could not finalize session transcript" }; }
     if (options.signal?.aborted) stop("cancelled");
-    if (performance.now() >= deadline) stop("deadline_exceeded");
+    if (executionNow() >= deadline) stop("deadline_exceeded");
     if (cancelled) { result.status = "cancelled"; result.error = { code: cancelled, message: "Request stopped before completion" }; }
     if (result.status !== "succeeded") { result.result = null; result.submission_id = null; }
-    // SDK缺失usage分量时也填0；无法区分真实0与未报告，保守输出null而非伪造计量。
-    result.usage = usageSeen && usageKnown ? Object.fromEntries(Object.entries(usage).map(([key, value]) => [key, value > 0 ? value : null])) : null;
+    Object.assign(result, usageResult(usage, chat));
     if (result.error) result.error = { ...result.error, ...submission.diagnostics() };
     audit("session_end", { status: result.status, ...submission.diagnostics(), submission_id: result.submission_id });
-    clearTimeout(timer);
-    if (remainingTimeTimer) clearTimeout(remainingTimeTimer);
+    clearInterval(timer);
+    if (remainingTimeTimer) clearInterval(remainingTimeTimer);
     options.signal?.removeEventListener("abort", onAbort);
   }
   return result;

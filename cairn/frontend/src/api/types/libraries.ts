@@ -1,21 +1,10 @@
 export interface AdvisoryLibrary {
   key: string;
   name: string;
-  latest_version?: number | null;
+  builtin: boolean;
   file_count: number;
   created_at: string;
   archived_at?: string | null;
-}
-
-export interface AdvisoryLibraryRevision {
-  library_key: string;
-  version: number;
-  digest_sha256: string;
-  source: 'api' | 'legacy_filesystem';
-  message?: string | null;
-  created_by?: string | null;
-  created_at: string;
-  file_count: number;
 }
 
 export interface AdvisoryLibraryFile {
@@ -24,16 +13,22 @@ export interface AdvisoryLibraryFile {
   sha256: string;
 }
 
-export interface AdvisoryLibraryFileContent extends AdvisoryLibraryFile {
-  content: string;
+export interface LibraryManifest {
+  library_key: string;
+  library_name: string;
+  file_count: number;
+  files: AdvisoryLibraryFile[];
+  safety_path: string | null;
+}
+
+export interface LibrarySelection {
+  library_key: string;
+  paths: string[] | null;
+  source: 'current' | 'saved';
+  expected_files?: Record<string, string> | null;
 }
 
 export interface CreateAdvisoryLibraryRequest {
   key: string;
   name?: string;
-}
-
-export interface CreateAdvisoryLibraryRevisionRequest {
-  files: Array<{ path: string; content: string }>;
-  message?: string;
 }

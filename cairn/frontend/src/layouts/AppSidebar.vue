@@ -5,128 +5,84 @@
     aria-label="主导航"
   >
     <div class="brand">
-      <div class="logo">
-        <span class="brand-logo-mark" aria-hidden="true">A</span>
-      </div>
-      <span class="brand-text">Arena</span>
-      <IconButton class="mobile-sidebar-close" label="关闭主导航" size="sm" @click="closeSidebar">
-        <X :size="16" />
-      </IconButton>
+      <RouterLink :to="{ name: 'Projects' }" class="brand-link" aria-label="Arena 项目">
+        <span class="brand-logo-mark" aria-hidden="true">A</span
+        ><span class="brand-text">Arena</span>
+      </RouterLink>
+      <IconButton class="mobile-sidebar-close" label="关闭主导航" size="sm" @click="closeSidebar"
+        ><X :size="16"
+      /></IconButton>
     </div>
-
+    <button
+      class="sidebar-command nav-item"
+      type="button"
+      aria-label="搜索与命令"
+      title="搜索与命令 (Ctrl+K)"
+      @click="emit('command')"
+    >
+      <Search :size="16" /><span class="label">搜索与命令</span
+      ><kbd v-if="!uiStore.isSidebarCollapsed">⌃ K</kbd>
+    </button>
     <nav class="nav-links" aria-label="应用导航">
-      <RouterLink
-        v-for="item in primaryItems"
-        :key="item.routeName"
-        :to="{ name: item.routeName }"
-        class="nav-item"
-        active-class=""
-        exact-active-class="active"
-        :class="{ active: route.name === item.routeName || (item.routeName === 'Verifications' && route.path.startsWith('/verifications/')) }"
-        @click="closeSidebarAfterNavigation"
+      <section
+        v-for="group in workGroups"
+        :key="group.placement"
+        class="nav-section"
+        :aria-label="group.label"
       >
-        <span class="icon"
-          ><component :is="iconFor(item.icon)" :size="16" aria-hidden="true"
-        /></span>
-        <span class="label">{{ item.label }}</span>
-      </RouterLink>
-
-      <div v-if="scenarioItems.length" class="nav-group" :class="{ 'group-open': isScenariosOpen }">
-        <button
-          type="button"
-          class="nav-item nav-group-header"
-          :class="{ active: scenarioItems.some((item) => item.routeName === route.name) }"
-          @click="toggleScenarios"
+        <div v-if="group.items.length" class="nav-section-label">{{ group.label }}</div>
+        <RouterLink
+          v-for="item in group.items"
+          :key="item.routeName"
+          :to="{ name: item.routeName }"
+          class="nav-item"
+          active-class=""
+          exact-active-class=""
+          :class="{ active: isActive(item.routeName) }"
+          :aria-current="isActive(item.routeName) ? 'page' : undefined"
+          :title="item.label"
+          :aria-label="item.label"
+          @click="closeSidebarAfterNavigation"
         >
-          <span class="icon"><Layers3 :size="16" aria-hidden="true" /></span>
-          <span class="label">探索场景</span>
-          <span v-if="!uiStore.isSidebarCollapsed" class="arrow-icon"
-            ><ChevronDown :size="12" aria-hidden="true"
-          /></span>
-        </button>
-        <div v-show="isScenariosOpen && !uiStore.isSidebarCollapsed" class="nav-sub-items">
-          <RouterLink
-            v-for="item in scenarioItems"
-            :key="item.routeName"
-            :to="{ name: item.routeName }"
-            class="nav-sub-item"
-            :class="{ active: route.name === item.routeName }"
-            @click="closeSidebarAfterNavigation"
+          <component :is="iconMap[item.icon]" :size="18" aria-hidden="true" /><span class="label">{{
+            item.label
+          }}</span>
+        </RouterLink>
+      </section>
+    </nav>
+    <div class="sidebar-bottom">
+      <Popover v-model:open="settingsOpen" side="top" align="start" size="md">
+        <template #trigger>
+          <button
+            type="button"
+            class="nav-item nav-group-header"
+            :class="{ active: systemItems.some((item) => isActive(item.routeName)) }"
+            title="设置"
+            aria-label="设置"
           >
-            <span class="icon"
-              ><component :is="iconFor(item.icon)" :size="14" aria-hidden="true"
-            /></span>
-            <span>{{ item.label }}</span>
-          </RouterLink>
-        </div>
-      </div>
-
-      <RouterLink
-        v-for="item in standaloneItems"
-        :key="item.routeName"
-        :to="{ name: item.routeName }"
-        class="nav-item"
-        active-class=""
-        exact-active-class="active"
-        :class="{ active: route.name === item.routeName }"
-        @click="closeSidebarAfterNavigation"
-      >
-        <span class="icon"
-          ><component :is="iconFor(item.icon)" :size="16" aria-hidden="true"
-        /></span>
-        <span class="label">{{ item.label }}</span>
-      </RouterLink>
-
-      <div class="nav-group" :class="{ 'group-open': isSysMgmtOpen }">
-        <button
-          type="button"
-          class="nav-item nav-group-header"
-          :class="{ active: systemItems.some((item) => item.routeName === route.name) }"
-          @click="toggleSysMgmt"
-        >
-          <span class="icon"><Settings :size="16" aria-hidden="true" /></span>
-          <span class="label">系统管理</span>
-          <span v-if="!uiStore.isSidebarCollapsed" class="arrow-icon"
-            ><ChevronDown :size="12" aria-hidden="true"
-          /></span>
-        </button>
-        <div v-show="isSysMgmtOpen && !uiStore.isSidebarCollapsed" class="nav-sub-items">
+            <Settings :size="20" /><span class="label">设置</span>
+            <ChevronUp v-if="!uiStore.isSidebarCollapsed" :size="18" class="arrow-icon" :class="{ 'is-open': settingsOpen }" />
+          </button>
+        </template>
+        <nav id="sidebar-settings" class="settings-navigation" aria-label="设置页面">
           <RouterLink
             v-for="item in systemItems"
             :key="item.routeName"
             :to="{ name: item.routeName }"
-            class="nav-sub-item"
-            :class="{ active: route.name === item.routeName }"
+            class="nav-item"
+            active-class=""
+            exact-active-class=""
+            :class="{ active: isActive(item.routeName) }"
+            :aria-current="isActive(item.routeName) ? 'page' : undefined"
             @click="closeSidebarAfterNavigation"
           >
-            <span class="icon"
-              ><component :is="iconFor(item.icon)" :size="14" aria-hidden="true"
-            /></span>
+            <component :is="iconMap[item.icon]" :size="20" aria-hidden="true" />
             <span>{{ item.label }}</span>
           </RouterLink>
-        </div>
-      </div>
-    </nav>
-
-    <button
-      v-if="authStore.isSuperAdmin"
-      type="button"
-      class="dispatcher-status"
-      :aria-label="`打开监控，调度器状态: ${dispatcherStatusText}`"
-      @click="goToMonitoring"
-    >
-      <div class="live-dot-container">
-        <span class="live-dot" :class="dispatcherColorClass"></span>
-        <span class="live-pulse" :class="dispatcherPulseClass"></span>
-      </div>
-      <div class="dispatcher-info">
-        <div class="dispatcher-title">调度器: {{ dispatcherStatusText }}</div>
-        <div v-if="dispatcherSummary" class="dispatcher-sub">
-          最近循环 {{ lastLoopTimeText }} · {{ dispatcherSummary.last_loop_duration_ms || 0 }}ms
-        </div>
-        <div v-else class="dispatcher-sub">{{ route.name === 'ConsoleWorkers' ? '运行设置可查看配置加载状态' : '未连接' }}</div>
-      </div>
-    </button>
+        </nav>
+      </Popover>
+      <slot name="utilities" />
+    </div>
   </aside>
 </template>
 
@@ -134,7 +90,8 @@
 import {
   AlertTriangle,
   Box,
-  ChevronDown,
+  CalendarDays,
+  ChevronUp,
   CirclePlus,
   FileArchive,
   Folder,
@@ -145,6 +102,7 @@ import {
   Lightbulb,
   RadioTower,
   ScrollText,
+  Search,
   Settings,
   ShieldAlert,
   Users,
@@ -152,26 +110,31 @@ import {
   type LucideIcon,
 } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { useQuery } from '@tanstack/vue-query'
-import { api } from '@/api/client'
-import type { MonitoringSummary } from '@/api/types'
-import { IconButton } from '@/components/ui'
-import { dispatcherEffectiveStatus } from '@/features/monitoring/monitoringModel'
+import { useRoute } from 'vue-router'
+import { IconButton, Popover } from '@/components/ui'
 import { useAuthStore } from '@/stores/auth'
 import { useUIStore } from '@/stores/ui'
-import { sidebarNavigation, type NavigationIcon } from '@/router/navigationRegistry'
+import {
+  sidebarNavigation,
+  type NavigationIcon,
+  type ProductionRouteName,
+} from '@/router/navigationRegistry'
 
+const emit = defineEmits<{ command: [] }>()
 const route = useRoute()
-const router = useRouter()
 const authStore = useAuthStore()
 const uiStore = useUIStore()
-
-const primaryItems = computed(() => sidebarNavigation('primary', authStore.isSuperAdmin))
-const scenarioItems = computed(() => sidebarNavigation('scenario', authStore.isSuperAdmin))
-const standaloneItems = computed(() => sidebarNavigation('standalone', authStore.isSuperAdmin))
+const workGroups = computed(() =>
+  [
+    { placement: 'primary' as const, label: '工作' },
+    { placement: 'results' as const, label: '成果' },
+    { placement: 'support' as const, label: '研究支持' },
+  ].map((group) => ({
+    ...group,
+    items: sidebarNavigation(group.placement, authStore.isSuperAdmin),
+  })),
+)
 const systemItems = computed(() => sidebarNavigation('system', authStore.isSuperAdmin))
-
 const iconMap: Record<NavigationIcon, LucideIcon> = {
   dashboard: Gauge,
   finding: AlertTriangle,
@@ -190,83 +153,30 @@ const iconMap: Record<NavigationIcon, LucideIcon> = {
   knowledge: FileArchive,
   status: ShieldAlert,
   auth: KeyRound,
+  schedules: CalendarDays,
 }
-const iconFor = (icon: NavigationIcon) => iconMap[icon]
-
-const isScenariosOpen = ref(scenarioItems.value.some((item) => item.routeName === route.name))
-const isSysMgmtOpen = ref(systemItems.value.some((item) => item.routeName === route.name))
-
-watch(
-  () => route.name,
-  (name) => {
-    if (scenarioItems.value.some((item) => item.routeName === name)) isScenariosOpen.value = true
-    if (systemItems.value.some((item) => item.routeName === name)) isSysMgmtOpen.value = true
-  },
-)
-
-const isMobileViewport = () =>
-  typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches
-
+function isActive(name: ProductionRouteName) {
+  if (name === 'ProjectSchedules')
+    return (
+      route.name === name ||
+      route.name === 'ProjectSchedule' ||
+      (route.name === 'Projects' && route.query.view === 'schedules')
+    )
+  if (name === 'Projects')
+    return route.path.startsWith('/projects') && route.query.view !== 'schedules'
+  if (name === 'Verifications') return route.path.startsWith('/verifications')
+  return route.name === name
+}
+const settingsOpen = ref(false)
+watch(() => [route.name, route.fullPath], () => { settingsOpen.value = false })
 const closeSidebar = () => {
   if (!uiStore.isSidebarCollapsed) uiStore.toggleSidebar()
 }
-
 const closeSidebarAfterNavigation = () => {
-  if (isMobileViewport()) closeSidebar()
+  settingsOpen.value = false
+  if (typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches)
+    closeSidebar()
 }
-
-const goToMonitoring = () => {
-  void router.push({ name: 'Monitoring' })
-  closeSidebarAfterNavigation()
-}
-
-const expandCollapsedSidebar = () => {
-  if (!uiStore.isSidebarCollapsed) return false
-  uiStore.toggleSidebar()
-  return true
-}
-const toggleScenarios = () => {
-  if (expandCollapsedSidebar()) isScenariosOpen.value = true
-  else isScenariosOpen.value = !isScenariosOpen.value
-}
-const toggleSysMgmt = () => {
-  if (expandCollapsedSidebar()) isSysMgmtOpen.value = true
-  else isSysMgmtOpen.value = !isSysMgmtOpen.value
-}
-
-const { data: monitoringSummary } = useQuery<MonitoringSummary>({
-  queryKey: ['monitoringSummary', 'dispatcher'],
-  queryFn: () => api<MonitoringSummary>('GET', '/admin/monitoring?profile=dispatcher'),
-  enabled: computed(() => authStore.isSuperAdmin && route.name !== 'ConsoleWorkers'),
-  refetchInterval: 10000,
-})
-const dispatcherSummary = computed(() => route.name === 'ConsoleWorkers' ? null : monitoringSummary.value?.dispatcher || null)
-const dispatcherStatus = computed(() => dispatcherEffectiveStatus(dispatcherSummary.value))
-const dispatcherStatusText = computed(
-  () => route.name === 'ConsoleWorkers'
-    ? '未查询'
-    : ({ running: '正常', idle: '空闲', stale: '过期', error: '异常' })[dispatcherStatus.value] || '未连接',
-)
-const dispatcherColorClass = computed(() =>
-  dispatcherStatus.value === 'running'
-    ? 'live-success'
-    : dispatcherStatus.value === 'stale' || dispatcherStatus.value === 'error'
-      ? 'live-danger'
-      : 'live-neutral',
-)
-const dispatcherPulseClass = computed(() =>
-  dispatcherStatus.value === 'running' ? 'animate-pulse-live' : '',
-)
-const lastLoopTimeText = computed(() => {
-  const value =
-    dispatcherSummary.value?.last_loop_finished_at || dispatcherSummary.value?.last_loop_started_at
-  if (!value) return '—'
-  const date = new Date(value)
-  return Number.isNaN(date.getTime())
-    ? '—'
-    : date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-})
 </script>
 
 <style src="./FrontLayout-shell.css" scoped></style>
-<style src="./FrontLayout-palette.css" scoped></style>

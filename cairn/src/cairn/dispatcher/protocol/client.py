@@ -21,7 +21,6 @@ from cairn.server.models import (
     Intent,
     LibraryFile,
     ProjectDetail,
-    ProjectLibraryBinding,
     ProjectResource,
     ProjectSummary,
     Scenario,
@@ -29,6 +28,7 @@ from cairn.server.models import (
     VulnerabilityVerifierTarget,
 )
 from cairn.server.schemas.tenant_workers import TenantWorkerExecutionBinding
+from cairn.server.schemas.traffic import TrafficOwner
 
 LOG = logging.getLogger(__name__)
 DISPATCHER_TOKEN_ENV = "CAIRN_DISPATCHER_TOKEN"
@@ -62,11 +62,12 @@ class CairnClient:
         self._summary_adapter = TypeAdapter(list[ProjectSummary])
         self._scenario_adapter = TypeAdapter(list[Scenario])
         self._library_file_adapter = TypeAdapter(list[LibraryFile])
-        self._project_library_binding_adapter = TypeAdapter(list[ProjectLibraryBinding])
         self._project_resource_adapter = TypeAdapter(list[ProjectResource])
         self._local = threading.local()
         self._sessions: dict[int, requests.Session] = {}
-        self._sessions_lock = threading.Lock()
+        self._sessions_lock = threading.RLock()
+        self._active_requests: set[int] = set()
+        self._closed = False
         self._execution_event_capability_cache: tuple[float, dict[str, Any] | None] | None = None
         self._execution_event_capability_lock = threading.Lock()
         self._candidate_capability_cache: tuple[float, dict[str, Any] | None] | None = None
@@ -74,9 +75,10 @@ class CairnClient:
 
     def close(self) -> None:
         with self._sessions_lock:
-            sessions = list(self._sessions.values())
-            self._sessions.clear()
-        # 热加载切换 Server 或进程退出时关闭所有线程创建过的 session。
+            self._closed = True
+            sessions = [self._sessions.pop(owner) for owner in list(self._sessions)
+                        if owner not in self._active_requests]
+        # 关停不等待网络；在途 JSON 请求负责在返回后关闭自己的 session。
         for session in sessions:
             session.close()
 
@@ -98,27 +100,49 @@ class CairnClient:
             raise ValueError("Invalid project schedule consumption response")
         return {"processed": result["processed"], "errors": result["errors"]}
 
+    def expire_paused_projects(self) -> int:
+        response = self._session().post(
+            self._url("/projects/pause-timeouts/expire"), timeout=self._timeout,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict) or type(result.get("finished")) is not int or result["finished"] < 0:
+            raise ValueError("Invalid pause timeout response")
+        return result["finished"]
+
     def list_projects(self) -> list[ProjectSummary]:
         # 调度主循环的读请求使用 raise_for_status，Server 不可用时直接进入本轮异常处理。
         response = self._session().get(self._url("/projects"), timeout=self._timeout)
         response.raise_for_status()
         return self._summary_adapter.validate_python(response.json())
 
+    def confirm_execution_control(self, project_id: str, *, request_id: str, state: str,
+                                  resources: list[dict[str, str]], error: str | None = None) -> ApiResult:
+        return self._request_json("POST", f"/projects/{project_id}/execution-control/confirm", json={
+            "request_id": request_id, "state": state, "resources": resources, "error": error,
+        })
+
     def get_project(self, project_id: str) -> ProjectDetail:
         response = self._session().get(self._url(f"/projects/{project_id}"), timeout=self._timeout)
         response.raise_for_status()
         return ProjectDetail.model_validate(response.json())
 
-    def pending_agent_turns(self) -> ApiResult:
-        return self._request_json("GET", "/agent-turns/pending")
+    def pending_conversation_cleanups(self) -> ApiResult:
+        return self._request_json("GET", "/agent-conversation-cleanups/pending")
 
-    def claim_agent_turn(self, project_id: str, conversation_id: str, task_run: dict[str, Any]) -> ApiResult:
-        return self._request_json("POST", f"/projects/{project_id}/agent-conversations/{conversation_id}/claim", json={"task_run": task_run})
+    def conversation_cleanup(self, conversation_id: str, body: dict) -> ApiResult:
+        return self._request_json("POST", f"/agent-conversations/{quote(conversation_id, safe='')}/cleanup", json=body)
 
-    def agent_turn_action(self, project_id: str, conversation_id: str, message_id: int | str, action: str, body: dict[str, Any]) -> ApiResult:
+    def pending_agent_turns(self, *, after: str = "") -> ApiResult:
+        return self._request_json("GET", "/agent-turns/pending", params={"after": after})
+
+    def claim_agent_turn(self, conversation_id: str, request_id: str) -> ApiResult:
+        return self._request_json("POST", f"/agent-conversations/{conversation_id}/claim", json={"request_id": request_id})
+
+    def agent_turn_action(self, conversation_id: str, message_id: int | str, action: str, body: dict[str, Any]) -> ApiResult:
         if action not in {"tools", "finish", "heartbeat"}:
             raise ValueError("invalid agent turn action")
-        return self._request_json("POST", f"/projects/{project_id}/agent-conversations/{conversation_id}/turns/{message_id}/{action}", json=body)
+        return self._request_json("POST", f"/agent-conversations/{conversation_id}/turns/{message_id}/{action}", json=body)
 
     def get_verification_input(self, request_id: str) -> ApiResult:
         return self._request_json("GET", f"/api/v1/verification-requests/{request_id}/input")
@@ -154,10 +178,16 @@ class CairnClient:
             json={"generation": generation, "docker_daemon_id": docker_daemon_id},
         )
 
-    def finish_container_activation(self, project_id: str, token: str, container_id: str | None) -> ApiResult:
+    def finish_container_activation(self, project_id: str, token: str, container_id: str) -> ApiResult:
         return self._request_json(
             "POST", f"/projects/{project_id}/container-activation/finish",
             json={"activation_token": token, "container_id": container_id},
+        )
+
+    def abort_container_activation(self, project_id: str, token: str, docker_daemon_id: str) -> ApiResult:
+        return self._request_json(
+            "POST", f"/projects/{project_id}/container-activation/abort",
+            json={"activation_token": token, "docker_daemon_id": docker_daemon_id},
         )
 
     def adopt_container_pause(
@@ -216,15 +246,6 @@ class CairnClient:
         response.raise_for_status()
         return self._scenario_adapter.validate_python(response.json())
 
-    def list_project_library_bindings(
-        self,
-        project_id: str,
-    ) -> list[ProjectLibraryBinding]:
-        project = self.get_project(project_id)
-        return self._project_library_binding_adapter.validate_python(
-            project.library_bindings
-        )
-
     def list_project_library_files(
         self,
         project_id: str,
@@ -265,13 +286,24 @@ class CairnClient:
         response.raise_for_status()
         return self._project_resource_adapter.validate_python(response.json())
 
-    def read_project_resource(self, project_id: str, resource_id: str) -> bytes:
-        response = self._session().get(
-            self._url(f"/projects/{project_id}/resources/{resource_id}"),
-            timeout=self._timeout,
-        )
-        response.raise_for_status()
-        return response.content
+    def download_project_resource(self, project_id: str, resource: ProjectResource, output: BinaryIO) -> None:
+        from hashlib import sha256
+
+        digest = sha256()
+        size = 0
+        with self._session().get(
+            self._url(f"/projects/{project_id}/resources/{resource.id}"),
+            timeout=self._timeout, stream=True,
+        ) as response:
+            response.raise_for_status()
+            for chunk in response.iter_content(chunk_size=256 * 1024):
+                size += len(chunk)
+                if size > resource.size_bytes:
+                    raise RuntimeError(f"project resource {resource.id} size mismatch")
+                digest.update(chunk)
+                output.write(chunk)
+        if size != resource.size_bytes or digest.hexdigest() != resource.sha256:
+            raise RuntimeError(f"project resource {resource.id} content integrity check failed")
 
     def resolve_execution_binding(
         self,
@@ -1050,11 +1082,13 @@ class CairnClient:
         task_run_id: str,
         kind: str,
         payload: dict[str, Any],
+        timeout: float | None = None,
     ) -> ApiResult:
         return self._request_json(
             "POST",
             f"/projects/{project_id}/agent-events",
             json={"task_run_id": task_run_id, "kind": kind, "payload": payload},
+            timeout=timeout,
         )
 
     def apply_injection_payload_operations(
@@ -1075,15 +1109,22 @@ class CairnClient:
     def publish_http_evidence_image(self, project_id: str, body: dict[str, Any]) -> ApiResult:
         return self._request_json("POST", f"/projects/{quote(project_id, safe='')}/traffic/http-evidence/publish", json=body)
 
+    @staticmethod
+    def _traffic_path(owner) -> str:
+        owner = TrafficOwner.normalize(owner)
+        if owner.conversation_id is not None:
+            return f"/agent-conversations/{quote(owner.conversation_id, safe='')}/traffic"
+        return f"/projects/{quote(owner.project_id, safe='')}/traffic"
+
     def list_http_flows(self, project_id: str, *, task_run_id: str | None, **filters: Any) -> ApiResult:
         return self._request_json(
-            "GET", f"/projects/{quote(project_id, safe='')}/traffic",
+            "GET", f"{self._traffic_path(project_id)}",
             params={**filters, **({"task_run_id": task_run_id} if task_run_id is not None else {})},
         )
 
     def read_http_flow(self, project_id: str, flow_id: str) -> ApiResult:
         return self._request_json(
-            "GET", f"/projects/{quote(project_id, safe='')}/traffic/{quote(flow_id, safe='')}",
+            "GET", f"{self._traffic_path(project_id)}/{quote(flow_id, safe='')}",
         )
 
     def read_http_flow_projection(
@@ -1092,7 +1133,7 @@ class CairnClient:
         if side not in {"request", "response"}:
             raise ValueError("traffic_side_invalid")
         return self._request_json(
-            "GET", f"/projects/{quote(project_id, safe='')}/traffic/{quote(flow_id, safe='')}/projection/{side}",
+            "GET", f"{self._traffic_path(project_id)}/{quote(flow_id, safe='')}/projection/{side}",
             params={"offset": offset, "limit": limit},
         )
 
@@ -1102,29 +1143,29 @@ class CairnClient:
         if side not in {"request", "response"}:
             raise ValueError("traffic_side_invalid")
         return self._request_json(
-            "GET", f"/projects/{quote(project_id, safe='')}/traffic/{quote(flow_id, safe='')}/bodies/{side}",
+            "GET", f"{self._traffic_path(project_id)}/{quote(flow_id, safe='')}/bodies/{side}",
             params={"preview": "true", "offset": offset, "limit": limit},
         )
 
     def register_traffic_scope(self, project_id: str, binding: dict[str, Any]) -> ApiResult:
-        return self._request_json("POST", f"/projects/{project_id}/traffic/scopes", json=binding)
+        return self._request_json("POST", f"{self._traffic_path(project_id)}/scopes", json=binding)
 
     def sync_traffic_flow(self, project_id: str, scope_id: str, record: dict[str, Any]) -> ApiResult:
         return self._request_json(
-            "PUT", f"/projects/{project_id}/traffic/scopes/{scope_id}/flows/{record['id']}", json=record,
+            "PUT", f"{self._traffic_path(project_id)}/scopes/{scope_id}/flows/{record['id']}", json=record,
         )
 
     def sync_traffic_batch(self, project_id: str, scope_id: str, items: list[dict[str, Any]]) -> ApiResult:
         return self._request_json(
-            "POST", f"/projects/{project_id}/traffic/scopes/{scope_id}/batch", json={"items": items},
+            "POST", f"{self._traffic_path(project_id)}/scopes/{scope_id}/batch", json={"items": items},
         )
 
     def update_traffic_scope_status(self, project_id: str, scope_id: str, status: dict[str, Any]) -> ApiResult:
-        return self._request_json("PUT", f"/projects/{project_id}/traffic/scopes/{scope_id}/status", json=status)
+        return self._request_json("PUT", f"{self._traffic_path(project_id)}/scopes/{scope_id}/status", json=status)
 
     def list_traffic_scope_status(self, project_id: str, *, cursor: str = "", limit: int = 100) -> ApiResult:
         return self._request_json(
-            "GET", f"/projects/{project_id}/traffic/scopes/status?cursor={quote(cursor, safe='')}&limit={limit}",
+            "GET", f"{self._traffic_path(project_id)}/scopes/status?cursor={quote(cursor, safe='')}&limit={limit}",
         )
 
     def seal_traffic_body(
@@ -1132,7 +1173,7 @@ class CairnClient:
         revision: int, size: int, sha256: str,
     ) -> ApiResult:
         return self._request_json(
-            "POST", f"/projects/{project_id}/traffic/scopes/{scope_id}/flows/{flow_id}/bodies/{side}/seal",
+            "POST", f"{self._traffic_path(project_id)}/scopes/{scope_id}/flows/{flow_id}/bodies/{side}/seal",
             json={"revision": revision, "size": size, "sha256": sha256},
         )
 
@@ -1140,7 +1181,7 @@ class CairnClient:
         self, project_id: str, scope_id: str, flow_id: str, side: str, *,
         offset: int, size: int, sha256: str, content,
     ) -> ApiResult:
-        path = f"/projects/{project_id}/traffic/scopes/{scope_id}/flows/{flow_id}/bodies/{side}"
+        path = f"{self._traffic_path(project_id)}/scopes/{scope_id}/flows/{flow_id}/bodies/{side}"
         try:
             response = self._session().put(
                 self._url(path), params={"offset": offset, "size": size, "sha256": sha256},
@@ -1306,21 +1347,43 @@ class CairnClient:
             },
         )
 
+    def register_consumption(self, identifier: str, *, task_run_id: str, project_id=None, conversation_id=None) -> ApiResult:
+        return self._request_json('PUT', f'/model-consumption/{identifier}', json={
+            'task_run_id': task_run_id, 'project_id': project_id, 'conversation_id': conversation_id,
+        }, timeout=3)
+
+    def submit_consumption(self, identifier: str, event: dict) -> ApiResult:
+        return self._request_json('POST', f'/model-consumption/{identifier}/responses', json=event, timeout=3)
+
     def _request_json(
         self,
         method: str,
         path: str,
         json: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> ApiResult:
+        owner = threading.get_ident()
         try:
-            response = self._session().request(
-                method,
-                self._url(path),
-                json=json,
-                timeout=self._timeout,
-                **({"params": params} if params is not None else {}),
-            )
+            with self._sessions_lock:
+                if self._closed:
+                    return ApiResult(status_code=0, text="client_closed", error_code="client_closed")
+                session = self._session()
+                self._active_requests.add(owner)
+            try:
+                response = session.request(
+                    method,
+                    self._url(path),
+                    json=json,
+                    timeout=self._timeout if timeout is None else timeout,
+                    **({"params": params} if params is not None else {}),
+                )
+            finally:
+                with self._sessions_lock:
+                    self._active_requests.remove(owner)
+                    closing = self._sessions.pop(owner, None) if self._closed else None
+                if closing is not None:
+                    closing.close()
         except requests.RequestException as exc:
             # 保留连接、读取与其他传输故障的区别，不记录可能带认证信息的异常正文。
             if isinstance(exc, requests.ConnectTimeout):
@@ -1349,18 +1412,21 @@ class CairnClient:
         return f"{self._base_url}{path}"
 
     def _session(self) -> requests.Session:
-        session = getattr(self._local, "session", None)
-        if session is not None:
-            return session
-
-        session = requests.Session()
-        # 凭据只进入 Dispatcher 到 Server 的 transport session，不加入 worker env 或请求日志。
-        session.headers["Authorization"] = f"Bearer {self._token}"
-        # dispatcher 使用线程池并发执行任务；每个线程持有自己的 session 以复用连接池。
-        adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, pool_block=False)
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        self._local.session = session
+        # 创建、登记与关闭共用锁，关闭后也不能从线程本地复活旧连接池。
         with self._sessions_lock:
+            if self._closed:
+                raise RuntimeError("CairnClient is closed")
+            session = getattr(self._local, "session", None)
+            if session is not None:
+                return session
+
+            session = requests.Session()
+            # 凭据只进入 Dispatcher 到 Server 的 transport session，不加入 worker env 或请求日志。
+            session.headers["Authorization"] = f"Bearer {self._token}"
+            # dispatcher 使用线程池并发执行任务；每个线程持有自己的 session 以复用连接池。
+            adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64, pool_block=False)
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+            self._local.session = session
             self._sessions[threading.get_ident()] = session
-        return session
+            return session

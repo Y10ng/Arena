@@ -24,6 +24,43 @@ afterEach(() => {
   document.body.innerHTML = ''
 })
 
+describe.each([['Dialog', Dialog], ['Drawer', Drawer]] as const)('%s optional description', (_, component) => {
+  it('omits empty description and restores its association when supplied', async () => {
+    const wrapper = mount(component, {
+      attachTo: document.body,
+      props: { open: true, title: '对象详情' },
+      slots: { default: '<button>正文操作</button>' },
+    })
+    mountedWrappers.push(wrapper)
+    await flushPromises()
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!
+    expect(document.getElementById(dialog.getAttribute('aria-labelledby')!)?.textContent).toBe('对象详情')
+    expect(dialog.hasAttribute('aria-describedby')).toBe(false)
+    expect(dialog.querySelector('[class$="__description"]')).toBeNull()
+
+    await wrapper.setProps({ description: '真实限制' })
+    await flushPromises()
+    expect(document.getElementById(dialog.getAttribute('aria-describedby')!)?.textContent).toBe('真实限制')
+    await wrapper.setProps({ description: '' })
+    await flushPromises()
+    expect(dialog.hasAttribute('aria-describedby')).toBe(false)
+    expect(dialog.querySelector('[class$="__description"]')).toBeNull()
+    pressEscape()
+    await flushPromises()
+    expect(wrapper.emitted('update:open')?.[0]?.[0]).toBe(false)
+  })
+
+  it('keeps a description slot associated without a description prop', async () => {
+    mountToBody(component, {
+      props: { open: true, title: '对象详情' },
+      slots: { description: '<span>证据缺失</span>' },
+    })
+    await flushPromises()
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]')!
+    expect(document.getElementById(dialog.getAttribute('aria-describedby')!)?.textContent).toBe('证据缺失')
+  })
+})
+
 describe('Dialog', () => {
   it('renders a named and described dialog through a portal', async () => {
     const wrapper = mountToBody(Dialog, {

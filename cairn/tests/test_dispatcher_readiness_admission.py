@@ -16,7 +16,7 @@ def _runtime() -> WorkerRuntimeMixin:
     runtime.config = SimpleNamespace(
         runtime=SimpleNamespace(healthcheck_timeout=7),
     )
-    def activate(project_id, options, *, register, finish):
+    def activate(project_id, options, *, register, finish, abort):
         token = register("daemon-test")
         try:
             return runtime.container_manager.ensure_running(project_id, options)

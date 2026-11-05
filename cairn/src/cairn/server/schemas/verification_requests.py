@@ -301,5 +301,5 @@ class UpdateVerificationIntegration(BaseModel):
 
 class VerificationCleanup(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    status: Literal["pending", "removed"]
+    status: Literal["pending", "stopped", "removed"]
     error: VerificationError | None = None

@@ -167,6 +167,8 @@ AgentEventKind = Literal[
 HOOK_EVENT_NAMES = {
     "tool_execution_start",
     "tool_execution_end",
+    "observation_saved",
+    "observation_incomplete",
     "SessionStart",
     "UserPromptSubmit",
     "PreToolUse",

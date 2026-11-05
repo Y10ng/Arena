@@ -232,16 +232,42 @@ Body：
 - `generated_at`：生成时间。
 - `projects: {total, by_status}`：可见普通项目统计，排除所有复测内部项目。
 - `vulnerabilities: {total, by_severity, by_status}`：沿用漏洞列表的 Tenant／caller／deleted／purge 范围，包含各生命周期状态，不等同已确认或未修复数量。
-- `project_previews`：最多 6 条 `id/title/status/created_at`；active → pending → paused → 其他，同组按 created_at、ID 降序。
+- `project_previews`：最多 6 条 `id/title/status/created_at/consumption`，消费结构与项目列表／详情一致；active → pending → paused → 其他，同组按 created_at、ID 降序。
 - `vulnerability_previews`：最多 5 条 `id/project_id/project_title/title/severity/status/created_at`；按 created_at、ID、project_id 降序。
 
 超级管理员延续全局视角并记录 `admin.overview.read`。业务查询为固定四次 SELECT，不读取完整正文／证据，不调用旧 summary、全项目列表或过期维护。前端缓存按用户／Tenant／角色隔离；可见且有 active/pending 项目时每 60 秒刷新，空闲和隐藏时不持续轮询，刷新失败保留上次数据及时间。
+
+#### 2026-11-04 实现合同：Token 与估算费用
+
+数据口径见 `platform-workflow-redesign.md` 第 5F 节；加载与验收事实分别记入该节和 `global-ui-redesign.md` 第 26 节，不以协议实现替代部署证明。
+
+`GET /overview` 新增 `consumption`：
+
+- `scope: tenant | global`、`timezone`（`CAIRN_BUSINESS_TIMEZONE`，IANA 名称，默认 `UTC`）、`enabled_at`、`generated_at`、`start/end`（近 14 个业务自然日的 `[start,end)` UTC 区间）。
+- `coverage: recorded_only`：仅汇总持久记录，不代表完整供应商账单。
+- `total`、`today`、`undated`：全部已记录消费、今日消费、没有可靠发生日期的历史汇总。`undated` 只进入总量，不摊入日期趋势。
+- `days[]`：连续 14 个自然日，各含 `date`、`coverage: unavailable | partial` 及相同汇总；没有可用计量不能用 `tokens=0` 推断真实零消费。
+- `models[]`：同一 14 天范围，按冻结的模型执行版本和 `source` 分组，含模型名称快照及相同汇总，不因原模型删除而消失。
+- 每份汇总包括 `tokens`（已知分量小计）、`responses`（记录数）、`partial_responses`、`unpriced_responses`、`usage` 四分量和 `amounts: [{currency, amount}]`。`amount` 为服务端 Decimal 十进制字符串；不同币种不混加，缺费率／数量时金额只表示已计价部分。`usage` 的未知分量为 null；SDK normalized 的默认零无法证明原字段存在，仍标部分计量。
+
+普通用户仅本租户；超级管理员全局范围含平台诊断。消费范围不继承普通项目统计的复测排除条件，不返回他人聊天正文或身份。独立消费记录不随项目、会话或模型删除；消息读取按本会话 TaskRun 批量投影同一来源，关联研究／复测／报告不加到父聊天。新增汇总查询后，旧四次 SELECT 仅描述原业务统计，不再是 `/overview` 总查询次数；无逐项目／消息 N+1、stdout 扫描、模型调用或生命周期维护。
+
+模型配置 API 新增 `pricing`：`currency`（可空、三位大写代码）、`input/output/cache_read/cache_write`（可空、非负有限 Decimal，每百万 Token 单价）。空白不等于零；执行绑定冻结服务端费率，改价不重算旧绑定。试用草稿仅在协议、实际 endpoint、模型、认证方式、Headers 和凭据匹配保存配置时使用该配置价格；否则明确按草稿未定价记录。
+
+机器消费交付使用现有 Dispatcher bearer 身份：
+
+- `PUT /model-consumption/{UUID}`：`task_run_id/project_id/conversation_id` 精确范围注册，验证真实执行 owner；注册 ACK 后才启动 runner。
+- `POST /model-consumption/{UUID}/responses`：`response_seq` 区分响应，`revision` 表示同一响应累计更新；四项 usage、带时区的 `occurred_at`、`time_basis`、`measurement`、`missing_responses`。严格非负整数；同版本不同内容冲突、计数回退冲突，较旧版本被已有累计覆盖而不重计。ACK 包含 `accepted/id/response_seq/revision/sha256`，精确匹配后推进本地 cursor。
+- runner 的 `time_basis=observed` 是 SDK 调用开始观察时刻，不冒充供应商时钟；直接 HTTP 的 `received` 是本机读取响应时刻。历史导入使用 `unknown_historical` 且无日期，不开放为机器新回执字段。
+- 注册后交付不再依赖业务对象存活。runner 使用 fsync JSONL 与独立宿主 hardlink outbox；Server 直接 HTTP 使用独立持久回执及短事务。恢复仅交付回执，不重跑模型。保留失败、部分计量和未定价范围。
 
 ### Projects
 
 #### GET /projects
 
 返回所有项目列表，含元信息和统计摘要，不含图数据。
+
+2026-11-05：项目列表、项目详情及 `/overview.project_previews` 共享 `consumption` 投影：`tokens/responses/partial_responses/unpriced_responses/usage/amounts/unobserved_bindings`。先限定可见项目，再按 `model_consumption_bindings.project_id` 与项目 Tenant 精确匹配，最多两次批量汇总；不根据消息的项目上下文追加归属，不扫描日志或逐项目取详情。修订仍更新同一 `binding_id/response_seq`；四项 usage 为非缓存输入、输出、缓存读取、缓存写入，未知保持 null，不重复加缓存。无回执与全未知不能解读成零；已知分量全为零才是可信零。`unobserved_bindings` 表示尚无回执的绑定，前端显示已知小计／部分。缺少字段代表未加载。金额保持按币种 Decimal 字符串，与 Token 不混算；项目合计无需等于平台总计。
 
 响应：
 
@@ -270,6 +296,30 @@ Body：
 
 ---
 
+#### 项目材料上传与原件读取（2026-11-05）
+
+- `GET /project-resource-config` 返回部署实际生效限额。默认普通单文件、独立 ZIP 上传及每个展开成员均允许 **500,000,000** 字节，超过一字节拒绝；活动集合／批次默认 2,000,000,000 字节，每用户暂存默认 4,000,000,000 字节。已有显式环境覆盖继续生效，数量、4 个开放批次、24 小时过期、1,000 ZIP 条目、100 倍压缩比和路径／加密／特殊文件安全检查不变。普通 ZIP 文件不自动展开。
+- `POST /project-resource-batches/{id}/files?path=...&upload_id=prm_{32位小写hex}` 使用原始字节流。可选随机 `upload_id` 作为成员 ID，服务端仍计算实际字节数和 SHA-256；重复身份返回 409，不覆盖原件。客户端可通过有权访问的批次 GET 核对同一请求身份、路径、来源和大小，无需整文件浏览器哈希；名字和大小相同不足以确认回执，查询缺席也不自动重传。
+- 单文件尺寸拒绝返回 413，detail 为 `{code: "project_resource_file_too_large", category: "file" | "zip" | "zip_entry", limit_bytes, path, message}`；ZIP 成员超限携带成员路径。集合额度、数量、内容安全及网络未知保持各自错误语义。
+- `GET /projects/{project_id}/resources/{resource_id}` 保留项目授权及完整性检查，以 `application/octet-stream` 和 attachment 响应原始字节；校验／传输采用有界流，不经 UTF-8 解码。Dispatcher 流式下载，验证完整大小与 SHA-256，再以只读目录原子发布。绑定资料库读取沿用项目限定的冻结版本／实际子集接口，原件下载不查询全局当前版本。两类原件 URL 同时支持 HEAD，复用授权／完整性校验，供下载前行级错误反馈；HEAD 不返回正文。后续实际下载中断由浏览器下载管理器报告，不把预检成功冒充下载完成。
+- ChatBot 附件独立使用 `CAIRN_AGENT_ATTACHMENT_MAX_FILE_BYTES/MAX_ACTIVE_TOTAL_BYTES/MAX_ACTIVE_COUNT`，默认仍是 10 MiB／100 MiB／200；不随项目扩容。旧项目变量若曾用于覆盖聊天额度，部署迁移须显式设置对应聊天变量。
+
+#### GET /library-catalog/{key}/manifest
+
+普通登录用户可只读获取未归档资料库的**当前文件**元数据：`library_key`、`library_name`、`file_count`、`files`（每项仅含 `path`、`size_bytes`、`sha256`）和 `safety_path`。库与当前文件清单在同一数据库语句快照内读取，不从 `MAX(version)` 或使用快照推导；空库返回空数组，不能新建空库绑定。不存在或已归档的库返回 `404`；不接受查询参数，包括指定历史版本的参数。响应使用 `Cache-Control: no-store`。该接口不返回正文、不开放管理权限，也不授予任意历史资料访问权。不再返回 `version`、`digest_sha256` 或 `selection_proof`。
+
+新选择使用 `{library_key, source: "current", paths, expected_files}`。`expected_files` 是所选路径到原始 UTF-8 正文 SHA-256 的完整映射；`paths: null` 表示浏览时整库文件集合，非空数组表示明确子集。保存时在库行锁内校验当前可选权限、路径和逐文件摘要，并仅固定实际所选正文。所选文件改动／移除，或整库选择后新增文件，返回 `409`、`code: library_selection_conflict`；无关文件变化不阻断子集。前端保留输入，只有明确更新资料才接受新清单；不会静默扩大整库选择。日常管理编辑不再生成版本，已保存项目／计划仍使用不可变资料。
+
+#### 当前资料管理与固定根
+
+`/knowledge` 与 `/libraries` 管理入口仍只允许现有 `super_admin`。`PUT /knowledge/{key}/files/{path}` 保存单个当前文件，`DELETE` 删除普通当前文件；`PUT /libraries/{key}/files` 用 `{files: [{path, content}]}` 替换完整当前集合。旧管理版本发布、列表及历史文件路由已移除，不新增修订查询入口。
+
+`knowledge_base` 是固定逻辑根，其文件直接显示，其他库只在树中显示为子节点，不迁移实体。仅根库返回 `safety_path: "执行安全约束.md"`，其他库为 `null`。安装／升级初始化将应用内默认正文写入当前文件表，同路径已存在则原样保留；重启不覆盖管理员改稿。所有人包括管理员均不可删除该文件、改变其固定路径或归档根库，完整集合替换也不得遗漏它；拒绝返回 `409`。其他库的同名文件不受此特殊保护。
+
+PostgreSQL v82 从每库旧最新资料建立当前文件，保留原文、旧快照、绑定、摘要及普通库归档状态，恢复固定根库可用身份；只导入数据库尚不存在的磁盘库，停止请求触发重复导入。周期 JSON 按本计划绑定改写为 `source: "saved"`，不改历史请求收据。部署与验收证据见 `project-creation-input-design.md` 第 13 节；第 12.11 节的 v81 记录仅属前轮。更新前端与 Server 时须同步合同，不能把旧客户端的 `version/proof` 当作当前选择接受。
+
+---
+
 #### POST /projects
 
 创建新项目。`origin` 和 `goal` 写入 `facts` 作为特殊 Fact，`hints` 可选。项目组已取消，请求不再接受 `group_id`，也不生成默认组。公开请求不接受 `tenant_worker_ids`（携带返回 `422`）；服务端按认证 Tenant 解析固定 bootstrap／reason／explore 三个身份。配置未就绪返回具体 Worker 原因（如 `model_unconfigured`），固定身份缺失返回 `409`；不借用其他 Tenant 模型、不选默认模板。临时满载或执行器离线不等于配置失效，创建不要求手工 connectivity 验证。当前创建请求拒绝额外字段（422），旧客户端不得继续发送 `explore_budget`、`exploration_limit` 或 `verification_reserve` 等已移除额度参数，也不再使用旧的 `preferred_workers`／`bootstrap_enabled` 创建参数。
@@ -288,7 +338,7 @@ Origin 来源的不可变 grant 使用 scope descriptor v4：`version: 4`、`pro
 
 Bootstrap、Reason、Explore（含复核及收口）直接消费同一 Origin 原文和授权来源。Origin 已明确授予的对象／动作可自主研究；参考／排除地址、附件、重定向、历史发现和模型输出不扩权。无地址的资料任务可开始，结构化空列表不等于任意联网许可；仅对范围不清的拟进行外部动作提出具体缺失信息，不增加逐步审批。此合同不是 OS 网络硬隔离。Prompt 必须含 `{authorization_scope}` 和 `{origin}`，Target 索引按来源解释；受管自定义 Prompt 不被自动覆盖，缺少必要上下文时需明确更新后才能使用。模板占位符只替换一次，不二次改写 Origin 内的同名片段。
 
-`resource_batch_id` 消费当前用户、当前 Tenant 的一个临时资料批次；非空 `resources` 与批次不能同时提交。`library_keys` 在创建时固定到不可变资料库版本。定时和周期创建另走 `POST /project-schedules`，不能向本接口发送计划时间字段。
+`resource_batch_id` 消费当前用户、当前 Tenant 的一个临时资料批次；非空 `resources` 与批次不能同时提交。新请求必须提交 `library_selections`：每项 `{library_key, source: "current", paths, expected_files}` 按上述当前文件合同保存；不选择资料库用顶层 `[]`。同库重复、子集空数组、无效路径／摘要以及旧 `version/proof/library_keys` 均被拒绝。新建请求没有既有绑定，不能用 `source: "saved"` 获取历史资料。新建页默认选择根层安全文件一次，关闭安全开关或移除标签只取消本次选择，不删除库原件；计划编辑按原绑定回显，不自动加入最新安全正文。定时和周期创建另走 `POST /project-schedules`，不能向本接口发送计划时间字段。
 
 Body：
 
@@ -299,6 +349,7 @@ Body：
   "goal": "拿到 flag",
   "explore_deadline": null,
   "authorization_expires_at": null,
+  "library_selections": [],
   "hints": [
     { "content": "优先看 web 服务" },
     { "content": "注意 80 端口" }
@@ -535,7 +586,7 @@ Body 为上述时间字段，可带可选 `project` 以计入授权和执行停�
     "goal": "验证目标并保留证据",
     "authorization_expires_at": null,
     "explore_deadline": null,
-    "library_keys": []
+    "library_selections": []
   }
 }
 ```
@@ -548,7 +599,11 @@ Body 为上述时间字段，可带可选 `project` 以计入授权和执行停�
 
 列表返回计划详情数组，详情返回单个计划。主要字段包括 `id`、`mode`、`status`、`version`、时间规则、`next_run_at`、`project_id`、`last_project_id`、`generated_count`、`block_reason`、`project`、`resources`、`library_bindings` 和 `last_result`。
 
-周期的 `project` 是未来输入；`resources` 项包含 `id/path/kind/size_bytes/digest_sha256/source_name`，库绑定包含 `library_key/library_name/version/digest_sha256/file_count`。单次输入和资料以关联项目为准，计划的 `project` 为 `null`、计划资料列表为空，另以顶层只读 `explore_deadline`、`authorization_expires_at` 展示关联项目的执行停止时间与授权到期时间，直接读取关联项目，不另存计划副本；完整资料通过项目详情读取。`last_result` 为最近的触发记录或 `null`。
+周期的 `project` 是未来输入；`resources` 项包含 `id/path/kind/size_bytes/digest_sha256/source_name`，库绑定包含 `library_key/library_name/version/digest_sha256/file_count/paths/selection_sha256`，其中 `file_count` 是选中范围的实际文件数，`paths: null` 表示该次保存的完整快照，不代表管理端当前整库；`version/digest_sha256` 保留为内部不可变身份，不是日常编辑历史。顶层 `library_selection_explicit` 区分明确选择和历史默认，不可把缺失当成明确空。单次输入和资料以关联项目为准，计划的 `project` 为 `null`；关联项目存在时 `once_project_materials_available` 为 `true`，`resources` 与 `library_bindings` 直接投影项目当前有效资料及其冻结库版本（项目记录不保存上传源名称，故 `source_name` 为 `null`，不以路径冒充），不另存计划副本。项目不可用时该字段为 `false`；旧版本服务可能不返回该字段，客户端不得把缺失当作确认无资料。顶层只读 `explore_deadline`、`authorization_expires_at` 同样来自关联项目；完整资料仍通过项目详情读取。这些字段说明关联与版本，不证明执行时已挂载或读取。`last_result` 为最近的触发记录或 `null`。
+
+#### GET /project-schedules/{schedule_id}/library-manifests/{key}
+
+在计划访问权限内返回该计划已有绑定的文件元数据，形状同当前可选清单（包含 `safety_path`，无 `version/digest_sha256/selection_proof`）；子集只包含已绑定路径，不授权扩大至其他路径或访问任意历史资料。安全文件身份不意味着绑定中必然包含该文件，客户端须检查真实文件集合。
 
 #### PUT /project-schedules/{schedule_id}
 
@@ -576,8 +631,8 @@ Body 为上述时间字段，可带可选 `project` 以计入授权和执行停�
 
 - `resource_ids` 省略或为 `null`：保留所有计划资料；`[]`：移除全部；非空数组：保留指定资料 ID，其他移除。重复 ID 或不属于此计划的 ID 被拒绝。
 - `project.resource_batch_id`：追加本次新批次。先校验保留资料与新成员的最终路径冲突、类型及文件数量／字节配额；可在同一次编辑中移除旧资料并用新批次替换同路径资料。
-- `project.library_keys`：最终选择的库集合。同 key 默认保留已固定 revision，新增 key 才解析当前版本；从集合移除即解除未来绑定。
-- `refresh_library_keys`：显式将这些已选 key 更新到当前不可变 revision，未选择的 key 不能刷新。更新不追改历史项目。
+- `project.library_selections`：最终选择；省略时校验已保存输入与绑定一致并保留原范围及历史默认状态。`{library_key, source: "saved", paths}` 只能从本计划自己的绑定保持或收窄，不接受客户端版本 ID、证明或当前摘要，越界返回 `403`。显式移除最后一个旧绑定会转为明确空选择；原本无绑定且沿用历史默认的计划要明确关闭默认资料，必须同时提交 `library_selections: []` 和顶层 `library_selection_explicit: true`。
+- 新增资料或明确更新为当前资料时，先读取当前清单，再提交 `source: "current"` 和准确的 `expected_files`。原所选路径在当前清单缺失时，页面保留原选择并提示先处理，不静默丢失；保存前再发生变化由服务返回 `409 library_selection_conflict`。周期持久 JSON 只存从绑定得到的 `source: "saved"` 及范围，实际快照身份只由绑定表持有。每轮继续使用该绑定，不重选当前文件，不追改历史项目。
 
 成功编辑重新计算未来时间和受阻原因；有有效未来时间时清除旧原因，暂停中的周期计划仍保持暂停。达到生成次数上限或因结束日期已无下一有效时刻时完成；若限制来自授权或执行停止边界，边界前已无后续有效启动时间则变为 `blocked`，要求显式更新未来配置后恢复，不提前宣称尚未到达的边界已经过期。
 
@@ -607,7 +662,7 @@ Body 为 `{"version": 1, "action": "pause"}`，仍执行版本检查。
 
 周期消费上传批次一次，将原始成员保存在资源根目录按 schedule 隔离的目录；未来每轮复制并校验文件大小／SHA-256，生成普通项目资源记录，继续使用既有 advisory bundle／只读挂载。临时批次 TTL 只清理 batch 记录和暂存，不删除计划持久原件。计划停用和已生成项目删除都不删除计划输入；修改计划资料也不影响已有项目副本。不使用隐藏模板项目，不将私有附件发布为公共库。
 
-资料库在保存／显式编辑计划时固定不可变版本及摘要，每轮绑定同一版本，不静默换成 latest；归档和数据库删除约束包含计划引用。触发前校验库文件字节和摘要，资料缺失、不可读或摘要不符时，不提交缺资料的 active 项目。
+资料库在保存／显式编辑计划时固定不可变版本和选择范围，每轮绑定同一版本及范围，不静默换成 latest；归档和数据库删除约束包含计划引用。项目文件列表与正文读取均按绑定范围裁决。触发前校验选中文件的字节数与 SHA-256；整版摘要、所选文件元数据计算的 `selection_sha256` 和物化 bundle 的摘要各自独立，不能用子集正文冒充整版摘要。资料缺失、不可读或摘要不符时，不提交缺资料的 active 项目。显式空选择不触发 `scenario.knowledge` 旧资料回退；确属历史缺省的项目继续沿用旧语义。PostgreSQL v81 从原冻结绑定前向重建周期 JSON，不读取当前 latest，也不改写历史收据和指纹。
 
 资料复制和 DB 事务结果通过回调关联：复制失败或外层 rollback 仅清理本次新副本，不删除源 batch 或已提交资料；commit 后才清理 batch 暂存和此次移除的旧计划资料。普通项目初始 JSON 资料和 batch 消费也遵循外层 rollback 清理。
 
@@ -635,7 +690,7 @@ Body 为 `{"version": 1, "action": "pause"}`，仍执行版本检查。
 
 `committed` 表示创建请求已提交，周期结果只有 schedule ID，单次结果同时有 project ID；`unknown` 表示当前未查到已提交身份，两个 ID 均为 `null`，不等于确认请求失败。关联项目后来被删除时，请求仍为 `committed` 且 `project_id` 可为 `null`；若已无关联业务结果，相同请求 ID 重试返回 `409`，不能把删除后的原请求重放成新创建。
 
-项目组退场不重算或清空历史创建请求摘要。跨版本的未知创建先通过本查询核对原业务结果；旧客户端带 `group_id` 的请求不符合当前 Schema，不能靠删字段、改请求 ID 或自动重提来猜测恢复。
+项目组退场及资料选择合同更替均不重算或清空历史创建请求摘要。跨合同的未知创建先通过本查询核对原业务结果；旧客户端带 `group_id` 或资料选择 `version/proof` 的请求不符合当前 Schema，不能靠删字段、改请求 ID 或自动重提来猜测恢复。创建返回 `422` 时页面先查原请求收据；`committed` 恢复已保存结果，`unknown` 或查询失败保留原 ID／载荷及未知状态，不自动生成新请求。当前合法载荷的相同请求仍在解析资料选择前命中收据，不因后续库编辑重新生成项目。
 
 API 已发出但结果未确认时继续查询，或使用相同请求 ID、相同内容重试；不要自动换请求 ID 再创建，也不要在未确认前清掉待消费资料。已知成功但导航失败，只重试进入已知对象，不撤销成功事实。页面的可选 `sessionStorage` 仅缓存不透明 ID／operation，不保存 Origin、Goal、凭据或完整载荷；读取、损坏值、写入或清理失败均显示短提示，不阻断提交、不锁定按钮、不把已确认成功改成未知。缓存不可用时仍保留内存恢复依据，但跨刷新查询入口可能未保存，且不承诺刷新后恢复原载荷／File。此身份机制覆盖立即创建和计划保存，不扩展为上传／ZIP 或所有管理动作的通用去重机制。
 

@@ -25,7 +25,7 @@ class BindingCircuitKey:
 class RunningTask:
     """线程池中正在执行的任务快照，用于并发控制和 shutdown/reconcile。"""
 
-    project_id: str
+    project_id: str | None
     task_type: str
     worker_name: str
     worker_type: str

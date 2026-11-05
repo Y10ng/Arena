@@ -143,10 +143,10 @@ def get_verifier_target_route(project_id: str, observation_id: str):
     response_model=VulnerabilityDetail,
     dependencies=[Depends(require_tenant_project)],
 )
-def get_vulnerability_route(project_id: str, vuln_id: str, observation_id: str | None = None):
+def get_vulnerability_route(project_id: str, vuln_id: str, observation_id: str | None = None, include_display_images: bool = False):
     # 主证据和补充资料始终来自服务端选定的同一次发现。
     with get_conn() as conn:
-        return get_vulnerability_detail(conn, project_id, vuln_id, observation_id)
+        return get_vulnerability_detail(conn, project_id, vuln_id, observation_id, include_display_images=include_display_images)
 
 
 @router.get(
@@ -156,12 +156,11 @@ def get_vulnerability_route(project_id: str, vuln_id: str, observation_id: str |
 )
 def export_vulnerability_report_route(
     project_id: str, vuln_id: str,
-    template_key: str | None = None,
     observation_id: str | None = None,
 ):
     with get_conn() as conn:
         markdown, title = render_vulnerability_report(
-            conn, project_id, vuln_id, template_key=template_key, observation_id=observation_id,
+            conn, project_id, vuln_id, observation_id=observation_id,
         )
     return Response(markdown.encode("utf-8"), media_type="text/markdown; charset=utf-8", headers={
         "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
@@ -183,11 +182,13 @@ def delete_vulnerability_route(project_id: str, vuln_id: str):
 @router.patch(
     "/projects/{project_id}/vulnerabilities/{vuln_id}",
     response_model=Vulnerability,
-    dependencies=[Depends(require_tenant_project)],
 )
-def update_vulnerability_route(project_id: str, vuln_id: str, body: UpdateVulnerabilityRequest):
+def update_vulnerability_route(
+    project_id: str, vuln_id: str, body: UpdateVulnerabilityRequest,
+    principal: RequestPrincipal = Depends(require_tenant_project),
+):
     with get_conn() as conn:
-        return update_vulnerability(conn, project_id, vuln_id, body)
+        return update_vulnerability(conn, project_id, vuln_id, body, principal=principal)
 
 
 @router.get(

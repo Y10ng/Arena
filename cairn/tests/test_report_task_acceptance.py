@@ -88,8 +88,20 @@ class LocalPiContainer:
     def ensure_running(self, project_id, options):
         return self.container_name(project_id)
 
+    def ensure_report_running(self, project_id, task_run_id, options):
+        self.report_task_run_id = task_run_id
+        self.stopped = False
+        return self.container_name(project_id)
+
+    def stop_owned_report(self, project_id, identity):
+        assert project_id == "p1" and identity == "isolated-container"
+        assert self.process is None or self.process.process.poll() is not None
+        self.stopped = True
+        return True
+
     def runtime_metadata(self, name):
-        return {"container_id": "isolated-container", "container_state": "running"}
+        return {"container_id": "isolated-container", "container_state": "exited" if getattr(self, "stopped", False) else "running",
+                "project_id": "p1", "container_role": "report", "report_task_run_id": getattr(self, "report_task_run_id", None)}
 
     def docker_daemon_id(self):
         return "isolated-local-process"
@@ -171,16 +183,15 @@ def synthetic_provider(artifact_id, original):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             calls.append(body)
             if len(calls) == 1:
-                identity = {"kind": "finding", "vulnerability_id": "v1", "observation_id": "o1"}
+                prompt = json.dumps(body, ensure_ascii=False)
+                assert "顶层冻结漏洞说明" in prompt and "后来修改的模板" not in prompt
                 tools = [{"name": "save_report_segment", "args": {"key": "finding", "content": {
-                    **identity, "description": "冻结发现：合成用户甲能够读取用户乙的对象；没有验证写入。",
-                    "steps": [{"operation": "用合成用户甲身份读取对象 id=sample-7。", "observed": "返回用户乙拥有的 sample-7。", "evidence": [{
-                        "evidence_item_id": "e1", "selections": [{"side": "response", "artifact_id": artifact_id, "byte_start": 0, "byte_end": len(original)}],
-                    }]}], "remediation": "在服务端读取前检查对象归属。",
+                    "kind": "markdown", "sources": [{"vulnerability_id": "v1", "observation_ids": ["o1"]}],
+                    "markdown": "# 顶层冻结漏洞说明\n\n## p1/v1 · 合成读取越权\n\n合成用户甲能够读取用户乙的 sample-7；没有验证写入，尚未独立复现。\n\n[证据](evidence://o1/e1)",
                 }}}, {"name": "save_report_segment", "args": {"key": "summary", "content": {
-                    "kind": "executive_summary", "text": "项目综合：仅一条冻结的合成读取越权发现，未访问真实目标。",
+                    "kind": "markdown", "sources": [], "markdown": "项目综合：仅一条冻结的合成读取越权发现，未访问真实目标。",
                 }}}, {"name": "save_report_segment", "args": {"key": "remediation", "content": {
-                    "kind": "overall_remediation", "text": "优先修复对象归属检查；修复效果尚未验证。",
+                    "kind": "markdown", "sources": [], "markdown": "## 修改建议\n\n优先修复对象归属检查；修复效果尚未验证。",
                 }}}]
             else:
                 # 真实 runner 会从工作上下文移除已保存正文，仅向 provider 投影持久引用。
@@ -233,14 +244,15 @@ def isolated_worker_workspace():
         shutil.rmtree(workspace)
 
 
-def test_top_level_report_registers_worker_binding_and_accepts_frozen_report(defaults_v60_conn, isolated_worker_workspace, monkeypatch, tmp_path):
+@pytest.mark.parametrize("source_status", ["active", "paused"])
+def test_top_level_report_registers_worker_binding_and_accepts_frozen_report(defaults_v60_conn, isolated_worker_workspace, monkeypatch, tmp_path, source_status):
     repository = Path(__file__).resolve().parents[2]
     assert (repository / "container/pi-agent/dist/cli.js").is_file(), "先构建现有 Pi 源码"
     manager = LocalPiContainer(repository)
     conn = defaults_v60_conn
     db.run_migrations(conn, "postgresql")
     _seed_project(conn)
-    conn.execute("UPDATE projects SET status = 'stopped' WHERE id = 'p1'")
+    conn.execute("UPDATE projects SET status = ? WHERE id = 'p1'", (source_status,))
     conn.commit()
 
     @contextmanager
@@ -280,21 +292,63 @@ def test_top_level_report_registers_worker_binding_and_accepts_frozen_report(def
                 (id, project_id, vulnerability_id, severity, confidence, observed_at, evidence_items_json)
                 VALUES ('o1', 'p1', 'v1', 'high', 0.8, 'before', ?)""", (json.dumps([{"id": "e1", "kind": "http", "source": "capture", "title": "合成响应", "response": {"artifact_id": artifact_id}}]),))
             current = report_templates.get_report_template(conn, "vulnerability-report")
-            frozen_template = current.markdown_content.replace("### 漏洞说明", "### 顶层冻结漏洞说明") + "\n## 项目综合\n\n{{ executive_summary }}\n"
+            frozen_template = "# 顶层冻结漏洞说明\n\n## 示例结构\n\n普通 Markdown 范例，不含槽位。\n"
             report_templates.update_report_template(conn, current.key, current.name, "", frozen_template)
             requested = assessment_reports.request_assessment_report_generation(conn, "p1", template_key=current.key, requested_by="synthetic-user")
             conn.commit()
             # 请求受理后修改 live 模板，执行仍须使用原来选定且冻结的版本。
-            report_templates.update_report_template(conn, current.key, current.name, "", current.markdown_content.replace("### 漏洞说明", "### 后来修改的模板"))
+            report_templates.update_report_template(conn, current.key, current.name, "", "# 后来修改的模板\n\n不影响已受理任务。")
             conn.commit()
             with synthetic_provider(artifact_id, original) as (base, provider_calls):
                 worker = WorkerConfig(name="worker", type="pi", task_types=["reason"], max_running=1, priority=1, model_binding=PiModelConfig(protocol="openai-chat-completions", model_name="synthetic-report", inference_endpoint=base + "/chat/completions", base_url=base, auth_header="authorization-bearer", api_key="synthetic-only"))
                 config = SimpleNamespace(dispatcher_id="synthetic-dispatcher", tasks=SimpleNamespace(report=SimpleNamespace(timeout=60, max_output_tokens=4096)))
                 candidate_outbox = CandidateCaptureOutbox(tmp_path / "candidates", owner_id="synthetic-dispatcher")
                 finish_outbox = ReportFinishOutbox(tmp_path / "finishes")
-                outcome = report.run_post_completion_report(config, client, manager, "p1", "project: p1\nfacts: []\n", worker, prompt_group="goal-driven-v1", durable_request=True, generation_token=requested.generation_token, finish_outbox=finish_outbox, candidate_outbox=candidate_outbox)
+                from concurrent.futures import Future
+                from test_dispatcher_multi_project_capacity import _loop, _summary
+
+                loop = _loop(max_workers=2, max_running_projects=1, worker_count=1)
+                config.runtime = SimpleNamespace(max_workers=2, max_project_workers=1)
+                loop.config, loop.client, loop.container_manager = config, client, manager
+                loop.report_finish_outbox, loop.candidate_capture_outbox = finish_outbox, candidate_outbox
+                research_future = Future()
+                loop.futures[research_future] = SimpleNamespace(project_id="p1", task_type="explore", worker_name="research")
+                loop._cleanup_pending.add("container-p1")
+                loop._candidate_fenced_projects = {"p1"}
+                loop._candidate_report_projects = set()
+                loop._scenario_for_project = lambda project: SimpleNamespace(key="test", prompt_group="goal-driven-v1", knowledge=None)
+                loop._container_runtime_options = lambda *args: None
+                loop._delivery_route_workers = lambda *args, **kwargs: SimpleNamespace(workers=[worker])
+                loop._select_worker = lambda *args: SimpleNamespace(worker=worker)
+                loop._materialize_selected_worker = lambda *args: (worker, None, None)
+                submitted = []
+
+                def submit(function, *args, **kwargs):
+                    assert function is report.run_post_completion_report
+                    future = Future()
+                    future.set_result(function(*args, **kwargs))
+                    submitted.append(future)
+                    return future
+
+                loop.executor = SimpleNamespace(submit=submit)
+                # 容量不足真实排队；有容量后研究 future、研究 fence 和清理不挡独立报告。
+                loop._dispatch_completed_reports([_summary("p1", status=source_status)])
+                assert submitted == [] and provider_calls == []
+                config.runtime.max_project_workers = 2
+                loop._dispatch_completed_reports([_summary("p1", status=source_status)])
+                assert len(submitted) == 1
+                assert not research_future.done() and research_future in loop.futures
+                outcome = submitted[0].result()
             assert outcome == "success", (outcome, failures, manager.result.read_stdout() if manager.result else None)
             assert len(provider_calls) == 2
+            assert "http_evidence_render" not in manager.request["capabilities"]
+            assert conn.execute("SELECT status FROM projects WHERE id = 'p1'").fetchone()["status"] == source_status
+            snapshot = conn.execute("SELECT id FROM artifacts WHERE uri LIKE '%-report-input-snapshot.json'").fetchone()
+            frozen = json.loads(audit_artifacts.artifact_content_file("p1", snapshot["id"]).disk_path.read_text())
+            from datetime import datetime
+            assert datetime.fromisoformat(frozen["report_packet"]["materialized_at"]) >= datetime.fromisoformat(requested.requested_at)
+            assert frozen["report_template"]["markdown_content"] == frozen_template
+            assert frozen["report_packet"]["vulnerabilities"][0]["number"] == "p1/v1"
             run = conn.execute("SELECT * FROM task_runs WHERE task_type = 'report'").fetchone()
             assert run["status"] == "succeeded"
             delivery = json.loads(run["runtime_context_json"])["execution_delivery"]
@@ -315,6 +369,7 @@ def test_top_level_report_registers_worker_binding_and_accepts_frozen_report(def
             assert receipt["generation_token"] == requested.generation_token
             assert receipt["artifact_id"] == item.artifact_id
             assert json.loads(receipt["response_json"])["status"] == "ready"
+            assert json.loads(receipt["response_json"])["materialized_at"] == frozen["report_packet"]["materialized_at"]
             content = audit_artifacts.artifact_content_file("p1", item.artifact_id).disk_path.read_bytes().decode()
             assert "顶层冻结漏洞说明" in content and "后来修改的模板" not in content
             assert "合成读取越权" in content and "sample-7" in content

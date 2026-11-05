@@ -40,6 +40,151 @@ def test_client_session_reads_machine_token_once_and_keeps_it_out_of_logs(
     assert "dispatcher-machine-secret" not in repr(client)
 
 
+@pytest.mark.parametrize("prewarm", [False, True])
+def test_client_close_rejects_session_creation_and_thread_local_reuse(monkeypatch, prewarm):
+    from unittest.mock import Mock
+
+    sessions = []
+    def session():
+        result = FakeSession()
+        result.close = Mock()
+        result.request = Mock(return_value=Mock(status_code=200, headers={}, text="ok"))
+        sessions.append(result)
+        return result
+    monkeypatch.setattr("cairn.dispatcher.protocol.client.requests.Session", session)
+    client = CairnClient("https://synthetic.invalid", token="synthetic-test-only")
+    ready, resume = threading.Event(), threading.Event()
+    results, errors = [], []
+    def worker():
+        try:
+            if prewarm:
+                # 正常恢复周期在同一线程复用 session，不因本次关闭修正重复创建。
+                for _ in range(2):
+                    assert client.register_consumption("binding", task_run_id="run").ok
+            ready.set()
+            assert resume.wait(5)
+            results.append(client.register_consumption("binding", task_run_id="run"))
+            with pytest.raises(RuntimeError, match="CairnClient is closed"):
+                client._session()
+        except BaseException as exc:
+            errors.append(exc)
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    try:
+        assert ready.wait(2)
+        client.close()
+        client.close()
+        resume.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert not errors
+        assert len(results) == 1 and results[0].error_code == "client_closed"
+        assert not results[0].ok
+        assert len(sessions) == int(prewarm)
+        if prewarm:
+            assert sessions[0].request.call_count == 2
+            sessions[0].close.assert_called_once()
+        assert client._sessions == {}
+    finally:
+        resume.set()
+        thread.join(timeout=2)
+        client.close()
+
+
+def test_client_close_serializes_session_creation_in_progress(monkeypatch):
+    from unittest.mock import Mock
+
+    creating, release, closing, closed = (threading.Event() for _ in range(4))
+    session = FakeSession()
+    session.close = Mock()
+    session.request = Mock(return_value=Mock(status_code=200, headers={}, text="ok"))
+    def factory():
+        creating.set()
+        assert release.wait(5)
+        return session
+    monkeypatch.setattr("cairn.dispatcher.protocol.client.requests.Session", factory)
+    client = CairnClient("https://synthetic.invalid", token="synthetic-test-only")
+    errors = []
+    def worker():
+        try:
+            assert client.register_consumption("binding", task_run_id="run").ok
+        except BaseException as exc:
+            errors.append(exc)
+    def close():
+        closing.set()
+        client.close()
+        closed.set()
+    request_thread = threading.Thread(target=worker, daemon=True)
+    close_thread = threading.Thread(target=close, daemon=True)
+    request_thread.start()
+    try:
+        assert creating.wait(2)
+        close_thread.start()
+        assert closing.wait(2)
+        # 创建尚未登记时 close 不能抢先返回，留下无人回收的新 session。
+        assert not closed.wait(.05)
+        release.set()
+        request_thread.join(timeout=2)
+        close_thread.join(timeout=2)
+        assert not request_thread.is_alive() and not close_thread.is_alive()
+        assert closed.is_set() and not errors
+        session.close.assert_called_once()
+        assert client._sessions == {} and client._active_requests == set()
+    finally:
+        release.set()
+        request_thread.join(timeout=2)
+        if close_thread.ident is not None:
+            close_thread.join(timeout=2)
+        client.close()
+
+
+@pytest.mark.parametrize("failure", ["timeout", "unexpected"])
+def test_client_close_releases_inflight_session_after_request_failure(monkeypatch, failure):
+    from unittest.mock import Mock
+
+    import requests
+
+    entered, release = threading.Event(), threading.Event()
+    session = FakeSession()
+    session.close = Mock()
+    def request(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(5)
+        if failure == "timeout":
+            raise requests.ReadTimeout("synthetic-timeout")
+        raise ValueError("synthetic-failure")
+    session.request = request
+    monkeypatch.setattr("cairn.dispatcher.protocol.client.requests.Session", lambda: session)
+    client = CairnClient("https://synthetic.invalid", token="synthetic-test-only")
+    results, errors = [], []
+    def worker():
+        try:
+            results.append(client.register_consumption("binding", task_run_id="run"))
+        except BaseException as exc:
+            errors.append(exc)
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    try:
+        assert entered.wait(2)
+        client.close()
+        session.close.assert_not_called()
+        release.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        session.close.assert_called_once()
+        assert client._sessions == {} and client._active_requests == set()
+        if failure == "timeout":
+            assert not errors
+            assert len(results) == 1 and results[0].error_code == "read_timeout"
+        else:
+            assert not results
+            assert len(errors) == 1 and isinstance(errors[0], ValueError)
+    finally:
+        release.set()
+        thread.join(timeout=2)
+        client.close()
+
+
 def test_client_requires_machine_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CAIRN_DISPATCHER_TOKEN", raising=False)
     with pytest.raises(ValueError, match="CAIRN_DISPATCHER_TOKEN"):

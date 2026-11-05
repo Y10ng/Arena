@@ -52,10 +52,17 @@ def traffic_request_address(request: dict) -> dict:
     if not host:
         issue = issue or ("invalid_request_authority" if selected else "request_authority_missing")
         host, url = "", target
+    # 展示目标保留原查询编码与特殊请求形式，不复用已去掉查询串的检索 path。
+    display_target = target[absolute.end():] if absolute else target
+    if absolute and (not display_target or display_target.startswith("?")):
+        display_target = "/" + display_target
+    display_scheme = absolute.group(1) if absolute else request["scheme"]
+    display_host = f"{display_scheme}://{selected}" if host else ""
     # PostgreSQL TEXT 不接受 NUL；只有可重建派生列做可见转义，原件不变。
     return {key: value.replace("\x00", "\\x00") if isinstance(value, str) else value
             for key, value in {
                 "host": host, "request_url": url, "request_path": path,
+                "display_host": display_host, "display_target": display_target,
                 "connection_host": request["host"], "address_issue": issue,
             }.items()}
 

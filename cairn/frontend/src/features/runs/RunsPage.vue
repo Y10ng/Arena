@@ -1,30 +1,67 @@
 <template>
-  <div
-    class="runs-container"
-    :class="{ 'runs-container--reading': showDetail && Boolean(selectedRun) }"
-  >
-    <!-- Left Master Column: Runs List -->
-    <aside class="runs-sidebar">
-      <div class="sidebar-header">
-        <div class="sidebar-title-row">
-          <h3>任务运行审计</h3>
-        </div>
-        <FilterBar label="运行列表筛选">
-          <Input
-            v-model="searchQuery"
-            placeholder="搜索工作目的、角色、优先级、Worker 或结果..."
-            aria-label="搜索运行"
-          />
-          <Select v-model="statusFilter" :options="statusFilterOptions" aria-label="运行状态" />
-        </FilterBar>
-      </div>
+  <div class="runs-container">
+    <Alert v-if="chatRunNotice" class="runs-stale-error" tone="info">
+      此记录属于 Agent 对话，请在项目 Agent 中查看。
+      <template #actions>
+        <Button variant="secondary" size="sm" @click="openProjectAgent">打开项目 Agent</Button>
+      </template>
+    </Alert>
+    <Alert
+      v-if="runsStaleError"
+      class="runs-stale-error"
+      tone="warning"
+      title="刷新失败，保留上次运行列表"
+    >
+      {{ errorMessage(runsError) }}
+      <template #actions>
+        <Button variant="secondary" size="sm" @click="refetchRuns">重试</Button>
+      </template>
+    </Alert>
 
-      <Alert v-if="chatRunNotice" class="runs-stale-error" tone="info">
-        此记录属于 Agent 对话，请在项目 Agent 中查看。
-        <template #actions>
-          <Button variant="secondary" size="sm" @click="openProjectAgent">打开项目 Agent</Button>
-        </template>
+    <section
+      v-show="!selectedRun || showRunList"
+      ref="runList"
+      class="runs-index"
+      aria-label="工作进展时间线"
+    >
+      <h2 ref="listHeading" class="sr-only" tabindex="-1">工作进展</h2>
+      <Alert
+        v-if="reportsError"
+        tone="warning"
+        :title="reportsLoaded ? '报告刷新失败，保留上次读取结果' : '报告结果尚未读到'"
+      >
+        {{ reportsError }}
+        <template #actions
+          ><Button variant="secondary" size="sm" @click="loadReports()"
+            >重读报告结果</Button
+          ></template
+        >
       </Alert>
+      <Alert v-if="resultReadState" tone="warning" aria-label="工作结果读取状态">{{
+        resultReadState
+      }}</Alert>
+      <FilterBar label="工作进展筛选">
+        <Input
+          v-model="searchQuery"
+          class="runs-search"
+          placeholder="搜索目的、角色、Worker 或结果…"
+          aria-label="搜索运行元数据"
+          aria-describedby="runs-search-scope"
+        />
+        <Select v-model="statusFilter" :options="statusFilterOptions" aria-label="执行记录状态" />
+        <template #status
+          ><span id="runs-search-scope">检索元数据与已接受结果，不搜索日志正文</span></template
+        >
+        <template #actions>
+          <Button v-if="selectedRun" variant="ghost" @click="resumeReading">返回当前记录</Button>
+          <Button v-if="hasNewProgress" variant="ghost" @click="backToLatest"
+            >有新进展 · 回到最新</Button
+          >
+          <Button variant="secondary" @click="refreshTimeline"
+            ><RefreshCw :size="16" />刷新进展</Button
+          >
+        </template>
+      </FilterBar>
       <ErrorState
         v-if="runsInitialError"
         class="runs-list-state"
@@ -42,84 +79,248 @@
         />
       </div>
       <template v-else>
-        <Alert
-          v-if="runsStaleError"
-          class="runs-stale-error"
-          tone="warning"
-          title="刷新失败，保留上次运行列表"
+        <div
+          v-if="workTimeline.length"
+          ref="timelineScroll"
+          class="runs-timeline-scroll"
+          @scroll="onTimelineScroll"
         >
-          {{ errorMessage(runsError) }}
-        </Alert>
-        <div class="runs-list" v-if="filteredRuns.length > 0">
-          <Button
-            v-for="run in filteredRuns"
-            :key="run.id"
-            variant="ghost"
-            size="sm"
-            class="run-row"
-            :class="{ active: selectedRunId === run.id }"
-            @click="openRun(run.id)"
-          >
-            <div class="row-top">
-              <span class="run-business-title" :title="runBusinessTitle(run)">
-                {{ runBusinessTitle(run) }}
-              </span>
-              <StatusBadge :status="run.status" size="sm" />
-            </div>
-            <div class="row-middle row-business-meta">
-              <span class="run-badges">
-                <Badge tone="info" size="sm">{{ runRoleLabel(run) }}</Badge>
-                <Badge
-                  v-if="runPriorityLabel(run)"
-                  :tone="runIntent(run)?.priority === 2 ? 'warning' : 'neutral'"
-                  size="sm"
+          <ol class="work-timeline" aria-label="工作进展">
+            <li
+              v-for="work in workTimeline"
+              :key="work.key"
+              class="work-node"
+              :data-work-key="work.key"
+            >
+              <div class="work-time">
+                <time v-if="work.startedAt" :datetime="work.startedAt" :title="work.startedAt">{{
+                  formatRelativeTime(work.startedAt)
+                }}</time
+                ><span v-else>时间未记录</span>
+              </div>
+              <div class="work-body">
+                <header class="work-heading">
+                  <h3>{{ workTitle(work) }}</h3>
+                  <span
+                    class="work-status"
+                    :class="{
+                      'work-status--active': work.status === '执行中',
+                      'work-status--uncertain': work.status.includes('未'),
+                    }"
+                    >{{ work.status }}</span
+                  >
+                </header>
+                <ul
+                  v-if="workActivity(work).length"
+                  class="work-activity"
+                  aria-label="当前工具活动"
                 >
-                  {{ runPriorityLabel(run) }}
-                </Badge>
-              </span>
-              <span class="worker-name" :title="run.worker_name">{{ run.worker_name }}</span>
-            </div>
-            <p v-if="runCardDiagnostic(run)" class="row-diagnostic" :title="runCardDiagnostic(run)">
-              {{ runCardDiagnostic(run) }}
-            </p>
-            <div class="row-bottom">
-              <span class="row-technical mono text-faint">
-                {{ run.task_type }} · #{{ run.id.slice(0, 8) }}
-              </span>
-              <span class="time text-faint">
-                {{ runDurationText(run) }} · {{ formatRelativeTime(runReferenceTime(run)) }}
-              </span>
-            </div>
-          </Button>
+                  <li v-for="call in workActivity(work)" :key="call.key">
+                    <Wrench :size="14" aria-hidden="true" />
+                    <span
+                      >{{
+                        call.active
+                          ? '正在执行'
+                          : call.status === '已完成'
+                            ? '最近完成'
+                            : '最近调用未完成'
+                      }}
+                      · {{ call.name }}</span
+                    >
+                    <time v-if="call.startedAt || call.endedAt">{{
+                      formatTimeShort(call.startedAt || call.endedAt || '')
+                    }}</time>
+                  </li>
+                </ul>
+                <p v-else-if="work.runs.some(isActiveRun)" class="work-observation-empty">
+                  {{ work.status
+                  }}<span v-if="work.runs.some((run) => hookReads[run.id]?.loaded)">
+                    · 暂无已记录工具活动</span
+                  >
+                </p>
+                <div v-for="run in work.runs" :key="`read:${run.id}`" class="work-read-state">
+                  <p v-if="hookReadError(run.id)" role="status">
+                    {{ hookReadError(run.id) }}
+                    <Button variant="ghost" size="sm" @click="refetchHooks(run.id)"
+                      >重读工具过程</Button
+                    >
+                  </p>
+                  <p v-if="hookObservationIncomplete(run.id)" role="status">
+                    工具观测不完整，不能据此判断全部调用状态。<Button
+                      variant="ghost"
+                      size="sm"
+                      @click="openRun(run.id, $event)"
+                      >查看执行详情</Button
+                    >
+                  </p>
+                </div>
+                <div v-if="work.results.length" class="work-results">
+                  <section v-for="result in work.results" :key="result.key" class="work-result">
+                    <div class="work-result-source">
+                      <span>{{ result.label }}</span
+                      ><Button
+                        variant="ghost"
+                        size="sm"
+                        :title="result.runId"
+                        @click="openRun(result.runId, $event)"
+                        >来源执行</Button
+                      >
+                    </div>
+                    <Button
+                      v-if="result.artifactId"
+                      variant="link"
+                      @click="previewArtifact(result.artifactId)"
+                      >{{ result.text }}</Button
+                    >
+                    <details
+                      v-else-if="result.text.length > 240 || result.text.split('\n').length > 3"
+                    >
+                      <summary>查看结果全文</summary>
+                      <p>{{ result.text }}</p>
+                    </details>
+                    <p v-else>{{ result.text }}</p>
+                  </section>
+                </div>
+                <p v-else-if="!work.runs.some(isActiveRun)" class="work-observation-empty">
+                  执行已结束，尚无可确认归属的接受结果。
+                </p>
+                <div class="work-actions">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    :aria-expanded="expandedTools.has(work.key)"
+                    :aria-controls="`tools-${work.key}`"
+                    @click="toggleTools(work)"
+                    ><ChevronDown
+                      :size="14"
+                      :class="{ 'is-expanded': expandedTools.has(work.key) }"
+                    />工具过程</Button
+                  >
+                  <Button
+                    class="work-detail"
+                    variant="ghost"
+                    size="sm"
+                    :aria-current="
+                      work.runs.some((run) => selectedRunId === run.id) ? 'true' : undefined
+                    "
+                    @click="openRun(work.matchedRuns[0]!.id, $event)"
+                    >查看详情</Button
+                  >
+                </div>
+                <div
+                  v-if="expandedTools.has(work.key)"
+                  :id="`tools-${work.key}`"
+                  class="work-tools"
+                >
+                  <section
+                    v-for="run in work.runs"
+                    :key="run.id"
+                    :aria-label="`执行 ${run.id} 的工具过程`"
+                  >
+                    <div class="work-tool-source">
+                      <Button variant="ghost" size="sm" @click="openRun(run.id, $event)"
+                        >执行 {{ run.id }}</Button
+                      ><StatusBadge :status="run.status" size="sm" />
+                    </div>
+                    <p v-if="!hookReads[run.id]?.loaded">
+                      {{ hookReads[run.id]?.loading ? '正在读取工具过程…' : '工具过程尚未读到' }}
+                    </p>
+                    <p v-else-if="!toolCalls(run).length">暂无已记录工具调用</p>
+                    <ol v-else class="tool-calls">
+                      <li v-for="call in toolCalls(run)" :key="call.key">
+                        <time :title="call.startedAt || call.endedAt || undefined">{{
+                          call.startedAt || call.endedAt
+                            ? formatTimeShort(call.startedAt || call.endedAt || '')
+                            : '时间未记录'
+                        }}</time>
+                        <span class="tool-name">{{ call.name }}</span
+                        ><span>{{ call.status }}</span
+                        ><span v-if="call.durationMs !== null"
+                          >{{ (call.durationMs / 1000).toFixed(1) }} 秒</span
+                        >
+                        <Button
+                          v-if="call.artifactId"
+                          variant="ghost"
+                          size="sm"
+                          @click="previewArtifact(call.artifactId)"
+                          >已保存原件</Button
+                        >
+                      </li>
+                    </ol>
+                  </section>
+                </div>
+                <details class="work-attempts">
+                  <summary>
+                    执行记录 · {{ work.runs.length
+                    }}<span v-if="filtersActive"> · 命中 {{ work.matchedRuns.length }} 次</span>
+                  </summary>
+                  <ul>
+                    <li
+                      v-for="run in work.runs"
+                      :key="run.id"
+                      :class="{
+                        'attempt-match':
+                          filtersActive && work.matchedRuns.some((match) => match.id === run.id),
+                      }"
+                    >
+                      <StatusBadge :status="run.status" size="sm" /><time>{{
+                        formatRelativeTime(runReferenceTime(run))
+                      }}</time
+                      ><span>{{ runDurationText(run) }}</span>
+                      <span
+                        v-if="
+                          filtersActive && work.matchedRuns.some((match) => match.id === run.id)
+                        "
+                        >命中筛选</span
+                      >
+                      <Button variant="ghost" size="sm" @click="openRun(run.id, $event)"
+                        >查看执行 {{ run.id }}</Button
+                      >
+                    </li>
+                  </ul>
+                </details>
+              </div>
+            </li>
+          </ol>
         </div>
         <EmptyState
           v-else
           class="runs-list-state"
           :title="filtersActive ? '当前筛选条件没有匹配记录' : '没有运行记录'"
-          :description="
-            filtersActive ? '清除筛选条件可查看全部历史任务。' : '项目状态请查看工作空间顶部。'
-          "
         />
       </template>
-    </aside>
+    </section>
 
-    <!-- Right Detail Column: Selected Run Details -->
-    <main class="run-details-panel" v-if="selectedRun">
-      <!-- Detail Header -->
+    <main
+      v-if="selectedRun"
+      v-show="!showRunList"
+      class="run-details-panel"
+      aria-label="运行记录阅读"
+    >
+      <div class="run-reader-nav">
+        <Button class="run-back" variant="ghost" @click="returnToList">
+          <ArrowLeft :size="16" />返回工作进展
+        </Button>
+        <span class="run-reader-id mono">Run {{ selectedRun.id }}</span>
+      </div>
       <header class="detail-header">
-        <Button class="run-back" variant="ghost" size="sm" @click="showDetail = false"
-          >返回运行列表</Button
-        >
         <div class="header-left-info">
           <div class="title-row">
             <StatusBadge :status="selectedRun.status" size="sm" />
-            <h2 :title="runBusinessTitle(selectedRun)">{{ runBusinessTitle(selectedRun) }}</h2>
+            <h2 ref="detailHeading" tabindex="-1">{{ runBusinessTitle(selectedRun) }}</h2>
             <span class="run-detail-loading">
               <Spinner v-if="isLoadingRunDetails" size="sm" label="正在载入运行详情" />
             </span>
           </div>
           <p class="subtitle text-faint">
-            {{ runRoleLabel(selectedRun) }}
+            {{ runRoleLabel(selectedRun) }} · {{ selectedRun.worker_name }} ·
+            {{ runDurationText(selectedRun) }}
+            <time
+              :datetime="runReferenceTime(selectedRun) || undefined"
+              :title="runReferenceTime(selectedRun) || undefined"
+            >
+              · {{ formatRelativeTime(runReferenceTime(selectedRun)) }}
+            </time>
             <template v-if="runPriorityLabel(selectedRun)">
               · 优先级：{{ runPriorityLabel(selectedRun) }}
             </template>
@@ -185,7 +386,10 @@
         :tone="trafficStatusError ? 'warning' : 'info'"
         aria-label="本次运行流量状态"
       >
-        {{ runTrafficMessage }}<template v-if="trafficStatusError">{{ runTrafficMessage ? ' · 状态刷新失败，显示上次观测' : '流量状态查询失败，当前状态未知' }}</template>
+        {{ runTrafficMessage
+        }}<template v-if="trafficStatusError">{{
+          runTrafficMessage ? ' · 状态刷新失败，显示上次观测' : '流量状态查询失败，当前状态未知'
+        }}</template>
         <template v-if="trafficStatusError" #actions>
           <Button variant="secondary" size="sm" @click="refetchTrafficScopes">重试</Button>
         </template>
@@ -202,21 +406,24 @@
         {{ linkedIntentOutcomeText(selectedRun) }}
       </Alert>
 
-      <Alert v-if="runDetailsError" class="run-detail-state" tone="warning">
-        {{ runDetailsError }}
-        <template #actions>
-          <Button variant="secondary" size="sm" @click="refetchTerminal">重试</Button>
-        </template>
-      </Alert>
-
       <Tabs
         class="runs-detail-tabs"
         :model-value="activeDetailTab"
         :options="detailTabs"
         activation-mode="manual"
+        :unmount-on-hide="false"
         variant="line"
         @update:model-value="activeDetailTab = $event"
       >
+        <template #label="{ option }">
+          {{
+            option.value === 'terminal'
+              ? '运行日志'
+              : option.value === 'commands'
+                ? '命令审计'
+                : '关联资产'
+          }}
+        </template>
         <template #actions>
           <div v-if="activeDetailTab === 'terminal'" class="term-actions">
             <a
@@ -227,7 +434,12 @@
               :title="stdoutDownloadTitle"
               >{{ stdoutDownloadLabel }}</a
             >
-            <Button variant="secondary" size="sm" title="重新加载流" @click="refetchTerminal"
+            <Button
+              variant="secondary"
+              size="sm"
+              title="重新读取日志"
+              :disabled="isLoadingTerminalPreview || (!stdoutArtifactId && isLoadingArtifacts)"
+              @click="refetchTerminal"
               >刷新</Button
             >
             <Checkbox v-model="autoScrollTerminal" label="自动滚动" />
@@ -237,6 +449,40 @@
           <div class="tab-viewport">
             <!-- 终端日志保留原始内容与截断来源提示。 -->
             <div class="terminal-view" v-if="option.value === 'terminal'">
+              <Alert
+                v-if="artifactsError"
+                tone="warning"
+                aria-label="日志来源读取状态"
+                :title="artifactsLoaded ? '资产清单刷新失败，显示上次读取来源' : '日志来源尚未读到'"
+              >
+                {{ artifactsError }}
+                <template #actions>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    :disabled="isLoadingArtifacts"
+                    @click="refetchArtifacts"
+                    >重试资产清单</Button
+                  >
+                </template>
+              </Alert>
+              <Alert
+                v-if="terminalPreviewError"
+                tone="warning"
+                aria-label="日志读取状态"
+                :title="terminalPreviewLoaded ? '刷新失败，显示上次读取内容' : '日志读取失败'"
+              >
+                {{ terminalPreviewError }}
+                <template #actions>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    :disabled="isLoadingTerminalPreview"
+                    @click="refetchTerminal"
+                    >重试日志</Button
+                  >
+                </template>
+              </Alert>
               <div class="terminal-output-nav" v-if="terminalOutputs.length > 1">
                 <Button
                   v-for="output in terminalOutputs"
@@ -244,19 +490,17 @@
                   variant="secondary"
                   size="sm"
                   class="terminal-output-option"
-                  :class="{
-                    active: stdoutArtifactId === output.id,
-                    success: output.successful,
-                    timeout: output.timedOut,
-                  }"
+                  :class="{ active: stdoutArtifactId === output.id }"
                   :aria-pressed="stdoutArtifactId === output.id"
                   @click="selectTerminalOutput(output.id)"
                 >
                   {{ output.label }}
+                  <Badge v-if="output.timedOut" tone="warning" size="sm">超时</Badge>
+                  <Badge v-else-if="output.successful" tone="success" size="sm">成功</Badge>
                 </Button>
               </div>
               <div class="terminal-recovery-notice" v-if="terminalRecovered">
-                主执行超时后已通过 conclude 恢复；默认展示最终成功输出，可切换查看原始执行记录。
+                主执行超时后有 conclude 阶段输出；退出码不代表结果已接受，可切换查看此前记录。
               </div>
               <div class="terminal-preview-notice" v-if="previewTruncationMessage">
                 {{ previewTruncationMessage }}
@@ -265,25 +509,59 @@
                 {{ captureTruncationMessage }}
               </div>
 
-              <div class="terminal-screen" ref="terminalScreen">
-                <div class="terminal-empty" v-if="isLoadingTerminalPreview && !stdoutContent">
-                  <span class="text-faint">正在载入终端日志...</span>
-                </div>
-                <div class="terminal-empty terminal-error" v-else-if="terminalPreviewError">
-                  <span>{{ terminalPreviewError }}</span>
-                  <Button variant="secondary" size="sm" @click="refetchTerminal">重试</Button>
-                </div>
-                <pre class="terminal-content text-wrap mono" v-else-if="stdoutContent">{{
+              <div
+                class="terminal-screen"
+                ref="terminalScreen"
+                tabindex="0"
+                role="region"
+                aria-label="日志正文"
+              >
+                <pre class="terminal-content text-wrap mono" v-if="stdoutContent">{{
                   stdoutContent
                 }}</pre>
+                <div class="terminal-empty" v-else-if="terminalPreviewLoaded">
+                  <span class="text-faint">日志内容为空</span>
+                </div>
+                <div class="terminal-empty" v-else-if="isLoadingTerminalPreview">
+                  <span class="text-faint">正在载入终端日志...</span>
+                </div>
+                <div class="terminal-empty" v-else-if="terminalPreviewError">
+                  <span class="text-faint">尚未读取到日志内容</span>
+                </div>
+                <div class="terminal-empty" v-else-if="!artifactsLoaded">
+                  <span class="text-faint">{{
+                    isLoadingArtifacts ? '正在读取日志来源…' : '尚未读取到日志来源'
+                  }}</span>
+                </div>
+                <div class="terminal-empty" v-else-if="artifactsError">
+                  <span class="text-faint">上次读取未找到日志产物，当前清单尚未更新</span>
+                </div>
                 <div class="terminal-empty" v-else>
                   <span class="text-faint">暂无标准输出、标准错误或诊断日志产物</span>
                 </div>
               </div>
             </div>
 
-            <!-- Shell 命令 -->
             <div class="commands-view" v-if="option.value === 'commands'">
+              <p class="commands-reading-note">历史命令审计 · 只读记录</p>
+              <Alert
+                v-if="commandsError"
+                tone="warning"
+                aria-label="命令审计读取状态"
+                :title="commandsLoaded ? '刷新失败，显示上次读取内容' : '命令审计读取失败'"
+              >
+                {{ commandsError }}
+                <template #actions>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    :disabled="isLoadingCommands"
+                    @click="refetchCommands"
+                    >重试命令审计</Button
+                  >
+                </template>
+              </Alert>
+              <Spinner v-if="isLoadingCommands" size="sm" label="正在读取命令审计" />
               <DataTable
                 v-if="commandEvents.length > 0"
                 :rows="commandEvents"
@@ -330,47 +608,49 @@
                 </template>
               </DataTable>
               <EmptyState
-                v-else
+                v-else-if="commandsLoaded && !commandsError"
                 title="暂无 Shell 命令"
-                description="本轮执行中没有调用的 Shell 命令。"
               />
             </div>
 
-            <!-- 产物证据 -->
             <div class="artifacts-view" v-if="option.value === 'artifacts'">
-              <div class="artifacts-grid" v-if="artifacts.length > 0">
-                <Card v-for="art in artifacts" :key="art.id" class="artifact-card" padding="sm">
-                  <Button variant="ghost" size="sm" @click="previewArtifact(art.id)">
-                    <div class="art-icon">
-                      <svg
-                        width="24"
-                        height="24"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        class="text-info"
-                      >
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                        <polyline points="14 2 14 8 20 8"></polyline>
-                        <line x1="16" y1="13" x2="8" y2="13"></line>
-                        <line x1="16" y1="17" x2="8" y2="17"></line>
-                        <polyline points="10 9 9 9 8 9"></polyline>
-                      </svg>
-                    </div>
-                    <div class="art-info">
-                      <span class="art-title text-truncate" :title="art.uri">{{
-                        art.uri.split('/').pop()
-                      }}</span>
-                      <span class="art-meta mono text-faint">
-                        Size: {{ art.size }} 字节 · Category: {{ art.category }}
-                      </span>
-                    </div>
+              <Alert
+                v-if="artifactsError"
+                tone="warning"
+                aria-label="关联资产读取状态"
+                :title="artifactsLoaded ? '刷新失败，显示上次读取内容' : '关联资产读取失败'"
+              >
+                {{ artifactsError }}
+                <template #actions>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    :disabled="isLoadingArtifacts"
+                    @click="refetchArtifacts"
+                    >重试资产清单</Button
+                  >
+                </template>
+              </Alert>
+              <Spinner v-if="isLoadingArtifacts" size="sm" label="正在读取关联资产" />
+              <ul
+                class="run-artifacts-list"
+                v-if="artifacts.length > 0"
+                aria-label="本次运行关联资产"
+              >
+                <li v-for="art in artifacts" :key="art.id">
+                  <Button variant="ghost" class="run-artifact" @click="previewArtifact(art.id)">
+                    <FileText :size="18" />
+                    <span class="art-info">
+                      <span class="art-title">{{ art.uri.split('/').pop() }}</span>
+                      <span class="art-meta">{{ art.size }} 字节 · {{ art.category }}</span>
+                      <span class="art-source mono">{{ art.uri }}</span>
+                    </span>
+                    <ArrowUpRight :size="16" />
                   </Button>
-                </Card>
-              </div>
+                </li>
+              </ul>
               <EmptyState
-                v-else
+                v-else-if="artifactsLoaded && !artifactsError"
                 title="暂无产物证据"
                 description="本轮运行中没有写入任何产物证据资产。"
               />
@@ -379,37 +659,13 @@
         </template>
       </Tabs>
     </main>
-    <div class="runs-empty-detail" v-else>
-      <svg
-        width="48"
-        height="48"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1"
-        class="text-faint"
-      >
-        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-        <line x1="9" y1="3" x2="9" y2="21"></line>
-        <line x1="15" y1="9" x2="21" y2="9"></line>
-        <line x1="15" y1="15" x2="21" y2="15"></line>
-      </svg>
-      <h3>
-        {{ filteredRuns.length ? '请在左侧选择一个运行记录' : '暂无运行记录' }}
-      </h3>
-      <p>
-        {{
-          filteredRuns.length
-            ? '观察该任务的实时终端日志及审计详情。'
-            : '项目状态请查看工作空间顶部。'
-        }}
-      </p>
-    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
+import { ArrowLeft, ArrowUpRight, ChevronDown, FileText, RefreshCw, Wrench } from '@lucide/vue'
+import { isActiveRun } from './runTimelineModel'
 import { useQuery } from '@tanstack/vue-query'
 import { getTrafficScopes } from '@/api/traffic'
 import { trafficScopeLabel } from '@/features/traffic/trafficStatus'
@@ -418,7 +674,6 @@ import {
   Alert,
   Badge,
   Button,
-  Card,
   Checkbox,
   EmptyState,
   Input,
@@ -435,7 +690,7 @@ import type { TaskRunCommandEvent } from './runTypes'
 import { useRunsPage } from './useRunsPage'
 
 const statusFilterOptions: readonly SelectOption[] = [
-  { label: '所有状态', value: 'all' },
+  { label: '执行记录状态：全部', value: 'all' },
   { label: '运行中', value: 'running' },
   { label: '成功', value: 'succeeded' },
   { label: '失败', value: 'failed' },
@@ -481,7 +736,6 @@ const {
   chatRunNotice,
   commandEvents,
   detailTabs,
-  filteredRuns,
   filtersActive,
   formatRelativeTime,
   formatTimeShort,
@@ -495,10 +749,31 @@ const {
   refetchRuns,
   refetchTerminal,
   runBusinessTitle,
-  runCardDiagnostic,
-  runDetailsError,
+  workTimeline,
+  workTitle,
+  workActivity,
+  toolCalls,
+  hookReads,
+  hookReadError,
+  hookObservationIncomplete,
+  expandedTools,
+  toggleTools,
+  refetchHooks,
+  refreshTimeline,
+  reportsLoaded,
+  resultReadState,
+  reportsError,
+  loadReports,
+  commandsLoaded,
+  commandsError,
+  isLoadingCommands,
+  artifactsLoaded,
+  artifactsError,
+  isLoadingArtifacts,
+  refetchCommands,
+  refetchArtifacts,
+  terminalPreviewLoaded,
   runDurationText,
-  runIntent,
   runPriorityLabel,
   runReferenceTime,
   runResultText,
@@ -524,27 +799,114 @@ const {
   terminalScreen,
 } = useRunsPage()
 
-const { data: trafficScopes, isError: trafficStatusError, refetch: refetchTrafficScopes } = useQuery({
-  queryKey: computed(() => ['runTrafficScopes', selectedRun.value?.project_id, selectedRun.value?.id]),
-  queryFn: ({ signal }) => getTrafficScopes(selectedRun.value!.project_id, signal, selectedRun.value!.id),
+const {
+  data: trafficScopes,
+  isError: trafficStatusError,
+  refetch: refetchTrafficScopes,
+} = useQuery({
+  queryKey: computed(() => [
+    'runTrafficScopes',
+    selectedRun.value?.project_id,
+    selectedRun.value?.id,
+  ]),
+  queryFn: ({ signal }) =>
+    getTrafficScopes(selectedRun.value!.project_id, signal, selectedRun.value!.id),
   enabled: computed(() => Boolean(selectedRun.value?.project_id)),
   refetchInterval: (query) => {
     if (query.state.status === 'error') return false
     const scope = query.state.data?.items.find((item) => item.task_run_id === selectedRun.value?.id)
-    if (!scope) return ['queued', 'running'].includes(selectedRun.value?.status ?? '') ? 3000 : false
-    return scope.status?.upload_complete === true && scope.status.control_stopped === true
-      && scope.status.test_stopped === true && scope.status.collector_stopped === true ? false : 3000
+    if (!scope)
+      return ['queued', 'running'].includes(selectedRun.value?.status ?? '') ? 3000 : false
+    return scope.status?.upload_complete === true &&
+      scope.status.control_stopped === true &&
+      scope.status.test_stopped === true &&
+      scope.status.collector_stopped === true
+      ? false
+      : 3000
   },
 })
-const runTrafficScope = computed(() => trafficScopes.value?.items.find(
-  (scope) => scope.task_run_id === selectedRun.value?.id,
-))
-const runTrafficMessage = computed(() => runTrafficScope.value ? trafficScopeLabel(runTrafficScope.value) : '')
+const runTrafficScope = computed(() =>
+  trafficScopes.value?.items.find((scope) => scope.task_run_id === selectedRun.value?.id),
+)
+const runTrafficMessage = computed(() =>
+  runTrafficScope.value ? trafficScopeLabel(runTrafficScope.value) : '',
+)
 
-const showDetail = ref(false)
-const openRun = (id: string) => {
+const showRunList = ref(false)
+watch(selectedRunId, () => {
+  showRunList.value = false
+})
+const runList = ref<HTMLElement | null>(null)
+const listHeading = ref<HTMLElement | null>(null)
+const detailHeading = ref<HTMLElement | null>(null)
+const resumeReading = async () => {
+  showRunList.value = false
+  await nextTick()
+  // 检索期间输出可能更新；只有开启自动滚动时才恢复到底部。
+  if (autoScrollTerminal.value && terminalScreen.value) {
+    terminalScreen.value.scrollTop = terminalScreen.value.scrollHeight
+  }
+  detailHeading.value?.focus({ preventScroll: true })
+}
+const lastRunTrigger = ref<HTMLElement | null>(null)
+const timelineScroll = ref<HTMLElement | null>(null)
+const hasNewProgress = ref(false)
+const onTimelineScroll = () => {
+  if ((timelineScroll.value?.scrollTop || 0) < 24) hasNewProgress.value = false
+}
+const backToLatest = () => {
+  timelineScroll.value?.scrollTo({ top: 0 })
+  hasNewProgress.value = false
+}
+// 只固定当前读到的工作锚点；新工作或工具更新不能把读者推回顶部。
+watch(
+  () =>
+    JSON.stringify([
+      workTimeline.value.map((work) => [
+        work.key,
+        work.status,
+        work.results,
+        work.runs.map((run) => [run.id, run.status]),
+      ]),
+      Object.entries(hookReads.value).map(([id, read]) => [
+        id,
+        read.events.map((event) => event.id),
+      ]),
+    ]),
+  async () => {
+    const viewport = timelineScroll.value
+    if (!viewport || viewport.scrollTop < 24) return
+    const anchor = [...viewport.querySelectorAll<HTMLElement>('.work-node')].find(
+      (item) => item.getBoundingClientRect().bottom > viewport.getBoundingClientRect().top,
+    )
+    const before = anchor?.getBoundingClientRect().top
+    hasNewProgress.value = true
+    await nextTick()
+    if (anchor?.isConnected && before !== undefined) {
+      // DOMRect 已包含应用缩放，scrollTop 仍是布局像素，须换回同一坐标系。
+      const scale = viewport.offsetHeight
+        ? viewport.getBoundingClientRect().height / viewport.offsetHeight
+        : 1
+      viewport.scrollTop += (anchor.getBoundingClientRect().top - before) / (scale || 1)
+    }
+  },
+)
+watch([statusFilter, searchQuery], () => {
+  hasNewProgress.value = false
+})
+const openRun = (id: string, event?: Event) => {
+  lastRunTrigger.value = event?.currentTarget instanceof HTMLElement ? event.currentTarget : null
   selectRun(id)
-  showDetail.value = true
+  void resumeReading()
+}
+const returnToList = async () => {
+  showRunList.value = true
+  await nextTick()
+  const currentRow = runList.value?.querySelector<HTMLElement>('.work-detail[aria-current="true"]')
+  ;(lastRunTrigger.value?.isConnected
+    ? lastRunTrigger.value
+    : currentRow || listHeading.value
+  )?.focus({ preventScroll: true })
 }
 const resultText = computed(() => (selectedRun.value ? runResultText(selectedRun.value) : ''))
 const resultDuplicatesError = computed(
@@ -559,8 +921,6 @@ const errorIsLong = computed(() => {
   const message = selectedRun.value?.error_message || ''
   return message.length > 240 || message.split('\n').length > 3
 })
-
-void terminalScreen
 </script>
 
 <style src="./RunsPage.css" scoped></style>

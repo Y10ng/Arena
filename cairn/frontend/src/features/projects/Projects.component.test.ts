@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { ref, unref } from 'vue'
+import { reactive, ref, unref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { VueWrapper } from '@vue/test-utils'
 import type { ProjectSummary } from '@/api/types'
@@ -18,11 +18,24 @@ const mocks = vi.hoisted(() => ({
   getProjectManagementOptions: vi.fn(),
   getTenantMonitoringSummary: vi.fn(),
   projectsRefetch: vi.fn(),
+  runtimeRefetch: vi.fn(),
   getQueryData: vi.fn(),
   setQueryData: vi.fn(),
   invalidateQueries: vi.fn(),
-  authStore: { isSuperAdmin: false },
-  uiStore: { globalRefreshKey: 0, showToast: vi.fn() },
+  authStore: { isSuperAdmin: false, authGeneration: 0 },
+  uiStore: {
+    globalRefreshKey: 0,
+    showToast: vi.fn(),
+    projectListView: {
+      authGeneration: -1,
+      activeSegment: 'all',
+      searchQuery: '',
+      selectedTenantId: 'all',
+      sortBy: 'created_desc',
+      scrollTop: 0,
+      scrollLeft: 0,
+    },
+  },
   router: { push: vi.fn() },
   route: { query: {} as Record<string, unknown> },
   runtimeOverrides: {} as Record<string, Record<string, unknown>>,
@@ -47,6 +60,7 @@ vi.mock('@/stores/ui', () => ({
 vi.mock('vue-router', () => ({
   useRoute: () => mocks.route,
   useRouter: () => mocks.router,
+  onBeforeRouteLeave: vi.fn(),
 }))
 
 vi.mock('@tanstack/vue-query', () => ({
@@ -82,7 +96,10 @@ vi.mock('@tanstack/vue-query', () => ({
             }),
           ),
         }),
+        dataUpdatedAt: ref(Date.now()),
         isError: ref(mocks.runtimeError),
+        isFetching: ref(false),
+        refetch: mocks.runtimeRefetch,
       }
     if (key[0] === 'scenarios') return { data: ref(mocks.scenarios) }
     return { data: ref(undefined), isError: ref(false) }
@@ -123,10 +140,13 @@ const project: ProjectSummary = {
 
 const wrappers: VueWrapper[] = []
 
-function mountPage() {
+function mountPage(attachTo: HTMLElement = document.body) {
   const wrapper = mount(Projects, {
-    attachTo: document.body,
-    global: { mocks: { $router: mocks.router } },
+    attachTo,
+    global: {
+      mocks: { $router: mocks.router },
+      stubs: { RouterLink: { props: ['to'], template: '<a :href="to"><slot /></a>' } },
+    },
   })
   wrappers.push(wrapper)
   return wrapper
@@ -180,6 +200,16 @@ beforeEach(() => {
   mocks.runtimeError = false
   mocks.authStore.isSuperAdmin = false
   mocks.uiStore.globalRefreshKey = 0
+  mocks.authStore.authGeneration = 0
+  mocks.uiStore.projectListView = reactive({
+    authGeneration: -1,
+    activeSegment: 'all',
+    searchQuery: '',
+    selectedTenantId: 'all',
+    sortBy: 'created_desc',
+    scrollTop: 0,
+    scrollLeft: 0,
+  })
   mocks.route.query = {}
   mocks.runtimeOverrides = {}
 
@@ -189,6 +219,7 @@ beforeEach(() => {
     tenant_workers: [],
   })
   mocks.projectsRefetch.mockReset()
+  mocks.runtimeRefetch.mockReset()
   mocks.getQueryData.mockReset().mockReturnValue(mocks.projects)
   mocks.setQueryData.mockReset()
   mocks.invalidateQueries.mockReset().mockResolvedValue(undefined)
@@ -202,29 +233,75 @@ afterEach(() => {
 })
 
 describe('Projects shared control migration', () => {
+  it('explains the pause timeout policy in the ordinary project pause menu without submitting', async () => {
+    mocks.projects = [{ ...project, status: 'active' }]
+    mountPage()
+    await flushPromises()
+    await openProjectMenu()
+    const pause = Array.from(document.body.querySelectorAll('[role="menuitem"]')).find(item => item.textContent?.includes('暂停项目'))
+    expect(pause?.textContent).toContain('暂停满12小时将自动结束，工作文件保留')
+    expect(mocks.api).not.toHaveBeenCalled()
+  })
+
+  it('R2 separates ended metadata from cleanup and only rereads observations', async () => {
+    mocks.runtimeOverrides[project.id] = { state: 'waiting', code: 'cleanup_pending' }
+    const wrapper = mountPage()
+    expect(wrapper.get('.project-row [aria-label="项目状态"]').text()).toBe('已结束')
+    expect(wrapper.get('.project-row').text()).toContain('资源清理待确认')
+    await wrapper.get('button[aria-label="运行详情"]').trigger('click')
+    await flushPromises()
+    bodyButton('刷新观测').click()
+    expect(mocks.runtimeRefetch).toHaveBeenCalledWith({ cancelRefetch: false })
+    expect(mocks.projectsRefetch).not.toHaveBeenCalled()
+    expect(mocks.api).not.toHaveBeenCalled()
+  })
+
   it('moves the selected state when a project status filter is clicked', async () => {
     mountPage()
     await flushPromises()
 
-    const segmentButtons = [...document.body.querySelectorAll<HTMLButtonElement>('.segment-btn')]
-    const allButton = segmentButtons.find((button) => button.textContent?.includes('全部项目'))
-    const stoppedButton = segmentButtons.find((button) => button.textContent?.includes('已结束'))
-    if (!allButton || !stoppedButton) throw new Error('找不到项目状态筛选按钮')
-
     expect(document.body.querySelector('[role="status"]')?.textContent).toContain('1 个项目')
-    expect(allButton.classList.contains('active')).toBe(true)
-    expect(allButton.getAttribute('aria-pressed')).toBe('true')
-    expect(stoppedButton.classList.contains('active')).toBe(false)
-    expect(stoppedButton.getAttribute('aria-pressed')).toBe('false')
-
-    stoppedButton.click()
+    bodyButton('项目状态').click()
     await flushPromises()
-
-    expect(allButton.classList.contains('active')).toBe(false)
-    expect(allButton.getAttribute('aria-pressed')).toBe('false')
-    expect(stoppedButton.classList.contains('active')).toBe(true)
-    expect(stoppedButton.getAttribute('aria-pressed')).toBe('true')
+    const stopped = document.querySelector<HTMLInputElement>(
+      'input[type="radio"][value="stopped"]',
+    )!
+    expect(stopped.checked).toBe(false)
+    stopped.click()
+    await flushPromises()
+    expect(mocks.uiStore.projectListView.activeSegment).toBe('stopped')
+    expect(bodyButton('项目状态：已结束').getAttribute('aria-expanded')).toBe('false')
     expect(document.body.textContent).toContain('Assessment Workspace')
+  })
+
+  it('preserves filters and reading position across remounts but resets after account changes', async () => {
+    const wrapper = mountPage()
+    await flushPromises()
+    await wrapper.get('#project-search').setValue('Assessment')
+    mocks.uiStore.projectListView.sortBy = 'facts_desc'
+    const tableScroll = wrapper.get('.project-table-scroll').element
+    const viewport = document.createElement('main')
+    viewport.className = 'content-viewport'
+    wrapper.element.parentElement!.insertBefore(viewport, wrapper.element)
+    viewport.append(wrapper.element)
+    viewport.scrollTop = 240
+    tableScroll.scrollLeft = 80
+    wrapper.unmount()
+    viewport.scrollTop = 0
+    const returned = mountPage(viewport)
+    await flushPromises()
+    expect((returned.get('#project-search').element as HTMLInputElement).value).toBe('Assessment')
+    expect(mocks.uiStore.projectListView.sortBy).toBe('facts_desc')
+    expect(mocks.uiStore.projectListView.scrollTop).toBe(240)
+    expect(viewport.scrollTop).toBe(240)
+    expect(returned.get('.project-table-scroll').element.scrollLeft).toBe(80)
+    returned.unmount()
+    mocks.authStore.authGeneration++
+    const nextAccount = mountPage()
+    await flushPromises()
+    expect((nextAccount.get('#project-search').element as HTMLInputElement).value).toBe('')
+    expect(mocks.uiStore.projectListView.sortBy).toBe('created_desc')
+    expect(mocks.uiStore.projectListView.scrollTop).toBe(0)
   })
 
   it('keeps a stale project snapshot visible when a background refresh fails', async () => {
@@ -256,7 +333,10 @@ describe('Projects shared control migration', () => {
     const status = document.body.querySelector<HTMLElement>('[role="status"]')
     expect(status?.textContent).toContain('1 个项目')
     expect(status?.getAttribute('aria-live')).toBe('polite')
-    expect(document.body.querySelector('[role="list"]')).not.toBeNull()
+    expect(document.body.querySelector('table[aria-label="项目列表"]')).not.toBeNull()
+    expect(document.body.querySelector('.project-row-main')?.getAttribute('href')).toBe(
+      '/projects/project-a',
+    )
   })
 
   it('renders an accessible project menu without resuming a stopped project', async () => {

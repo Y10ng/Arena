@@ -51,12 +51,14 @@ defineOptions({ name: 'UiTextarea', inheritAttrs: false })
 <style scoped>
 .ui-textarea {
   width: 100%;
-  min-height: calc(var(--control-height) * 2);
-  border: calc(var(--space-1) / 4) solid var(--border);
+  min-width: 0;
+  min-height: 120px;
+  border: calc(var(--space-1) / 4) solid var(--color-control-border);
   border-radius: var(--radius-md);
-  background: var(--bg-inset);
+  background: var(--bg-surface);
   color: var(--text);
   padding: var(--space-2) var(--space-3);
+  font-family: var(--font-sans);
   font-size: var(--text-md);
   line-height: var(--leading-relaxed);
   transition:
@@ -65,18 +67,26 @@ defineOptions({ name: 'UiTextarea', inheritAttrs: false })
     box-shadow var(--dur-fast) var(--ease);
 }
 
-.ui-textarea:hover:not(:disabled) {
+.ui-textarea:hover:not(:disabled):not([readonly]) {
   border-color: var(--border-strong);
 }
 
 .ui-textarea:focus {
   border-color: var(--accent);
-  box-shadow: var(--ring);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .ui-textarea--invalid,
-.ui-textarea--invalid:focus {
+.ui-textarea--invalid:focus,
+.ui-textarea[aria-invalid='true'] {
   border-color: var(--danger);
+  outline-color: var(--danger);
+}
+
+.ui-textarea[readonly] {
+  background: var(--bg-inset);
+  cursor: text;
 }
 
 .ui-textarea:disabled {

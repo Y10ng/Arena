@@ -5,19 +5,21 @@
         <IconButton
           class="btn-play-pause"
           variant="secondary"
-          size="sm"
           :label="isPlaying ? '暂停历史推演回放' : '开始历史推演回放'"
           :aria-pressed="isPlaying"
           @click="$emit('togglePlayback')"
         >
-          <Pause v-if="isPlaying" :size="14" :stroke-width="2" />
-          <Play v-else :size="14" :stroke-width="2" />
+          <Pause v-if="isPlaying" :size="16" :stroke-width="2" />
+          <Play v-else :size="16" :stroke-width="2" />
         </IconButton>
       </Tooltip>
-      <span class="playback-title">历史推演回放</span>
+      <div class="playback-heading">
+        <span class="playback-title">历史推演回放</span>
+        <span class="playback-time mono">{{ playbackTimeLabel }}</span>
+      </div>
     </div>
     <div class="playback-center">
-      <!-- shared Input 不支持 range；保留原生滑块以维持数值与 input 事件语义。 -->
+      <!-- 保留原生 range 的键盘操作、数值与 input 事件语义。 -->
       <input
         type="range"
         :value="playbackIndex"
@@ -28,21 +30,17 @@
         :aria-valuetext="playbackTimeLabel"
         @input="onSliderInput"
       />
-      <Badge class="playback-time mono" tone="neutral" size="sm">
-        {{ playbackTimeLabel }}
-      </Badge>
     </div>
-    <div class="playback-right">
-      <Tooltip :content="playbackEventDesc" :disabled="!playbackEventDesc">
-        <span class="playback-desc text-truncate">{{ playbackEventDesc }}</span>
-      </Tooltip>
+    <span class="playback-position">{{ playbackIndex }} / {{ eventCount }}</span>
+    <div v-if="playbackEventDesc" class="playback-right">
+      <p class="playback-desc" tabindex="0">{{ playbackEventDesc }}</p>
     </div>
   </footer>
 </template>
 
 <script setup lang="ts">
 import { Pause, Play } from '@lucide/vue'
-import { Badge, IconButton, Tooltip } from '@/components/ui'
+import { IconButton, Tooltip } from '@/components/ui'
 
 defineProps<{
   isPlaying: boolean

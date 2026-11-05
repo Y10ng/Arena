@@ -21,13 +21,14 @@
       aria-label="关闭提示"
       @click="emit('dismiss')"
     >
-      ×
+      <X :size="16" aria-hidden="true" />
     </button>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { X } from '@lucide/vue'
 
 defineOptions({ name: 'UiAlert' })
 
@@ -62,31 +63,31 @@ const defaultRole = computed(() =>
   display: flex;
   align-items: flex-start;
   gap: var(--space-3);
-  padding: var(--space-3);
+  padding: var(--space-4);
   background: var(--bg-inset);
   color: var(--text-muted);
 }
 
 .ui-alert--info {
-  border-color: var(--info);
+  border-color: var(--info-border);
   background: var(--color-info-soft);
   color: var(--info);
 }
 
 .ui-alert--success {
-  border-color: var(--success);
+  border-color: var(--success-border);
   background: var(--color-success-soft);
   color: var(--success);
 }
 
 .ui-alert--warning {
-  border-color: var(--warning);
+  border-color: var(--warning-border);
   background: var(--color-warning-soft);
   color: var(--warning);
 }
 
 .ui-alert--danger {
-  border-color: var(--danger);
+  border-color: var(--danger-border);
   background: var(--color-danger-soft);
   color: var(--danger);
 }
@@ -111,13 +112,14 @@ const defaultRole = computed(() =>
 }
 
 .ui-alert__content {
-  color: var(--text-muted);
+  color: var(--text);
+  overflow-wrap: anywhere;
   line-height: var(--leading-normal);
 }
 
 .ui-alert__title + .ui-alert__content,
 .ui-alert__actions {
-  margin-block-start: var(--space-1);
+  margin-block-start: var(--space-2);
 }
 
 .ui-alert__actions {
@@ -127,8 +129,8 @@ const defaultRole = computed(() =>
 }
 
 .ui-alert__dismiss {
-  width: var(--control-height-xs);
-  height: var(--control-height-xs);
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
   border-radius: var(--radius-sm);
   display: inline-flex;
   align-items: center;

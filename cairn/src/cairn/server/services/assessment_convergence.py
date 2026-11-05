@@ -458,6 +458,11 @@ def _goal_driven_pending_candidate(conn, project_id: str) -> bool:
         FROM task_run_candidates AS candidate
         WHERE candidate.project_id = ?
           AND NOT EXISTS (
+              SELECT 1 FROM task_runs AS run
+              WHERE run.project_id = candidate.project_id AND run.id = candidate.task_run_id
+                AND run.task_type = 'report'
+          )
+          AND NOT EXISTS (
               SELECT 1
               FROM task_run_candidate_outcomes AS outcome
               WHERE outcome.project_id = candidate.project_id

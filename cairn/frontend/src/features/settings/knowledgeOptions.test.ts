@@ -13,6 +13,7 @@ const makeSet = (overrides: Partial<KnowledgeSet> = {}): KnowledgeSet => ({
   key: 'playbooks',
   path: '/knowledge/playbooks',
   builtin: false,
+  safety_path: null,
   file_count: 1,
   referenced_by: [],
   ...overrides,

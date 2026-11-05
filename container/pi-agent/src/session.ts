@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import { mkdir, open, readFile, lstat, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CURRENT_SESSION_VERSION, SessionManager } from "@mariozechner/pi-coding-agent";
@@ -7,7 +8,9 @@ import { AgentFailure, object, type AgentRequest } from "./protocol.js";
 const digest = (raw: string) => createHash("sha256").update(raw).digest("hex");
 interface Manifest {
   protocol: "cairn-pi-session-v1";
-  project_id: string;
+  project_id?: string;
+  conversation_id?: string;
+  initialized?: boolean;
   session: string;
   sdk_session_id: string;
   cwd: string;
@@ -20,7 +23,11 @@ interface Manifest {
 export interface SessionLease {
   manager: SessionManager;
   directory: string;
-  finish(): Promise<void>;
+  finish(): Promise<boolean>;
+}
+async function syncDirectory(path: string): Promise<void> {
+  const handle = await open(path, "r");
+  try { await handle.sync(); } finally { await handle.close(); }
 }
 async function regularFile(path: string): Promise<string> {
   const stat = await lstat(path);
@@ -31,7 +38,7 @@ function validateTranscript(raw: string, manifest: Manifest): void {
   if (!raw.endsWith("\n")) throw new AgentFailure("session_corrupt", "Session transcript is truncated");
   const lines = raw.trimEnd().split("\n").map((line: string) => JSON.parse(line) as unknown);
   const header = lines.shift();
-  if (!object(header) || header.type !== "session" || header.version !== CURRENT_SESSION_VERSION || header.id !== manifest.sdk_session_id || header.cwd !== manifest.cwd || !object(header.cairn) || header.cairn.project_id !== manifest.project_id || header.cairn.session !== manifest.session) {
+  if (!object(header) || header.type !== "session" || header.version !== CURRENT_SESSION_VERSION || header.id !== manifest.sdk_session_id || header.cwd !== manifest.cwd || !object(header.cairn) || header.cairn.project_id !== manifest.project_id || header.cairn.conversation_id !== manifest.conversation_id || header.cairn.session !== manifest.session) {
     throw new AgentFailure("session_corrupt", "Session header ownership or version mismatch");
   }
   const seen = new Set<string>();
@@ -50,8 +57,10 @@ function validateTranscript(raw: string, manifest: Manifest): void {
 }
 export async function acquireSession(request: AgentRequest): Promise<SessionLease> {
   const cwd = await realpath(request.cwd);
+  const chat = request.phase === "chat_turn";
+  const owner = chat ? { conversation_id: request.conversation_id } : { project_id: request.project_id };
   const phaseFamily = request.phase === "chat_turn" ? "chat" : request.phase.replace(/_(execute|conclude)$/, "");
-  const bindingDigest = digest(JSON.stringify(Object.fromEntries(Object.entries(request.binding ?? {}).sort(([left], [right]) => left.localeCompare(right)))));
+  const bindingDigest = digest(JSON.stringify(Object.fromEntries(Object.entries(chat ? owner : request.binding ?? {}).sort(([left], [right]) => left.localeCompare(right)))));
   const continuation = request.continuation;
   if (request.resume && !request.conclude_only && request.phase !== "report_execute" && request.phase !== "chat_turn" && !continuation) {
     throw new AgentFailure("invalid_request", "Normal resumed execution requires a verified continuation source", "continuation");
@@ -70,12 +79,15 @@ export async function acquireSession(request: AgentRequest): Promise<SessionLeas
   }
   const release = async () => { await lock.close(); await unlink(lockPath); };
   try {
-    await lock.writeFile(JSON.stringify({ pid: process.pid, project_id: request.project_id }));
+    await lock.writeFile(JSON.stringify({ pid: process.pid, ...owner, session: request.session }));
     const manifestPath = join(directory, "manifest.json");
     const transcriptPath = join(directory, "session.jsonl");
     let manifest: Manifest;
     let manager: SessionManager;
-    if (!request.resume) {
+    let exists = false;
+    try { await lstat(directory); exists = true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    if (!request.resume && !(chat && exists)) {
       try { await mkdir(directory, { mode: 0o700 }); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new AgentFailure("session_exists", "New session already exists; refusing to overwrite it");
@@ -84,30 +96,38 @@ export async function acquireSession(request: AgentRequest): Promise<SessionLeas
       // SDK 首个assistant到达前不落盘；预写header会触发0.73.0重复header缺陷。
       manager = SessionManager.open(transcriptPath, directory, cwd);
       const header = manager.getHeader();
-      Object.assign(header!, { cairn: { project_id: request.project_id, session: request.session } });
+      Object.assign(header!, { cairn: { ...owner, session: request.session } });
       const raw = `${JSON.stringify(header)}\n`;
-      manifest = { protocol: "cairn-pi-session-v1", project_id: request.project_id, session: request.session, sdk_session_id: manager.getSessionId(), cwd, phase_family: phaseFamily, binding_sha256: bindingDigest, last_task_run_id: request.task_run_id, sha256: digest(raw) };
-      await writeFile(manifestPath, JSON.stringify(manifest), { flag: "wx", mode: 0o600 });
+      manifest = { protocol: "cairn-pi-session-v1", ...owner, ...(chat ? { initialized: false } : {}), session: request.session, sdk_session_id: manager.getSessionId(), cwd, phase_family: phaseFamily, binding_sha256: bindingDigest, last_task_run_id: request.task_run_id, sha256: digest(raw) };
+      if (chat) await writeFile(transcriptPath, raw, { flag: "wx", mode: 0o600, flush: true });
+      await writeFile(manifestPath, JSON.stringify(manifest), { flag: "wx", mode: 0o600, flush: chat });
+      if (chat) { await syncDirectory(directory); await syncDirectory(root); }
     } else {
       if ((await lstat(directory)).isSymbolicLink()) throw new AgentFailure("session_corrupt", "Session directory cannot be a symlink");
       const parsed: unknown = JSON.parse(await regularFile(manifestPath));
       // manifest 的初始绑定只证明对话归属；续作的新绑定须由本次执行来源显式确认。
-      if (!object(parsed) || parsed.protocol !== "cairn-pi-session-v1" || parsed.project_id !== request.project_id || parsed.session !== request.session || parsed.cwd !== cwd || parsed.phase_family !== phaseFamily || !/^[a-f0-9]{64}$/.test(parsed.binding_sha256 as string) || typeof parsed.sha256 !== "string" || typeof parsed.sdk_session_id !== "string" || (parsed.current_binding_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(parsed.current_binding_sha256 as string)) || (parsed.last_task_run_id !== undefined && (typeof parsed.last_task_run_id !== "string" || parsed.last_task_run_id.length === 0))) {
+      if (!object(parsed) || parsed.protocol !== "cairn-pi-session-v1" || parsed.project_id !== owner.project_id || parsed.conversation_id !== owner.conversation_id || parsed.session !== request.session || parsed.cwd !== cwd || parsed.phase_family !== phaseFamily || !/^[a-f0-9]{64}$/.test(parsed.binding_sha256 as string) || typeof parsed.sha256 !== "string" || typeof parsed.sdk_session_id !== "string" || (parsed.current_binding_sha256 !== undefined && !/^[a-f0-9]{64}$/.test(parsed.current_binding_sha256 as string)) || (parsed.last_task_run_id !== undefined && (typeof parsed.last_task_run_id !== "string" || parsed.last_task_run_id.length === 0))) {
         throw new AgentFailure("session_ownership", "Session manifest ownership or version mismatch");
       }
       manifest = parsed as unknown as Manifest;
       if (continuation && manifest.last_task_run_id && continuation.source_task_run_id !== manifest.last_task_run_id) {
         throw new AgentFailure("session_ownership", "Continuation source does not match the latest session writer");
       }
-      if (bindingDigest !== (manifest.current_binding_sha256 ?? manifest.binding_sha256) && !continuation) {
+      if ((chat && manifest.binding_sha256 !== bindingDigest) || (bindingDigest !== (manifest.current_binding_sha256 ?? manifest.binding_sha256) && !continuation)) {
         throw new AgentFailure("session_ownership", "Session execution binding mismatch");
       }
       const raw = await regularFile(transcriptPath);
       if (digest(raw) !== manifest.sha256) throw new AgentFailure("session_corrupt", "Session transcript digest mismatch");
       validateTranscript(raw, manifest);
       const initialized = raw.trimEnd().split("\n").some((line) => { const entry = JSON.parse(line); return entry.type === "message" && entry.message?.role === "assistant"; });
-      if (!initialized) throw new AgentFailure("session_corrupt", "Session never initialized an assistant turn; refusing silent reopening");
+      if (chat ? manifest.initialized !== initialized || request.resume !== initialized : !initialized) {
+        throw new AgentFailure("session_corrupt", "Session initialization evidence does not match the request");
+      }
       manager = SessionManager.open(transcriptPath, directory, cwd);
+    }
+    if (chat) {
+      // SDK 0.73 首个 assistant 前会延迟落盘且重写已有 header；聊天逐条持久化真实 SDK entry，保留失败首轮身份。
+      manager._persist = (entry) => appendFileSync(transcriptPath, `${JSON.stringify(entry)}\n`, { mode: 0o600, flush: true });
     }
     if (manager.getSessionId() !== manifest.sdk_session_id) throw new AgentFailure("session_corrupt", "SDK changed the session identity");
     if (continuation) {
@@ -138,9 +158,13 @@ export async function acquireSession(request: AgentRequest): Promise<SessionLeas
           }
           const raw = await regularFile(transcriptPath);
           validateTranscript(raw, manifest);
+          const initialized = raw.trimEnd().split("\n").some((line) => { const entry = JSON.parse(line); return entry.type === "message" && entry.message?.role === "assistant"; });
           manifest.sha256 = digest(raw);
-          await writeFile(`${manifestPath}.tmp`, JSON.stringify(manifest), { mode: 0o600 });
+          if (chat) manifest.initialized = initialized;
+          await writeFile(`${manifestPath}.tmp`, JSON.stringify(manifest), { mode: 0o600, flush: chat });
           await rename(`${manifestPath}.tmp`, manifestPath);
+          if (chat) await syncDirectory(directory);
+          return initialized;
         } finally { await release(); }
       },
     };

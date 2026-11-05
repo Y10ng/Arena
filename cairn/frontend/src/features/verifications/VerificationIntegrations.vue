@@ -1,10 +1,10 @@
 <template>
   <section class="verification-page verification-config-page" aria-label="漏洞复测配置">
-    <header class="page-header config-heading">
-      <h1>漏洞复测配置</h1>
+    <h1 class="sr-only">漏洞复测配置</h1>
+    <div v-if="scopeError || !tenantId" class="config-actions">
       <Button variant="secondary" @click="router.push({ name: 'Verifications' })">复测记录</Button>
-    </header>
-    <FormField v-if="auth.isSuperAdmin && tenants.length > 1" class="config-tenant" label="管理租户" for="verification-tenant" required>
+    </div>
+    <FormField v-if="auth.isSuperAdmin && tenants.length > 1 && (scopeError || !tenantId)" class="config-tenant" label="管理租户" for="verification-tenant" required>
       <Select id="verification-tenant" :model-value="tenantId" :options="tenantOptions" :disabled="busy || configSaving || configLoading || loading" placeholder="选择管理范围" @update:model-value="selectTenant" />
     </FormField>
     <Alert v-if="auth.isSuperAdmin && tenantError" tone="danger" title="租户列表读取失败">
@@ -18,6 +18,12 @@
     <Skeleton v-else-if="tenantsLoading && !tenantId" aria-label="正在读取管理范围" />
     <EmptyState v-else-if="!tenantId" title="请选择目标租户" />
     <Tabs v-else v-model="activeTab" class="config-workspace" :options="configTabs">
+      <template #actions>
+        <FormField v-if="auth.isSuperAdmin && tenants.length > 1" class="config-tenant" label="管理租户" for="verification-tenant" required>
+          <Select id="verification-tenant" :model-value="tenantId" :options="tenantOptions" :disabled="busy || configSaving || configLoading || loading" placeholder="选择管理范围" @update:model-value="selectTenant" />
+        </FormField>
+        <Button variant="secondary" @click="router.push({ name: 'Verifications' })">复测记录</Button>
+      </template>
       <template #panel="{ option }">
         <section v-if="option.value === 'execution'" class="config-panel" aria-label="执行配置">
           <Skeleton v-if="configLoading && !configuration" aria-label="正在加载执行配置" />
@@ -26,6 +32,7 @@
             <template #actions><Button variant="secondary" :disabled="configLoading" @click="reloadConfig">重新读取</Button></template>
           </Alert>
           <form v-if="configuration && options" class="config-form" @submit.prevent="saveConfig">
+            <header class="config-task-intro"><h2>{{ managingOwnModels ? '个人复测执行' : '租户复测执行' }}</h2><p>保存仅作用于尚未开始的复测，不改变已受理记录。</p></header>
             <div class="config-main-fields">
               <div class="config-model">
                 <div class="config-model-heading">
@@ -75,13 +82,12 @@
                 <Button type="submit" :loading="configSaving" :disabled="configLoading || Boolean(configError) || !configForm.model_id">保存执行配置</Button>
                 <Button variant="secondary" :disabled="configSaving || configLoading" @click="reloadConfig">重新读取已保存配置</Button>
               </div>
-              <p>用于尚未开始的复测</p>
             </footer>
           </form>
         </section>
         <section v-else-if="canManageIntegrations" class="config-panel config-integrations" aria-label="外部调用">
           <header class="config-section-heading">
-            <h2>调用令牌</h2>
+            <div class="config-task-intro"><h2>外部集成与调用令牌</h2><p>管理员管理调用身份；令牌操作与个人执行配置分开保存。</p></div>
             <div class="config-actions">
               <Button :disabled="Boolean(secret) || busy || Boolean(unconfirmedCreate)" @click="openCreate">创建调用令牌</Button>
               <Button variant="secondary" :loading="loading" :disabled="busy" @click="refresh">刷新</Button>
@@ -157,6 +163,7 @@ Content-Type: application/json
     <ConfirmAction :open="confirmHideSecret" title="关闭一次性令牌显示" description="请确认已安全保存；关闭后无法重新查看，只能明确发起轮换。" confirm-label="已保存，关闭显示" tone="warning" @update:open="confirmHideSecret = $event" @confirm="hideSecret" />
     <ConfirmAction :open="confirmAbandon" title="放弃未确认创建表单" description="这不撤销可能已受理的集成，也不代表创建失败。请先核对列表；已有集成可通过明确轮换取得新令牌。" confirm-label="放弃表单，不撤销集成" tone="warning" @update:open="confirmAbandon = $event" @confirm="unconfirmedCreate = null; confirmAbandon = false" />
     </template>
+    <ConfirmAction :open="Boolean(leavePrompt)" title="确认离开当前编辑" :description="leavePrompt" confirm-label="确认继续" tone="warning" @update:open="!$event && resolveLeave(false)" @confirm="resolveLeave(true)" />
   </section>
 </template>
 <script setup lang="ts">
@@ -267,7 +274,23 @@ async function loadConfig() {
   } catch (error) { if (scope === scopeGeneration && generation === configGeneration) configError.value = errorMessage(error) }
   finally { if (scope === scopeGeneration && generation === configGeneration) configLoading.value = false }
 }
-function reloadConfig() { if (!configDirty.value || window.confirm('重新读取将放弃未保存的执行设置，继续吗？')) void loadConfig() }
+const leavePrompt = ref('')
+let leaveResolver: ((value: boolean) => void) | undefined
+function resolveLeave(value: boolean) {
+  leavePrompt.value = ''
+  const resolve = leaveResolver
+  leaveResolver = undefined
+  resolve?.(value)
+}
+function confirmLeave(description: string): Promise<boolean> {
+  if (leaveResolver) return Promise.resolve(false)
+  leavePrompt.value = description
+  return new Promise((resolve) => { leaveResolver = resolve })
+}
+async function reloadConfig() {
+  const scope = scopeGeneration
+  if ((!configDirty.value || await confirmLeave('重新读取将放弃未保存的执行设置，继续吗？')) && scope === scopeGeneration) void loadConfig()
+}
 async function saveConfig() {
   if (!tenantId.value || !options.value || configSaving.value || configLoading.value || configError.value) return
   if (!configForm.model_id) { saveError.value = '请选择模型。'; return }
@@ -375,23 +398,29 @@ async function copyToken() {
   catch { if (scope === scopeGeneration && secret.value === current) copyMessage.value = '浏览器无法自动复制，请手工选中并安全保存上方令牌。' }
 }
 function hideSecret() { secret.value = null; copyMessage.value = ''; confirmHideSecret.value = false }
-function canLeave() {
+async function canLeave() {
   if (busy.value || configSaving.value) return false
-  if (secret.value && !window.confirm('令牌仅显示一次。请确认已安全保存；离开后无法重新查看，继续吗？')) return false
-  if (unconfirmedCreate.value && !window.confirm('集成创建结果未确认，离开不撤销可能已创建的身份。请先核对列表，仍要离开吗？')) return false
-  return !configDirty.value || window.confirm('执行设置尚未保存，离开将丢失编辑值。继续吗？')
+  const scope = scopeGeneration
+  const warnings = [
+    secret.value ? '令牌仅显示一次，请确认已安全保存；离开后无法重新查看。' : '',
+    unconfirmedCreate.value ? '集成创建结果未确认，离开不撤销可能已创建的身份，请先核对列表。' : '',
+    configDirty.value ? '执行设置尚未保存，离开将丢失编辑值。' : '',
+  ].filter(Boolean)
+  const accepted = !warnings.length || await confirmLeave(warnings.join('\n'))
+  return accepted && scope === scopeGeneration && !busy.value && !configSaving.value
 }
 onBeforeRouteLeave(canLeave)
 onBeforeRouteUpdate((to) => to.query.tenant_id === route.query.tenant_id || canLeave())
 function beforeUnload(event: BeforeUnloadEvent) { if (!secret.value && !unconfirmedCreate.value && !configDirty.value && !busy.value && !configSaving.value) return; event.preventDefault(); event.returnValue = '' }
 window.addEventListener('beforeunload', beforeUnload)
-onBeforeUnmount(() => { scopeGeneration++; tenantGeneration++; configGeneration++; integrationGeneration++; hideSecret(); window.removeEventListener('beforeunload', beforeUnload) })
+onBeforeUnmount(() => { resolveLeave(false); scopeGeneration++; tenantGeneration++; configGeneration++; integrationGeneration++; hideSecret(); window.removeEventListener('beforeunload', beforeUnload) })
 watch(authIdentity, () => {
   tenantGeneration++; tenants.value = []; tenantsLoaded.value = false; tenantsLoading.value = false; tenantError.value = ''
   activeTab.value = 'execution'
 }, { immediate: true, flush: 'sync' })
 // 身份或实际管理范围一变就清空内存；加载另行批处理，避免旧请求回写新身份。
 watch([scopeKey, tenantId], () => {
+  resolveLeave(false)
   scopeGeneration++; configGeneration++; integrationGeneration++
   configLoading.value = false; configSaving.value = false; loading.value = false; busy.value = false
   configuration.value = null; options.value = null; savedConfigForm.value = ''
@@ -423,16 +452,16 @@ const apiExample = JSON.stringify({ schema_version: 1, request_id: '<调用方�
   line-height: var(--leading-normal);
 }
 
-.config-heading {
-  align-items: center;
-  flex-direction: row;
+.config-workspace {
+  display: flex;
   flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
 }
 
-.config-heading > h1 {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
+.config-workspace :deep(> .ui-tabs__list) { flex: 0 1 auto; }
+.config-workspace :deep(> .ui-tabs__actions) { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-3); min-width: 0; }
+.config-workspace :deep(> .ui-tabs__content) { flex: 1 1 100%; min-width: 0; padding-top: 0; }
 
 .config-tenant,
 .config-workspace {
@@ -453,11 +482,16 @@ const apiExample = JSON.stringify({ schema_version: 1, request_id: '<调用方�
 .config-panel {
   min-width: 0;
   overflow-wrap: anywhere;
-  padding: var(--space-6);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  background: var(--bg-surface);
+  padding-block: var(--space-3);
 }
+
+.config-form { max-width: 960px; }
+.config-task-intro h2 { margin: 0 0 8px; font-size: var(--text-section); font-weight: 600; }
+.config-task-intro p { margin: 0; color: var(--text-muted); line-height: 1.75; }
+.config-tenant { max-width: 420px; flex-direction: row; align-items: center; gap: var(--space-2); }
+.config-workspace .config-tenant { flex: 0 1 420px; }
+.config-tenant :deep(.ui-form-field__label) { flex: none; }
+.config-tenant :deep(.ui-select__trigger) { flex: 1; min-width: 0; }
 
 .config-form,
 .config-integrations,
@@ -471,7 +505,7 @@ const apiExample = JSON.stringify({ schema_version: 1, request_id: '<调用方�
 .config-main-fields,
 .config-advanced-fields {
   display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: end;
   min-width: 0;
   gap: var(--space-5);
@@ -578,11 +612,15 @@ const apiExample = JSON.stringify({ schema_version: 1, request_id: '<调用方�
 
 .config-save {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
   gap: var(--space-3);
   padding-top: var(--space-5);
   border-top: 1px solid var(--border-subtle);
 }
+
+.config-save > .ui-alert { flex-basis: 100%; }
 
 .config-save > p {
   margin: 0;
@@ -616,7 +654,7 @@ const apiExample = JSON.stringify({ schema_version: 1, request_id: '<调用方�
 
 .config-table th,
 .config-table td {
-  padding: var(--space-3) var(--space-4);
+  padding: 18px 16px;
   border-bottom: 1px solid var(--border-subtle);
   vertical-align: middle;
 }

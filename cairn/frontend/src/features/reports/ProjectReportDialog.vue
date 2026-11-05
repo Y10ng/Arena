@@ -2,15 +2,15 @@
   <Dialog
     :open="open"
     title="项目报告"
-    description="查看已有报告，或选择模板生成项目总报告。"
+    description=""
     size="lg"
+    class="project-report-dialog"
     close-label="关闭项目报告"
     :dismissible="!requestPending"
     @update:open="handleOpenChange"
     @close-auto-focus="emit('closeAutoFocus', $event)"
   >
     <section
-      v-if="inventoryLoading || inventoryQuery.isError.value || availableReport"
       class="report-available"
       aria-label="已有报告"
     >
@@ -33,8 +33,10 @@
         :description="errorMessage(inventoryQuery.error.value)"
         @retry="inventoryQuery.refetch()"
       />
+      <p v-if="!inventoryLoading && !inventoryQuery.isError.value && !availableReport" class="report-section-caption">当前项目暂无已完成报告。</p>
       <template v-if="availableReport">
         <div class="report-available-content">
+          <div class="report-available-identity">
           <strong class="report-available-name" :title="availableReportFilename">{{
             availableReportFilename
           }}</strong>
@@ -50,6 +52,7 @@
                 · v{{ availableReport.template_version }}</template
               ></span
             >
+          </div>
           </div>
           <div class="report-result-actions">
             <RouterLink
@@ -92,17 +95,7 @@
       <Alert v-if="!capability.supported" tone="neutral" title="当前场景未启用报告能力">
         {{ capability.reason || '该项目的冻结场景未声明手动报告能力。' }}
       </Alert>
-      <Alert v-else-if="projectStatus === 'active'" tone="neutral">
-        请先结束评估或等待项目完成，再基于已记录成果手动生成报告。
-      </Alert>
       <template v-else>
-        <Alert v-if="projectStatus === 'paused'" tone="neutral">
-          请先结束评估或等待项目完成，再基于已记录成果手动生成报告。暂停仅保留未完成工作，不会结束评估。
-        </Alert>
-        <Alert v-if="projectStatus === 'stopped'" tone="warning" title="将生成结束时点报告">
-          报告基于结束前已记录成果和冻结输入快照，属于未完成评估报告，不会恢复自治探索。若旧 Worker
-          尚未完全退出，请等待任务静默后重试。
-        </Alert>
         <ErrorState
           v-if="reportInitialError"
           title="报告状态加载失败"
@@ -117,6 +110,7 @@
           <Alert v-if="reportStaleError" tone="warning" title="报告状态刷新失败">
             {{ errorMessage(reportQuery.error.value) }}
           </Alert>
+          <p v-if="report?.materialized_at" class="report-section-caption">材料时点：{{ dateTime(report.materialized_at) }} · 本次快照内的已记录漏洞</p>
           <template v-if="eligible">
             <ErrorState
               v-if="catalogError"
@@ -128,17 +122,7 @@
               <Skeleton height="4rem" />
             </div>
             <Alert v-else-if="catalog.length === 0" tone="warning" title="暂无可用报告模板">
-              请联系超级管理员添加含正文的兼容模板。
-            </Alert>
-            <Alert
-              v-else-if="compatibleTemplates.length === 0"
-              tone="warning"
-              title="没有兼容的报告模板"
-            >
-              当前项目需要兼容 profile：{{ capability.template_profile || '未知' }}。
-            </Alert>
-            <Alert v-else-if="previousTemplateUnavailable" tone="warning">
-              上次使用的模板已不兼容，本次已选择系统默认模板；历史报告不变。
+              请联系超级管理员添加 Markdown 模板。
             </Alert>
             <div
               v-if="!catalogError && !catalogLoading && compatibleTemplates.length"
@@ -148,7 +132,7 @@
                 v-slot="{ controlAttrs }"
                 label="报告模板"
                 :error="
-                  selectedTemplateMissing ? '所选模板已删除或不再兼容，请重新选择。' : undefined
+                  selectedTemplateMissing ? '所选模板已删除或正文无效，请重新选择。' : undefined
                 "
               >
                 <Select
@@ -250,6 +234,7 @@
         </template>
       </template>
     </section>
+    <template #footer><Button variant="secondary" :disabled="requestPending" @click="handleOpenChange(false)">关闭项目报告</Button></template>
   </Dialog>
 </template>
 
@@ -302,12 +287,10 @@ let requestGeneration = 0
 const eligible = computed(
   () =>
     props.capability.supported &&
-    (props.projectStatus === 'completed' || props.projectStatus === 'stopped'),
+    ['active', 'paused', 'completed', 'stopped'].includes(props.projectStatus),
 )
 const dialogEligible = computed(() => props.open && eligible.value && Boolean(props.projectId))
-const reportEligible = computed(
-  () => eligible.value || (props.capability.supported && props.projectStatus === 'paused'),
-)
+const reportEligible = eligible
 const dialogReportEligible = computed(
   () => props.open && reportEligible.value && Boolean(props.projectId),
 )
@@ -365,13 +348,7 @@ const reportQuery = useQuery<AssessmentReportFinalization | null>({
 })
 
 const catalog = computed(() => catalogQuery.data.value || [])
-const compatibleTemplates = computed(() => {
-  const profile = props.capability.template_profile
-  if (!profile) return []
-  return catalog.value.filter(
-    (template) => !template.validation_error && template.compatibility_profiles.includes(profile),
-  )
-})
+const compatibleTemplates = computed(() => catalog.value.filter((template) => !template.validation_error))
 const selectedTemplate = computed(() =>
   compatibleTemplates.value.find((template) => template.key === selectedTemplateValue.value),
 )
@@ -398,14 +375,6 @@ const templateOptions = computed(() => {
   return options
 })
 const report = computed(() => (reportEligible.value ? reportQuery.data.value || null : null))
-const previousTemplateUnavailable = computed(() => {
-  const key = report.value?.template_key
-  return Boolean(
-    key &&
-    selectedTemplate.value?.is_default &&
-    !compatibleTemplates.value.some((item) => item.key === key),
-  )
-})
 const loadReportMarkdown = (signal: AbortSignal) => {
   const artifactId = availableReport.value?.artifact_id
   if (!artifactId) return Promise.reject(new Error('报告成品尚未就绪。'))
@@ -502,20 +471,11 @@ const catalogLoading = computed(() => dialogEligible.value && catalogQuery.isPen
 const catalogError = computed(() => dialogEligible.value && catalogQuery.isError.value)
 
 const REPORT_REQUEST_ERROR_MESSAGES: Record<string, string> = {
-  project_pause_unconfirmed:
-    '尚未取得旧执行清理完成的可信证明，暂不能生成报告。请联系管理员核查。（关联码：project_pause_unconfirmed）',
-  assessment_report_project_active: '项目仍在运行，请先结束评估或等待项目完成。',
-  assessment_report_project_paused: '项目仅暂停，未结束评估。请先结束评估再生成部分报告。',
-  project_pause_draining: '旧执行仍在退出或清理，请等待收尾完成后重试。',
-  assessment_report_tasks_not_quiescent:
-    '仍有评估任务正在排队或运行，请等待 Worker 完全退出后重试。',
-  assessment_report_stopped_tasks_not_quiescent:
-    '仍有评估任务正在排队或运行，请等待 Worker 完全退出后重试。',
   assessment_report_finalization_in_progress: '报告生成仍在进行，请等待当前任务结束。',
   report_template_not_found: '所选模板已不存在，请刷新目录后重新选择。',
   assessment_report_template_content_missing: '所选模板尚无正文，请联系管理员补全后再生成。',
   assessment_report_template_invalid:
-    '所选模板缺少必要槽位或语法不合法，请先在报告模板中完成转换，再重新生成。',
+    '所选模板正文无效，请检查非空内容和大小限制。',
 }
 
 const errorMessage = (error: unknown) => {
@@ -638,18 +598,24 @@ watch(
 }
 .report-section-heading h2 {
   margin: 0;
-  font-size: var(--text-lg);
+  font-size: var(--text-section);
   font-weight: var(--font-semibold);
 }
 .report-section-heading > a {
   color: var(--accent);
 }
 .report-generation,
-.report-available-content {
+.report-available-identity {
   display: grid;
-  gap: var(--space-3);
+  gap: 16px;
   min-width: 0;
 }
+.report-available-content { display: flex; align-items: center; gap: 24px; padding-block: 16px; }
+.report-available-identity { flex: 1; }
+.report-result-actions { flex: none; }
+.report-section-caption { margin: 8px 0 0; color: var(--text-muted); font-size: var(--text-sm); line-height: var(--leading-reading); overflow-wrap: anywhere; }
+.report-section-caption code { font-size: inherit; }
+.report-generation { padding-top: 12px; }
 .report-available-name {
   overflow-wrap: anywhere;
   font-weight: var(--font-medium);
@@ -666,6 +632,7 @@ watch(
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--space-4);
 }
 .report-controls {
@@ -688,8 +655,12 @@ watch(
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   color: var(--accent);
+  font-size: var(--text-control);
   text-decoration: none;
+  transition: background-color var(--dur), color var(--dur);
 }
+.report-read-link:hover { background: var(--surface-hover); }
+@media (prefers-reduced-motion: reduce) { .report-read-link { transition: none; } }
 .report-read-link:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
@@ -749,6 +720,7 @@ watch(
   gap: var(--space-3);
 }
 @media (max-width: 720px) {
+  .report-available-content { align-items: flex-start; flex-direction: column; }
   .report-controls {
     align-items: stretch;
     flex-direction: column;

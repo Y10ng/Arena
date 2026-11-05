@@ -80,7 +80,8 @@ def test_session_output_boundary_and_bridge_private_method(tmp_path, monkeypatch
 
 def test_research_parameter_validation():
     assert context._protected(json.dumps({"content": 'value-"secret"-inside'}), [b'value-"secret"-inside'])
-    for params in ({"source": "unknown"}, {"source": []}, {"source": "facts", "project_id": "other"},
+    _tool_params("read_research_context", {"source": "facts", "project_id": "other"})
+    for params in ({"source": "unknown"}, {"source": []}, {"source": "facts", "project_id": "../other"},
                    {"source": "facts", "offset": -1}, {"source": "facts", "chunk_size": 20000}):
         with pytest.raises(HTTPException) as error:
             _tool_params("read_research_context", params)

@@ -675,7 +675,7 @@ def test_platform_source_selects_one_observation_and_preserves_project_context(e
         _project_resource_disk_path(project_id, source_resource_ids["missing-scope.md"]).unlink()
         snapshot, originals = read_platform_vulnerability_source(
             conn, project_id, vulnerability.id, user,
-            artifact_allowed=lambda connection, artifact: artifact["id"] != blocked.id,
+            artifact_allowed=lambda connection, artifact, **kwargs: artifact["id"] != blocked.id,
             resource_allowed=lambda connection, resource: resource["path"] != "blocked-scope.md",
         )
         assert snapshot["evidence"]["observation_id"] == "selected-b"
@@ -700,14 +700,14 @@ def test_platform_source_selects_one_observation_and_preserves_project_context(e
         assert {"project_context_resource_not_input", "project_context_resource_unreadable"}.issubset({item["code"] for item in snapshot["missing_materials"]})
         selected_a, selected_originals = read_platform_vulnerability_source(
             conn, project_id, vulnerability.id, user, observation_id=first_id,
-            artifact_allowed=lambda connection, artifact: True, resource_allowed=lambda *_: True,
+            artifact_allowed=lambda connection, artifact, **kwargs: True, resource_allowed=lambda *_: True,
         )
         assert [item["id"] for item in selected_a["facts"]] == ["finding-a"]
         assert [item["id"] for item in selected_originals] == [request.id]
         assert "response" not in selected_a["evidence"]["evidence_items"][0]
         with pytest.raises(HTTPException) as invalid_observation:
             read_platform_vulnerability_source(conn, project_id, vulnerability.id, user,
-                                               observation_id="not-a-member", artifact_allowed=lambda *_: True, resource_allowed=lambda *_: True)
+                                               observation_id="not-a-member", artifact_allowed=lambda *_, **kwargs: True, resource_allowed=lambda *_: True)
         assert invalid_observation.value.status_code == 404
         _, resources = save_platform_vulnerability_source(conn, project_id, snapshot, originals, created_by=user.subject_id)
         ids = {item.path: item.id for item in resources}
@@ -734,7 +734,7 @@ def test_platform_source_copy_rechecks_context_resource_bytes(execution):
         vulnerability = create_vulnerability(conn, detail["project_id"], CreateVulnerabilityRequest(title="context copy", severity="low"))
         snapshot, artifacts = read_platform_vulnerability_source(
             conn, detail["project_id"], vulnerability.id, user,
-            artifact_allowed=lambda *_: True, resource_allowed=lambda *_: True,
+            artifact_allowed=lambda *_, **kwargs: True, resource_allowed=lambda *_: True,
         )
     target, _ = _new_execution(user, machine, worker_id)
     _project_resource_disk_path(detail["project_id"], resource.id).write_bytes(b"changed original")

@@ -35,8 +35,8 @@ export class ReportSegments {
     try { this.validator = Compile(this.parameters); }
     catch { throw new AgentFailure("invalid_result_schema", "Cannot compile report segment schema"); }
   }
-  references(): { key: string; artifact_handle: string }[] {
-    return [...this.saved].map(([key, value]) => ({ key, artifact_handle: value.artifact.handle }));
+  references(): { key: string; artifact_handle: string; path: string }[] {
+    return [...this.saved].map(([key, value]) => ({ key, artifact_handle: value.artifact.handle, path: value.artifact.path }));
   }
   private async persistManifest(artifacts: readonly Artifact[]): Promise<void> {
     const bytes = Buffer.from(JSON.stringify({ protocol: "cairn-report-segment-manifest-v1", binding: this.capability.binding, artifacts }));

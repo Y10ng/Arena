@@ -1,34 +1,20 @@
 <template>
   <div class="vuln-page">
-    <FilterBar label="漏洞筛选">
-      <FormField label="严重度">
-        <template #default="{ controlAttrs }">
-          <Select
-            v-model="severitySelection"
-            v-bind="controlAttrs"
-            :options="filterSeverityOptions"
-          />
-        </template>
-      </FormField>
-      <FormField label="状态">
-        <template #default="{ controlAttrs }">
-          <Select v-model="statusSelection" v-bind="controlAttrs" :options="statusOptions" />
-        </template>
-      </FormField>
-
-      <template v-if="isFetching && vulns.length" #status>同步中…</template>
+    <h1 class="sr-only">漏洞成果</h1>
+    <VulnerabilityFilters
+      v-model:search="searchSelection"
+      v-model:severity="severitySelection"
+      v-model:status="statusSelection"
+      v-model:sort="sortSelection"
+      :count="visibleVulns.length"
+      :fetching="isFetching"
+      @refresh="refetch()"
+    >
       <template #actions>
-        <Button variant="secondary" size="sm" :loading="isFetching" @click="refetch()">
-          刷新
-        </Button>
-        <Button variant="secondary" size="sm" :disabled="reportDialogOpen" @click="openCreate">
-          录入漏洞
-        </Button>
-        <Button size="sm" :disabled="!currentProjectDetail || createOpen" @click="openReport">
-          生成报告
-        </Button>
+        <Button variant="secondary" :disabled="!currentProjectDetail || createOpen" @click="openReport">生成报告</Button>
+        <Button :disabled="reportDialogOpen" @click="openCreate">录入漏洞</Button>
       </template>
-    </FilterBar>
+    </VulnerabilityFilters>
 
     <div
       v-if="isLoading && !hasCurrentSnapshot"
@@ -36,9 +22,7 @@
       role="status"
       aria-label="正在加载漏洞"
     >
-      <Card v-for="index in 4" :key="index" padding="sm">
-        <Skeleton class="vuln-skeleton__line" shape="text" />
-      </Card>
+      <div v-for="index in 4" :key="index" class="vuln-skeleton__row"><Skeleton class="vuln-skeleton__line" shape="text" /></div>
     </div>
 
     <ErrorState
@@ -48,8 +32,8 @@
       @retry="refetch()"
     />
 
-    <EmptyState v-else-if="!vulns.length" title="暂无漏洞" :description="emptyDescription">
-      <template #icon>◇</template>
+    <EmptyState v-else-if="!vulns.length" :title="hasActiveFilters ? '没有符合条件的漏洞' : '暂无漏洞'">
+      <template #icon><ShieldCheck :size="24" /></template>
       <template #actions>
         <Button size="sm" @click="openCreate">录入漏洞</Button>
       </template>
@@ -71,9 +55,10 @@
       @close-auto-focus="restoreReportTriggerFocus"
     />
 
+    <EmptyState v-if="vulns.length && !visibleVulns.length" title="没有符合条件的漏洞" />
     <VulnerabilityTable
-      v-if="vulns.length || selectedId"
-      :rows="vulns"
+      v-if="visibleVulns.length || selectedId"
+      :rows="visibleVulns"
       :selected-project-id="projectId"
       :selected-id="selectedId"
       @select="selectVuln"
@@ -83,15 +68,18 @@
     <Dialog
       :open="createOpen"
       title="录入漏洞"
-      description="人工录入项目漏洞、影响范围、修复建议与复现证据。"
-      size="md"
+      description=""
+      size="lg"
       close-label="关闭录入漏洞"
       :dismissible="!creating"
       @update:open="handleCreateOpenChange"
       @open-auto-focus="focusCreateTitle"
       @close-auto-focus="restoreCreateTriggerFocus"
     >
+      <Alert v-if="createError" tone="danger" title="录入未成功">{{ createError }}</Alert>
       <form id="create-vulnerability-form" class="vuln-create-form" @submit.prevent="submitCreate">
+        <section class="vuln-create-section" aria-label="发现与影响">
+          <h3>发现与影响</h3>
         <FormField label="漏洞名称" required>
           <template #default="{ controlAttrs }">
             <Input
@@ -103,6 +91,7 @@
           </template>
         </FormField>
 
+        <div class="vuln-create-basics">
         <FormField label="严重度" required>
           <template #default="{ controlAttrs }">
             <Select
@@ -123,6 +112,7 @@
           </template>
         </FormField>
 
+        </div>
         <FormField label="影响目标">
           <template #default="{ controlAttrs }">
             <Input
@@ -133,17 +123,24 @@
           </template>
         </FormField>
 
-        <FormField label="修复建议">
-          <template #default="{ controlAttrs }">
-            <Textarea
-              v-model="createForm.remediation"
-              v-bind="controlAttrs"
-              :rows="3"
-              placeholder="修复建议（支持 markdown）"
+        <FormField label="可信度 (0-1)">
+          <template #default="{ id, describedBy, invalid }">
+            <input
+              :id="id"
+              v-model.number="createForm.confidence"
+              type="number"
+              min="0"
+              max="1"
+              step="0.1"
+              class="vuln-confidence-input"
+              :aria-describedby="describedBy"
+              :aria-invalid="invalid || undefined"
             />
           </template>
         </FormField>
-
+        </section>
+        <section class="vuln-create-section" aria-label="复现证据">
+          <h3>复现证据</h3>
         <FormField label="复现请求（原始 HTTP 包，可选）">
           <template #default="{ controlAttrs }">
             <Textarea
@@ -168,21 +165,21 @@
           </template>
         </FormField>
 
-        <FormField label="可信度 (0-1)">
-          <template #default="{ id, describedBy, invalid }">
-            <input
-              :id="id"
-              v-model.number="createForm.confidence"
-              type="number"
-              min="0"
-              max="1"
-              step="0.1"
-              class="vuln-confidence-input"
-              :aria-describedby="describedBy"
-              :aria-invalid="invalid || undefined"
+        </section>
+        <section class="vuln-create-section" aria-label="修复建议">
+          <h3>修复建议</h3>
+        <FormField label="建议内容">
+          <template #default="{ controlAttrs }">
+            <Textarea
+              v-model="createForm.remediation"
+              v-bind="controlAttrs"
+              :rows="3"
+              placeholder="修复建议（支持 markdown）"
             />
           </template>
         </FormField>
+
+        </section>
       </form>
 
       <template #footer>
@@ -197,12 +194,14 @@
         </Button>
       </template>
     </Dialog>
+    <ConfirmAction :open="discardCreateOpen" title="放弃录入？" description="未保存的漏洞正文和 HTTP 原文将丢失。" confirm-label="放弃录入" cancel-label="继续编辑" tone="warning" @update:open="!$event && resolveDiscardCreate(false)" @confirm="resolveDiscardCreate(true)" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
+import { ShieldCheck } from '@lucide/vue'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import {
   createVulnerability,
@@ -210,10 +209,12 @@ import {
   type CreateVulnerabilityRequest,
   type Vulnerability,
 } from '@/api/client'
-import { ErrorState, FilterBar } from '@/components/patterns'
+import { ConfirmAction, ErrorState } from '@/components/patterns'
+import VulnerabilityFilters from './VulnerabilityFilters.vue'
+import { sortVulnerabilities } from './vulnerabilitySorting'
 import {
+  Alert,
   Button,
-  Card,
   Dialog,
   EmptyState,
   FormField,
@@ -228,9 +229,7 @@ import { useWorkspaceStore } from '@/stores/workspace'
 import VulnerabilityTable from './VulnerabilityTable.vue'
 import {
   VULNERABILITY_SEVERITIES,
-  VULNERABILITY_STATUSES,
   vulnerabilitySeverityMeta,
-  vulnerabilityStatusMeta,
 } from './vulnerabilityMetadata'
 import { invalidateVulnerabilityLists, vulnerabilityKeys } from './vulnerabilityQueries'
 
@@ -255,6 +254,7 @@ interface VulnerabilityListSnapshot {
 
 const ALL_FILTER = '__all__'
 const route = useRoute()
+const router = useRouter()
 const uiStore = useUIStore()
 const workspaceStore = useWorkspaceStore()
 const queryClient = useQueryClient()
@@ -281,14 +281,8 @@ const severityOptions = VULNERABILITY_SEVERITIES.map((severity) => ({
   value: severity,
   label: vulnerabilitySeverityMeta(severity).label,
 }))
-const filterSeverityOptions = [{ value: ALL_FILTER, label: '全部严重度' }, ...severityOptions]
-const statusOptions = [
-  { value: ALL_FILTER, label: '全部状态' },
-  ...VULNERABILITY_STATUSES.map((status) => ({
-    value: status,
-    label: vulnerabilityStatusMeta(status).label,
-  })),
-]
+const searchSelection = ref('')
+const sortSelection = ref('created')
 
 const {
   data: vulnsData,
@@ -340,13 +334,12 @@ const currentSnapshot = computed(() => {
 })
 const hasCurrentSnapshot = computed(() => currentSnapshot.value !== null)
 const vulns = computed(() => currentSnapshot.value?.items || [])
+const visibleVulns = computed(() => {
+  const needle = searchSelection.value.trim().toLocaleLowerCase()
+  return sortVulnerabilities(vulns.value.filter(item => !needle || [item.number, item.id, item.title, item.target, item.vuln_type].some(value => value.toLocaleLowerCase().includes(needle))), sortSelection.value)
+})
 const hasActiveFilters = computed(
   () => severitySelection.value !== ALL_FILTER || statusSelection.value !== ALL_FILTER,
-)
-const emptyDescription = computed(() =>
-  hasActiveFilters.value
-    ? '当前筛选条件下没有匹配的漏洞记录。'
-    : '当前项目暂无漏洞记录；worker 可自动登记，也可手动录入。',
 )
 const queryErrorMessage = computed(() =>
   queryError.value instanceof Error && queryError.value.message
@@ -354,9 +347,12 @@ const queryErrorMessage = computed(() =>
     : '请稍后重试。',
 )
 
-const selectedId = ref<string | null>(null)
+const selectedId = computed(() =>
+  (!route.query.vulnerabilityProjectId || route.query.vulnerabilityProjectId === projectId.value) && typeof route.query.vulnerabilityId === 'string'
+    ? route.query.vulnerabilityId : null,
+)
 function selectVuln(_projectId: string, id: string | null) {
-  selectedId.value = id
+  void router.replace({ query: { ...route.query, vulnerabilityProjectId: id ? projectId.value : undefined, vulnerabilityId: id || undefined, vulnerabilityObservationId: undefined } })
 }
 
 function onStatusChanged() {
@@ -371,6 +367,31 @@ const createTitleInput = ref<InstanceType<typeof Input> | null>(null)
 let createRequestToken = 0
 const createTrigger = ref<HTMLElement | null>(null)
 const createForm = ref<CreateVulnerabilityDraft>(createDefaultDraft())
+const createError = ref('')
+const discardCreateOpen = ref(false)
+let discardCreateResolver: ((value: boolean) => void) | undefined
+const createDirty = computed(() => JSON.stringify(createForm.value) !== JSON.stringify(createDefaultDraft()))
+function resolveDiscardCreate(discard: boolean) {
+  discardCreateOpen.value = false
+  discardCreateResolver?.(discard)
+  discardCreateResolver = undefined
+}
+function canLeaveCreate(): boolean | Promise<boolean> {
+  if (creating.value) return false
+  if (!createOpen.value || !createDirty.value) return true
+  if (discardCreateOpen.value) return false
+  discardCreateOpen.value = true
+  return new Promise<boolean>((resolve) => { discardCreateResolver = resolve })
+}
+onBeforeRouteLeave(canLeaveCreate)
+onBeforeRouteUpdate((to, from) => to.params.id === from.params.id || canLeaveCreate())
+function beforeUnload(event: BeforeUnloadEvent) {
+  if (!createOpen.value || (!creating.value && !createDirty.value)) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+window.addEventListener('beforeunload', beforeUnload)
+onBeforeUnmount(() => { resolveDiscardCreate(false); window.removeEventListener('beforeunload', beforeUnload) })
 
 function createDefaultDraft(): CreateVulnerabilityDraft {
   return {
@@ -399,6 +420,7 @@ function restoreReportTriggerFocus(event: Event) {
 function openCreate(event: MouseEvent) {
   createTrigger.value = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
   createForm.value = createDefaultDraft()
+  createError.value = ''
   createOpen.value = true
 }
 
@@ -416,9 +438,8 @@ function handleCreateOpenChange(open: boolean) {
   if (!open) closeCreate()
 }
 
-function closeCreate() {
-  if (creating.value) return
-  createOpen.value = false
+async function closeCreate() {
+  if (await canLeaveCreate()) createOpen.value = false
 }
 
 function errorText(error: unknown) {
@@ -459,6 +480,7 @@ async function submitCreate() {
   }
 
   creating.value = true
+  createError.value = ''
   try {
     await createVulnerability(requestProjectId, body)
     await invalidateVulnerabilityLists(queryClient, requestProjectId)
@@ -476,7 +498,8 @@ async function submitCreate() {
       projectId.value === requestProjectId &&
       projectVisitGeneration.value === requestVisitGeneration
     ) {
-      uiStore.showToast(errorText(error), 'danger')
+      createError.value = errorText(error)
+      uiStore.showToast(createError.value, 'danger')
     }
   } finally {
     if (requestToken === createRequestToken) creating.value = false
@@ -486,10 +509,11 @@ async function submitCreate() {
 watch(
   projectId,
   () => {
+    searchSelection.value = ''
+    sortSelection.value = 'created'
     projectVisitGeneration.value += 1
     createRequestToken += 1
     creating.value = false
-    selectedId.value = null
     reportDialogOpen.value = false
     reportTrigger.value = null
     createOpen.value = false

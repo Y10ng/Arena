@@ -3,10 +3,15 @@ import { api } from '@/api/client'
 
 vi.mock('@/api/client', () => ({ api: vi.fn() }))
 afterEach(() => vi.clearAllMocks())
-import type { ProjectDetail } from '@/api/types'
-import { resolveProjectStatus } from './workspaceStatus'
+import type { ProjectDetail, ProjectExecutionControl } from '@/api/types'
+import {
+  resolveExecutionControl,
+  resolveProjectStatus,
+  resolveRuntimeObservation,
+} from './workspaceStatus'
 import { runtimeFixture, runtimeV2Fixture } from './projectRuntimeFixtures'
 import {
+  executionControlConfirmed,
   getProjectRuntimes,
   projectActionAllowed,
   runtimeRequestError,
@@ -14,6 +19,117 @@ import {
 } from './projectRuntime'
 
 const project = (status: ProjectDetail['project']['status'] = 'active') => ({ id: 'p1', status })
+const receipt = (overrides: Partial<ProjectExecutionControl> = {}): ProjectExecutionControl => ({
+  action: 'pause',
+  state: 'paused',
+  requested_at: '2026-11-02T00:00:00Z',
+  confirmed_at: '2026-11-02T00:00:01Z',
+  resources: [{ container_id: 'exact-container', state: 'paused' }],
+  ...overrides,
+})
+
+describe('execution control request and physical receipt boundaries', () => {
+  it.each([
+    ['pause', 'paused', 'paused', '物理暂停已确认'],
+    ['resume', 'running', 'active', '原地恢复已确认'],
+    ['finish', 'stopped', 'stopped', '所属执行终止已确认'],
+  ] as const)('recognizes only paired %s receipts', (action, state, status, text) => {
+    const control = receipt({ action, state })
+    expect(executionControlConfirmed(control, state)).toBe(true)
+    expect(
+      resolveExecutionControl({ ...project(status), execution_control: control }),
+    ).toMatchObject({
+      confirmed: true,
+      stateText: text,
+    })
+  })
+
+  it.each([
+    { state: 'requested' },
+    { action: 'resume' },
+    { requested_at: undefined },
+    { confirmed_at: null },
+    { confirmed_at: 'invalid' },
+    { confirmed_at: '2026-11-01T23:59:59Z' },
+  ] as Partial<ProjectExecutionControl>[])(
+    'does not infer physical success from %j',
+    (overrides) => {
+      const control = receipt(overrides)
+      expect(executionControlConfirmed(control, 'paused')).toBe(false)
+      expect(
+        resolveExecutionControl({ ...project('paused'), execution_control: control })?.confirmed,
+      ).toBe(false)
+      expect(
+        projectActionAllowed(undefined, 'resume', false, {
+          ...project('paused'),
+          execution_control: control,
+        }),
+      ).toBe(false)
+      expect(
+        projectActionAllowed(undefined, 'finish', true, {
+          ...project('paused'),
+          execution_control: control,
+        }),
+      ).toBe(true)
+    },
+  )
+
+  it('keeps acceptance separate from metadata and retains read failures beside the receipt', () => {
+    const subject = { ...project('paused'), execution_control: receipt({ state: 'requested' }) }
+    const result = resolveRuntimeObservation(
+      subject,
+      undefined,
+      { failed: true, fetching: false, dataUpdatedAt: 0 },
+      Date.now(),
+    )
+    expect(result.control?.label).toBe('暂停已受理')
+    expect(result.notice).toContain('物理暂停待确认')
+    expect(result.notice).toContain('观测读取失败')
+  })
+
+  it.each(['failed', 'lost'] as const)(
+    'shows %s without exposing unknown private errors',
+    (state) => {
+      const subject = {
+        ...project('paused'),
+        execution_control: receipt({ state, error: '/secret/token=canary' }),
+      }
+      const view = resolveExecutionControl(subject)!
+      expect(view.confirmed).toBe(false)
+      expect(view.tone).toBe('danger')
+      expect(view.notice).not.toContain('canary')
+      expect(projectActionAllowed(undefined, 'resume', false, subject)).toBe(false)
+      expect(projectActionAllowed(undefined, 'finish', false, subject)).toBe(true)
+    },
+  )
+
+  it('does not claim an original process was resumed when there are no owned resources', () => {
+    const view = resolveExecutionControl({
+      ...project(),
+      execution_control: receipt({ action: 'resume', state: 'running', resources: [] }),
+    })!
+    expect(view.stateText).toContain('当前无所属执行现场')
+    expect(view.stateText).not.toContain('原地恢复已确认')
+    expect(resolveExecutionControl({ ...project(), execution_control: {} })).toBeUndefined()
+  })
+
+  it('does not override a physical receipt with an old stop/drain projection', () => {
+    const subject = { ...project('paused'), execution_control: receipt() }
+    const runtime = runtimeFixture({
+      project_status: 'paused',
+      state: 'pausing',
+      code: 'project_pause_draining',
+    })
+    const view = resolveRuntimeObservation(
+      subject,
+      runtime,
+      { failed: false, fetching: false, dataUpdatedAt: Date.now() },
+      Date.now(),
+    )
+    expect(view.notice).toBe('')
+    expect(view.control?.stateText).toBe('物理暂停已确认')
+  })
+})
 
 describe('project metadata status and independent runtime action boundaries', () => {
   it.each([
@@ -69,7 +185,7 @@ describe('project metadata status and independent runtime action boundaries', ()
     expect(projectActionAllowed(runtime, 'reauthorize', false, project('paused'))).toBe(false)
   })
 
-  it('offers ordinary actions from project metadata despite absent, expired or incompatible queries', () => {
+  it('offers pause and finish from metadata but requires fresh Server admission for resume', () => {
     for (const runtime of [
       undefined,
       runtimeFixture({ observed_at: '2020-01-01T00:00:00Z' }),
@@ -77,7 +193,13 @@ describe('project metadata status and independent runtime action boundaries', ()
     ]) {
       expect(projectActionAllowed(runtime, 'pause', true, project())).toBe(true)
       expect(projectActionAllowed(runtime, 'pause', false, project('paused'))).toBe(false)
-      expect(projectActionAllowed(runtime, 'resume', true, project('paused'))).toBe(true)
+      expect(projectActionAllowed(runtime, 'resume', true, project('paused'))).toBe(false)
+      expect(
+        projectActionAllowed(runtime, 'resume', true, {
+          ...project('paused'),
+          execution_control: receipt(),
+        }),
+      ).toBe(false)
       expect(projectActionAllowed(runtime, 'finish', true, project())).toBe(true)
     }
     expect(
@@ -97,6 +219,30 @@ describe('project metadata status and independent runtime action boundaries', ()
       ),
     ).toBe(true)
     expect(projectActionAllowed(runtimeFixture(), 'pause')).toBe(false)
+  })
+
+  it.each([undefined, {}])('does not offer legacy resume without fresh Server admission (%j)', (control) => {
+    const subject = { ...project('paused'), execution_control: control }
+    const runtime = runtimeV2Fixture({
+      project_status: 'paused',
+      state: 'blocked',
+      actions: {
+        pause: { allowed: true, reason: null },
+        resume: { allowed: false, reason: 'execution_scene_unavailable' },
+        reauthorize: { allowed: false, reason: null },
+        reopen: { allowed: false, reason: null },
+        finish: { allowed: true, reason: null },
+      },
+    })
+    expect(projectActionAllowed(runtime, 'resume', false, subject)).toBe(false)
+    expect(projectActionAllowed(runtime, 'finish', false, subject)).toBe(true)
+    expect(runtimeRequestError({ status: 409, data: { detail: 'execution_scene_unavailable' } }))
+      .toContain('没有原执行的热暂停回执')
+    runtime.actions.resume = { allowed: true, reason: null }
+    expect(projectActionAllowed(runtime, 'resume', false, subject)).toBe(true)
+    expect(projectActionAllowed(runtime, 'resume', true, subject)).toBe(false)
+    runtime.observed_at = '2020-01-01T00:00:00Z'
+    expect(projectActionAllowed(runtime, 'resume', false, subject)).toBe(true)
   })
 
   it('lets the server reject an unsafe resume instead of trusting inconsistent observations', () => {
@@ -140,16 +286,18 @@ describe('project metadata status and independent runtime action boundaries', ()
         finish: { allowed: true, reason: null },
       },
     })
-    expect(runtimeSnapshotExpired(runtime)).toBe(true)
-    expect(projectActionAllowed(runtime, 'reauthorize', false, project('paused'))).toBe(false)
+    const expired = runtimeSnapshotExpired(Date.now() - 60_001)
+    expect(expired).toBe(true)
+    expect(projectActionAllowed(runtime, 'reauthorize', expired, project('paused'))).toBe(false)
     expect(resolveProjectStatus('paused').label).toBe('已暂停')
-    const future = runtimeFixture({ observed_at: new Date(Date.now() + 60_000).toISOString() })
-    expect(runtimeSnapshotExpired(future)).toBe(true)
+    const future = runtimeFixture({ observed_at: new Date(Date.now() + 120_000).toISOString() })
+    expect(runtimeSnapshotExpired(Date.now())).toBe(false)
+    expect(runtimeSnapshotExpired(0)).toBe(true)
     expect(projectActionAllowed(future, 'pause', true, project())).toBe(true)
   })
 
   it('maps stable error codes to Chinese without displaying raw exception content', () => {
-    expect(runtimeRequestError(new Error('project_pause_draining'))).toContain('旧执行仍在取消')
+    expect(runtimeRequestError(new Error('project_pause_draining'))).toContain('物理冻结尚未确认')
     expect(runtimeRequestError(new Error('project_pause_draining'))).toContain(
       '关联码：project_pause_draining',
     )
@@ -169,6 +317,8 @@ describe('project metadata status and independent runtime action boundaries', ()
       expect(message).toContain(`关联码：${code}`)
       expect(message).not.toContain('授权时间窗已到期')
     }
-    expect(runtimeRequestError(new Error('project_authorization_expired'))).toContain('项目授权已过期')
+    expect(runtimeRequestError(new Error('project_authorization_expired'))).toContain(
+      '项目授权已过期',
+    )
   })
 })

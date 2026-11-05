@@ -227,10 +227,18 @@ def get_vulnerability_detail(
     project_id: str,
     vuln_id: str,
     observation_id: str | None = None,
+    *,
+    include_display_images: bool = False,
 ) -> VulnerabilityDetail:
     """默认主证据来自最新真实 Observation；其他历史材料保留独立入口。"""
     row = get_vulnerability_or_404(conn, project_id, vuln_id)
-    detail = VulnerabilityDetail(**_with_delete_eligibility(conn, vulnerability_from_row(row)).model_dump())
+    from .vulnerability_dispositions import list_vulnerability_dispositions
+
+    detail = VulnerabilityDetail(
+        **_with_delete_eligibility(conn, vulnerability_from_row(row)).model_dump(),
+        record_version=row["record_version"],
+        dispositions=list_vulnerability_dispositions(conn, project_id, vuln_id),
+    )
     detail.record_evidence_items = detail.evidence_items
     selected = read_vulnerability_evidence(conn, project_id, vuln_id, observation_id)
     detail.observation_id = selected["observation_id"]
@@ -247,7 +255,7 @@ def get_vulnerability_detail(
     source_fact_id = (selected_observation if selected_observation is not None else row)["source_fact_id"]
     if source_fact_id:
         fact_row = conn.execute(
-            "SELECT id, description, task_run_id FROM facts WHERE id = ? AND project_id = ?",
+            "SELECT id, description, task_run_id, assessment_record_json FROM facts WHERE id = ? AND project_id = ?",
             (source_fact_id, project_id),
         ).fetchone()
         if fact_row is not None:
@@ -268,6 +276,7 @@ def get_vulnerability_detail(
             detail.source_fact = VulnerabilitySourceFact(
                 id=fact_row["id"],
                 description=fact_row["description"],
+                preconditions=json.loads(fact_row["assessment_record_json"] or "{}").get("preconditions", []),
                 task_run_id=fact_row["task_run_id"],
                 evidence=evidence,
             )
@@ -312,9 +321,11 @@ def get_vulnerability_detail(
     from .vulnerability_reports import build_vulnerability_readable
     from .http_evidence_render import list_display_images
 
-    detail.display_images = list_display_images(
-        conn, project_id, selected["evidence_items"], task_run_id=run_id,
-    )
+    # 图片与流量取材仅用于显式阅读／导出，首屏不访问证据文件。
+    if include_display_images:
+        detail.display_images = list_display_images(
+            conn, project_id, selected["evidence_items"], task_run_id=run_id,
+        )
     detail.readable = VulnerabilityReadable.model_validate(build_vulnerability_readable(conn, detail))
     return detail
 
@@ -411,6 +422,13 @@ def validate_flow_evidence_sources(conn, project_id: str, items: list[EvidenceIt
     for item in items:
         if item.flow_id is None:
             continue
+        if item.source == "manual":
+            # 人工补充只建立同项目引用；取材完整性留到实际阅读／受理时核验。
+            if task_run_id is not None:
+                raise HTTPException(422, "flow_evidence_source_mismatch")
+            if conn.execute("SELECT 1 FROM http_flows WHERE project_id = ? AND id = ?", (project_id, item.flow_id)).fetchone() is None:
+                raise HTTPException(422, "flow_not_found_in_project")
+            continue
         snapshot = resolve_flow_evidence(conn, project_id, item.flow_id)
         scope = snapshot["scope"]
         same_run = task_run_id is not None and scope["task_run_id"] == task_run_id
@@ -453,6 +471,9 @@ def _validate_evidence_items(
     task_run_id: str | None = None,
     preserved_items: list[EvidenceItem] | None = None,
 ) -> None:
+    manual_flows = [item.flow_id for item in items if item.source == "manual" and item.flow_id]
+    if len(manual_flows) != len(set(manual_flows)):
+        raise HTTPException(422, "manual_flow_reference_must_be_unique")
     ids = [item.id for item in items]
     if len(ids) != len(set(ids)):
         raise HTTPException(422, "evidence_item_id_must_be_unique")
@@ -722,9 +743,23 @@ def update_vulnerability(
     project_id: str,
     vuln_id: str,
     body: UpdateVulnerabilityRequest,
+    *,
+    principal: RequestPrincipal | None = None,
 ) -> Vulnerability:
+    from .vulnerability_dispositions import prepare_vulnerability_disposition, insert_vulnerability_disposition
+
+    if body.status is not None:
+        # 与删除及报告冻结按相同顺序先锁项目，再锁漏洞，避免处置依据跨事务漂移。
+        conn.execute("SELECT id FROM projects WHERE id = ? FOR UPDATE", (project_id,)).fetchone()
     lock_verification_project_write(conn, project_id)
-    current = get_vulnerability_or_404(conn, project_id, vuln_id)
+    current = conn.execute(
+        "SELECT * FROM vulnerabilities WHERE project_id = ? AND id = ? FOR UPDATE",
+        (project_id, vuln_id),
+    ).fetchone()
+    if current is None:
+        raise HTTPException(404, "Vulnerability not found")
+    disposition = (prepare_vulnerability_disposition(conn, project_id, current, body, principal)
+                   if body.status is not None else None)
     sets: list[str] = []
     params: list = []
     for field in ("status", "severity", "remediation"):
@@ -762,6 +797,8 @@ def update_vulnerability(
         params,
     )
     row = get_vulnerability_or_404(conn, project_id, vuln_id)
+    if disposition is not None:
+        insert_vulnerability_disposition(conn, disposition, row["record_version"])
     return vulnerability_from_row(row)
 
 

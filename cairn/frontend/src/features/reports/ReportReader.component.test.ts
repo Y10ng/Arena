@@ -28,6 +28,30 @@ afterEach(() => {
 })
 
 describe('ReportReader', () => {
+  it('内嵌预览目录按需展开，Esc只收起目录并回焦，切换身份不保留旧目录', async () => {
+    const wrapper = mountReader('# 本次报告\n\n## 证据\n\n原文')
+    await wrapper.setProps({ embedded: true })
+    await flushPromises()
+    const toggle = modeButton(wrapper, '目录')
+    expect(wrapper.find('nav').exists()).toBe(false)
+    await toggle.trigger('click')
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+    const item = wrapper.get('nav button')
+    ;(item.element as HTMLElement).focus()
+    await item.trigger('keydown', { key: 'Escape' })
+    expect(wrapper.find('nav').exists()).toBe(false)
+    expect(document.activeElement).toBe(toggle.element)
+    await toggle.trigger('click')
+    await wrapper.setProps({ identity: 'next-report', content: '# 新报告' })
+    await flushPromises()
+    expect(wrapper.find('nav').exists()).toBe(false)
+    const nextToggle = modeButton(wrapper, '目录')
+    expect(nextToggle.attributes('aria-expanded')).toBe('false')
+    await nextToggle.trigger('click')
+    expect(wrapper.get('nav').text()).toContain('新报告')
+    expect(wrapper.get('nav').text()).not.toContain('本次报告')
+  })
+
   it('uses the rendered tokens for unique headings and excludes fenced code', async () => {
     const wrapper = mountReader(
       [

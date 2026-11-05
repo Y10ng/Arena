@@ -2,8 +2,10 @@
   <div class="text-editor">
     <div class="text-editor-toolbar">
       <div class="text-editor-heading">
-        <span class="text-editor-label">{{ label }}</span>
-        <span class="text-editor-language">{{ languageLabel }}</span>
+        <slot name="heading">
+          <span class="text-editor-label">{{ label }}</span>
+          <span class="text-editor-language">{{ languageLabel }}</span>
+        </slot>
       </div>
       <div class="text-editor-actions">
         <template v-if="isMarkdown">
@@ -77,7 +79,17 @@
         :content="value"
       />
     </div>
-    <div class="resize-handle" title="拖拽调整高度" @pointerdown.prevent="startResize" />
+    <div
+      class="resize-handle"
+      role="separator"
+      tabindex="0"
+      aria-label="调整编辑器高度"
+      aria-orientation="horizontal"
+      :aria-valuemin="minHeight"
+      :aria-valuenow="height"
+      @pointerdown.prevent="startResize"
+      @keydown="resizeWithKeyboard"
+    />
   </div>
 
   <Dialog
@@ -92,8 +104,10 @@
   >
     <template #title>
       <div class="text-editor-heading">
-        <span>{{ label }}</span>
-        <span class="text-editor-language">{{ languageLabel }}</span>
+        <slot name="heading">
+          <span>{{ label }}</span>
+          <span class="text-editor-language">{{ languageLabel }}</span>
+        </slot>
       </div>
     </template>
 
@@ -178,6 +192,7 @@ import { Code2, Columns2, Eye, Maximize2, Minimize2 } from '@lucide/vue'
 import MarkdownPreview from '@/components/MarkdownPreview.vue'
 import { Dialog } from '@/components/ui'
 import { isMarkdownFile, languageDisplayName, resolveFileLanguage } from '@/lib/fileLanguage'
+import { toLogicalPixels } from '@/lib/uiScale'
 
 type EditorMode = 'source' | 'preview' | 'split'
 
@@ -253,18 +268,31 @@ const handleFullscreenOpenAutoFocus = (event: Event) => {
 const stopResize = () => {
   window.removeEventListener('pointermove', resize)
   window.removeEventListener('pointerup', stopResize)
+  window.removeEventListener('pointercancel', stopResize)
 }
 
 const resize = (event: PointerEvent) => {
-  const delta = event.clientY - startY
+  const delta = toLogicalPixels(event.clientY - startY)
   height.value = Math.max(props.minHeight, startHeight + delta)
 }
 
 const startResize = (event: PointerEvent) => {
+  if (event.button !== 0) return
+  ;(event.currentTarget as HTMLElement).focus({ preventScroll: true })
   startY = event.clientY
   startHeight = height.value
   window.addEventListener('pointermove', resize)
   window.addEventListener('pointerup', stopResize)
+  window.addEventListener('pointercancel', stopResize)
+}
+
+function resizeWithKeyboard(event: KeyboardEvent) {
+  if (!['ArrowUp', 'ArrowDown', 'Home'].includes(event.key)) return
+  event.preventDefault()
+  const step = (event.key === 'ArrowDown' ? 1 : -1) * (event.shiftKey ? 80 : 20)
+  height.value = event.key === 'Home'
+    ? props.minHeight
+    : Math.max(props.minHeight, height.value + step)
 }
 
 onUnmounted(stopResize)
@@ -275,7 +303,7 @@ onUnmounted(stopResize)
   min-width: 0;
   display: flex;
   flex-direction: column;
-  background-color: var(--bg-inset);
+  background-color: var(--bg-surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -290,7 +318,7 @@ onUnmounted(stopResize)
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--border);
-  background-color: var(--bg-surface);
+  background-color: var(--bg-inset);
 }
 
 .text-editor-heading,
@@ -302,17 +330,16 @@ onUnmounted(stopResize)
 }
 
 .text-editor-label {
-  color: var(--text-muted);
-  font-size: var(--text-sm);
+  color: var(--text);
+  font-size: var(--text-md);
   font-weight: var(--font-medium);
   overflow-wrap: anywhere;
 }
 
 .text-editor-language {
   color: var(--text-faint);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 1px 5px;
+  padding-inline-start: var(--space-2);
+  border-inline-start: 1px solid var(--border);
   font-size: var(--text-xs);
   font-weight: var(--font-medium);
 }
@@ -338,6 +365,15 @@ onUnmounted(stopResize)
   background-color: var(--surface-hover);
 }
 
+.editor-tool-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.editor-tool-btn:active {
+  background-color: var(--color-surface-pressed);
+}
+
 .editor-tool-btn.active {
   color: var(--accent);
   background-color: var(--surface-selected);
@@ -350,7 +386,7 @@ onUnmounted(stopResize)
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  background-color: var(--bg-inset);
+  background-color: var(--bg-surface);
   overflow: hidden;
 }
 
@@ -387,10 +423,30 @@ onUnmounted(stopResize)
   height: 10px;
   cursor: ns-resize;
   border-top: 1px solid var(--border);
-  background:
-    linear-gradient(90deg, transparent, var(--border-strong), transparent) center / 64px 1px
-      no-repeat,
-    var(--bg-surface);
+  position: relative;
+  background: var(--bg-inset);
+  touch-action: none;
+}
+
+.resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  left: calc(50% - 24px);
+  width: 48px;
+  height: 2px;
+  border-radius: var(--radius-full);
+  background: var(--color-control-border);
+}
+
+.resize-handle:hover::after,
+.resize-handle:focus-visible::after {
+  background: var(--accent);
+}
+
+.resize-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .editor-fullscreen-body {

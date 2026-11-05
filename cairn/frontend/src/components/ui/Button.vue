@@ -2,13 +2,17 @@
   <button
     v-bind="$attrs"
     class="ui-button"
-    :class="[`ui-button--${variant}`, `ui-button--${size}`, { 'ui-button--block': block }]"
+    :class="[
+      `ui-button--${variant}`,
+      `ui-button--${size}`,
+      { 'ui-button--block': block, 'ui-button--loading': loading },
+    ]"
     :type="type"
     :disabled="disabled || loading"
     :aria-busy="loading ? 'true' : undefined"
   >
     <Spinner v-if="loading" class="ui-button__spinner" size="sm" decorative />
-    <span v-else-if="$slots.icon" class="ui-button__icon" aria-hidden="true">
+    <span v-if="$slots.icon" class="ui-button__icon" aria-hidden="true">
       <slot name="icon" />
     </span>
     <span class="ui-button__content"><slot /></span>
@@ -46,14 +50,16 @@ defineOptions({ name: 'UiButton', inheritAttrs: false })
 
 <style scoped>
 .ui-button {
+  position: relative;
   min-width: 0;
-  border: calc(var(--space-1) / 4) solid transparent;
+  border: 1px solid transparent;
   border-radius: var(--radius-md);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
   cursor: pointer;
+  font-family: var(--font-sans);
   font-weight: var(--font-medium);
   line-height: var(--leading-tight);
   text-decoration: none;
@@ -61,25 +67,26 @@ defineOptions({ name: 'UiButton', inheritAttrs: false })
     background-color var(--dur-fast) var(--ease),
     border-color var(--dur-fast) var(--ease),
     color var(--dur-fast) var(--ease),
-    box-shadow var(--dur-fast) var(--ease);
+    box-shadow var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
 }
 
 .ui-button--sm {
-  min-height: var(--control-height-sm);
+  min-height: var(--button-control-height, var(--control-height-sm));
   padding-inline: var(--space-2);
-  font-size: var(--text-sm);
+  font-size: var(--text-body);
 }
 
 .ui-button--md {
-  min-height: var(--control-height);
+  min-height: var(--button-control-height, var(--control-height));
   padding-inline: var(--space-3);
-  font-size: var(--text-md);
+  font-size: var(--text-control);
 }
 
 .ui-button--lg {
-  min-height: var(--control-height-lg);
+  min-height: var(--button-control-height, var(--control-height-lg));
   padding-inline: var(--space-4);
-  font-size: var(--text-lg);
+  font-size: var(--text-control);
 }
 
 .ui-button--block {
@@ -87,16 +94,18 @@ defineOptions({ name: 'UiButton', inheritAttrs: false })
 }
 
 .ui-button--primary {
-  background: var(--accent);
-  color: var(--color-accent-contrast);
+  background: linear-gradient(135deg, var(--color-primary), var(--color-primary-end));
+  color: var(--color-primary-contrast);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 20%), 0 2px 5px color-mix(in srgb, var(--color-primary) 18%, transparent);
 }
 
 .ui-button--primary:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: linear-gradient(135deg, var(--color-primary-hover), var(--color-primary-end));
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 28%), 0 4px 12px color-mix(in srgb, var(--color-primary) 26%, transparent);
 }
 
 .ui-button--secondary {
-  border-color: var(--border);
+  border-color: var(--color-control-border);
   background: var(--bg-elevated);
   color: var(--text);
 }
@@ -143,10 +152,55 @@ defineOptions({ name: 'UiButton', inheritAttrs: false })
   color: var(--link-hover);
 }
 
+/* 轻微按压只用于主动作，不改变控件布局。 */
+.ui-button:active:not(:disabled) {
+  background: var(--color-surface-pressed);
+}
+
+.ui-button--primary:active:not(:disabled) {
+  background: var(--color-primary-pressed);
+  transform: translateY(1px);
+  box-shadow: none;
+}
+
+.ui-button--success:hover:not(:disabled),
+.ui-button--success:active:not(:disabled) {
+  background: color-mix(in srgb, var(--success) 88%, var(--text));
+}
+
+.ui-button--danger:hover:not(:disabled),
+.ui-button--danger:active:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 88%, var(--text));
+}
+
+.ui-button--warning:hover:not(:disabled),
+.ui-button--warning:active:not(:disabled) {
+  background: color-mix(in srgb, var(--warning) 88%, var(--text));
+}
+
 .ui-button:disabled {
   cursor: not-allowed;
+  border-color: var(--border);
   background: var(--surface-disabled);
   color: var(--text-disabled);
+  box-shadow: none;
+}
+
+.ui-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.ui-button__spinner {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+}
+
+/* 保留原内容占位及可访问名称，加载不增宽、不重复触发。 */
+.ui-button--loading .ui-button__content,
+.ui-button--loading .ui-button__icon {
+  opacity: 0;
 }
 
 .ui-button__icon,
@@ -162,5 +216,18 @@ defineOptions({ name: 'UiButton', inheritAttrs: false })
 
 .ui-button__content {
   min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+}
+.ui-button :deep(svg) {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-button { transition: none; }
+  .ui-button--primary:active:not(:disabled) { transform: none; }
 }
 </style>

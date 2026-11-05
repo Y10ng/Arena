@@ -1,10 +1,20 @@
 <template>
-  <section class="resource-batch-uploader" aria-label="项目辅助资料上传">
+  <section
+    ref="uploadArea"
+    tabindex="-1"
+    class="resource-batch-uploader"
+    :class="{ 'is-dragging': dragging && !controlsDisabled }"
+    aria-label="项目辅助资料上传"
+    @dragover.prevent="dragging = !controlsDisabled"
+    @dragleave="handleDragLeave"
+    @drop.prevent="handleDrop"
+  >
     <input
       ref="fileInput"
       type="file"
       multiple
       class="resource-file-input"
+      aria-label="添加项目资料文件"
       :disabled="controlsDisabled"
       @change="handleFiles"
     />
@@ -13,11 +23,12 @@
       type="file"
       accept=".zip,application/zip"
       class="resource-file-input"
+      aria-label="导入项目资料 ZIP"
       :disabled="controlsDisabled"
       @change="handleZip"
     />
 
-    <div class="resource-batch-actions">
+    <header class="resource-batch-actions">
       <div class="resource-batch-buttons">
         <Button
           size="sm"
@@ -35,18 +46,9 @@
         >
         <slot name="actions" />
       </div>
-    </div>
+    </header>
 
-    <div
-      class="resource-drop-zone"
-      :class="{ 'is-dragging': dragging && !controlsDisabled }"
-      @dragover.prevent="dragging = !controlsDisabled"
-      @dragleave="dragging = false"
-      @drop.prevent="handleDrop"
-    >
-      <Upload :size="18" aria-hidden="true" />
-      <span>将文件拖入此区域，或多选添加文件。ZIP 展开请使用“导入 ZIP”。</span>
-    </div>
+    <p v-if="dragging && !controlsDisabled" class="resource-batch-status" role="status">松开以添加文件</p>
     <p v-if="operation === 'importing-zip'" class="resource-batch-status" role="status">
       正在由服务器校验并展开 ZIP…
     </p>
@@ -87,7 +89,11 @@
     </Alert>
     <p v-if="notice" class="resource-batch-status" role="status">{{ notice }}</p>
 
-    <div v-if="uploads.length" class="resource-pending-list" aria-label="尚未加入临时批次的资料">
+    <section
+      v-if="uploads.length"
+      class="resource-pending-list"
+      aria-label="尚未加入临时批次的资料"
+    >
       <div v-for="item in uploads" :key="item.id" class="resource-pending-item">
         <div class="resource-pending-description">
           <strong>{{ item.file.name }}</strong>
@@ -111,32 +117,23 @@
             size="sm"
             variant="ghost"
             :disabled="busy || disabled || item.state === 'unknown'"
+            :aria-label="`移除未上传文件 ${item.file.name}`"
             @click="skipPending(item)"
-            >移除，不参与创建</Button
+            >移除</Button
           >
         </div>
       </div>
-    </div>
+    </section>
 
-    <div v-if="batch?.members.length" class="resource-batch-members">
+    <section v-if="batch?.members.length" class="resource-batch-members" aria-label="临时批次文件">
+      <h4>已上传 · 待提交</h4>
       <div v-for="member in batch.members" :key="member.id" class="resource-batch-member">
-        <div class="resource-member-summary">
-          <strong class="mono">{{ member.path }}</strong>
-          <span class="resource-member-meta"
-            >{{ formatProjectResourceSize(member.size_bytes) }} ·
-            {{ member.source === 'zip' ? 'ZIP 成员' : '本地文件' }} · 已加入临时批次</span
-          >
-          <IconButton
-            label="移除待导入资料"
-            size="sm"
-            variant="ghost"
-            :disabled="controlsDisabled"
-            @click="removeMember(member)"
-            ><X :size="14"
-          /></IconButton>
-        </div>
         <details class="resource-member-details">
-          <summary>类型与路径</summary>
+          <summary>{{ member.path }}</summary>
+          <p class="resource-member-meta">
+            {{ formatProjectResourceSize(member.size_bytes) }} ·
+            {{ member.source === 'zip' ? 'ZIP 成员' : '本地文件' }}
+          </p>
           <div class="resource-member-fields">
             <Select
               :model-value="member.kind"
@@ -153,40 +150,39 @@
               @blur="savePath(member)"
             />
           </div>
-          <span class="resource-member-meta"
-            >{{ projectResourceKindLabel(member.kind) }} · 相对路径保留目录结构</span
-          >
         </details>
+        <IconButton
+          :label="`移除待导入资料 ${member.path}`"
+          size="sm"
+          variant="ghost"
+          :disabled="controlsDisabled"
+          @click="removeMember(member)"
+          ><X :size="14"
+        /></IconButton>
       </div>
-    </div>
-    <EmptyState
-      v-else-if="!uploads.length"
-      title="未添加辅助资料"
-    />
+    </section>
 
-    <div v-if="config" class="resource-batch-usage mono">
-      <span>{{ usedCount }} / {{ config.limits.max_active_count }} 个文件</span>
-      <span
-        >{{ formatProjectResourceSize(usedBytes) }} /
-        {{ formatProjectResourceSize(config.limits.max_active_total_bytes) }}</span
-      >
-      <span>单文件上限 {{ formatProjectResourceSize(config.limits.max_file_bytes) }}</span>
-    </div>
+    <Dialog :open="oversized.length > 0" title="文件过大" size="sm"
+      @close-auto-focus="restoreUploadFocus"
+      @update:open="(open) => { if (!open) oversized = [] }">
+      <p>{{ oversized.some((item) => item.member) ? '以下 ZIP 成员超过单文件限制，导入未完成。' : `以下文件超过 ${oversized[0] ? oversized[0].limit / 1_000_000 : 500} MB，未上传。` }}</p>
+      <ul class="resource-size-rejections"><li v-for="(item, index) in oversized" :key="index">{{ item.name }}</li></ul>
+      <template #footer><Button @click="oversized = []">知道了</Button></template>
+    </Dialog>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { Archive, FilePlus, Upload, X } from '@lucide/vue'
+import { Archive, FilePlus, X } from '@lucide/vue'
 import type {
   ProjectResourceBatch,
   ProjectResourceBatchMember,
   ProjectResourceKind,
 } from '@/api/types'
-import { Alert, Button, EmptyState, IconButton, Input, Select } from '@/components/ui'
+import { Alert, Button, Dialog, IconButton, Input, Select } from '@/components/ui'
 import {
   formatProjectResourceSize,
-  projectResourceKindLabel,
   projectResourceKindOptions,
 } from './projectResources'
 import { useProjectResourceBatch, type PendingResourceUpload } from './useProjectResourceBatch'
@@ -209,6 +205,12 @@ const emit = defineEmits<{
   summary: [summary: string]
 }>()
 
+const uploadArea = ref<HTMLElement | null>(null)
+const restoreUploadFocus = (event: Event) => {
+  event.preventDefault()
+  const entry = uploadArea.value?.querySelector<HTMLButtonElement>('.resource-batch-buttons button:not(:disabled)')
+  ;(entry || uploadArea.value)?.focus()
+}
 const fileInput = ref<HTMLInputElement | null>(null)
 const zipInput = ref<HTMLInputElement | null>(null)
 const memberPaths = reactive<Record<string, string>>({})
@@ -221,6 +223,7 @@ const {
   operation,
   busy,
   uploads,
+  oversized,
   pending: pendingOperations,
   hasUnknown,
   syncBatch,
@@ -249,8 +252,6 @@ const controlsDisabled = computed(
   () => props.disabled || busy.value || hasUnknown.value || !config.value,
 )
 const kindOptions = computed(() => projectResourceKindOptions(config.value))
-const usedCount = computed(() => props.existingCount + (batch.value?.resource_count || 0))
-const usedBytes = computed(() => props.existingBytes + (batch.value?.total_bytes || 0))
 
 // 折叠摘要直接来自上传会话，不把 File、未知请求和路径草稿复制到父组件。
 const summary = computed(() => {
@@ -289,8 +290,12 @@ watch(pending, (value) => emit('pending', value), { immediate: true, flush: 'syn
 watch(() => props.modelValue, syncBatch)
 watch(
   () => batch.value?.members,
-  (members) => {
-    for (const member of members || []) memberPaths[member.id] = member.path
+  (members, previous) => {
+    for (const member of members || []) {
+      // 其他文件上传或核对只刷新集合，不覆盖本成员尚未保存的路径草稿。
+      if (memberPaths[member.id] === undefined || previous?.find((item) => item.id === member.id)?.path !== member.path)
+        memberPaths[member.id] = member.path
+    }
   },
   { immediate: true },
 )
@@ -339,6 +344,11 @@ const handleFiles = async (event: Event) => {
   const files = Array.from(input.files || [])
   input.value = ''
   await addFiles(files)
+}
+
+const handleDragLeave = (event: DragEvent) => {
+  if (!(event.relatedTarget instanceof Node) || !(event.currentTarget as HTMLElement).contains(event.relatedTarget))
+    dragging.value = false
 }
 
 const handleDrop = async (event: DragEvent) => {
@@ -436,7 +446,27 @@ defineExpose({ cancel })
 <style scoped>
 .resource-batch-uploader {
   display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  border-radius: var(--radius-md);
+}
+.resource-batch-uploader.is-dragging {
+  outline: 1px dashed var(--accent);
+  outline-offset: 4px;
+  background: var(--accent-dim);
+}
+.resource-batch-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--space-3);
+}
+.resource-batch-members h4 {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
 }
 .resource-file-input {
   display: none;
@@ -448,70 +478,57 @@ defineExpose({ cancel })
   align-items: center;
   gap: var(--space-2);
 }
-.resource-drop-zone {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border: 1px dashed var(--border);
-  border-radius: var(--radius-md);
-  color: var(--text-muted);
-  font-size: var(--text-sm);
-}
-.resource-drop-zone.is-dragging {
-  border-color: var(--accent);
-  background: var(--accent-dim);
-}
-.resource-drop-zone svg {
-  flex-shrink: 0;
-}
 .resource-batch-status {
   margin: 0;
   color: var(--text-muted);
   font-size: var(--text-sm);
 }
-.resource-batch-members,
 .resource-pending-list {
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
   gap: var(--space-2);
 }
+.resource-batch-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  max-height: 240px;
+  overflow-y: auto;
+}
+.resource-batch-members h4 { flex-basis: 100%; }
 .resource-batch-member,
 .resource-pending-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
   min-width: 0;
-  padding: var(--space-3);
+  max-width: 100%;
+  padding: var(--space-1) var(--space-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
 }
-.resource-member-summary {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-1) var(--space-2);
-}
-.resource-member-summary strong {
-  overflow-wrap: anywhere;
-  font-size: var(--text-sm);
-}
-.resource-member-summary .resource-member-meta {
-  grid-column: 1;
-}
-.resource-member-summary :deep(.ui-icon-button) {
-  grid-column: 2;
-  grid-row: 1 / 3;
+.resource-batch-member :deep(.ui-icon-button) {
+  flex-shrink: 0;
 }
 .resource-member-meta,
 .resource-batch-usage,
 .resource-pending-description span {
   color: var(--text-muted);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
 }
 .resource-member-details {
-  margin-top: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
-.resource-member-details summary {
-  color: var(--text-muted);
-  font-size: var(--text-xs);
+.resource-member-details > summary {
+  padding-block: var(--space-1);
+  font-size: var(--text-md);
   cursor: pointer;
+}
+.resource-size-rejections { max-height: 240px; overflow-y: auto; overflow-wrap: anywhere; }
+.resource-member-details > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
 }
 .resource-member-fields {
   display: grid;
@@ -538,12 +555,12 @@ defineExpose({ cancel })
   overflow-wrap: anywhere;
 }
 .resource-pending-description strong {
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
 }
 .resource-pending-error {
   margin: 0;
   color: var(--danger);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
 }
 .resource-pending-actions {
   flex-shrink: 0;

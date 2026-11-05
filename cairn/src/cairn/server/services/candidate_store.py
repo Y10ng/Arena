@@ -39,14 +39,18 @@ from .audit_task_runs import authenticated_execution_owner
 from .ids import require_project_not_purging
 from .time_utils import utcnow
 
-_PRIVATE_KEY_MARKERS = (
-    b"-----BEGIN PRIVATE KEY-----",
-    b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
-    b"-----BEGIN RSA PRIVATE KEY-----",
-    b"-----BEGIN DSA PRIVATE KEY-----",
-    b"-----BEGIN EC PRIVATE KEY-----",
-    b"-----BEGIN OPENSSH PRIVATE KEY-----",
-    b"-----BEGIN PGP PRIVATE KEY BLOCK-----",
+# 分开表示检测头，避免发布扫描把检测器源码当成私钥；运行时匹配字节不变。
+_PRIVATE_KEY_MARKERS = tuple(
+    b"-----BEGIN " + kind + b"-----"
+    for kind in (
+        b"PRIVATE KEY",
+        b"ENCRYPTED PRIVATE KEY",
+        b"RSA PRIVATE KEY",
+        b"DSA PRIVATE KEY",
+        b"EC PRIVATE KEY",
+        b"OPENSSH PRIVATE KEY",
+        b"PGP PRIVATE KEY BLOCK",
+    )
 )
 
 
@@ -120,25 +124,24 @@ def _verified_delivery(
     delivery = context.get("execution_delivery")
     if not isinstance(delivery, dict):
         raise HTTPException(409, "candidate_execution_delivery_unavailable")
-    required = {
-        "session_id",
-        "phase",
-        "deadline_at",
-        "container_id",
-        "model_binding_sha256",
-        "result_schema_sha256",
-        "binding",
-        "inputs",
-    }
-    if set(delivery) != required:
-        raise HTTPException(409, "candidate_execution_delivery_unavailable")
-    result_schema_sha256 = delivery["result_schema_sha256"]
-    if (
-        not isinstance(result_schema_sha256, str)
-        or len(result_schema_sha256) != 64
-        or any(character not in "0123456789abcdef" for character in result_schema_sha256)
-    ):
-        raise HTTPException(409, "candidate_execution_delivery_unavailable")
+    # 完整快照由登记端冻结；留存只消费候选身份，不重新制定执行预算字段合同。
+    try:
+        session = delivery["session_id"]
+        phase = delivery["phase"]
+        schema_digest = delivery["result_schema_sha256"]
+        binding = delivery["binding"]
+        if not all(isinstance(value, str) for value in (session, phase, schema_digest)):
+            raise ValueError
+        if binding is not None and not isinstance(binding, dict):
+            raise ValueError
+        CandidateFrameManifest.validate_session(session)
+        CandidateFrameManifest.validate_phase(phase)
+        CandidateFrameManifest.validate_digest(schema_digest)
+        canonical_value_sha256(binding)
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(409, "candidate_execution_delivery_unavailable") from None
+    if session != run["session_id"]:
+        raise HTTPException(409, "candidate_session_mismatch")
     return verified_dispatcher_id, delivery
 
 

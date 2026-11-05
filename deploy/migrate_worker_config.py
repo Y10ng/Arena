@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""将 legacy Provider secret 引用显式迁移到 dispatch.yaml。"""
+"""显式迁移 legacy Provider secret 引用与独立 executor 镜像配置。"""
 
 from __future__ import annotations
 
@@ -135,14 +135,30 @@ def migrate(*, config_path: Path, secrets_dir: Path) -> MigrationResult:
     raw_secrets_dir = secrets_dir.expanduser()
     if raw_config_path.is_symlink() or not raw_config_path.is_file():
         raise MigrationError(f"dispatch.yaml 必须是普通文件: {raw_config_path}")
-    if raw_secrets_dir.is_symlink() or not raw_secrets_dir.is_dir():
-        raise MigrationError(f"secrets 目录不可用: {raw_secrets_dir}")
     config_path = raw_config_path.resolve()
-    secrets_dir = raw_secrets_dir.resolve()
 
     store = DispatcherConfigStore(config_path)
     config, _content, revision = store.read()
+    container = config.get("container", {})
+    if not isinstance(container, dict):
+        raise MigrationError("dispatch.yaml container 必须是对象")
+    image_changed = "task_executor_image" in container
+    if image_changed:
+        # 先拒绝有独立定制的执行环境，不能在凭据迁移后才发现无法合并。
+        old_image = container["task_executor_image"]
+        research_image = container.get("image")
+        if old_image not in ("arena-task-executor:local", research_image):
+            raise MigrationError(
+                "container.task_executor_image 是不同的自定义镜像；请先将执行服务和所需工具"
+                "合入配套研究镜像，设置 container.image 后显式移除 task_executor_image。"
+                "原配置和凭据未修改"
+            )
     mapping = migrate_legacy_secret_references(config)
+    if not mapping and not image_changed:
+        return MigrationResult(0, False, None)
+    if mapping and (raw_secrets_dir.is_symlink() or not raw_secrets_dir.is_dir()):
+        raise MigrationError(f"secrets 目录不可用: {raw_secrets_dir}")
+    secrets_dir = raw_secrets_dir.resolve()
 
     resolved: dict[str, str] = {}
     for old_ref in mapping:
@@ -152,11 +168,10 @@ def migrate(*, config_path: Path, secrets_dir: Path) -> MigrationResult:
         assert secret_file is not None
         resolved[old_ref] = _read_secret(secret_file)
 
-    if not mapping:
-        return MigrationResult(0, False, None)
-
     candidate: dict[str, Any] = yaml.safe_load(yaml.safe_dump(config, sort_keys=False)) or {}
-    common_env = candidate.setdefault("common_env", {})
+    if image_changed:
+        del candidate["container"]["task_executor_image"]
+    common_env = candidate.setdefault("common_env", {}) if mapping else candidate.get("common_env", {})
     if not isinstance(common_env, dict):
         raise MigrationError("dispatch.yaml common_env 必须是对象")
     providers = candidate.get("providers") or []
@@ -192,7 +207,7 @@ def migrate(*, config_path: Path, secrets_dir: Path) -> MigrationResult:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="迁移 legacy Provider credential 配置")
+    parser = argparse.ArgumentParser(description="迁移 legacy Provider credential 与独立 executor 镜像配置")
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--config", type=Path, default=Path("runtime/dispatch.yaml"))
     parser.add_argument("--secrets-dir", type=Path, default=Path("runtime/secrets"))
@@ -213,7 +228,7 @@ def main() -> int:
     if not result.changed:
         print("Worker 配置迁移：无需变更")
         return 0
-    print(f"Worker 配置迁移完成：providers={result.provider_count}")
+    print(f"Worker 配置迁移完成：providers={result.provider_count}；Worker 与 executor 共用 container.image")
     if result.backup_path is not None:
         print(f"备份：{result.backup_path}")
     return 0

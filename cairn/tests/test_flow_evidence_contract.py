@@ -31,13 +31,19 @@ def test_flow_contract_and_artifact_resolution():
         assert evidence_refs([parsed]) == []
         assert not has_evidence([parsed.model_copy(update={"source": "historical"})], current=True)
         for invalid in (
-            {**value, "kind": "artifact"}, {**value, "source": "manual"},
+            {**value, "kind": "artifact"},
             {**value, "response": {"artifact_id": "a1"}},
             {**value, "excerpts": [{"side": "response", "pointer": "utf8-bytes=0:4"}]},
         ):
             with pytest.raises(ValidationError):
                 model.model_validate(invalid)
             assert list(Draft202012Validator(model.model_json_schema()).iter_errors(invalid))
+    manual = {**value, "source": "manual"}
+    EvidenceItem.model_validate(manual)
+    Draft202012Validator(EvidenceItem.model_json_schema()).validate(manual)
+    with pytest.raises(ValidationError):
+        WorkerEvidenceItem.model_validate(manual)
+    assert list(Draft202012Validator(WorkerEvidenceItem.model_json_schema()).iter_errors(manual))
     resolved = resolve_declared_evidence_items([WorkerEvidenceItem.model_validate(value)], ProcessArtifactRecord(refs=[]), require_current_run=True)
     assert resolved[0].model_dump(exclude_defaults=True) == EvidenceItem.model_validate(value).model_dump(exclude_defaults=True)
     with pytest.raises(ValidationError):

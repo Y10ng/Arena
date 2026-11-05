@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from cairn.dispatcher.runtime.containers import container_instance_id
+from cairn.dispatcher.runtime.containers import canonical_server_address, container_instance_id
 from cairn.dispatcher.runtime.startup_healthcheck import StartupHealthcheckResult
 from cairn.dispatcher.tasks.candidate_capture_outbox import CandidateCaptureOutbox
 from cairn.dispatcher.workers.base import (
@@ -100,8 +100,9 @@ class ConfigRuntimeMixin:
                 # 在途任务与浏览器清理必须继续使用原归属，身份变更需用户显式重启。
                 raise RuntimeError("dispatcher/server identity changed; restart the dispatcher explicitly")
         previous_interval = self.config.runtime.interval if self.config is not None else None
-        if getattr(self, "client", None) is not None and self.client.base_url != config.server.rstrip("/"):
-            # Server 地址变化后重建 HTTP session，避免连接池继续打到旧目标。
+        if (getattr(self, "client", None) is not None
+                and canonical_server_address(self.client.base_url) != canonical_server_address(config.server)):
+            # 等价地址沿用 client，避免关闭恢复线程及在途业务仍持有的实例。
             self.client.close()
             self.client = CairnClient(config.server)
         self.config = config

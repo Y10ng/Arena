@@ -290,7 +290,7 @@ def update_task_run_record(
             except ValidationError:
                 raise HTTPException(422, "verification_cleanup_invalid") from None
             prior_cleanup = runtime_context.get("external_verification_cleanup", {})
-            if prior_cleanup.get("status") == "removed" and cleanup["status"] != "removed":
+            if prior_cleanup.get("status") in {"stopped", "removed"} and cleanup["status"] != prior_cleanup["status"]:
                 raise HTTPException(409, "verification_cleanup_confirmation_conflict")
             if cleanup.get("error"):
                 from .verification_requests import _validate_public_text
@@ -310,7 +310,7 @@ def update_task_run_record(
                     raise HTTPException(409, "execution_lifecycle_confirmation_conflict")
             if lifecycle["cleanup_confirmed"] and not lifecycle["termination_confirmed"]:
                 raise HTTPException(422, "execution_cleanup_requires_termination")
-        if updates.get("external_verification_cleanup", {}).get("status") == "removed":
+        if updates.get("external_verification_cleanup", {}).get("status") in {"stopped", "removed"}:
             proof = lifecycle or runtime_context.get("execution_lifecycle", {})
             if proof.get("termination_confirmed") is not True or proof.get("cleanup_confirmed") is not True:
                 raise HTTPException(422, "verification_cleanup_requires_confirmation")

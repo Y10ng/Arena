@@ -108,6 +108,44 @@ class FakeContainer:
         return SimpleNamespace(exit_code=0)
 
 
+def test_exec_create_waits_for_original_scene_resume():
+    from concurrent.futures import ThreadPoolExecutor
+    from cairn.dispatcher.runtime.pause_clock import PauseClock
+
+    api = FakeAPI(FakeStream([]))
+    process = ManagedProcess(FakeContainer(api), ["fixture"], {})
+    process.pause_clock = PauseClock()
+    process.pause_clock.pause()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        started = pool.submit(process.start)
+        assert not threading.Event().wait(.1)
+        assert api.created is None and not started.done()
+        process.pause_clock.resume()
+        started.result(timeout=2)
+    result = process.communicate(timeout=2)
+    assert result.returncode == 0 and process.execution_completed
+    result.cleanup()
+
+
+def test_detach_does_not_kill_or_resolve_frozen_execution():
+    from cairn.dispatcher.runtime.pause_clock import ExecutionDetached, PauseClock
+
+    stream = BlockingStream()
+    api = TimeoutAPI(stream)
+    process = ManagedProcess(FakeContainer(api), ["fixture"], {})
+    process.pause_clock = PauseClock()
+    process.start()
+    assert stream.started.wait(2)
+    process.pause_clock.pause()
+    process.pause_clock.detach()
+    with pytest.raises(ExecutionDetached):
+        process.communicate(timeout=2)
+    process._reader.join(timeout=2)
+    assert not process._reader.is_alive()
+    assert api.controls == [] and api.running and not process.execution_completed
+    process.cleanup_output()
+
+
 @pytest.mark.parametrize("terminal", [
     {"Running": True, "ExitCode": 0},
     {"Running": False, "ExitCode": None},

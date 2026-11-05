@@ -56,7 +56,7 @@ from cairn.dispatcher.worker_result_gateway import (
     decode_pi_result,
     worker_failure_error_type,
 )
-from cairn.dispatcher.tasks.delivery import DeliveryUnavailable, DELIVERY_PROMPT, register_delivery, resume_continuation, resume_delivery, remaining_delivery_seconds
+from cairn.dispatcher.tasks.delivery import DeliveryUnavailable, DELIVERY_PROMPT, ResearchDeliveryBudget, register_delivery, resume_continuation, resume_delivery, remaining_delivery_seconds
 from cairn.dispatcher.workers.registry import get_driver
 from cairn.server.models import Intent, ProjectDetail
 
@@ -105,10 +105,13 @@ def run_bootstrap_task(
     lease.start()
     execute_result = None
     try:
+        cancellation.pause_clock = container_manager.research_clock(project.project.id)
+        delivery_budget = ResearchDeliveryBudget(cancellation.pause_clock)
         execution_timeout = config.tasks.bootstrap.timeout
         if delivery_context is not None:
             container_name, frozen_delivery, execution_timeout = resume_delivery(
                 container_manager, project.project.id, worker, delivery_context, "bootstrap_execute",
+                client=client, budget=delivery_budget,
             )
             session = frozen_delivery["session_id"]
             prompt = DELIVERY_PROMPT
@@ -130,7 +133,7 @@ def run_bootstrap_task(
             frozen_delivery = register_delivery(
                 client, container_manager, container_name, project, task_run_id, worker,
                 phase="bootstrap_execute", session=session, timeout_seconds=execution_timeout,
-                binding=request_binding, inputs=None,
+                binding=request_binding, inputs=None, budget=delivery_budget,
             )
 
             # Bootstrap prompt 只需要项目初始事实、hint、target 和知识库，不依赖完整 YAML 快照。
@@ -167,7 +170,7 @@ def run_bootstrap_task(
         task_execution = None if delivery_context is not None else container_manager.prepare_task_execution(
             project.project, task_run_id, cancellation, container_runtime,
         )
-        execution_timeout = remaining_delivery_seconds(frozen_delivery)
+        execution_timeout = remaining_delivery_seconds(frozen_delivery, budget=delivery_budget)
         execute = driver.build_execute(
             worker, prompt, session, phase="bootstrap_execute",
             project_id=project.project.id, task_run_id=task_run_id,
@@ -471,7 +474,8 @@ def run_bootstrap_task(
         best_effort_release(client, project.project.id, intent.id, worker.name, task_run_id=task_run_id)
         return "container_failed"
     finally:
-        container_manager.stop_task_execution(project.project.id, task_run_id)
+        if not cancellation.detached:
+            container_manager.stop_task_execution(project.project.id, task_run_id)
         # ProcessResult 持有临时输出文件，所有返回和异常路径都必须显式回收。
         if execute_result is not None:
             execute_result.cleanup()

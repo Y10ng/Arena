@@ -112,18 +112,20 @@ defineOptions({ name: 'UiSelect', inheritAttrs: false })
 <style scoped>
 .ui-select__trigger {
   width: 100%;
-  min-height: var(--control-height);
-  border: calc(var(--space-1) / 4) solid var(--border);
+  min-width: 0;
+  min-height: var(--field-control-height, var(--control-height-form));
+  border: calc(var(--space-1) / 4) solid var(--color-control-border);
   border-radius: var(--radius-md);
   padding: calc(var(--space-1) * 1.5) var(--space-3);
-  font-size: var(--text-md);
-  line-height: var(--leading-normal);
+  font-family: var(--font-sans);
+  font-size: var(--text-control);
+  line-height: var(--leading-snug);
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
   overflow: hidden;
-  background: var(--bg-inset);
+  background: var(--bg-surface);
   color: var(--text);
   text-align: left;
   transition:
@@ -139,11 +141,14 @@ defineOptions({ name: 'UiSelect', inheritAttrs: false })
 .ui-select__trigger:focus-visible,
 .ui-select__trigger[data-state='open'] {
   border-color: var(--accent);
-  box-shadow: var(--ring);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
-.ui-select__trigger--invalid {
+.ui-select__trigger--invalid,
+.ui-select__trigger[aria-invalid='true'] {
   border-color: var(--danger);
+  outline-color: var(--danger);
 }
 
 .ui-select__trigger:disabled {
@@ -172,19 +177,20 @@ defineOptions({ name: 'UiSelect', inheritAttrs: false })
 <!-- SelectContent 通过 Portal 挂载到 body，弹层样式不能依赖组件 scoped 属性。 -->
 <style>
 .ui-select__content {
-  min-width: var(--reka-select-trigger-width);
-  max-width: min(520px, calc(100vw - var(--space-4)));
-  max-height: min(var(--reka-select-content-available-height), 320px);
-  border: calc(var(--space-1) / 4) solid var(--border-strong);
-  border-radius: var(--radius-md);
+  /* Popper 坐标壳提供屏幕尺寸，内容约束需还原为逻辑像素。 */
+  min-width: calc(var(--reka-select-trigger-width) / var(--ui-scale));
+  max-width: min(520px, calc(100 * var(--ui-vw) - var(--space-4)));
+  max-height: min(calc(var(--reka-select-content-available-height) / var(--ui-scale)), 320px);
+  border: calc(var(--space-1) / 4) solid var(--border);
+  border-radius: var(--radius-lg);
   z-index: var(--z-overlay-child);
   overflow: hidden;
   background: var(--bg-elevated);
   box-shadow: var(--shadow-pop);
   color: var(--text);
   font-family: var(--font-sans);
-  font-size: var(--text-md);
-  line-height: var(--leading-normal);
+  font-size: var(--text-control);
+  line-height: var(--leading-snug);
   transform-origin: var(--reka-select-content-transform-origin);
 }
 
@@ -197,7 +203,7 @@ defineOptions({ name: 'UiSelect', inheritAttrs: false })
 }
 
 .ui-select__item {
-  min-height: var(--control-height);
+  min-height: var(--control-height-filter);
   border-radius: var(--radius-sm);
   padding: calc(var(--space-1) * 1.5) var(--space-3) calc(var(--space-1) * 1.5) calc(var(--space-3) + var(--space-4));
   position: relative;
@@ -205,16 +211,23 @@ defineOptions({ name: 'UiSelect', inheritAttrs: false })
   align-items: center;
   outline: none;
   color: var(--text);
-  font-size: var(--text-md);
-  line-height: var(--leading-normal);
+  font-size: var(--text-control);
+  line-height: var(--leading-snug);
   white-space: normal;
   overflow-wrap: anywhere;
   cursor: default;
   user-select: none;
 }
 
-.ui-select__item[data-highlighted] {
+.ui-select__item[data-state='checked'] {
   background: var(--surface-selected);
+  color: var(--accent);
+}
+
+.ui-select__item[data-highlighted] {
+  background: var(--surface-hover);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .ui-select__item[data-disabled] {
@@ -244,7 +257,7 @@ defineOptions({ name: 'UiSelect', inheritAttrs: false })
 @keyframes ui-select-enter {
   from {
     opacity: 0;
-    transform: scale(0.98);
+    transform: translateY(var(--space-1));
   }
 }
 

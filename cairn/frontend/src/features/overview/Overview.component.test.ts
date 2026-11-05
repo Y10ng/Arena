@@ -58,7 +58,7 @@ async function mountOverview() {
         ['/projects', 'Projects'],
         ['/reports', 'Reports'],
         ['/findings', 'Findings'],
-        ['/projects/:id', 'WorkspaceGraph'],
+        ['/projects/:id', 'ProjectEntry'],
       ].map(([path, name]) => ({ path, name, component: { template: '<div />' } })),
     ],
   })
@@ -77,6 +77,7 @@ async function mountOverview() {
 }
 
 beforeEach(() => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
   mocks.api.mockReset()
   mocks.auth = reactive({
     isAuthenticated: true,
@@ -89,6 +90,7 @@ afterEach(() => {
   wrappers.splice(0).forEach((wrapper) => wrapper.unmount())
   clients.splice(0).forEach((client) => client.clear())
   vi.restoreAllMocks()
+  vi.unstubAllGlobals()
   document.body.innerHTML = ''
 })
 
@@ -113,9 +115,9 @@ describe('Overview', () => {
       .find((button) => button.text() === '重试')!
       .trigger('click')
     await flushPromises()
-    expect(wrapper.findAll('.overview-stats dd').map((node) => node.text())).toEqual([
-      '0',
-      '0',
+    expect(wrapper.findAll('.overview-stats dd:not(.stat-detail)').map((node) => node.text())).toEqual([
+      '未记录',
+      '未记录',
       '0',
       '0',
     ])
@@ -127,14 +129,69 @@ describe('Overview', () => {
     ).toBe(true)
   })
 
+  it('distinguishes partly metered and unpriced amounts without inventing today’s usage', async () => {
+    const unmeasured = {
+      tokens: 0, responses: 0, partial_responses: 0, unpriced_responses: 0, amounts: [],
+      usage: { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null },
+    }
+    mocks.api.mockResolvedValueOnce({
+      ...empty,
+      consumption: {
+        scope: 'tenant', timezone: 'Asia/Shanghai', coverage: 'recorded_only', unobserved_bindings: 2,
+        enabled_at: empty.generated_at, generated_at: empty.generated_at,
+        start: empty.generated_at, end: empty.generated_at,
+        total: {
+          ...unmeasured, tokens: 12, responses: 3, partial_responses: 1, unpriced_responses: 2,
+          usage: { ...unmeasured.usage, input_tokens: 12 },
+          amounts: [{ currency: 'USD', amount: '0.0100' }],
+        },
+        today: { ...unmeasured, date: '2026-10-27', coverage: 'partial' },
+        undated: unmeasured, days: [], models: [],
+      },
+    })
+    const { wrapper } = await mountOverview()
+    const stats = wrapper.findAll('.overview-stats > div')
+    expect(stats[0]!.get('dt').text()).toBe('总 Token 用量（已记录）')
+    expect(stats[1]!.get('dt').text()).toBe('今日 Token 用量（已记录）')
+    expect(stats[0]!.text()).toContain('已计价部分估算 USD 0.01')
+    expect(stats[0]!.text()).toContain('1 次部分计量')
+    expect(stats[0]!.text()).toContain('2 次未定价')
+    expect(stats[1]!.text()).toContain('未记录')
+    expect(stats[1]!.text()).toContain('费用未定价')
+    expect(wrapper.text()).toContain('有 2 个执行绑定尚无计量回执，已记录用量可能不完整')
+    expect(wrapper.find('.token-plot svg').exists()).toBe(false)
+  })
+
+  it.each([3, 0, undefined])('keeps usage unknown without receipt rows (unobserved bindings: %s)', async (count) => {
+    const unmeasured = {
+      tokens: 0, responses: 0, partial_responses: 0, unpriced_responses: 0, amounts: [],
+      usage: { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null },
+    }
+    mocks.api.mockResolvedValueOnce({
+      ...empty,
+      consumption: {
+        scope: 'tenant', timezone: 'Asia/Shanghai', coverage: 'recorded_only', unobserved_bindings: count,
+        enabled_at: empty.generated_at, generated_at: empty.generated_at,
+        start: empty.generated_at, end: empty.generated_at,
+        total: unmeasured, today: { ...unmeasured, date: '2026-10-27', coverage: 'partial' },
+        undated: unmeasured, days: [], models: [],
+      },
+    })
+    const { wrapper } = await mountOverview()
+    expect(wrapper.findAll('.overview-stats dd:not(.stat-detail)').slice(0, 2).map(node => node.text())).toEqual(['未记录', '未记录'])
+    expect(wrapper.find('.token-plot svg').exists()).toBe(false)
+    if (count) expect(wrapper.text()).toContain(`有 ${count} 个执行绑定尚无计量回执`)
+    else expect(wrapper.text()).not.toContain('个执行绑定尚无计量回执')
+  })
+
   it('uses shared status labels, numeric bars and existing keyboard-accessible deep links', async () => {
     mocks.api.mockResolvedValueOnce(loaded)
     const { wrapper } = await mountOverview()
-    expect(wrapper.findAll('.overview-stats dd').map((node) => node.text())).toEqual([
+    expect(wrapper.findAll('.overview-stats dd:not(.stat-detail)').map((node) => node.text())).toEqual([
+      '未记录',
+      '未记录',
       '1',
-      '0',
       '3',
-      '2',
     ])
     expect(wrapper.text()).toContain('进行中')
     expect(wrapper.text()).toContain('已修复')
@@ -174,11 +231,11 @@ describe('Overview', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('更新失败，显示上次数据')
     expect(wrapper.get('.overview-freshness time').attributes('datetime')).toBe(loaded.generated_at)
-    expect(wrapper.findAll('.overview-stats dd').map((node) => node.text())).toEqual([
+    expect(wrapper.findAll('.overview-stats dd:not(.stat-detail)').map((node) => node.text())).toEqual([
+      '未记录',
+      '未记录',
       '1',
-      '0',
       '3',
-      '2',
     ])
     mocks.api.mockResolvedValueOnce(empty)
     await wrapper

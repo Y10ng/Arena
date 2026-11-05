@@ -83,6 +83,7 @@ def _report_provenance(metadata_json: object) -> dict[str, Any] | None:
         # 历史已接受原件只读识别，不能因新生成合同升级从清单消失。
         (2, 3, 2),
         (2, 4, 3),
+        (2, 4, 4),
         (REPORT_PACKET_VERSION, REPORT_OUTPUT_CONTRACT_VERSION, REPORT_DATA_SCHEMA_VERSION),
     }:
         return None

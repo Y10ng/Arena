@@ -27,12 +27,9 @@ import type {
   InjectionPayloadRecord,
   AdminUser,
   AdvisoryLibrary,
+  LibraryManifest,
   Hint,
-  AdvisoryLibraryFile,
-  AdvisoryLibraryFileContent,
-  AdvisoryLibraryRevision,
   CreateAdvisoryLibraryRequest,
-  CreateAdvisoryLibraryRevisionRequest,
   ResetAdminUserPasswordRequest,
   SurfaceManifestEntry,
   Target,
@@ -321,40 +318,15 @@ export const listAdvisoryLibraries = () => api<AdvisoryLibrary[]>('GET', '/libra
 
 export const listLibraryCatalog = () => api<AdvisoryLibrary[]>('GET', '/library-catalog')
 
+export const getLibraryCatalogManifest = (key: string) =>
+  api<LibraryManifest>('GET', `/library-catalog/${encodePathPart(key)}/manifest`)
+
 export const createAdvisoryLibrary = (body: CreateAdvisoryLibraryRequest) => {
   return api<AdvisoryLibrary>('POST', '/libraries', body)
 }
 
 export const archiveAdvisoryLibrary = (key: string) => {
   return api<void>('DELETE', `/libraries/${encodePathPart(key)}`)
-}
-
-export const listAdvisoryLibraryRevisions = (key: string, signal?: AbortSignal) => {
-  return api<AdvisoryLibraryRevision[]>(
-    'GET',
-    `/libraries/${encodePathPart(key)}/versions`,
-    undefined,
-    signal,
-  )
-}
-
-export const createAdvisoryLibraryRevision = (
-  key: string,
-  body: CreateAdvisoryLibraryRevisionRequest,
-) => api<AdvisoryLibraryRevision>('POST', `/libraries/${encodePathPart(key)}/versions`, body)
-
-export const listAdvisoryLibraryFiles = (key: string, version: number) => {
-  return api<AdvisoryLibraryFile[]>(
-    'GET',
-    `/libraries/${encodePathPart(key)}/versions/${version}/files`,
-  )
-}
-
-export const readAdvisoryLibraryFile = (key: string, version: number, path: string) => {
-  return api<AdvisoryLibraryFileContent>(
-    'GET',
-    `/libraries/${encodePathPart(key)}/versions/${version}/files/${encodeKnowledgeFilePath(path)}`,
-  )
 }
 
 export const listPromptGroups = (signal?: AbortSignal) =>
@@ -517,8 +489,10 @@ export const uploadProjectResourceBatchFile = (
   path: string,
   kind?: ProjectResourceKind,
   signal?: AbortSignal,
+  uploadId?: string,
 ) => {
   const params = new URLSearchParams({ path })
+  if (uploadId) params.set('upload_id', uploadId)
   if (kind) params.set('kind', kind)
   return apiRaw<ProjectResourceBatchMember>(
     'POST',
@@ -568,10 +542,8 @@ export const commitProjectResourceBatch = (projectId: string, batchId: string) =
 export const listProjectResources = (projectId: string) =>
   api<ProjectResource[]>('GET', `/projects/${encodeURIComponent(projectId)}/resources`)
 
-export const readProjectResource = (projectId: string, resourceId: string) =>
-  fetchText(
-    `/projects/${encodeURIComponent(projectId)}/resources/${encodeURIComponent(resourceId)}`,
-  )
+export const projectResourceUrl = (projectId: string, resourceId: string) =>
+  `/projects/${encodeURIComponent(projectId)}/resources/${encodeURIComponent(resourceId)}`
 
 export const createProjectResource = (projectId: string, body: CreateProjectResourceRequest) =>
   api<ProjectResource>('POST', `/projects/${encodeURIComponent(projectId)}/resources`, body)
@@ -637,6 +609,7 @@ export interface VulnerabilityReadable {
   vulnerability_id: string
   observation_id: string | null
   description_markdown: string
+  preconditions: string[]
   reproduction_markdown: string
   remediation_markdown: string
   limitations_markdown: string
@@ -728,6 +701,7 @@ export const getAcceptedVulnerabilityReport = async (
 export interface Vulnerability {
   id: string
   project_id: string
+  number: string
   title: string
   severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
   vuln_type: string
@@ -761,6 +735,7 @@ export interface VulnerabilityEvidenceArtifact {
 export interface VulnerabilitySourceFact {
   id: string
   description: string
+  preconditions: string[]
   task_run_id: string | null
   evidence: VulnerabilityEvidenceArtifact[]
 }
@@ -798,7 +773,25 @@ export interface VulnerabilityVerification {
 }
 
 // 详情：聚合来源 fact、发现记录、独立验证与产出 run 证据，供完整审阅。
+export interface VulnerabilityDisposition {
+  id: string
+  project_id: string
+  vulnerability_id: string
+  actor_id: string
+  actor_login: string
+  observation_id: string | null
+  source_snapshot: Record<string, unknown>
+  reason: string | null
+  previous_status: string
+  status: string
+  previous_version: number
+  record_version: number
+  created_at: string
+}
+
 export interface VulnerabilityDetail extends Vulnerability {
+  record_version: number
+  dispositions: VulnerabilityDisposition[]
   display_images?: import('@/features/reports/reportImages').ReportDisplayImage[]
   observation_id: string | null
   readable: VulnerabilityReadable
@@ -863,6 +856,7 @@ export interface CreateVulnerabilityRequest {
 
 export interface UpdateVulnerabilityRequest {
   status?: string
+  disposition?: { expected_version: number; observation_id: string | null; reason: string | null }
   severity?: string
   remediation?: string
   confidence?: number
@@ -908,10 +902,10 @@ export const listAllVulnerabilities = (
   )
 }
 
-export const getVulnerability = (projectId: string, vulnId: string, signal?: AbortSignal, observationId?: string) =>
+export const getVulnerability = (projectId: string, vulnId: string, signal?: AbortSignal, observationId?: string, includeDisplayImages = false) =>
   api<VulnerabilityDetail>(
     'GET',
-    `/projects/${encodeURIComponent(projectId)}/vulnerabilities/${encodeURIComponent(vulnId)}${observationId ? `?${new URLSearchParams({ observation_id: observationId })}` : ''}`,
+    `/projects/${encodeURIComponent(projectId)}/vulnerabilities/${encodeURIComponent(vulnId)}?${new URLSearchParams({ ...(observationId ? { observation_id: observationId } : {}), ...(includeDisplayImages ? { include_display_images: 'true' } : {}) })}`,
     undefined,
     signal,
   )

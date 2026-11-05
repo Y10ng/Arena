@@ -1,4 +1,6 @@
 import type { TestEgressInput, TestEgressPublic } from '../testEgress'
+import type { LibrarySelection } from './libraries'
+import type { ConsumptionSummary } from './consumption'
 
 export interface ProjectReason {
   worker?: string | null
@@ -28,8 +30,32 @@ export interface ReportCapability {
   reason: string | null
 }
 
+export interface ProjectExecutionResource {
+  container_id?: string
+  container_name?: string
+  kind?: string
+  task_run_id?: string
+  exec_id?: string
+  scope_id?: string
+  state?: string
+}
+
+export interface ProjectExecutionControl {
+  request_id?: string
+  action?: 'pause' | 'resume' | 'finish'
+  state?: 'requested' | 'paused' | 'running' | 'stopped' | 'failed' | 'lost'
+  requested_at?: string
+  confirmed_at?: string | null
+  error?: string | null
+  resources?: ProjectExecutionResource[]
+  resources_request_id?: string | null
+  resources_observed_at?: string | null
+}
+
 export interface ProjectSummary {
+  consumption?: ConsumptionSummary | null
   test_egress?: TestEgressPublic
+  execution_control?: ProjectExecutionControl
   id: string
   schedule_id?: string | null
   title: string
@@ -74,6 +100,7 @@ export interface ReauthorizeProjectRequest {
 }
 
 export interface ProjectRuntimeBase {
+  execution_control?: ProjectExecutionControl
   project_id: string
   observed_at: string
   execution_generation: number
@@ -366,7 +393,7 @@ export interface TrafficFlowDetail {
   started_at?: number
   finished_at?: number | null
   error?: { code: string; message: string | null } | null
-  observations?: { observation_id: string; vulnerability_id: string; status: string; task_run_id: string }[]
+  observations?: { observation_id: string | null; vulnerability_id: string; status: string; task_run_id: string | null; source: 'observation' | 'record' }[]
   sync: {
     pending_sides?: TrafficSide[]
     bodies: Record<TrafficSide, {
@@ -586,6 +613,7 @@ export interface AssessmentReportFinalization {
   template_compatibility_profiles?: string[]
   input_snapshot_artifact_id?: string | null
   input_snapshot_sha256?: string | null
+  materialized_at?: string | null
   report_policy_version?: number | null
   report_execution_plan_sha256?: string | null
   report_prompt_digest_sha256?: string | null
@@ -635,6 +663,7 @@ export interface ProjectResourceBatchMember {
 export interface ProjectResourceBatch {
   id: string
   state: ProjectResourceBatchState
+  consumed_project_id?: string | null
   created_at: string
   expires_at: string
   resource_count: number
@@ -677,6 +706,8 @@ export interface ProjectLibraryBinding {
   version: number
   digest_sha256: string
   file_count: number
+  paths: string[] | null
+  selection_sha256: string
 }
 
 export interface CreateProjectRequest {
@@ -692,14 +723,17 @@ export interface CreateProjectRequest {
   targets?: Array<{ value: string; type: TargetType }> | null
   resources?: CreateProjectResourceRequest[]
   resource_batch_id?: string
-  library_keys?: string[]
+  library_selections?: LibrarySelection[]
 }
 
 export interface ProjectDetail {
+  consumption?: ConsumptionSummary | null
   project: {
     test_egress?: TestEgressPublic
+    execution_control?: ProjectExecutionControl
     id: string
     schedule_id?: string | null
+    verification_request_id?: string | null
     title: string
     status: 'pending' | 'active' | 'paused' | 'stopped' | 'completed'
     created_at: string

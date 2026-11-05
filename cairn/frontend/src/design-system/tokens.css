@@ -1,51 +1,63 @@
-:root {
-  color-scheme: dark;
+:root,
+[data-theme='light'] {
+  color-scheme: light;
 
-  /* 工作台以近黑画布、炭灰面板和柔蓝强调建立层次，编辑区低于面板一级。 */
-  --color-canvas: #101114;
-  --color-sidebar: #15171b;
-  --color-surface: #1e2025;
-  --color-surface-raised: #1e2025;
-  --color-surface-inset: #15171b;
-  --color-surface-hover: #292c33;
-  --color-surface-selected: #293343;
-  --color-surface-disabled: #24262c;
-  --color-overlay: rgb(0 0 0 / 58%);
+  /* 浅冷灰画布承托白色工作面，蓝紫只强调操作与选中。 */
+  --color-canvas: #f5f6fa;
+  --color-sidebar: #f0f1f8;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-surface-inset: #f7f8fc;
+  --color-surface-hover: #eeeff8;
+  --color-surface-selected: #ece8fc;
+  --color-surface-disabled: #f7f8fa;
+  --color-overlay: rgb(17 24 39 / 40%);
 
-  --color-border-subtle: #2a2d34;
-  --color-border: #343840;
-  --color-border-strong: #49515e;
+  --color-control-border: #d6d9e1;
+  --color-primary: #6550c9;
+  --color-primary-end: #515fc8;
+  --color-primary-hover: #5741ba;
+  --color-primary-pressed: #4837a2;
+  --color-primary-contrast: #ffffff;
+  --color-surface-pressed: #e4e7ed;
 
-  --color-text: #ebedf0;
-  --color-text-secondary: #b1b6c0;
-  --color-text-tertiary: #9198a5;
-  --color-text-disabled: #737b88;
-  --color-text-inverse: #101114;
-  --color-link: #80b3ed;
-  --color-link-hover: #a6cdf5;
+  --color-border-subtle: #e5e7ec;
+  --color-border: #e5e7ec;
+  --color-border-strong: #858b98;
 
-  --color-accent: #65a1e6;
-  --color-accent-hover: #7db0eb;
-  --color-accent-soft: rgb(101 161 230 / 15%);
-  --color-accent-contrast: #101114;
+  --color-text: #202329;
+  --color-text-secondary: #626976;
+  --color-text-tertiary: #626976;
+  --color-text-disabled: #858b98;
+  --color-text-inverse: #ffffff;
+  --color-link: var(--color-accent);
+  --color-link-hover: var(--color-accent-hover);
+
+  --color-accent: #6550c9;
+  --color-chart-token: #6550c9;
+  --color-accent-hover: #4938a0;
+  --color-accent-soft: var(--color-surface-selected);
+  --color-accent-contrast: #ffffff;
 
   /* 状态色仅用于反馈，不作为大面积品牌装饰。 */
-  --color-success: #71b991;
-  --color-info: #78a9c7;
-  --color-warning: #c8a96a;
-  --color-danger: #d17b7b;
-  --color-intent: #9c92bd;
-  --color-success-soft: rgb(113 185 145 / 12%);
-  --color-info-soft: rgb(120 169 199 / 12%);
-  --color-warning-soft: rgb(200 169 106 / 12%);
-  --color-danger-soft: rgb(209 123 123 / 12%);
+  --color-reviewed: #196c78;
+  --color-reviewed-soft: #e5f4f6;
+  --color-success: #287451;
+  --color-info: #305ca3;
+  --color-warning: #8a581b;
+  --color-danger: #b64142;
+  --color-intent: #71608e;
+  --color-success-soft: #edf6f0;
+  --color-info-soft: #eaf1ff;
+  --color-warning-soft: #fff1d9;
+  --color-danger-soft: #fcf0ee;
 
   /* 漏洞严重度保持固定语义顺序，并为深浅主题分别选择可辨识色阶。 */
-  --color-severity-critical: #d95f64;
-  --color-severity-high: #e8874f;
-  --color-severity-medium: #c9a227;
-  --color-severity-low: #4c91c7;
-  --color-severity-info: #8994a3;
+  --color-severity-critical: #b43f46;
+  --color-severity-high: #b85c2c;
+  --color-severity-medium: #8a6a00;
+  --color-severity-low: #326f9e;
+  --color-severity-info: #5f6b7a;
 
   --font-sans:
     ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei',
@@ -53,14 +65,21 @@
   --font-mono:
     ui-monospace, 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono',
     'Noto Sans Mono CJK SC', monospace;
-  --text-2xs: 11px;
-  --text-xs: 12px;
-  --text-sm: 13px;
-  --text-md: 14px;
-  --text-lg: 16px;
-  --text-xl: 18px;
-  --text-2xl: 20px;
-  --text-3xl: 28px;
+  --text-2xs: 12.5px;
+  --text-xs: 12.5px;
+  --text-sm: 12.5px;
+  --text-dense: 13.5px;
+  --text-md: 14.5px;
+  --text-body: 14.5px;
+  --text-control: 15px;
+  --text-section: 17px;
+  --text-object: 19px;
+  --text-reading: var(--text-body);
+  --leading-reading: 1.65;
+  --text-lg: var(--text-control);
+  --text-xl: var(--text-section);
+  --text-2xl: var(--text-object);
+  --text-3xl: var(--text-object);
   --font-normal: 400;
   --font-medium: 500;
   --font-semibold: 600;
@@ -68,7 +87,7 @@
   --leading-tight: 1.25;
   --leading-snug: 1.4;
   --leading-normal: 1.5;
-  --leading-relaxed: 1.65;
+  --leading-relaxed: 1.75;
   --tracking-tight: -0.01em;
   --tracking-wide: 0.02em;
 
@@ -84,80 +103,74 @@
   --space-10: 64px;
 
   --radius-none: 0;
-  --radius-sm: 6px;
+  --radius-sm: 5px;
   --radius-md: 8px;
-  --radius-lg: 10px;
+  --radius-lg: 12px;
   --radius-xl: 12px;
   --radius-2xl: 12px;
   --radius-full: 999px;
   --control-height-xs: 24px;
-  --control-height-sm: 32px;
-  --control-height: 36px;
-  --control-height-lg: 40px;
-  --control-height-xl: 44px;
+  --control-height-sm: 30px;
+  --control-height: 34px;
+  --control-height-lg: 38px;
+  --control-height-xl: 38px;
+  --control-height-filter: 34px;
+  --control-height-form: var(--control-height-xl);
 
-  --shadow-xs: 0 1px 1px rgb(0 0 0 / 10%);
-  --shadow-sm: 0 1px 2px rgb(0 0 0 / 16%);
-  --shadow-md: 0 8px 24px rgb(0 0 0 / 24%);
-  --shadow-pop: 0 12px 32px rgb(0 0 0 / 32%);
-  --shadow-modal: 0 20px 64px rgb(0 0 0 / 42%);
-  --ring: 0 0 0 1px var(--color-canvas), 0 0 0 3px rgb(101 161 230 / 35%);
+  --shadow-xs: 0 1px 2px rgb(20 22 24 / 3%);
+  --shadow-sm: 0 1px 3px rgb(20 22 24 / 5%);
+  --shadow-md: 0 8px 24px rgb(20 22 24 / 8%);
+  --shadow-pop: 0 12px 32px rgb(20 27 48 / 12%), 0 2px 8px rgb(20 27 48 / 4%);
+  --shadow-modal: 0 16px 64px rgb(20 27 48 / 13%), 0 2px 8px rgb(20 27 48 / 4%);
+  --ring: 0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-accent);
 
   /* Shell、内容区与浮层尺寸统一由语义变量控制。 */
   --layout-sidebar-width: 248px;
-  --layout-sidebar-collapsed-width: 56px;
-  --layout-topbar-height: 48px;
-  --layout-workspace-tabs-height: 36px;
+  --layout-sidebar-collapsed-width: 68px;
+  --layout-topbar-height: 52px;
+  --layout-brand-height: 56px;
+  --layout-nav-item-height: 42px;
+  --layout-content-padding: 18px;
+  --table-row-height: 48px;
+  --table-row-height-detail: 60px;
+  --table-heading-height: 34px;
+  --layout-workspace-tabs-height: 38px;
   --layout-content-max: 1440px;
   --layout-content-narrow: 960px;
 
   /* 独立工作台使用阅读型比例；仅在对应工作区启用，不改变管理页密度。 */
-  --workbench-history-width: 272px;
-  --workbench-results-width: 352px;
-  --workbench-reading-width: 68rem;
+  --workbench-history-width: 240px;
+  --workbench-results-width: 384px;
+  --workbench-reading-width: 1040px;
   --workbench-body-size: 15px;
-  --workbench-welcome-size: 32px;
+  --workbench-welcome-size: 30px;
   --workbench-bubble-radius: 18px;
   --workbench-input-radius: 20px;
-  --workbench-canvas: #1d1f1c;
-  --workbench-sidebar: #181a17;
-  --workbench-surface: #252823;
-  --workbench-inset: #30342c;
-  --workbench-hover: #343930;
-  --workbench-border: #41473b;
-  --workbench-border-subtle: #343a2f;
-  --workbench-border-strong: #59624f;
-  --workbench-text: #eceee6;
-  --workbench-secondary: #bac0af;
-  --workbench-tertiary: #9da58f;
-  --workbench-accent: #c8d5ac;
-  --workbench-accent-hover: #d8e3c2;
-  --workbench-accent-contrast: #242b1b;
-  --workbench-accent-soft: rgb(200 213 172 / 12%);
-  --overlay-dialog-sm: 420px;
-  --overlay-dialog-md: 560px;
+  --overlay-dialog-sm: 470px;
+  --overlay-dialog-md: 660px;
   --overlay-dialog-lg: 760px;
+  --overlay-dialog-editor: 1120px;
   --overlay-drawer-sm: 360px;
   --overlay-drawer-md: 480px;
   --overlay-drawer-lg: 860px;
   --overlay-toast-width: 380px;
 
-  /* 普通浮层低于模态框；Portal 子浮层必须高于全屏模态框。 */
+  /* Portal 子浮层高于全屏；全局通知不被模态与菜单遮挡。 */
   --z-base: 0;
   --z-sticky: 10;
   --z-sidebar-overlay: 20;
   --z-dropdown: 30;
   --z-popover: 40;
   --z-modal: 50;
-  --z-toast: 60;
+  --z-toast: 100;
   --z-command-palette: 70;
   --z-fullscreen: 80;
   --z-overlay-child: 90;
 
   --dur-instant: 60ms;
-  --dur-fast: 140ms;
-  --dur: 190ms;
-  --dur-slow: 220ms;
+  --dur-fast: 180ms;
+  --dur: 180ms;
+  --dur-slow: 180ms;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
   --ease-enter: var(--ease);
   --ease-exit: cubic-bezier(0.4, 0, 1, 1);
@@ -168,7 +181,7 @@
   --breakpoint-desktop: 1200px;
   --breakpoint-wide: 1440px;
 
-  /* 兼容现有页面：旧名称统一指向语义 token。 */
+  /* 现有消费者的短名称只引用唯一语义，不另维护主题数值。 */
   --bg-base: var(--color-canvas);
   --bg-surface: var(--color-surface);
   --bg-elevated: var(--color-surface-raised);
@@ -177,7 +190,7 @@
   --surface-hover: var(--color-surface-hover);
   --surface-selected: var(--color-surface-selected);
   --surface-disabled: var(--color-surface-disabled);
-  --glass-bg: rgb(21 23 27 / 96%);
+  --glass-bg: var(--color-surface-raised);
 
   --border-faint: var(--color-border-subtle);
   --border-subtle: var(--color-border-subtle);
@@ -196,7 +209,7 @@
   --accent: var(--color-accent);
   --accent-hover: var(--color-accent-hover);
   --accent-dim: var(--color-accent-soft);
-  --accent-rgb: 101, 161, 230;
+  --accent-rgb: 101, 80, 201;
   --success: var(--color-success);
   --success-soft: var(--color-success-soft);
   --success-border: color-mix(in srgb, var(--color-success) 32%, transparent);
@@ -210,7 +223,7 @@
   --danger: var(--color-danger);
   --danger-soft: var(--color-danger-soft);
   --danger-border: color-mix(in srgb, var(--color-danger) 32%, transparent);
-  --danger-rgb: 209, 123, 123;
+  --danger-rgb: 182, 65, 66;
   --intent: var(--color-intent);
   --severity-critical: var(--color-severity-critical);
   --severity-high: var(--color-severity-high);
@@ -218,128 +231,10 @@
   --severity-low: var(--color-severity-low);
   --severity-info: var(--color-severity-info);
   --console-accent: var(--color-warning);
-  --console-accent-dim: rgb(200 169 106 / 12%);
+  --console-accent-dim: var(--color-warning-soft);
   --mono: var(--font-mono);
 
   /* 图谱继续使用独立语义变量，避免全局 primitive 改写其表现规则。 */
-  --graph-page-bg: var(--color-canvas);
-  --graph-canvas-bg: #0d0f12;
-  --graph-canvas-grid: rgb(126 157 184 / 18%);
-  --graph-canvas-grid-strong: rgb(126 157 184 / 12%);
-  --graph-canvas-wash-top: rgb(255 255 255 / 1.5%);
-  --graph-canvas-wash-bottom: rgb(0 0 0 / 18%);
-  --graph-overlay-bg: rgb(17 19 23 / 86%);
-  --graph-node-bg: rgb(23 25 30 / 96%);
-  --graph-node-border: #343943;
-  --graph-node-shadow: 0 10px 30px rgb(0 0 0 / 28%), 0 1px 2px rgb(0 0 0 / 32%);
-  --graph-node-shadow-hover: 0 16px 38px rgb(0 0 0 / 36%), 0 2px 5px rgb(0 0 0 / 32%);
-  --graph-node-selected-ring: rgb(231 233 237 / 38%);
-  --graph-node-running-ring: rgb(57 135 229 / 42%);
-  --graph-node-critical-ring: rgb(209 123 123 / 42%);
-  --graph-kind-origin: #3987e5;
-  --graph-kind-origin-soft: rgb(57 135 229 / 16%);
-  --graph-kind-goal: #008300;
-  --graph-kind-goal-soft: rgb(0 131 0 / 16%);
-  --graph-kind-fact: #d55181;
-  --graph-kind-fact-soft: rgb(213 81 129 / 16%);
-  --graph-kind-pending: #c98500;
-  --graph-kind-pending-soft: rgb(201 133 0 / 16%);
-  --graph-kind-pending-group: #199e70;
-  --graph-kind-pending-group-soft: rgb(25 158 112 / 16%);
-  --graph-kind-reason: #d95926;
-  --graph-kind-reason-soft: rgb(217 89 38 / 16%);
-  --graph-edge-muted: #59606b;
-  --graph-edge-trunk: #8d83ee;
-  --graph-edge-active: #5e9ef0;
-  --graph-edge-selected: var(--color-accent);
-  --graph-edge-critical: var(--color-danger);
-  --graph-edge-join: var(--color-intent);
-  --graph-edge-reason: #c67be8;
-  --graph-edge-reason-input: #b178d2;
-  --graph-edge-reason-output: #e08b62;
-  --graph-reason-border: var(--graph-kind-reason);
-  --graph-reason-soft: var(--graph-kind-reason-soft);
-  --graph-badge-bg: var(--color-surface-raised);
-  --graph-badge-border: var(--color-border-strong);
-  --graph-badge-text: var(--color-text-secondary);
-  --graph-minimap-bg: rgb(17 19 23 / 90%);
-  --graph-minimap-viewport: rgb(231 233 237 / 16%);
-  --graph-minimap-viewport-border: rgb(231 233 237 / 58%);
-}
-
-[data-theme='light'] {
-  color-scheme: light;
-
-  --workbench-canvas: #fcfbf8;
-  --workbench-sidebar: #f2f1eb;
-  --workbench-surface: #ffffff;
-  --workbench-inset: #eeeee5;
-  --workbench-hover: #e7e8dd;
-  --workbench-border: #dedfd4;
-  --workbench-border-subtle: #e8e8df;
-  --workbench-border-strong: #b9bfab;
-  --workbench-text: #292e24;
-  --workbench-secondary: #626957;
-  --workbench-tertiary: #747c66;
-  --workbench-accent: #3d4c2d;
-  --workbench-accent-hover: #2c3920;
-  --workbench-accent-contrast: #ffffff;
-  --workbench-accent-soft: rgb(61 76 45 / 9%);
-
-  --color-canvas: #f6f7f9;
-  --color-sidebar: #f0f2f6;
-  --color-surface: #ffffff;
-  --color-surface-raised: #ffffff;
-  --color-surface-inset: #f6f8fb;
-  --color-surface-hover: #edf1f6;
-  --color-surface-selected: #e7effa;
-  --color-surface-disabled: #f0f2f5;
-  --color-overlay: rgb(15 23 42 / 28%);
-
-  --color-border-subtle: #e6e9ef;
-  --color-border: #d6dce5;
-  --color-border-strong: #aeb9c8;
-
-  --color-text: #20242b;
-  --color-text-secondary: #4b5563;
-  --color-text-tertiary: #626b79;
-  --color-text-disabled: #87909e;
-  --color-text-inverse: #ffffff;
-  --color-link: #2864a8;
-  --color-link-hover: #1c4d85;
-
-  --color-accent: #2e6fb9;
-  --color-accent-hover: #245d9f;
-  --color-accent-soft: rgb(46 111 185 / 10%);
-  --color-accent-contrast: #ffffff;
-
-  --color-success: #397556;
-  --color-info: #426f8a;
-  --color-warning: #846725;
-  --color-danger: #a34848;
-  --color-intent: #655a87;
-  --color-success-soft: rgb(57 117 86 / 10%);
-  --color-info-soft: rgb(66 111 138 / 10%);
-  --color-warning-soft: rgb(132 103 37 / 10%);
-  --color-danger-soft: rgb(163 72 72 / 10%);
-
-  --color-severity-critical: #b43f46;
-  --color-severity-high: #b85c2c;
-  --color-severity-medium: #8a6a00;
-  --color-severity-low: #326f9e;
-  --color-severity-info: #5f6b7a;
-
-  --glass-bg: rgb(255 255 255 / 92%);
-  --accent-rgb: 46, 111, 185;
-  --danger-rgb: 163, 72, 72;
-  --console-accent-dim: rgb(132 103 37 / 10%);
-  --shadow-xs: 0 1px 2px rgb(15 23 42 / 3%);
-  --shadow-sm: 0 1px 3px rgb(15 23 42 / 5%);
-  --shadow-md: 0 8px 24px rgb(15 23 42 / 8%);
-  --shadow-pop: 0 12px 32px rgb(15 23 42 / 12%);
-  --shadow-modal: 0 20px 64px rgb(15 23 42 / 16%);
-  --ring: 0 0 0 1px var(--color-surface), 0 0 0 3px rgb(46 111 185 / 28%);
-
   --graph-page-bg: var(--color-canvas);
   --graph-canvas-bg: #f7f7f5;
   --graph-canvas-grid: rgb(66 111 138 / 16%);
@@ -385,50 +280,105 @@
   --graph-minimap-viewport-border: rgb(31 41 55 / 42%);
 }
 
-/* 路由级工作台语义覆盖同时作用于 Shell 与 Portal，普通页面仍使用原主题。 */
-:root[data-workbench='agent'],
-.workbench-surface {
-  --color-canvas: var(--workbench-canvas);
-  --color-sidebar: var(--workbench-sidebar);
-  --color-surface: var(--workbench-surface);
-  --color-surface-raised: var(--workbench-surface);
-  --color-surface-inset: var(--workbench-inset);
-  --color-surface-hover: var(--workbench-hover);
-  --color-surface-selected: var(--workbench-hover);
-  --color-border: var(--workbench-border);
-  --color-border-subtle: var(--workbench-border-subtle);
-  --color-border-strong: var(--workbench-border-strong);
-  --color-text: var(--workbench-text);
-  --color-text-secondary: var(--workbench-secondary);
-  --color-text-tertiary: var(--workbench-tertiary);
-  --color-accent: var(--workbench-accent);
-  --color-accent-hover: var(--workbench-accent-hover);
-  --color-accent-contrast: var(--workbench-accent-contrast);
-  --color-accent-soft: var(--workbench-accent-soft);
-  --color-link: var(--workbench-accent);
-  --color-link-hover: var(--workbench-accent-hover);
-  --bg-base: var(--color-canvas);
-  --bg-surface: var(--color-surface);
-  --bg-elevated: var(--color-surface-raised);
-  --bg-inset: var(--color-surface-inset);
-  --surface-raised: var(--color-surface-raised);
-  --surface-hover: var(--color-surface-hover);
-  --surface-selected: var(--color-surface-selected);
-  --border: var(--color-border);
-  --border-color: var(--color-border);
-  --border-faint: var(--color-border-subtle);
-  --border-subtle: var(--color-border-subtle);
-  --border-strong: var(--color-border-strong);
-  --text: var(--color-text);
-  --text-muted: var(--color-text-secondary);
-  --text-secondary: var(--color-text-secondary);
-  --text-faint: var(--color-text-tertiary);
-  --accent: var(--color-accent);
-  --accent-hover: var(--color-accent-hover);
-  --accent-dim: var(--color-accent-soft);
-  --link: var(--color-link);
-  --link-hover: var(--color-link-hover);
-  --ring: 0 0 0 1px var(--color-canvas), 0 0 0 3px var(--color-accent-soft);
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --color-canvas: #131722;
+  --color-sidebar: #10141f;
+  --color-surface: #1a1f2d;
+  --color-surface-raised: #232939;
+  --color-surface-inset: #171c29;
+  --color-surface-hover: #2a3043;
+  --color-surface-selected: #343052;
+  --color-surface-disabled: #25272e;
+  --color-overlay: rgb(0 0 0 / 58%);
+  --color-border-subtle: #30333c;
+  --color-border: #30333c;
+  --color-border-strong: #71798a;
+  --color-text: #e9eaee;
+  --color-text-secondary: #a7acb9;
+  --color-text-tertiary: #a7acb9;
+  --color-text-disabled: #787e8d;
+  --color-text-inverse: #17181c;
+  --color-accent: #a1afff;
+  --color-chart-token: #7a88d7;
+  --color-accent-hover: #c8cff9;
+  --color-accent-soft: var(--color-surface-selected);
+  --color-accent-contrast: #1c2030;
+  --color-reviewed: #8cd1da;
+  --color-reviewed-soft: #203b40;
+  --color-success: #8acba7;
+  --color-info: #a0b8df;
+  --color-warning: #dcbc7c;
+  --color-danger: #f0a09a;
+  --color-intent: #bcb0d7;
+  --color-success-soft: #1e3129;
+  --color-info-soft: #252e3b;
+  --color-warning-soft: #342f25;
+  --color-danger-soft: #392628;
+  --color-severity-critical: #d95f64;
+  --color-severity-high: #e8874f;
+  --color-severity-medium: #c9a227;
+  --color-severity-low: #4c91c7;
+  --color-severity-info: #8994a3;
+  --accent-rgb: 161, 175, 255;
+  --danger-rgb: 240, 160, 154;
+  --console-accent-dim: var(--color-warning-soft);
+  --shadow-xs: 0 1px 1px rgb(0 0 0 / 10%);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 16%);
+  --shadow-md: 0 8px 24px rgb(0 0 0 / 24%);
+  --shadow-pop: 0 12px 32px rgb(0 0 0 / 32%), 0 2px 8px rgb(0 0 0 / 18%);
+  --shadow-modal: 0 16px 64px rgb(0 0 0 / 40%), 0 2px 8px rgb(0 0 0 / 20%);
+  --graph-page-bg: var(--color-canvas);
+  --graph-canvas-bg: #0d0f12;
+  --graph-canvas-grid: rgb(126 157 184 / 18%);
+  --graph-canvas-grid-strong: rgb(126 157 184 / 12%);
+  --graph-canvas-wash-top: rgb(255 255 255 / 1.5%);
+  --graph-canvas-wash-bottom: rgb(0 0 0 / 18%);
+  --graph-overlay-bg: rgb(17 19 23 / 86%);
+  --graph-node-bg: rgb(23 25 30 / 96%);
+  --graph-node-border: #343943;
+  --graph-node-shadow: 0 10px 30px rgb(0 0 0 / 28%), 0 1px 2px rgb(0 0 0 / 32%);
+  --graph-node-shadow-hover: 0 16px 38px rgb(0 0 0 / 36%), 0 2px 5px rgb(0 0 0 / 32%);
+  --graph-node-selected-ring: rgb(231 233 237 / 38%);
+  --graph-node-running-ring: rgb(57 135 229 / 42%);
+  --graph-node-critical-ring: rgb(209 123 123 / 42%);
+  --graph-kind-origin: #3987e5;
+  --graph-kind-origin-soft: rgb(57 135 229 / 16%);
+  --graph-kind-goal: #008300;
+  --graph-kind-goal-soft: rgb(0 131 0 / 16%);
+  --graph-kind-fact: #d55181;
+  --graph-kind-fact-soft: rgb(213 81 129 / 16%);
+  --graph-kind-pending: #c98500;
+  --graph-kind-pending-soft: rgb(201 133 0 / 16%);
+  --graph-kind-pending-group: #199e70;
+  --graph-kind-pending-group-soft: rgb(25 158 112 / 16%);
+  --graph-kind-reason: #d95926;
+  --graph-kind-reason-soft: rgb(217 89 38 / 16%);
+  --graph-edge-muted: #59606b;
+  --graph-edge-trunk: #8d83ee;
+  --graph-edge-active: #5e9ef0;
+  --graph-edge-selected: var(--color-accent);
+  --graph-edge-critical: var(--color-danger);
+  --graph-edge-join: var(--color-intent);
+  --graph-edge-reason: #c67be8;
+  --graph-edge-reason-input: #b178d2;
+  --graph-edge-reason-output: #e08b62;
+  --graph-reason-border: var(--graph-kind-reason);
+  --graph-reason-soft: var(--graph-kind-reason-soft);
+  --graph-badge-bg: var(--color-surface-raised);
+  --graph-badge-border: var(--color-border-strong);
+  --graph-badge-text: var(--color-text-secondary);
+  --graph-minimap-bg: rgb(17 19 23 / 90%);
+  --graph-minimap-viewport: rgb(231 233 237 / 16%);
+  --graph-minimap-viewport-border: rgb(231 233 237 / 58%);
+  --color-control-border: #505663;
+  --color-primary: #b0a0f4;
+  --color-primary-end: #8fa7f4;
+  --color-primary-hover: #c0b2ff;
+  --color-primary-pressed: #9c8cde;
+  --color-primary-contrast: #14182d;
+  --color-surface-pressed: #343844;
 }
 
 @media (prefers-reduced-motion: reduce) {

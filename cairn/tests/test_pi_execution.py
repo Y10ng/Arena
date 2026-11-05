@@ -49,6 +49,20 @@ def worker(protocol="anthropic-messages"):
     )
 
 
+def execution_options(phase, project_id, task_run_id):
+    if phase == 'report_execute':
+        return {'binding': {'report_segments': {
+            'project_id': project_id, 'task_run_id': task_run_id, 'generation_token': 'fixture-generation',
+            'input_snapshot_sha256': 'a' * 64, 'report_template_digest_sha256': 'b' * 64,
+        }}}
+    if phase.endswith('_conclude'):
+        return {}
+    return {'session_root': '/home/kali/.cairn/pi', 'task_execution': {
+        'protocol': 'cairn-task-execution-v1', 'scope_id': 'a' * 32, 'task_run_id': task_run_id,
+        'socket_path': '/run/cairn-exec/' + 'a' * 32 + '/execute.sock',
+    }}
+
+
 @pytest.mark.parametrize("protocol", ["anthropic-messages", "openai-chat-completions", "openai-responses"])
 @pytest.mark.parametrize("phase", [
     "bootstrap_execute", "bootstrap_conclude", "reason_execute", "explore_execute",
@@ -61,12 +75,15 @@ def test_all_phases_use_private_sdk_requests_and_preserve_model_binding(protocol
         worker(protocol), "Do not infer project=fake phase=wrong from this prompt.", session,
         phase=phase, project_id="project-authoritative", task_run_id="run-authoritative",
         timeout_seconds=13, resume=phase.endswith("_conclude"), conclude_only=phase.endswith("_conclude"),
+        **execution_options(phase, 'project-authoritative', 'run-authoritative'),
     )
     assert invocation.argv == ["cairn-agent", "--request", invocation.input_files[0].path]
-    assert len(invocation.input_files) == 2
-    input_file, candidate_file = invocation.input_files
-    assert input_file.mode == candidate_file.mode == 0o600
-    assert input_file.owner == candidate_file.owner == "kali"
+    assert len(invocation.input_files) == (4 if phase == 'report_execute' else 3)
+    input_file, consumption_file, candidate_file = invocation.input_files[:3]
+    assert input_file.mode == consumption_file.mode == candidate_file.mode == 0o600
+    assert input_file.owner == consumption_file.owner == candidate_file.owner == "kali"
+    assert consumption_file.path == invocation.consumption_spool_path
+    assert consumption_file.content == ""
     assert input_file.path.startswith(input_file.allowed_root + "/")
     assert invocation.candidate_spool is not None
     assert candidate_file.path == invocation.candidate_spool.path
@@ -86,7 +103,12 @@ def test_all_phases_use_private_sdk_requests_and_preserve_model_binding(protocol
     assert request["conclude_timeout_seconds"] == 0
     assert request["cwd"] == "/home/kali/workspace"
     assert isinstance(request["result_schema"], dict)
-    assert request["capabilities"] == {
+    capabilities = request['capabilities']
+    expected_extra = {'report_segments'} if phase == 'report_execute' else (set() if phase.endswith('_conclude') else {'task_execution', 'http_traffic'})
+    assert set(capabilities) == {'consumption', 'candidate_capture'} | expected_extra
+    assert {key: capabilities[key] for key in ('consumption', 'candidate_capture')} == {
+        "consumption": {"protocol": "cairn-consumption-v1", "id": invocation.consumption_id,
+                        "spool_path": invocation.consumption_spool_path},
         "candidate_capture": {
             "protocol": invocation.candidate_spool.protocol,
             "spool_path": invocation.candidate_spool.path,
@@ -253,6 +275,8 @@ def test_delivery_resume_rejects_result_schema_drift(
         "session_id": "pi:11111111-1111-4111-8111-111111111111",
         "phase": "explore_execute",
         "deadline_at": "2099-09-19T12:00:00+00:00",
+        "authorization_expires_at": None,
+        "paused_seconds": 0,
         "container_id": "container-frozen",
         "model_binding_sha256": model_binding_digest(configured_worker),
         "result_schema_sha256": result_schema_digest("explore_execute", None),
@@ -278,12 +302,18 @@ def test_delivery_resume_rejects_result_schema_drift(
                 "container_id": "container-frozen",
             }
 
+    from cairn.dispatcher.runtime.pause_clock import PauseClock
+
+    delivery_budget = delivery_module.ResearchDeliveryBudget(PauseClock())
+    client = SimpleNamespace(get_project=lambda _: SimpleNamespace(project=SimpleNamespace(
+        execution_control={}, authorization_expires_at=None,
+    )))
     container_id, resumed, _remaining = resume_delivery(
         ContainerManager(),
         "project-frozen",
         configured_worker,
         {"delivery_retry": {"source_task_run_id": "run-1"}, "execution_delivery": snapshot},
-        "explore_execute",
+        "explore_execute", client=client, budget=delivery_budget,
     )
     assert container_id == "container-frozen"
     assert resumed == snapshot
@@ -328,9 +358,13 @@ def test_delivery_registration_never_runs_past_authorization_expiry() -> None:
             id="p",
             explore_deadline=None,
             authorization_expires_at=expires_at.isoformat(),
+            execution_control={},
         )
     )
+    from cairn.dispatcher.runtime.pause_clock import PauseClock
 
+    client.get_project = lambda _: project
+    delivery_budget = delivery_module.ResearchDeliveryBudget(PauseClock())
     snapshot = delivery_module.register_delivery(
         client,
         manager,
@@ -343,9 +377,12 @@ def test_delivery_registration_never_runs_past_authorization_expiry() -> None:
         timeout_seconds=120,
         binding={"allowed_fact_ids": ["origin"], "max_intents": 3},
         inputs={"open_intent_ids": []},
+        budget=delivery_budget,
     )
 
-    assert datetime.fromisoformat(snapshot["deadline_at"]) == expires_at
+    assert datetime.fromisoformat(snapshot["deadline_at"]) > expires_at
+    assert snapshot["authorization_expires_at"] == expires_at.isoformat()
+    assert 0 < delivery_module.remaining_delivery_seconds(snapshot, budget=delivery_budget) <= 60
     assert updates[0][1]["runtime_context"]["execution_delivery"] == snapshot
 
 
@@ -354,10 +391,12 @@ def test_checkpoint_capability_materializes_a_private_unique_spool() -> None:
     first = driver.build_execute(
         worker(), "Explore", None, phase="explore_execute", project_id="p",
         task_run_id="t1", timeout_seconds=5, enable_checkpoints=True,
+        **execution_options('explore_execute', 'p', 't1'),
     )
     second = driver.build_execute(
         worker(), "Explore", None, phase="explore_execute", project_id="p",
         task_run_id="t2", timeout_seconds=5, enable_checkpoints=True,
+        **execution_options('explore_execute', 'p', 't2'),
     )
 
     assert first.checkpoint_spool is not None
@@ -366,8 +405,11 @@ def test_checkpoint_capability_materializes_a_private_unique_spool() -> None:
     assert first.candidate_spool is not None
     assert second.candidate_spool is not None
     assert first.candidate_spool.path != second.candidate_spool.path
-    assert len(first.input_files) == 3
-    request_file, candidate_file, checkpoint_file = first.input_files
+    assert len(first.input_files) == 4
+    request_file, consumption_file, candidate_file, checkpoint_file = first.input_files
+    assert consumption_file.path == first.consumption_spool_path
+    assert consumption_file.content == ""
+    assert first.consumption_id != second.consumption_id
     assert first.argv == ["cairn-agent", "--request", request_file.path]
     assert request_file.mode == candidate_file.mode == checkpoint_file.mode == 0o600
     assert request_file.owner == candidate_file.owner == checkpoint_file.owner == "kali"
@@ -375,7 +417,10 @@ def test_checkpoint_capability_materializes_a_private_unique_spool() -> None:
     assert checkpoint_file.path == first.checkpoint_spool.path
     assert candidate_file.content == checkpoint_file.content == ""
     request = json.loads(request_file.content)
-    assert request["capabilities"] == {
+    assert set(request['capabilities']) == {'consumption', 'candidate_capture', 'execution_checkpoints', 'task_execution', 'http_traffic'}
+    assert {key: request['capabilities'][key] for key in ('consumption', 'candidate_capture', 'execution_checkpoints')} == {
+        "consumption": {"protocol": "cairn-consumption-v1", "id": first.consumption_id,
+                        "spool_path": first.consumption_spool_path},
         "candidate_capture": {
             "protocol": first.candidate_spool.protocol,
             "spool_path": first.candidate_spool.path,
@@ -413,13 +458,15 @@ def test_checkpoint_spool_is_forbidden_for_non_exploration_delivery_modes(
         worker(), "Use the existing result", PiDriver().prepare_session() if resume else None,
         phase=phase, project_id="p", task_run_id="t", timeout_seconds=5,
         resume=resume, conclude_only=conclude_only, enable_checkpoints=True,
+        **execution_options(phase, 'p', 't'),
     )
 
     assert invocation.checkpoint_spool is None
     assert invocation.candidate_spool is not None
-    assert len(invocation.input_files) == 2
+    assert len(invocation.input_files) == (4 if phase == 'report_execute' else 3)
     capabilities = json.loads(invocation.input_files[0].content)["capabilities"]
-    assert set(capabilities) == {"candidate_capture"}
+    expected_extra = {'report_segments'} if phase == 'report_execute' else (set() if phase.endswith('_conclude') else {'task_execution', 'http_traffic'})
+    assert set(capabilities) == {"candidate_capture", "consumption"} | expected_extra
 
 
 @pytest.fixture(scope="module")

@@ -1,760 +1,584 @@
-import { flushPromises, mount } from '@vue/test-utils'
-import { defineComponent, reactive, ref } from 'vue'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
+import { defineComponent, reactive } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { VueWrapper } from '@vue/test-utils'
-import type { ArtifactPreview, ProjectArtifact } from '@/api/client'
+import { ApiError, type ArtifactPreview, type ProjectArtifact } from '@/api/client'
+import type { WorkspaceEntries, WorkspaceEntry, WorkspacePreview, WorkspaceSearch } from '@/api/workspace'
 import ArtifactsPage from './ArtifactsPage.vue'
 
 const mocks = vi.hoisted(() => ({
-  fetchArtifactPreview: vi.fn(),
-  fetchArtifactTailPreview: vi.fn(),
-  listProjectArtifacts: vi.fn(),
+  entries: vi.fn(),
+  search: vi.fn(),
+  preview: vi.fn(),
+  saved: vi.fn(),
+  head: vi.fn(),
+  tail: vi.fn(),
   push: vi.fn(),
-  refetch: vi.fn(),
   replace: vi.fn(),
-  showToast: vi.fn(),
-  useQuery: vi.fn(),
+  toast: vi.fn(),
 }))
-
-vi.mock('@/api/client', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/api/client')>()
-  return {
-    ...actual,
-    fetchArtifactPreview: mocks.fetchArtifactPreview,
-    fetchArtifactTailPreview: mocks.fetchArtifactTailPreview,
-    listProjectArtifacts: mocks.listProjectArtifacts,
-  }
-})
-
-vi.mock('@tanstack/vue-query', () => ({ useQuery: mocks.useQuery }))
-
-const route = reactive({
-  query: {} as Record<string, string | string[] | null | undefined>,
-  params: { id: 'project-a' },
-})
-
+vi.mock('@/api/workspace', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/workspace')>()),
+  listWorkspaceEntries: mocks.entries,
+  searchWorkspaceFiles: mocks.search,
+  fetchWorkspacePreview: mocks.preview,
+}))
+vi.mock('@/api/client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/client')>()),
+  listProjectArtifacts: mocks.saved,
+  fetchArtifactPreview: mocks.head,
+  fetchArtifactTailPreview: mocks.tail,
+}))
+const route = reactive({ query: {} as Record<string, string>, params: { id: 'p1' } })
+const store = reactive({ currentProjectId: 'p1' })
+const ui = reactive({ globalRefreshKey: 0, showToast: mocks.toast })
 vi.mock('vue-router', () => ({
   useRoute: () => route,
   useRouter: () => ({ push: mocks.push, replace: mocks.replace }),
 }))
-
-const workspaceStore = reactive({ currentProjectId: 'project-a' as string | null })
-const uiStore = reactive({ globalRefreshKey: 0, showToast: mocks.showToast })
-
-vi.mock('@/stores/workspace', () => ({ useWorkspaceStore: () => workspaceStore }))
-vi.mock('@/stores/ui', () => ({ useUIStore: () => uiStore }))
+vi.mock('@/stores/workspace', () => ({ useWorkspaceStore: () => store }))
+vi.mock('@/stores/ui', () => ({ useUIStore: () => ui }))
 vi.mock('@/components/MonacoEditor.vue', () => ({
   __esModule: true,
   __isTeleport: false,
   default: defineComponent({
     name: 'MonacoEditor',
-    props: ['modelValue', 'language', 'wordWrap'],
+    props: ['modelValue', 'language', 'readingState', 'readingView'],
     template: '<pre data-testid="monaco">{{ modelValue }}</pre>',
   }),
 }))
 vi.mock('@/components/MarkdownPreview.vue', () => ({
-  __esModule: true,
-  __isTeleport: false,
   default: defineComponent({
-    name: 'MarkdownPreview',
     props: ['content'],
     template: '<article data-testid="markdown">{{ content }}</article>',
   }),
 }))
-
-const queryState = {
-  data: ref<ProjectArtifact[] | undefined>([]),
-  error: ref<Error | null>(null),
-  isError: ref(false),
-  isFetching: ref(false),
-  isLoading: ref(false),
+const wid = 'a'.repeat(64)
+const file = (path: string, kind: WorkspaceEntry['kind'] = 'file'): WorkspaceEntry => ({
+  name: path.split('/').pop()!,
+  path,
+  kind,
+  size: kind === 'directory' ? null : 200,
+  modified_at: '2026-11-03T00:00:00Z',
+})
+const listing = (
+  entries: WorkspaceEntry[] = [file('notes', 'directory'), file('readme.md'), file('output.txt')],
+  overrides: Partial<WorkspaceEntries> = {},
+): WorkspaceEntries => ({
+  project_id: 'p1',
+  workspace_id: wid,
+  root_path: '/home/kali/workspace',
+  path: '',
+  entries,
+  next_cursor: null,
+  has_more: false,
+  live: true,
+  ...overrides,
+})
+const preview = (
+  path: string,
+  content = 'hello',
+  overrides: Partial<WorkspacePreview> = {},
+): WorkspacePreview => ({
+  project_id: 'p1',
+  workspace_id: wid,
+  path,
+  size: 200,
+  modified_at: '2026-11-03T00:00:00Z',
+  preview_kind: 'text',
+  media_type: 'text/plain',
+  content,
+  bytes_read: 5,
+  truncated: true,
+  window: 'head',
+  live: true,
+  ...overrides,
+})
+const saved: ProjectArtifact = {
+  id: 'original',
+  project_id: 'p1',
+  task_run_id: 'run-1',
+  kind: 'report',
+  kind_deprecated: false,
+  deprecation_message: null,
+  category: 'deliverable',
+  uri: 'saved/readme.md',
+  sha256: 'a'.repeat(64),
+  size: 200,
+  created_at: '2026-11-03T00:00:00Z',
+  metadata: {},
 }
-const wrappers: VueWrapper[] = []
-
-let sequence = 0
-function artifact(overrides: Partial<ProjectArtifact> = {}): ProjectArtifact {
-  sequence += 1
-  return {
-    id: `artifact-${sequence}`,
-    project_id: 'project-a',
-    task_run_id: null,
-    kind: 'report',
-    kind_deprecated: false,
-    deprecation_message: null,
-    category: 'deliverable',
-    uri: `reports/report-${sequence}.md`,
-    sha256: 'a'.repeat(64),
-    size: 100,
-    created_at: `2026-08-${String(sequence).padStart(2, '0')}T00:00:00Z`,
-    metadata: {},
-    ...overrides,
-  }
-}
-
-function preview(
-  target: ProjectArtifact,
-  overrides: Partial<ArtifactPreview> = {},
-): ArtifactPreview {
-  return {
-    artifact_id: target.id,
-    project_id: target.project_id,
-    task_run_id: target.task_run_id,
-    kind: target.kind,
-    kind_deprecated: target.kind_deprecated,
-    deprecation_message: target.deprecation_message,
-    content: '# preview',
-    size: target.size,
-    bytes_read: 9,
-    truncated: true,
-    sha256: target.sha256,
-    ...overrides,
-  }
-}
-
-function mountPage() {
-  const wrapper = mount(ArtifactsPage, { attachTo: document.body })
-  wrappers.push(wrapper)
-  return wrapper
-}
-
-function buttonByText(text: string): HTMLButtonElement {
-  const button = [...document.body.querySelectorAll<HTMLButtonElement>('button')].find(
-    (candidate) => candidate.textContent?.trim() === text,
-  )
-  if (!button) throw new Error(`找不到按钮：${text}`)
-  return button
-}
-
+const savedPreview = (overrides: Partial<ArtifactPreview> = {}): ArtifactPreview => ({
+  artifact_id: saved.id,
+  project_id: 'p1',
+  task_run_id: saved.task_run_id,
+  kind: saved.kind,
+  kind_deprecated: false,
+  deprecation_message: null,
+  content: 'saved original',
+  size: 200,
+  bytes_read: 14,
+  truncated: true,
+  sha256: saved.sha256,
+  ...overrides,
+})
 function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void
-  let reject!: (reason?: unknown) => void
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise
-    reject = rejectPromise
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
   })
   return { promise, resolve, reject }
 }
-
+let wrapper: VueWrapper
+async function render() {
+  wrapper = mount(ArtifactsPage, { attachTo: document.body })
+  await flushPromises()
+  return wrapper
+}
+const row = (path: string, kind?: string) =>
+  wrapper.get(`[role="treeitem"][data-path="${path}"]${kind ? `[data-kind="${kind}"]` : ''}`)
+const button = (text: string) => wrapper.findAll('button').find((item) => item.text() === text)!
+async function choose(path: string) {
+  await row(path).trigger('click')
+  await flushPromises()
+}
 beforeEach(() => {
-  sequence = 0
-  HTMLElement.prototype.hasPointerCapture = () => false
-  HTMLElement.prototype.setPointerCapture = () => undefined
-  HTMLElement.prototype.releasePointerCapture = () => undefined
-  workspaceStore.currentProjectId = 'project-a'
-  uiStore.globalRefreshKey = 0
-  route.params.id = 'project-a'
+  vi.clearAllMocks()
+  store.currentProjectId = 'p1'
   route.query = {}
-  queryState.data.value = []
-  queryState.error.value = null
-  queryState.isError.value = false
-  queryState.isFetching.value = false
-  queryState.isLoading.value = false
-  for (const mock of Object.values(mocks)) mock.mockReset()
-  mocks.listProjectArtifacts.mockResolvedValue([])
-  mocks.refetch.mockResolvedValue(undefined)
-  mocks.replace.mockResolvedValue(undefined)
-  mocks.push.mockResolvedValue(undefined)
-  mocks.useQuery.mockReturnValue({ ...queryState, refetch: mocks.refetch })
-  mocks.fetchArtifactPreview.mockImplementation(async (_projectId, _artifactId) => ({
-    artifact_id: _artifactId,
-    project_id: _projectId,
-    task_run_id: null,
-    kind: 'file',
-    kind_deprecated: false,
-    deprecation_message: null,
-    content: 'head',
-    size: 4,
-    bytes_read: 4,
-    truncated: false,
-    sha256: '',
-  }))
-  mocks.fetchArtifactTailPreview.mockImplementation(async (projectId, artifactId) => ({
-    artifact_id: artifactId,
-    project_id: projectId,
-    task_run_id: null,
-    kind: 'file',
-    kind_deprecated: false,
-    deprecation_message: null,
-    content: 'tail',
-    size: 4,
-    bytes_read: 4,
-    truncated: false,
-    sha256: '',
-  }))
+  route.params.id = 'p1'
+  ui.globalRefreshKey = 0
+  mocks.entries.mockImplementation(async (_project, path) =>
+    listing(path ? [file(`${path}/nested.txt`)] : undefined, { path }),
+  )
+  mocks.preview.mockImplementation(async (_project, _workspace, path, window) =>
+    preview(path, `content:${path}:${window}`, { window }),
+  )
+  mocks.saved.mockResolvedValue([saved])
+  mocks.head.mockResolvedValue(savedPreview())
+  mocks.tail.mockResolvedValue(savedPreview({ content: 'saved tail' }))
+  mocks.replace.mockImplementation(async ({ query }) => {
+    route.query = query
+  })
+  Object.defineProperty(HTMLElement.prototype, 'hasPointerCapture', {
+    configurable: true,
+    value: () => false,
+  })
+  Object.defineProperty(HTMLElement.prototype, 'setPointerCapture', {
+    configurable: true,
+    value: () => undefined,
+  })
+  Object.defineProperty(HTMLElement.prototype, 'releasePointerCapture', {
+    configurable: true,
+    value: () => undefined,
+  })
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+    configurable: true,
+    value: () => undefined,
+  })
 })
-
 afterEach(() => {
-  wrappers.splice(0).forEach((wrapper) => wrapper.unmount())
+  wrapper?.unmount()
   document.body.innerHTML = ''
-  vi.unstubAllGlobals()
 })
 
-describe('ArtifactsPage', () => {
-  it('uses the project-scoped typed query, accessible table, explicit actions, and guarded refresh', async () => {
-    const item = artifact({ id: 'artifact-a', kind: 'file', task_run_id: 'run-123456789' })
-    queryState.data.value = [item]
-    const wrapper = mountPage()
-    const options = mocks.useQuery.mock.calls[0]?.[0] as {
-      queryKey: [string, { value: string | null }]
-      queryFn: () => Promise<ProjectArtifact[]>
-      enabled: { value: boolean }
-    }
-
-    expect(options.queryKey[0]).toBe('workspaceArtifacts')
-    expect(options.queryKey[1].value).toBe('project-a')
-    expect(options.enabled.value).toBe(true)
-    await options.queryFn()
-    expect(mocks.listProjectArtifacts).toHaveBeenCalledWith('project-a')
-    expect(wrapper.get('caption').text()).toBe('项目产物列表')
-    expect(wrapper.findAll('th').every((heading) => heading.attributes('scope') === 'col')).toBe(
-      true,
+describe('real research workspace browser', () => {
+  it('loads only one level, leaves the tree visible beside preview and removes legacy categories', async () => {
+    await render()
+    expect(mocks.entries).toHaveBeenCalledTimes(1)
+    expect(mocks.entries.mock.calls[0]!.slice(0, 4)).toEqual(['p1', '', undefined, undefined])
+    expect(mocks.saved).not.toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('不是原子快照或正式归档')
+    expect(wrapper.find('input[aria-label="搜索文件名或路径"]').exists()).toBe(true)
+    expect(button('刷新').classes()).toContain('ui-button--secondary')
+    for (const removed of ['项目文件', '诊断日志', '正式报告清单', '返回文件'])
+      expect(wrapper.text()).not.toContain(removed)
+    expect(wrapper.find('select').exists()).toBe(false)
+    await choose('readme.md')
+    expect(wrapper.get('[role="tree"]').isVisible()).toBe(true)
+    expect(wrapper.get('[data-testid="markdown"]').text()).toContain('content:readme.md:head')
+    expect(row('readme.md').attributes('aria-selected')).toBe('true')
+    expect(wrapper.get('a[download]').attributes('href')).toContain('/workspace/content?')
+    expect(wrapper.get('a[download]').attributes('href')).not.toContain('inline=true')
+    expect(wrapper.text()).toContain('内容已截断')
+    await button('查看源码').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="monaco"]').text()).toContain('content:readme.md:head')
+  })
+  it('lazily expands by keyboard, moves focus, and keeps directories from replacing selection', async () => {
+    await render()
+    await choose('readme.md')
+    const directory = row('notes')
+    ;(directory.element as HTMLElement).focus()
+    await directory.trigger('keydown', { key: 'ArrowRight' })
+    await flushPromises()
+    expect(directory.attributes('aria-expanded')).toBe('true')
+    expect(mocks.entries.mock.calls[1]!.slice(0, 4)).toEqual(['p1', 'notes', wid, undefined])
+    expect(wrapper.text()).toContain('content:readme.md:head')
+    await directory.trigger('keydown', { key: 'ArrowRight' })
+    await flushPromises()
+    expect(document.activeElement).toBe(row('notes/nested.txt').element)
+    await row('notes/nested.txt').trigger('keydown', { key: 'ArrowLeft' })
+    await flushPromises()
+    expect(document.activeElement).toBe(directory.element)
+    await directory.trigger('keydown', { key: 'ArrowLeft' })
+    await flushPromises()
+    expect(directory.attributes('aria-expanded')).toBe('false')
+    await directory.trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(directory.attributes('aria-expanded')).toBe('true')
+    expect(mocks.entries).toHaveBeenCalledTimes(2)
+  })
+  it('supports root and directory continuation without eager recursive enumeration', async () => {
+    mocks.entries.mockImplementation(async (_project, path, _id, cursor) =>
+      path
+        ? listing(cursor ? [file('notes/second.txt')] : [file('notes/first.txt')], {
+            path,
+            next_cursor: cursor ? null : 'child-page',
+            has_more: !cursor,
+          })
+        : listing(cursor ? [file('last.txt')] : [file('notes', 'directory')], {
+            next_cursor: cursor ? null : 'root-page',
+            has_more: !cursor,
+          }),
     )
-    expect(wrapper.find('tbody tr').attributes('role')).toBeUndefined()
+    await render()
+    await button('继续加载目录').trigger('click')
+    await flushPromises()
+    expect(row('last.txt').element).toBeTruthy()
+    expect(mocks.entries.mock.calls[1]!.slice(0, 4)).toEqual(['p1', '', wid, 'root-page'])
+    await choose('notes')
+    await row('notes', 'more').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    expect(row('notes/first.txt').element).toBeTruthy()
+    expect(row('notes/second.txt').element).toBeTruthy()
+    expect(mocks.entries.mock.calls[3]!.slice(0, 4)).toEqual(['p1', 'notes', wid, 'child-page'])
+  })
+  it('supports directory names that match Object prototype keys', async () => {
+    mocks.entries.mockImplementation(async (_project, path) =>
+      listing(path ? [file(`${path}/note.txt`)] : [file('__proto__', 'directory'), file('constructor', 'directory')], { path }),
+    )
+    await render()
+    await choose('__proto__')
+    expect(row('__proto__/note.txt').element).toBeTruthy()
+    await choose('constructor')
+    expect(row('constructor/note.txt').element).toBeTruthy()
+  })
+  it('shows empty directories and keeps blocked files non-readable', async () => {
+    mocks.entries.mockImplementation(async (_project, path) =>
+      listing(path ? [] : [file('empty', 'directory'), file('link', 'blocked')], { path }),
+    )
+    await render()
+    await choose('empty')
+    expect(wrapper.text()).toContain('目录为空')
+    await choose('link')
+    expect(mocks.preview).not.toHaveBeenCalled()
+    expect(wrapper.find('a[download]').exists()).toBe(false)
+    expect(row('link').attributes('title')).toContain('不允许读取')
+  })
+  it.each([
+    ['workspace_not_created', '尚未创建'],
+    ['workspace_owner_unknown', '归属'],
+    ['workspace_deleted', '已删除'],
+    ['workspace_permission_denied', '权限'],
+    ['workspace_unreachable', '不可达'],
+    ['workspace_layer_unsupported', '历史现场'],
+  ])('distinguishes %s from an empty directory', async (code, expected) => {
+    mocks.entries.mockRejectedValue(new ApiError('host-secret', 409, { detail: code }))
+    await render()
+    expect(wrapper.text()).toContain(expected)
+    expect(wrapper.text()).not.toContain('目录为空')
+    expect(wrapper.text()).not.toContain('host-secret')
+    expect(button('重试目录').exists()).toBe(true)
+  })
+  it('retains selection, expansion and focused row across refresh', async () => {
+    await render()
+    await choose('notes')
+    await choose('notes/nested.txt')
+    ;(row('notes/nested.txt').element as HTMLElement).focus()
+    ui.globalRefreshKey++
+    await flushPromises()
+    expect(row('notes').attributes('aria-expanded')).toBe('true')
+    expect(row('notes/nested.txt').attributes('aria-selected')).toBe('true')
+    expect(document.activeElement).toBe(row('notes/nested.txt').element)
+    expect(wrapper.text()).toContain('content:notes/nested.txt:head')
+  })
+  it('keeps the reader mounted and reuses Monaco reading state during refresh', async () => {
+    await render()
+    await choose('output.txt')
+    const editor = wrapper.findComponent({ name: 'MonacoEditor' })
+    const element = editor.element
+    const state = editor.props('readingState')
+    const view = editor.props('readingView')
+    expect(view).toContain('output.txt')
+    const panel = wrapper.get('.workspace-tree-scroll').element as HTMLElement
+    const body = wrapper.get('.artifact-preview-body').element as HTMLElement
+    panel.scrollTop = 90
+    body.scrollTop = 140
+    const pending = deferred<WorkspacePreview>()
+    mocks.preview.mockReturnValueOnce(pending.promise)
+    ui.globalRefreshKey++
+    await flushPromises()
+    expect(wrapper.get('[data-testid="monaco"]').element).toBe(element)
+    expect(wrapper.text()).toContain('暂显示上次读取内容')
+    pending.resolve(preview('output.txt', 'updated'))
+    await flushPromises()
+    expect(wrapper.findComponent({ name: 'MonacoEditor' }).props('readingState')).toBe(state)
+    expect(wrapper.findComponent({ name: 'MonacoEditor' }).props('readingView')).toBe(view)
+    expect(wrapper.get('[data-testid="monaco"]').element).toBe(element)
+    expect(panel.scrollTop).toBe(90)
+    expect(body.scrollTop).toBe(140)
+  })
+  it('does not leak a late directory response into another project or a new visit', async () => {
+    const pending = deferred<WorkspaceEntries>()
+    mocks.entries.mockReturnValueOnce(pending.promise)
+    await render()
+    store.currentProjectId = 'p2'
+    await flushPromises()
+    store.currentProjectId = 'p1'
+    await flushPromises()
+    pending.resolve(listing([file('stale.txt')]))
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('stale.txt')
+  })
+  it('isolates file, preview window and project late responses', async () => {
+    const pending = deferred<WorkspacePreview>()
+    mocks.preview.mockReturnValueOnce(pending.promise)
+    await render()
+    await choose('readme.md')
+    await choose('output.txt')
+    pending.resolve(preview('readme.md', 'STALE'))
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('STALE')
+    expect(wrapper.text()).toContain('content:output.txt:head')
+    const tail = deferred<WorkspacePreview>()
+    mocks.preview.mockReturnValueOnce(tail.promise)
+    await button('查看文件尾部').trigger('click')
+    await flushPromises()
+    await choose('readme.md')
+    tail.resolve(preview('output.txt', 'STALE-TAIL', { window: 'tail' }))
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('STALE-TAIL')
+    const oldProject = deferred<WorkspacePreview>()
+    mocks.preview.mockReturnValueOnce(oldProject.promise)
+    await choose('output.txt')
+    store.currentProjectId = 'p2'
+    await flushPromises()
+    oldProject.resolve(preview('output.txt', 'OLD-PROJECT'))
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('OLD-PROJECT')
+  })
+  it('rejects mismatched identities and clears replaced workspace selection', async () => {
+    mocks.preview.mockResolvedValueOnce(preview('other.txt', 'CROSS-PATH'))
+    await render()
+    await choose('output.txt')
+    expect(wrapper.text()).not.toContain('CROSS-PATH')
+    expect(wrapper.text()).toContain('读取失败')
+    mocks.preview.mockRejectedValueOnce(
+      new ApiError('', 409, { detail: 'workspace_identity_changed' }),
+    )
+    await choose('readme.md')
+    expect(wrapper.text()).toContain('身份已变化')
+    expect(wrapper.find('a[download]').exists()).toBe(false)
+    expect(wrapper.find('[role="tree"]').exists()).toBe(false)
+  })
+  it('uses the inline endpoint only for server-confirmed safe images and leaves HTML/SVG as text', async () => {
+    mocks.entries.mockResolvedValue(
+      listing([file('a.png'), file('page.html'), file('a.svg'), file('capture.pcap')]),
+    )
+    mocks.preview.mockResolvedValueOnce(
+      preview('a.png', '', { preview_kind: 'image', content: null, media_type: 'image/png' }),
+    )
+    await render()
+    await choose('a.png')
+    expect(wrapper.get('img').attributes('src')).toContain('inline=true')
+    await wrapper.get('img').trigger('error')
+    expect(wrapper.text()).toContain('图片载入失败')
+    mocks.preview.mockResolvedValueOnce(preview('page.html', '<script>canary()</script>'))
+    await choose('page.html')
+    expect(wrapper.find('iframe, script').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="monaco"]').text()).toContain('<script>')
+    mocks.preview.mockResolvedValueOnce(preview('a.svg', '<svg onload="canary()"/>'))
+    await choose('a.svg')
+    expect(wrapper.find('img').exists()).toBe(false)
+    mocks.preview.mockResolvedValueOnce(
+      preview('capture.pcap', '', { content: null, preview_kind: 'binary' }),
+    )
+    await choose('capture.pcap')
+    expect(wrapper.text()).toContain('不支持在线预览')
+    expect(wrapper.get('a[download]').element).toBeTruthy()
+  })
+  it('keeps long names accessible and announces lossy UTF-8 windows', async () => {
+    const name = `${'长文件名'.repeat(30)}.txt`
+    mocks.entries.mockResolvedValue(listing([file(name)]))
+    mocks.preview.mockResolvedValue(preview(name, '�', { encoding_lossy: true }))
+    await render()
+    await choose(name)
+    expect(row(name).attributes('title')).toBe(name)
+    expect(wrapper.text()).toContain('替代字符')
+  })
+})
 
-    expect(document.body.querySelector('.artifact-file-info')).toBeNull()
-    await wrapper.get('[aria-label="预览产物 report-1.md"]').trigger('click')
+describe('workspace filename search', () => {
+  const result = (query: string, entries: WorkspaceEntry[] = [], more = false): WorkspaceSearch => ({
+    ...listing(entries), query, next_cursor: more ? 'next' : null, has_more: more,
+  })
+  async function search(query: string) {
+    await wrapper.get('input[aria-label="搜索文件名或路径"]').setValue(query)
+    await wrapper.get('form[role="search"]').trigger('submit')
     await flushPromises()
-    buttonByText('文件信息').click()
+  }
+  it('submits explicitly, continues incomplete empty pages, previews unopened paths, and restores the tree', async () => {
+    mocks.search.mockResolvedValueOnce(result('nested', [], true))
+      .mockResolvedValueOnce(result('nested', [file('unopened/nested.txt')]))
+      .mockResolvedValueOnce(result('nested', [file('unopened/nested.txt')]))
+    await render()
+    await choose('notes')
+    const tree = wrapper.get('.workspace-tree-scroll').element as HTMLElement
+    tree.scrollTop = 75
+    const input = wrapper.get('input[aria-label="搜索文件名或路径"]')
+    await input.setValue('nested')
+    expect(mocks.search).not.toHaveBeenCalled()
+    const ime = new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, cancelable: true })
+    input.element.dispatchEvent(ime)
+    expect(ime.defaultPrevented).toBe(true)
+    await search('nested')
+    expect(wrapper.text()).not.toContain('未找到匹配文件')
+    await button('继续查找').trigger('click')
     await flushPromises()
-    buttonByText('查看运行').click()
+    expect(mocks.search.mock.calls[1]!.slice(0, 4)).toEqual(['p1', wid, 'nested', 'next'])
+    await wrapper.get('.workspace-search-result').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('content:unopened/nested.txt:head')
+    expect(mocks.entries.mock.calls.every((call) => call[1] !== 'unopened')).toBe(true)
+    const calls = mocks.entries.mock.calls.length
+    await button('刷新').trigger('click')
+    await flushPromises()
+    expect(mocks.search.mock.calls[2]!.slice(0, 4)).toEqual(['p1', wid, 'nested', undefined])
+    expect(mocks.entries).toHaveBeenCalledTimes(calls)
+    await input.trigger('keydown', { key: 'Escape' })
+    expect(row('notes').attributes('aria-expanded')).toBe('true')
+    expect(tree.scrollTop).toBe(75)
+    expect(wrapper.text()).toContain('content:unopened/nested.txt:head')
+    expect(mocks.preview).toHaveBeenCalledTimes(2)
+  })
+  it('isolates edited, cleared, replaced and old-project responses, with a true completed no-match state', async () => {
+    await render()
+    for (const change of ['edit', 'clear', 'project']) {
+      const pending = deferred<WorkspaceSearch>()
+      mocks.search.mockReturnValueOnce(pending.promise)
+      await search('old')
+      const signal = mocks.search.mock.calls.at(-1)![4] as AbortSignal
+      if (change === 'edit') await wrapper.get('input').setValue('new')
+      else if (change === 'clear') await wrapper.get('[aria-label="清除搜索"]').trigger('click')
+      else { store.currentProjectId = 'p2'; await flushPromises() }
+      expect(signal.aborted).toBe(true)
+      pending.resolve(result('old', [file('STALE.txt')]))
+      await flushPromises()
+      expect(wrapper.text()).not.toContain('STALE')
+    }
+    store.currentProjectId = 'p1'
+    await flushPromises()
+    mocks.search.mockResolvedValueOnce(result('none'))
+    await search('none')
+    expect(wrapper.text()).toContain('未找到匹配文件')
+    mocks.search.mockRejectedValueOnce(new ApiError('', 403, { detail: 'workspace_permission_denied' }))
+    await search('blocked')
+    expect(wrapper.text()).toContain('没有读取')
+    expect(wrapper.text()).not.toContain('未找到匹配文件')
+    mocks.search.mockRejectedValueOnce(new ApiError('', 409, { detail: 'workspace_identity_changed' }))
+    await search('changed')
+    expect(wrapper.text()).toContain('身份已变化')
+    expect(wrapper.find('.workspace-search-result').exists()).toBe(false)
+  })
+})
+
+describe('saved Artifact deep links stay independent', () => {
+  it('keeps the real tree visible without a fabricated selection and preserves source metadata', async () => {
+    route.query = { artifactId: saved.id }
+    await render()
+    expect(wrapper.text()).toContain('已保存原件')
+    expect(wrapper.text()).toContain('saved original')
+    expect(wrapper.findAll('[role="treeitem"][aria-selected="true"]')).toHaveLength(0)
+    expect(wrapper.get('a[download]').attributes('href')).toBe(
+      '/projects/p1/artifacts/original/content',
+    )
+    await button('文件信息').trigger('click')
+    await flushPromises()
+    expect(document.body.textContent).toContain(saved.sha256)
+    const run = Array.from(document.body.querySelectorAll('button')).find(
+      (item) => item.textContent === '查看运行',
+    )!
+    run.click()
+    await flushPromises()
     expect(mocks.push).toHaveBeenCalledWith({
       name: 'WorkspaceRuns',
-      params: { id: 'project-a' },
-      query: { runId: 'run-123456789' },
+      params: { id: 'p1' },
+      query: { runId: 'run-1' },
     })
-
-    uiStore.globalRefreshKey += 1
+    await button('查看文件尾部').trigger('click')
     await flushPromises()
-    expect(mocks.refetch).toHaveBeenCalledOnce()
-    workspaceStore.currentProjectId = null
-    await flushPromises()
-    uiStore.globalRefreshKey += 1
-    await flushPromises()
-    expect(mocks.refetch).toHaveBeenCalledOnce()
+    expect(wrapper.text()).toContain('saved tail')
   })
-
-  it('distinguishes initial loading, initial error, project empty, filter empty, and stale errors', async () => {
-    queryState.data.value = undefined
-    queryState.isLoading.value = true
-    const wrapper = mountPage()
-    expect(wrapper.get('[aria-label="正在加载项目产物"]')).toBeDefined()
-
-    queryState.isLoading.value = false
-    queryState.error.value = new Error('网络不可用')
-    queryState.isError.value = true
-    await flushPromises()
-    expect(wrapper.text()).toContain('产物加载失败')
-    expect(wrapper.text()).toContain('网络不可用')
-
-    queryState.isError.value = false
-    queryState.error.value = null
-    queryState.data.value = []
-    await flushPromises()
-    expect(wrapper.text()).toContain('暂无项目产物')
-
-    queryState.data.value = [artifact({ kind: 'log', category: 'evidence' })]
-    await flushPromises()
-    expect(wrapper.text()).toContain('没有符合当前筛选条件的产物')
-
-    queryState.isError.value = true
-    queryState.error.value = new Error('刷新失败')
-    queryState.isFetching.value = true
-    queryState.data.value = [artifact({ uri: 'reports/visible.md' })]
-    await flushPromises()
-    expect(wrapper.text()).toContain('产物同步失败')
-    expect(wrapper.text()).toContain('visible.md')
-    expect(wrapper.text()).toContain('同步中…')
-  })
-
-  it('filters decoded filenames locally while preserving the selected preview and route', async () => {
-    const selected = artifact({
-      id: 'selected',
-      kind: 'report',
-      uri: 'reports/Final%20Report.MD',
-      task_run_id: 'run-selected',
-    })
-    const notes = artifact({
-      id: 'notes',
-      kind: 'file',
-      uri: 'runs/final-report/notes.txt',
-    })
-    const diagnostic = artifact({
-      id: 'diagnostic',
-      category: 'evidence',
-      kind: 'log',
-      uri: 'logs/final-report.log',
-    })
-    route.query = { artifactId: selected.id, keep: 'yes' }
-    queryState.data.value = [selected, notes, diagnostic]
-    mocks.fetchArtifactPreview.mockResolvedValue(
-      preview(selected, { content: '# selected preview', truncated: false }),
-    )
-    const wrapper = mountPage()
-    await flushPromises()
-    expect(wrapper.get('.artifacts-list-card').isVisible()).toBe(false)
-    buttonByText('返回文件').click()
-    await flushPromises()
-    expect(wrapper.get('.artifacts-list-card').isVisible()).toBe(true)
-    expect(wrapper.get('.artifact-report-reader').isVisible()).toBe(false)
-
-    const label = wrapper
-      .findAll('label')
-      .find((candidate) => candidate.text().includes('搜索文件名'))
-    expect(label).toBeDefined()
-    const inputId = label?.attributes('for')
-    expect(inputId).toBeTruthy()
-    const input = wrapper.get<HTMLInputElement>(`#${inputId}`)
-    expect(input.attributes('placeholder')).toBe('按文件名筛选…')
-    expect(wrapper.findAll('.artifact-file-name').map((node) => node.text())).toEqual([
-      'notes.txt',
-      'Final Report.MD',
-    ])
-    expect(wrapper.text()).toContain('selected preview')
-
-    await input.setValue(' final report ')
-    expect(wrapper.findAll('.artifact-file-name').map((node) => node.text())).toEqual([
-      'Final Report.MD',
-    ])
-    expect(mocks.listProjectArtifacts).not.toHaveBeenCalled()
-    expect(mocks.refetch).not.toHaveBeenCalled()
-
-    await input.setValue('notes')
-    expect(wrapper.findAll('.artifact-file-name').map((node) => node.text())).toEqual(['notes.txt'])
-    const kindSelect = wrapper.findComponent({ name: 'UiSelect' })
-    kindSelect.vm.$emit('update:modelValue', 'report')
-    await flushPromises()
-    expect(wrapper.text()).toContain('没有符合当前筛选条件的产物')
-    kindSelect.vm.$emit('update:modelValue', 'all')
-    await flushPromises()
-    expect(wrapper.findAll('.artifact-file-name').map((node) => node.text())).toEqual(['notes.txt'])
-    expect(wrapper.text()).toContain('selected preview')
-    expect(route.query).toEqual({ artifactId: 'selected', keep: 'yes' })
-    expect(wrapper.find('tbody tr').attributes('aria-current')).toBeUndefined()
-
-    await input.setValue('runs')
-    expect(wrapper.text()).toContain('没有符合当前筛选条件的产物')
-    expect(wrapper.text()).toContain('文件名搜索条件')
-
-    await input.setValue('')
-    const restoredRows = wrapper.findAll('tbody tr')
-    expect(restoredRows).toHaveLength(2)
-    expect(restoredRows[1]?.attributes('aria-current')).toBe('true')
-
-    const tabs = document.body.querySelectorAll<HTMLButtonElement>('[role="tab"]')
-    tabs[1]?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
-    await input.setValue('FINAL-REPORT')
-    await flushPromises()
-    expect(wrapper.findAll('.artifact-file-name').map((node) => node.text())).toEqual([
-      'final-report.log',
-    ])
-
-    workspaceStore.currentProjectId = 'project-b'
-    route.params.id = 'project-b'
-    queryState.data.value = [
-      artifact({ id: 'project-b-item', project_id: 'project-b', uri: 'project-b.txt' }),
-    ]
-    await flushPromises()
-    expect(input.element.value).toBe('')
-  })
-
-  it('keeps newest-first rows, switches view, and exposes historical kinds only when present', async () => {
-    queryState.data.value = [
-      artifact({ id: 'old', uri: 'old.md', created_at: '2026-08-01T00:00:00Z' }),
-      artifact({
-        id: 'capture',
-        kind: 'pcap',
-        uri: 'capture.pcap',
-        created_at: '2026-08-20T00:00:00Z',
-      }),
-      artifact({ id: 'log', kind: 'log', category: 'evidence', uri: 'worker.log' }),
-    ]
-    const wrapper = mountPage()
-
-    expect(wrapper.findAll('.artifact-file-name').map((node) => node.text())).toEqual([
-      'capture.pcap',
-      'old.md',
-    ])
-    const tabs = document.body.querySelectorAll<HTMLButtonElement>('[role="tab"]')
-    tabs[1]?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 }))
-    await flushPromises()
-    expect(wrapper.text()).toContain('worker.log')
-    expect(wrapper.text()).not.toContain('capture.pcap')
-  })
-
-  it('reconciles evidence deep links, query removal, and missing artifact IDs', async () => {
-    const diagnostic = artifact({
-      id: 'diagnostic-a',
-      category: 'evidence',
-      kind: 'log',
-      uri: 'worker.log',
-    })
-    route.query = { artifactId: diagnostic.id, keep: 'yes' }
-    queryState.data.value = [diagnostic]
-    const wrapper = mountPage()
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('worker.log')
-    expect(document.body.querySelectorAll('[role="tab"]')[1]?.getAttribute('aria-selected')).toBe(
-      'true',
-    )
-    expect(mocks.fetchArtifactTailPreview).toHaveBeenCalledWith(
-      'project-a',
-      'diagnostic-a',
-      expect.any(AbortSignal),
-    )
-    expect(wrapper.get('tbody tr').attributes('aria-current')).toBe('true')
-
-    route.query = { keep: 'yes' }
-    await flushPromises()
-    expect(wrapper.text()).toContain('选择一个文件开始审阅')
-
-    route.query = { artifactId: 'missing', keep: 'yes' }
-    await flushPromises()
-    expect(mocks.replace).toHaveBeenLastCalledWith({
-      name: 'WorkspaceArtifacts',
-      params: { id: 'project-a' },
-      query: { keep: 'yes' },
-    })
-    expect(wrapper.text()).toContain('指定产物不存在或已删除')
-  })
-
-  it('waits for an active background refresh before rejecting a cached-list deep link', async () => {
-    const cached = artifact({ id: 'cached', uri: 'cached.md' })
-    const fresh = artifact({ id: 'fresh', uri: 'fresh.md' })
-    route.query = { artifactId: fresh.id, keep: 'yes' }
-    queryState.data.value = [cached]
-    queryState.isFetching.value = true
-    const wrapper = mountPage()
-    await flushPromises()
-
-    expect(mocks.replace).not.toHaveBeenCalled()
-    expect(wrapper.text()).toContain('选择一个文件开始审阅')
-
-    queryState.data.value = [cached, fresh]
-    queryState.isFetching.value = false
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('fresh.md')
-    expect(wrapper.text()).not.toContain('指定产物不存在或已删除')
-    expect(mocks.fetchArtifactPreview).toHaveBeenCalledWith(
-      'project-a',
-      'fresh',
-      expect.any(AbortSignal),
-    )
-  })
-
-  it('renders only report Markdown while preserving raw Markdown and JSON previews', async () => {
-    const reportMarkdown = artifact({
-      id: 'report-markdown',
-      kind: 'report',
-      uri: 'reports/a194-vulnerability-report.MARKDOWN',
-    })
-    const reportSnapshot = artifact({
-      id: 'report-snapshot',
-      kind: 'report',
-      uri: 'reports/a190-report-input-snapshot.json',
-    })
-    const genericMarkdown = artifact({
-      id: 'generic-markdown',
-      kind: 'file',
-      uri: 'README.md',
-    })
-    queryState.data.value = [reportMarkdown, reportSnapshot, genericMarkdown]
-    const reportContent = '# 安全报告\n\n## 证据\n\n<script>alert(1)</script>'
-    mocks.fetchArtifactPreview.mockResolvedValue(
-      preview(reportMarkdown, { content: reportContent, truncated: false }),
-    )
-    mocks.fetchArtifactTailPreview.mockImplementation(async (_projectId, artifactId) => {
-      const target = [reportSnapshot, genericMarkdown].find((candidate) => candidate.id === artifactId)
-      if (!target) throw new Error('artifact missing')
-      const content = artifactId === reportSnapshot.id ? '{"packet": true}' : '# README source'
-      return preview(target, { content, truncated: false })
-    })
-    route.query = { artifactId: reportMarkdown.id, keep: 'yes' }
-    const wrapper = mountPage()
-    await flushPromises()
-
-    expect(mocks.fetchArtifactPreview).toHaveBeenCalledWith(
-      'project-a',
-      reportMarkdown.id,
-      expect.any(AbortSignal),
-    )
-    expect(mocks.fetchArtifactTailPreview).not.toHaveBeenCalled()
-    expect(wrapper.get('.artifact-report-reader .safe-report-markdown h1').text()).toBe('安全报告')
-    expect(wrapper.find('.safe-report-markdown script').exists()).toBe(false)
-    expect(wrapper.get('.safe-report-markdown').text()).toContain('<script>alert(1)</script>')
-    expect(wrapper.find('[data-testid="markdown"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="monaco"]').exists()).toBe(false)
-    expect(wrapper.get('.artifacts-list-card').isVisible()).toBe(false)
-    expect(wrapper.get('nav[aria-label="当前报告章节目录"]').findAll('button').map((entry) => entry.text())).toEqual(['安全报告', '证据'])
-
-    buttonByText('原文').click()
-    await flushPromises()
-    expect(wrapper.get('[aria-label="报告原文"] pre').text()).toBe(reportContent)
-    expect(wrapper.find('nav[aria-label="当前报告章节目录"]').exists()).toBe(false)
-    const pane = wrapper.get<HTMLElement>('[aria-label="报告原文"]')
-    pane.element.scrollTop = 95
-    await pane.trigger('scroll')
-    buttonByText('返回文件').click()
-    await flushPromises()
-    expect(wrapper.get('.artifacts-list-card').isVisible()).toBe(true)
-    expect(wrapper.get('.artifact-report-reader').isVisible()).toBe(false)
-    expect(route.query).toEqual({ artifactId: reportMarkdown.id, keep: 'yes' })
-    expect(mocks.replace).not.toHaveBeenCalled()
-    await wrapper.get(`[aria-label="预览产物 ${reportMarkdown.uri.split('/').pop()}"]`).trigger('click')
-    await flushPromises()
-    expect(wrapper.get('.artifact-report-reader').isVisible()).toBe(true)
-    expect(wrapper.get('.artifacts-list-card').isVisible()).toBe(false)
-    expect(wrapper.get('.report-reader-raw').text()).toBe(reportContent)
-    expect(wrapper.get<HTMLElement>('[aria-label="报告原文"]').element.scrollTop).toBe(95)
-    expect(mocks.fetchArtifactPreview).toHaveBeenCalledOnce()
-
-    route.query = { artifactId: reportSnapshot.id }
-    await flushPromises()
-    expect(wrapper.get('[data-testid="monaco"]').text()).toBe('{"packet": true}')
-    expect(wrapper.find('.artifact-report-reader').exists()).toBe(false)
-
-    route.query = { artifactId: genericMarkdown.id }
-    await flushPromises()
-    expect(wrapper.get('[data-testid="markdown"]').text()).toBe('# README source')
-    expect(wrapper.find('.artifact-report-reader').exists()).toBe(false)
-  })
-
-  it.each(['report', 'file'] as const)('uses the appropriate initial %s window, cancellation, truncation wording, and encoded downloads', async (kind) => {
-    const item = artifact({
-      id: 'artifact / one',
-      project_id: 'project / one',
-      kind,
-      uri: '报告 final.md',
-    })
-    workspaceStore.currentProjectId = 'project / one'
-    route.params.id = 'project / one'
-    route.query = { artifactId: item.id }
-    queryState.data.value = [item]
-    mocks.fetchArtifactTailPreview.mockResolvedValue(preview(item, { content: '# tail' }))
-    mocks.fetchArtifactPreview.mockResolvedValue(preview(item, { content: '# head' }))
-    const wrapper = mountPage()
-    await flushPromises()
-
-    const initialRequest = kind === 'report' ? mocks.fetchArtifactPreview : mocks.fetchArtifactTailPreview
-    const nextRequest = kind === 'report' ? mocks.fetchArtifactTailPreview : mocks.fetchArtifactPreview
-    expect(initialRequest).toHaveBeenCalledWith(
-      'project / one',
-      'artifact / one',
-      expect.any(AbortSignal),
-    )
-    expect(nextRequest).not.toHaveBeenCalled()
-    const initialSignal = initialRequest.mock.calls[0]?.[2] as AbortSignal
-    expect(initialSignal.aborted).toBe(false)
-    expect(wrapper.text()).toContain(kind === 'report' ? '当前仅显示报告开头' : '当前显示文件尾部窗口')
-    expect(wrapper.text()).toContain(kind === 'report' ? '目录仅覆盖已载入部分' : '下载原文件可获取完整服务器产物')
-    expect(wrapper.text()).not.toContain('加载完整内容')
-    expect(wrapper.get<HTMLAnchorElement>('a[download]').attributes('href')).toBe(
-      '/projects/project%20%2F%20one/artifacts/artifact%20%2F%20one/content',
-    )
-
-    buttonByText(kind === 'report' ? '查看文件尾部' : '查看文件开头').click()
-    await flushPromises()
-    expect(initialSignal.aborted).toBe(true)
-    expect(nextRequest).toHaveBeenCalledWith(
-      'project / one',
-      'artifact / one',
-      expect.any(AbortSignal),
-    )
-    expect(wrapper.text()).toContain(kind === 'report' ? '当前仅显示报告尾部' : '这不是完整文件')
-    expect(wrapper.text()).toContain(kind === 'report' ? '查看文件开头' : '查看文件尾部')
-    expect(wrapper.text()).toContain(kind === 'report' ? 'tail' : 'head')
-  })
-
-  it.each([
-    ['report', 'project_id'],
-    ['report', 'artifact_id'],
-    ['file', 'project_id'],
-    ['file', 'artifact_id'],
-  ] as const)('rejects a %s response with mismatched %s and permits an explicit retry', async (kind, field) => {
-    const item = artifact({ id: 'selected', kind, uri: 'selected.md' })
-    queryState.data.value = [item]
-    route.query = { artifactId: item.id }
-    const request = kind === 'report' ? mocks.fetchArtifactPreview : mocks.fetchArtifactTailPreview
-    request.mockResolvedValueOnce(
-      preview(item, { [field]: 'other-identity', content: '# 不应显示', truncated: false }),
-    )
-    const wrapper = mountPage()
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('服务端返回的项目或 Artifact 身份与所选文件不一致，已阻止渲染。')
-    expect(wrapper.text()).not.toContain('不应显示')
-    expect(wrapper.find('.safe-report-markdown').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="markdown"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="monaco"]').exists()).toBe(false)
-    request.mockResolvedValueOnce(preview(item, { content: '# 正确报告', truncated: false }))
-    buttonByText(kind === 'report' ? '重试' : '重试预览').click()
-    await flushPromises()
-    expect(wrapper.text()).toContain('正确报告')
-    expect(wrapper.text()).not.toContain('身份与所选文件不一致')
-  })
-
-  it('keeps the loaded preview when the selected artifact action is clicked again', async () => {
-    const item = artifact({ id: 'selected', uri: 'selected.txt', kind: 'file' })
-    queryState.data.value = [item]
-    route.query = { artifactId: item.id }
-    mocks.fetchArtifactTailPreview.mockResolvedValue(
-      preview(item, { content: 'loaded content', truncated: false }),
-    )
-    const wrapper = mountPage()
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('loaded content')
-    expect(mocks.fetchArtifactTailPreview).toHaveBeenCalledOnce()
-
-    buttonByText('已打开').click()
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('loaded content')
-    expect(mocks.fetchArtifactTailPreview).toHaveBeenCalledOnce()
+  it('does not clear valid deep links when live workspace is unavailable', async () => {
+    route.query = { artifactId: saved.id }
+    mocks.entries.mockRejectedValue(new ApiError('', 410, { detail: 'workspace_deleted' }))
+    await render()
+    expect(wrapper.text()).toContain('已删除')
+    expect(wrapper.text()).toContain('saved original')
     expect(mocks.replace).not.toHaveBeenCalled()
   })
-
-  it.each(['completion', 'failure'])('aborts switched artifact reads and ignores their stale %s', async (outcome) => {
-    const first = artifact({ id: 'shared', uri: 'first.txt', kind: 'file' })
-    const second = artifact({ id: 'second', uri: 'second.txt', kind: 'file' })
-    const firstRequest = deferred<ArtifactPreview>()
-    const secondRequest = deferred<ArtifactPreview>()
-    mocks.fetchArtifactTailPreview
-      .mockReturnValueOnce(firstRequest.promise)
-      .mockReturnValueOnce(secondRequest.promise)
-    queryState.data.value = [first, second]
-    const wrapper = mountPage()
-
-    document.body.querySelector<HTMLButtonElement>('[aria-label="预览产物 first.txt"]')?.click()
+  it('lets an in-flight saved preview finish after live workspace identity changes', async () => {
+    const pending = deferred<ArtifactPreview>()
+    mocks.head.mockReturnValueOnce(pending.promise)
+    route.query = { artifactId: saved.id }
+    await render()
+    mocks.entries.mockRejectedValueOnce(
+      new ApiError('', 409, { detail: 'workspace_identity_changed' }),
+    )
+    await button('刷新').trigger('click')
     await flushPromises()
-    document.body.querySelector<HTMLButtonElement>('[aria-label="预览产物 second.txt"]')?.click()
+    expect(wrapper.text()).toContain('身份已变化')
+    pending.resolve(savedPreview())
     await flushPromises()
-    const firstSignal = mocks.fetchArtifactTailPreview.mock.calls[0]?.[2] as AbortSignal
-    const secondSignal = mocks.fetchArtifactTailPreview.mock.calls[1]?.[2] as AbortSignal
-    expect(firstSignal.aborted).toBe(true)
-    expect(secondSignal.aborted).toBe(false)
-    secondRequest.resolve(preview(second, { content: 'second content', truncated: false }))
-    await flushPromises()
-    if (outcome === 'completion') {
-      firstRequest.resolve(preview(first, { content: 'stale content', truncated: false }))
-    } else {
-      firstRequest.reject(new Error('旧请求失败'))
-    }
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('second content')
-    expect(wrapper.text()).not.toContain('stale content')
-    expect(wrapper.text()).not.toContain('旧请求失败')
-    expect(mocks.showToast).not.toHaveBeenCalled()
-
-    workspaceStore.currentProjectId = 'project-b'
-    queryState.data.value = [
-      artifact({ id: 'shared', project_id: 'project-b', uri: 'project-b.txt' }),
-    ]
-    await flushPromises()
-    workspaceStore.currentProjectId = 'project-a'
-    queryState.data.value = [first]
-    await flushPromises()
-    expect(wrapper.text()).toContain('选择一个文件开始审阅')
+    expect(wrapper.text()).toContain('saved original')
+    expect(wrapper.text()).not.toContain('正在载入预览')
+    expect(wrapper.get('a[download]').attributes('href')).toContain('/artifacts/original/content')
   })
-
-  it('isolates late responses across project revisits and aborts an in-flight read on unmount', async () => {
-    const first = artifact({ id: 'shared', kind: 'file', uri: 'first.txt' })
-    const other = artifact({ id: 'shared', project_id: 'project-b', kind: 'file', uri: 'other.txt' })
-    const firstVisit = deferred<ArtifactPreview>()
-    const otherVisit = deferred<ArtifactPreview>()
-    const currentVisit = deferred<ArtifactPreview>()
-    mocks.fetchArtifactTailPreview
-      .mockReturnValueOnce(firstVisit.promise)
-      .mockReturnValueOnce(otherVisit.promise)
-      .mockReturnValueOnce(currentVisit.promise)
-    queryState.data.value = [first]
-    route.query = { artifactId: 'shared' }
-    const wrapper = mountPage()
-    await flushPromises()
-
-    workspaceStore.currentProjectId = 'project-b'
-    route.params.id = 'project-b'
-    queryState.data.value = [other]
-    await flushPromises()
-    workspaceStore.currentProjectId = 'project-a'
-    route.params.id = 'project-a'
-    queryState.data.value = [first]
-    await flushPromises()
-    const signals = mocks.fetchArtifactTailPreview.mock.calls.map((call) => call[2] as AbortSignal)
-    expect(signals).toHaveLength(3)
-    expect(signals.map((signal) => signal.aborted)).toEqual([true, true, false])
-
-    firstVisit.resolve(preview(first, { content: 'old visit content', truncated: false }))
-    otherVisit.reject(new Error('旧项目读取失败'))
-    await flushPromises()
-    expect(wrapper.text()).toContain('正在载入预览内容')
-    expect(wrapper.text()).not.toContain('old visit content')
-    expect(wrapper.text()).not.toContain('旧项目读取失败')
-    expect(mocks.showToast).not.toHaveBeenCalled()
-
-    currentVisit.resolve(preview(first, { content: 'current visit content' }))
-    await flushPromises()
-    expect(wrapper.text()).toContain('current visit content')
-    const headRequest = deferred<ArtifactPreview>()
-    mocks.fetchArtifactPreview.mockReturnValueOnce(headRequest.promise)
-    buttonByText('查看文件开头').click()
-    await flushPromises()
-    const headSignal = mocks.fetchArtifactPreview.mock.calls[0]?.[2] as AbortSignal
-    wrapper.unmount()
-    wrappers.splice(wrappers.indexOf(wrapper), 1)
-    expect(headSignal.aborted).toBe(true)
-    headRequest.reject(new Error('卸载后的读取失败'))
-    await flushPromises()
-    expect(mocks.showToast).not.toHaveBeenCalled()
+  it('retains invalid link identity with an explicit error rather than guessing a matching file', async () => {
+    route.query = { artifactId: 'missing' }
+    await render()
+    expect(wrapper.text()).toContain('指定的已保存原件不存在')
+    expect(mocks.preview).not.toHaveBeenCalled()
+    expect(mocks.replace).not.toHaveBeenCalled()
   })
-
-  it('renders screenshot fallback and download-only binary without requesting text previews', async () => {
-    const screenshot = artifact({ id: 'shot', kind: 'screenshot', uri: 'screen.png' })
-    const capture = artifact({ id: 'capture', kind: 'pcap', uri: 'capture.pcap' })
-    queryState.data.value = [screenshot, capture]
-    route.query = { artifactId: screenshot.id }
-    const wrapper = mountPage()
+  it('ignores saved-list and saved-preview responses after selecting a real file', async () => {
+    const pending = deferred<ProjectArtifact[]>()
+    mocks.saved.mockReturnValueOnce(pending.promise)
+    route.query = { artifactId: saved.id }
+    await render()
+    await choose('readme.md')
+    pending.resolve([saved])
     await flushPromises()
-
-    const image = wrapper.get('img')
-    expect(image.attributes('alt')).toBe('产物截图：screen.png')
-    await image.trigger('error')
-    expect(wrapper.text()).toContain('截图载入失败')
-    expect(mocks.fetchArtifactTailPreview).not.toHaveBeenCalled()
-
-    route.query = { artifactId: capture.id }
+    expect(wrapper.text()).toContain('content:readme.md:head')
+    expect(wrapper.text()).not.toContain('已保存原件')
+    expect(wrapper.text()).not.toContain('saved original')
+    const previewPending = deferred<ArtifactPreview>()
+    mocks.head.mockReturnValueOnce(previewPending.promise)
+    route.query = { artifactId: saved.id }
     await flushPromises()
-    expect(wrapper.text()).toContain('该类型不支持在线文本预览')
-    expect(mocks.fetchArtifactTailPreview).not.toHaveBeenCalled()
+    await choose('output.txt')
+    previewPending.resolve(savedPreview({ content: 'OLD-SAVED' }))
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('OLD-SAVED')
+    expect(route.query.artifactId).toBeUndefined()
   })
-
-  it('reports clipboard success only after resolution and handles rejection', async () => {
-    const item = artifact({ id: 'copy', uri: 'copy.md' })
-    queryState.data.value = [item]
-    route.query = { artifactId: item.id }
-    const copyRequest = deferred<void>()
-    const writeText = vi
-      .fn()
-      .mockReturnValueOnce(copyRequest.promise)
-      .mockRejectedValueOnce(new Error('denied'))
-    vi.stubGlobal('navigator', { clipboard: { writeText } })
-    mountPage()
-    await flushPromises()
-    buttonByText('文件信息').click()
-    await flushPromises()
-
-    buttonByText('复制 HASH').click()
-    await flushPromises()
-    expect(writeText).toHaveBeenCalledWith(item.sha256)
-    expect(mocks.showToast).not.toHaveBeenCalled()
-    copyRequest.resolve(undefined)
-    await flushPromises()
-    expect(mocks.showToast).toHaveBeenLastCalledWith('SHA256 HASH 值已复制到剪切板', 'success')
-
-    buttonByText('复制 HASH').click()
-    await flushPromises()
-    expect(mocks.showToast).toHaveBeenLastCalledWith('复制 SHA256 HASH 失败', 'danger')
+  it('blocks mismatched saved preview identity and arbitrary exception detail', async () => {
+    route.query = { artifactId: saved.id }
+    mocks.head.mockResolvedValue(savedPreview({ project_id: 'other', content: 'SECRET' }))
+    await render()
+    expect(wrapper.text()).not.toContain('SECRET')
+    expect(wrapper.text()).toContain('读取失败')
   })
 })

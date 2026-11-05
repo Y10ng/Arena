@@ -25,13 +25,22 @@ describe('password change validation', () => {
 })
 
 describe('safe redirect', () => {
-  it('accepts local application paths', () => {
-    expect(safeRedirect('/projects/one?tab=runs')).toBe('/projects/one?tab=runs')
+  it.each(['/', '/projects/one/runs?runId=run-a#output', '/reports?reportId=report-a'])(
+    'preserves local application path %s', (path) => {
+      expect(safeRedirect(path)).toBe(path)
+    },
+  )
+
+  it.each([
+    undefined, null, [], '', 'projects', '//example.test', 'https://example.test',
+    '/change-password', '/change-password?redirect=/',
+  ].map((value) => ({ value })))('falls back to projects for invalid or looping redirect $value', ({ value }) => {
+    expect(safeRedirect(value)).toBe('/projects')
   })
 
-  it('rejects external and password-page loops', () => {
-    expect(safeRedirect('//example.test')).toBe('/')
-    expect(safeRedirect('https://example.test')).toBe('/')
-    expect(safeRedirect('/change-password?redirect=/')).toBe('/')
+  it('honors an explicit fallback without replacing a valid deep link', () => {
+    expect(safeRedirect('//example.test', '/reports')).toBe('/reports')
+    expect(safeRedirect('/change-password', '/reports')).toBe('/reports')
+    expect(safeRedirect('/projects/one', '/reports')).toBe('/projects/one')
   })
 })

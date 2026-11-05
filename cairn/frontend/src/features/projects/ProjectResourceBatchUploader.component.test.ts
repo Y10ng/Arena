@@ -1,7 +1,9 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useProjectResourceBatch } from './useProjectResourceBatch'
 import ProjectResourceBatchUploader from './ProjectResourceBatchUploader.vue'
 import { ApiError } from '@/api/client'
+import type { ProjectResourceBatchMember } from '@/api/types'
 
 const mocks = vi.hoisted(() => ({
   createBatch: vi.fn(),
@@ -38,13 +40,13 @@ const config = {
   kinds: ['note', 'script', 'file'],
   limits: {
     max_active_count: 200,
-    max_file_bytes: 10 * 1024 * 1024,
-    max_active_total_bytes: 100 * 1024 * 1024,
-    max_zip_upload_bytes: 50 * 1024 * 1024,
+    max_file_bytes: 500_000_000,
+    max_active_total_bytes: 2_000_000_000,
+    max_zip_upload_bytes: 500_000_000,
     max_zip_entries: 400,
     max_compression_ratio: 200,
     max_open_batches_per_user: 4,
-    max_staged_bytes_per_user: 200 * 1024 * 1024,
+    max_staged_bytes_per_user: 4_000_000_000,
     max_path_bytes: 1024,
     max_path_segment_bytes: 255,
   },
@@ -79,6 +81,15 @@ beforeEach(() => {
   mocks.showToast.mockReset()
 })
 
+afterEach(() => { vi.restoreAllMocks() })
+
+// 这里只验证浏览器预检，不把 size fixture 当成真实 500 MB 传输验收。
+function sizedFile(name: string, size: number) {
+  const file = new File(['fixture'], name)
+  Object.defineProperty(file, 'size', { value: size })
+  return file
+}
+
 describe('ProjectResourceBatchUploader', () => {
   const selectFiles = async (wrapper: ReturnType<typeof mount>, files: File[]) => {
     const input = wrapper.find<HTMLInputElement>('input[type="file"]')
@@ -86,6 +97,54 @@ describe('ProjectResourceBatchUploader', () => {
     await input.trigger('change')
     await flushPromises()
   }
+
+  it.each(['选择', '拖放'])('%s 混合边界文件时只弹一次，超限不入队且合法项继续', async (mode) => {
+    const allowed = sizedFile('allowed.bin', 500_000_000)
+    const oversized = [sizedFile('large.bin', 500_000_001), sizedFile('larger.bin', 500_000_002)]
+    mocks.uploadFile.mockResolvedValue({ id: 'allowed', path: allowed.name, kind: 'file', source: 'file', size_bytes: allowed.size, sha256: 'a'.repeat(64) })
+    const wrapper = mount(ProjectResourceBatchUploader, { attachTo: document.body, props: { modelValue: null } })
+    try {
+      await flushPromises()
+      expect(wrapper.text()).not.toContain('500 MB')
+      const files = [oversized[0]!, allowed, oversized[1]!]
+      if (mode === '选择') await selectFiles(wrapper, files)
+      else { await wrapper.trigger('drop', { dataTransfer: { files } }); await flushPromises() }
+      const dialogs = document.body.querySelectorAll('[role="dialog"]')
+      expect(dialogs).toHaveLength(1)
+      expect(dialogs[0]!.textContent).toContain('以下文件超过 500 MB，未上传。')
+      expect([...dialogs[0]!.querySelectorAll('li')].map((li) => li.textContent)).toEqual(['large.bin', 'larger.bin'])
+      expect(mocks.uploadFile).toHaveBeenCalledOnce()
+      expect(mocks.uploadFile.mock.calls[0]![1]).toBe(allowed)
+      expect(wrapper.find('.resource-pending-list').exists()).toBe(false)
+      expect(wrapper.emitted('pending')?.at(-1)).toEqual([false])
+      expect(mocks.showToast).not.toHaveBeenCalled()
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+      dialogs[0]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+      await flushPromises()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(document.body.querySelector('[role="dialog"]')).toBeNull()
+      expect(document.activeElement?.textContent).toBe('添加文件')
+    } finally { wrapper.unmount() }
+  })
+
+  it('独立 ZIP 超限不创建批次，服务端成员超限与配额拒绝不混淆', async () => {
+    const session = useProjectResourceBatch()
+    await session.importZip(sizedFile('too-large.zip', 500_000_001))
+    expect(mocks.createBatch).not.toHaveBeenCalled()
+    expect(session.pending.value).toBe(false)
+    mocks.importZip.mockRejectedValueOnce(new ApiError('成员过大', 413, { detail: { code: 'project_resource_file_too_large', category: 'zip_entry', limit_bytes: 500_000_000, path: 'inside/large.bin' } }))
+    await session.importZip(sizedFile('allowed.zip', 500_000_000))
+    expect(session.oversized.value).toEqual([{ name: 'inside/large.bin', limit: 500_000_000, member: true }])
+    expect(session.pending.value).toBe(false)
+    mocks.uploadFile.mockRejectedValueOnce(new ApiError('暂存总额超限', 413, { detail: { code: 'project_resource_quota_exceeded' } }))
+    await expect(session.uploadFiles([new File(['x'], 'quota.bin')])).rejects.toThrow('暂存总额超限')
+    expect(session.oversized.value).toEqual([])
+    expect(session.uploads.value[0]!.state).toBe('failed')
+    Object.defineProperty(session.uploads.value[0]!.file, 'size', { value: 500_000_001 })
+    await session.retryUpload(session.uploads.value[0]!)
+    expect(session.pending.value).toBe(false)
+    expect(mocks.uploadFile).toHaveBeenCalledOnce()
+  })
 
   it('retains successful members and only retries the explicitly rejected file', async () => {
     const first = new File(['one'], 'first.txt')
@@ -148,45 +207,48 @@ describe('ProjectResourceBatchUploader', () => {
     wrapper.unmount()
   })
 
-  it('accepts an unknown file upload only after batch membership and original-byte digest agree', async () => {
+  it('以随机 uploadId 核对未知上传，保留 File 且禁止整文件读取或重传', async () => {
     const file = new File(['one'], 'confirmed.txt')
-    const arrayBuffer = vi
-      .spyOn(file, 'arrayBuffer')
-      .mockResolvedValue(new Uint8Array([1, 2, 3]).buffer)
-    const digest = vi.fn().mockResolvedValue(new Uint8Array(32).fill(0xaa).buffer)
-    vi.stubGlobal('crypto', { subtle: { digest } })
+    const arrayBuffer = vi.spyOn(file, 'arrayBuffer').mockRejectedValue(new Error('禁止整文件读取'))
     mocks.uploadFile.mockRejectedValue(new TypeError('响应断开'))
-    mocks.getBatch.mockResolvedValue({
-      ...emptyBatch,
-      resource_count: 1,
-      total_bytes: 3,
-      members: [
-        {
-          id: 'confirmed',
-          path: file.name,
-          source: 'file',
-          kind: 'file',
-          size_bytes: 3,
-          sha256: 'aa'.repeat(32),
-        },
-      ],
-    })
-    const wrapper = mount(ProjectResourceBatchUploader, {
-      attachTo: document.body,
-      props: { modelValue: null },
-    })
+    const session = useProjectResourceBatch()
+    await expect(session.uploadFiles([file])).rejects.toThrow('响应断开')
+    const upload = session.uploads.value[0]!
+    expect(upload.file).toBe(file)
+    expect(upload.uploadId).toMatch(/^prm_[a-f0-9]{32}$/)
+    expect(mocks.uploadFile).toHaveBeenCalledWith('batch-1', file, file.name, undefined, undefined, upload.uploadId)
+    const member = { id: 'another-upload', path: file.name, source: 'file', kind: 'file', size_bytes: 3, sha256: 'a'.repeat(64) }
+    mocks.getBatch.mockResolvedValue({ ...emptyBatch, resource_count: 1, total_bytes: 3, members: [member] })
+    await expect(session.checkBatch()).rejects.toThrow('仍有操作结果未确认')
+    expect(session.uploads.value[0]!.file).toBe(file)
+    await session.retryUpload(upload)
+    session.removeUpload(upload)
+    expect(session.pending.value).toBe(true)
+    mocks.getBatch.mockResolvedValue({ ...emptyBatch, resource_count: 1, total_bytes: 3, members: [{ ...member, id: upload.uploadId }] })
+    await session.checkBatch()
+    expect(session.pending.value).toBe(false)
+    expect(arrayBuffer).not.toHaveBeenCalled()
+    expect(mocks.uploadFile).toHaveBeenCalledOnce()
+  })
+
+  it('添加混合大小文件保留已有成员未保存路径，服务端明确拒绝仅移除当前项', async () => {
+    const member: ProjectResourceBatchMember = { id: 'existing', path: 'existing.bin', kind: 'file', source: 'file', size_bytes: 3, sha256: 'a'.repeat(64) }
+    const wrapper = mount(ProjectResourceBatchUploader, { attachTo: document.body, props: { modelValue: { ...emptyBatch, state: 'open', resource_count: 1, total_bytes: 3, members: [member] } } })
     try {
       await flushPromises()
-      await selectFiles(wrapper, [file])
-      expect(arrayBuffer).toHaveBeenCalledOnce()
-      expect(digest).toHaveBeenCalledWith('SHA-256', new Uint8Array([1, 2, 3]).buffer)
-      expect(wrapper.emitted('pending')?.at(-1)).toEqual([false])
-      expect(wrapper.text()).toContain('已核对临时批次')
-      expect(mocks.uploadFile).toHaveBeenCalledOnce()
-    } finally {
-      wrapper.unmount()
-      vi.unstubAllGlobals()
-    }
+      const input = wrapper.get<HTMLInputElement>('[aria-label="资源相对路径"]')
+      await input.setValue('unsaved.bin')
+      mocks.uploadFile.mockResolvedValueOnce({ ...member, id: 'new', path: 'new.bin' })
+        .mockRejectedValueOnce(new ApiError('文件过大', 413, { detail: { code: 'project_resource_file_too_large', category: 'file', limit_bytes: 500_000_000 } }))
+      await selectFiles(wrapper, [new File(['new'], 'new.bin'), new File(['bad'], 'rejected.bin'), sizedFile('oversized.bin', 500_000_001)])
+      expect(input.element.value).toBe('unsaved.bin')
+      expect(wrapper.emitted('pending')?.at(-1)).toEqual([true])
+      expect(wrapper.find('.resource-pending-list').exists()).toBe(false)
+      expect(document.body.querySelectorAll('[role="dialog"]')).toHaveLength(1)
+      expect(mocks.showToast).not.toHaveBeenCalled()
+      const latest = wrapper.emitted('update:modelValue')?.at(-1)?.[0] as { members: { path: string }[] }
+      expect(latest.members.map((item) => item.path)).toEqual(['existing.bin', 'new.bin'])
+    } finally { wrapper.unmount() }
   })
 
   it('retains the pending file and batch if cancellation is rejected', async () => {
@@ -234,12 +296,32 @@ describe('ProjectResourceBatchUploader', () => {
     await flushPromises()
 
     expect(mocks.createBatch).toHaveBeenCalledOnce()
-    expect(mocks.uploadFile).toHaveBeenCalledWith('batch-1', file, 'image.png')
+    expect(mocks.uploadFile).toHaveBeenCalledWith('batch-1', file, 'image.png', undefined, undefined, expect.stringMatching(/^prm_[a-f0-9]{32}$/))
     expect(arrayBuffer).not.toHaveBeenCalled()
     expect(
       document.body.querySelector<HTMLInputElement>('[aria-label="资源相对路径"]')?.value,
     ).toBe('image.png')
     expect(document.body.textContent).toContain('文件')
+    wrapper.unmount()
+  })
+
+  it('accepts dropped files on the compact uploader without implicitly expanding ZIP', async () => {
+    const file = new File(['zip-bytes'], 'raw.zip')
+    mocks.uploadFile.mockResolvedValue({
+      id: 'raw-zip', kind: 'file', path: 'raw.zip', size_bytes: file.size,
+      sha256: 'c'.repeat(64), source: 'file',
+    })
+    const wrapper = mount(ProjectResourceBatchUploader, { props: { modelValue: null } })
+    await flushPromises()
+    await wrapper.trigger('dragover')
+    expect(wrapper.classes()).toContain('is-dragging')
+    await wrapper.trigger('drop', { dataTransfer: { files: [file] } })
+    await flushPromises()
+    expect(mocks.uploadFile).toHaveBeenCalledWith('batch-1', file, 'raw.zip', undefined, undefined, expect.stringMatching(/^prm_[a-f0-9]{32}$/))
+    expect(mocks.importZip).not.toHaveBeenCalled()
+    expect(wrapper.classes()).not.toContain('is-dragging')
+    expect(wrapper.find('.resource-member-details > summary').text()).toBe('raw.zip')
+    expect(wrapper.find('.resource-member-details').attributes('open')).toBeUndefined()
     wrapper.unmount()
   })
 
@@ -286,10 +368,11 @@ describe('ProjectResourceBatchUploader', () => {
     })
     expect(wrapper.emitted('pending')?.at(-1)).toEqual([false])
 
-    document.body.querySelector<HTMLButtonElement>('button[aria-label="移除待导入资料"]')?.click()
+    expect(wrapper.find('.resource-member-details > summary').text()).toBe('docs/renamed.txt')
+    document.body.querySelector<HTMLButtonElement>('button[aria-label="移除待导入资料 docs/renamed.txt"]')?.click()
     await flushPromises()
     expect(mocks.deleteMember).toHaveBeenCalledWith('batch-1', 'member-zip')
-    expect(document.body.textContent).toContain('未添加辅助资料')
+    expect(wrapper.findAll('.resource-batch-member')).toHaveLength(0)
     wrapper.unmount()
   })
 })

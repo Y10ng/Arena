@@ -1,7 +1,7 @@
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { TSchema } from "typebox";
 import type { SubmissionDiagnostics } from "./submission.js";
-import type { ProjectToolsCapability } from "./project-tools.js";
+import { validateProjectToolNames, type ProjectToolsCapability } from "./project-tools.js";
 import type { TaskExecutionBinding } from "./task-execution.js";
 import type { HttpTrafficBinding } from "./http-flows.js";
 import type { FrozenHttpRenderCapability } from "./http-evidence-render.js";
@@ -84,9 +84,12 @@ export interface ReportSegmentCapability {
   segment_schema: TSchema;
   manifest_path: string;
 }
-export interface AgentRequest {
+export type AgentRequest = AgentRequestBase & (
+  { phase: "chat_turn"; project_id: string | null; conversation_id: string } |
+  { phase: keyof typeof PHASE_RESULT_KINDS; project_id: string; conversation_id?: never }
+);
+interface AgentRequestBase {
   protocol: "cairn-agent-request-v1";
-  project_id: string;
   task_run_id: string;
   phase: Phase;
   prompt: string;
@@ -124,6 +127,7 @@ export interface AgentRequest {
   cwd: string;
   session_root: string;
   capabilities: {
+    consumption?: { protocol: "cairn-consumption-v1"; id: string; spool_path: string };
     candidate_capture?: CandidateCaptureCapability;
     project_tools?: ProjectToolsCapability;
     task_execution?: TaskExecutionBinding;
@@ -136,7 +140,9 @@ export interface AgentRequest {
 export interface AgentEnvelope {
   protocol: "cairn-agent-result-v1";
   engine: "pi";
-  project_id: string;
+  project_id: string | null;
+  conversation_id?: string;
+  session_initialized?: boolean | null;
   task_run_id: string;
   phase: string;
   session: string;
@@ -144,6 +150,7 @@ export interface AgentEnvelope {
   result: JsonObject | null;
   submission_id: string | null;
   usage: JsonObject | null;
+  usage_missing_responses?: number | null;
   error: ({ code: string; message: string; path?: string } & Partial<SubmissionDiagnostics>) | null;
 }
 export class AgentFailure extends Error {
@@ -230,10 +237,12 @@ function parseReportSegments(value: unknown, raw: JsonObject): ReportSegmentCapa
 export function parseRequest(raw: unknown): AgentRequest {
   assert(object(raw), "$");
   assert(raw.protocol === "cairn-agent-request-v1", "protocol");
-  for (const key of ["project_id", "task_run_id", "phase", "prompt", "session"]) {
+  for (const key of ["task_run_id", "phase", "prompt", "session"]) {
     assert(typeof raw[key] === "string" && raw[key].length > 0 && !raw[key].includes("\0"), key);
   }
   const chat = raw.phase === "chat_turn";
+  assert(typeof raw.project_id === "string" && raw.project_id.length > 0 && !raw.project_id.includes("\0") || chat && raw.project_id === null, "project_id");
+  assert(chat ? typeof raw.conversation_id === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/.test(raw.conversation_id) : raw.conversation_id === undefined, "conversation_id");
   assert(chat || Object.hasOwn(PHASE_RESULT_KINDS, raw.phase as string), "phase");
   assert(/^pi:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(raw.session as string), "session");
   for (const key of ["resume", "conclude_only"]) assert(typeof raw[key] === "boolean", key);
@@ -277,14 +286,26 @@ export function parseRequest(raw: unknown): AgentRequest {
     assert(binding.structured_intent_binding === undefined || object(binding.structured_intent_binding), "binding.structured_intent_binding");
   }
   assert(object(raw.capabilities), "capabilities");
-  const capabilityKeys = Object.keys(raw.capabilities);
+  const consumption = raw.capabilities.consumption;
+  if (consumption !== undefined) {
+    assert(object(consumption) && exactKeys(consumption, ["protocol", "id", "spool_path"]), "capabilities.consumption");
+    assert(consumption.protocol === "cairn-consumption-v1" && typeof consumption.id === "string"
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(consumption.id)
+      && consumption.spool_path === `/tmp/cairn-prompts/pi-consumption-${consumption.id}.jsonl`, "capabilities.consumption");
+  }
+  const capabilityKeys = Object.keys(raw.capabilities).filter((key) => key !== "consumption");
   assert(chat
     ? capabilityKeys.length === 1 && capabilityKeys[0] === "project_tools"
     : capabilityKeys.length >= 1 && capabilityKeys.length <= 6 && capabilityKeys.includes("candidate_capture") && capabilityKeys.every((key) => ["candidate_capture", "execution_checkpoints", "report_segments", "task_execution", "http_traffic", "http_evidence_render"].includes(key)), "capabilities");
   const projectTools = raw.capabilities.project_tools;
   if (chat) {
     assert(raw.conclude_only === false && raw.binding === null && raw.continuation === undefined && maxRepairs === 0, "chat_turn");
-    assert(object(projectTools) && exactKeys(projectTools, ["protocol", "socket_path", "workspace_path", "forbidden_literals"]), "capabilities.project_tools");
+    assert(object(projectTools) && exactKeys(projectTools, ["protocol", "socket_path", "workspace_path", "forbidden_literals", "allowed_tools", "research_execution"]), "capabilities.project_tools");
+    const research = projectTools.research_execution;
+    assert(object(research) && exactKeys(research, ["protocol", "conversation_id", "task_run_id"])
+      && research.protocol === "cairn-conversation-research-v1" && research.conversation_id === raw.conversation_id
+      && research.task_run_id === raw.task_run_id, "capabilities.project_tools.research_execution");
+    validateProjectToolNames(projectTools.allowed_tools);
     assert(projectTools.protocol === "cairn-project-tools-v1", "capabilities.project_tools.protocol");
     assert(typeof projectTools.workspace_path === "string" && isAbsolute(projectTools.workspace_path) && /^[A-Za-z0-9_-][A-Za-z0-9_.-]{0,199}$/.test(basename(projectTools.workspace_path)) && dirname(projectTools.workspace_path) === (raw.cwd ?? "/home/kali/workspace"), "capabilities.project_tools.workspace_path");
     assert(typeof projectTools.socket_path === "string" && /^\/tmp\/cairn-prompts\/pi-project-[0-9a-f]{32}\.sock$/.test(projectTools.socket_path), "capabilities.project_tools.socket_path");
@@ -316,6 +337,7 @@ export function parseRequest(raw: unknown): AgentRequest {
   const reportSegments = raw.capabilities.report_segments === undefined ? undefined : parseReportSegments(raw.capabilities.report_segments, raw);
   assert(raw.phase !== "report_execute" || reportSegments !== undefined, "capabilities.report_segments");
   const capabilities: AgentRequest["capabilities"] = {
+    ...(consumption === undefined ? {} : { consumption: consumption as unknown as NonNullable<AgentRequest["capabilities"]["consumption"]> }),
     ...(chat ? { project_tools: projectTools as unknown as ProjectToolsCapability } : { candidate_capture: parseCandidateCapture(raw.capabilities.candidate_capture, reportSegments !== undefined) }),
     ...(taskExecution === undefined ? {} : { task_execution: taskExecution as unknown as TaskExecutionBinding }),
     ...(httpTraffic === undefined ? {} : { http_traffic: httpTraffic as unknown as HttpTrafficBinding }),
@@ -341,7 +363,9 @@ export function parseRequest(raw: unknown): AgentRequest {
 export function envelope(request: Partial<AgentRequest>): AgentEnvelope {
   return {
     protocol: "cairn-agent-result-v1", engine: "pi",
-    project_id: request.project_id ?? "", task_run_id: request.task_run_id ?? "",
+    project_id: request.phase === "chat_turn" ? request.project_id ?? null : request.project_id ?? "",
+    ...(request.phase === "chat_turn" ? { conversation_id: request.conversation_id, session_initialized: null, usage_missing_responses: null } : {}),
+    task_run_id: request.task_run_id ?? "",
     phase: request.phase ?? "", session: request.session ?? "",
     status: "failed", result: null, submission_id: null, usage: null, error: null,
   };

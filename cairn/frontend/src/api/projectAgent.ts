@@ -1,9 +1,10 @@
 import { api, apiRaw } from './client'
 import type { VerificationResult } from './verificationRequests'
+import type { ConsumptionSummary } from './types/consumption'
 
 export interface AgentConversation {
   id: string
-  project_id: string
+  project_id: string | null
   model_id: string | null
   model_display_name?: string | null
   model_name?: string | null
@@ -62,57 +63,106 @@ export interface AgentAttachmentLimits {
   max_total_bytes: number
 }
 
+export interface AgentArtifact {
+  id: string
+  title: string
+  download_url: string
+  source_project_id?: string
+  sources?: {
+    verified: { label: string; scope: string; version: string; verified_at: string; limitations?: string; reference: Record<string, unknown>; material_version?: Record<string, unknown> }[]
+    declared: string[]
+    declared_read_at: string | null
+    limitations: string[]
+  }
+}
+
 export interface AgentMessage {
   id: number
   client_message_id: string
+  project_id: string | null
   text: string
   created_at: string
   task_run_id: string | null
   status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
   answer: string | null
   error_code: string | null
-  artifacts: { id: string; title: string; download_url: string }[]
+  artifacts: AgentArtifact[]
   actions: AgentAction[]
   attachments: AgentAttachment[]
+  usage?: {
+    input_tokens: number | null
+    output_tokens: number | null
+    cache_read_tokens: number | null
+    cache_write_tokens: number | null
+  } | null
+  consumption?: ConsumptionSummary | null
+  consumption_error?: boolean
+  unobserved_consumption_bindings?: number | null
+  usage_missing_responses?: number | null
+  cancel_requested_at?: string | null
 }
 
-const conversationsPath = (projectId: string) =>
-  `/projects/${encodeURIComponent(projectId)}/agent-conversations`
-const conversationPath = (projectId: string, conversationId: string) =>
-  `${conversationsPath(projectId)}/${encodeURIComponent(conversationId)}`
+const conversationsPath = '/agent-conversations'
+const conversationPath = (conversationId: string) =>
+  `${conversationsPath}/${encodeURIComponent(conversationId)}`
 
-export const listAgentConversations = (projectId: string, signal?: AbortSignal) =>
-  api<AgentConversation[]>('GET', conversationsPath(projectId), undefined, signal)
+export const listAgentConversations = (signal?: AbortSignal) =>
+  api<AgentConversation[]>('GET', conversationsPath, undefined, signal)
 
-export const createAgentConversation = (projectId: string) =>
-  api<AgentConversation>('POST', conversationsPath(projectId), {})
+export const createAgentConversation = (projectId: string | null) =>
+  api<AgentConversation>('POST', conversationsPath, { project_id: projectId })
 
-export const listAgentMessages = (projectId: string, conversationId: string, signal?: AbortSignal) =>
-  api<AgentMessage[]>('GET', `${conversationPath(projectId, conversationId)}/messages?after=0`, undefined, signal)
+export const listAgentMessages = (conversationId: string, signal?: AbortSignal) =>
+  api<AgentMessage[]>('GET', `${conversationPath(conversationId)}/messages?after=0`, undefined, signal)
 
-export const listAgentWork = (projectId: string, conversationId: string, signal?: AbortSignal) =>
-  api<AgentWork[]>('GET', `${conversationPath(projectId, conversationId)}/actions`, undefined, signal)
+export const listAgentWork = (conversationId: string, signal?: AbortSignal) =>
+  api<AgentWork[]>('GET', `${conversationPath(conversationId)}/actions`, undefined, signal)
 
-export const deleteAgentConversation = (projectId: string, conversationId: string) =>
-  api<void>('DELETE', conversationPath(projectId, conversationId))
+export interface AgentCleanup {
+  request_id: string
+  state: 'requested' | 'completed' | 'failed'
+  attempts: number
+  retry_at: number
+  error_code: string | null
+  finished_at: string | null
+}
+export interface AgentCleanupResult { conversation_id: string; cleanup: AgentCleanup | null }
 
-export const listAgentAttachments = (projectId: string, conversationId: string, signal?: AbortSignal) =>
-  api<AgentAttachment[]>('GET', `${conversationPath(projectId, conversationId)}/attachments`, undefined, signal)
+export const deleteAgentConversation = (conversationId: string) =>
+  api<AgentCleanupResult>('DELETE', conversationPath(conversationId))
 
-export const getAgentAttachmentLimits = (projectId: string, conversationId: string, signal?: AbortSignal) =>
-  api<AgentAttachmentLimits>('GET', `${conversationPath(projectId, conversationId)}/attachment-limits`, undefined, signal)
+export const listAgentCleanupRequests = (signal?: AbortSignal) =>
+  api<AgentCleanupResult[]>('GET', `${conversationsPath}/cleanup-requests`, undefined, signal)
 
-export const uploadAgentAttachment = (projectId: string, conversationId: string, file: File) =>
-  apiRaw<AgentAttachment>('POST', `${conversationPath(projectId, conversationId)}/attachments?filename=${encodeURIComponent(file.name)}`, file)
+export const getAgentCleanup = (conversationId: string) =>
+  api<AgentCleanupResult>('GET', `${conversationPath(conversationId)}/cleanup`)
 
-export const deleteAgentAttachment = (projectId: string, conversationId: string, id: string) =>
-  api<void>('DELETE', `${conversationPath(projectId, conversationId)}/attachments/${encodeURIComponent(id)}`)
+export const stopAgentTurn = (conversationId: string, messageId: number) =>
+  api<AgentMessage>('POST', `${conversationPath(conversationId)}/messages/${messageId}/stop`)
 
-export const sendAgentMessage = (projectId: string, conversationId: string, body: { client_message_id: string; text: string; attachment_ids: string[] }) =>
-  api<AgentMessage>('POST', `${conversationPath(projectId, conversationId)}/messages`, body)
+export const listAgentAttachments = (conversationId: string, signal?: AbortSignal) =>
+  api<AgentAttachment[]>('GET', `${conversationPath(conversationId)}/attachments`, undefined, signal)
 
-export const agentEventsUrl = (projectId: string, conversationId: string, after: string) =>
-  `${conversationPath(projectId, conversationId)}/events?after=${encodeURIComponent(after)}`
+export const getAgentAttachmentLimits = (conversationId: string, signal?: AbortSignal) =>
+  api<AgentAttachmentLimits>('GET', `${conversationPath(conversationId)}/attachment-limits`, undefined, signal)
+
+export const uploadAgentAttachment = (conversationId: string, file: File) =>
+  apiRaw<AgentAttachment>('POST', `${conversationPath(conversationId)}/attachments?filename=${encodeURIComponent(file.name)}`, file)
+
+export const deleteAgentAttachment = (conversationId: string, id: string) =>
+  api<void>('DELETE', `${conversationPath(conversationId)}/attachments/${encodeURIComponent(id)}`)
+
+export interface AgentMessageInput {
+  client_message_id: string
+  text: string
+  attachment_ids: string[]
+  project_id: string | null
+}
+export const sendAgentMessage = (conversationId: string, body: AgentMessageInput) =>
+  api<AgentMessage>('POST', `${conversationPath(conversationId)}/messages`, body)
+
+export const agentEventsUrl = (conversationId: string, after: string) =>
+  `${conversationPath(conversationId)}/events?after=${encodeURIComponent(after)}`
 
 export function agentDownloadUrl(value: string): string | undefined {
   try {

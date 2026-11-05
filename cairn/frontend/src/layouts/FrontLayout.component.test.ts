@@ -1,10 +1,11 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { reactive, ref } from 'vue'
+import { reactive } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { VueWrapper } from '@vue/test-utils'
 import FrontLayout from './FrontLayout.vue'
 
 const mocks = vi.hoisted(() => ({
+  invalidateQueries: vi.fn(),
   router: {
     push: vi.fn(),
     replace: vi.fn(),
@@ -62,8 +63,7 @@ vi.mock('vue-router', () => ({
 }))
 
 vi.mock('@tanstack/vue-query', () => ({
-  useQuery: () => ({ data: ref(undefined) }),
-  useQueryClient: () => ({ invalidateQueries: vi.fn().mockResolvedValue(undefined) }),
+  useQueryClient: () => ({ invalidateQueries: mocks.invalidateQueries }),
 }))
 
 const wrappers: VueWrapper[] = []
@@ -85,7 +85,7 @@ function mockMobileViewport(matches: boolean) {
   )
 }
 
-function mountLayout() {
+function mountLayout(pageTitle = '页面内容') {
   const wrapper = mount(FrontLayout, {
     attachTo: document.body,
     global: {
@@ -98,7 +98,10 @@ function mountLayout() {
           props: ['to'],
           template: '<a :href="typeof to === \'string\' ? to : to.path || to.name"><slot /></a>',
         },
-        RouterView: { template: '<div data-testid="router-view" />' },
+        RouterView: {
+          setup: () => ({ pageTitle }),
+          template: '<article data-testid="router-view"><h1>{{ pageTitle }}</h1></article>',
+        },
       },
     },
   })
@@ -131,7 +134,7 @@ function paletteOptions() {
 }
 
 async function openCommandPalette() {
-  const trigger = document.body.querySelector<HTMLButtonElement>('.btn-command')
+  const trigger = document.body.querySelector<HTMLButtonElement>('button[aria-label="搜索与命令"]')
   if (!trigger) throw new Error('找不到命令面板触发器')
   trigger.focus()
   trigger.click()
@@ -168,11 +171,13 @@ beforeEach(() => {
   scrollIntoViewMock.mockReset()
   mockMobileViewport(false)
 
-  mocks.route.path = '/projects'
-  mocks.route.name = 'Projects'
-  mocks.route.query = {}
-  mocks.route.params = {}
-  mocks.route.matched = []
+  mocks.route = reactive({
+    path: '/projects',
+    name: 'Projects',
+    query: {},
+    params: {},
+    matched: [],
+  })
   mocks.authStore.displayName = 'analyst'
   mocks.authStore.isSuperAdmin = false
   mocks.authStore.session = { tenant_id: 'tenant-a' }
@@ -180,7 +185,9 @@ beforeEach(() => {
     isSidebarCollapsed: false,
     isCommandPaletteOpen: false,
     theme: 'dark',
-    toggleSidebar: vi.fn(),
+    toggleSidebar: vi.fn(() => {
+      uiStore.isSidebarCollapsed = !uiStore.isSidebarCollapsed
+    }),
     openCommandPalette: vi.fn(() => {
       uiStore.isCommandPaletteOpen = true
     }),
@@ -199,6 +206,7 @@ beforeEach(() => {
     clearProject: vi.fn(),
   })
 
+  mocks.invalidateQueries.mockReset().mockResolvedValue(undefined)
   mocks.router.push.mockReset().mockResolvedValue(undefined)
   mocks.router.replace.mockReset().mockResolvedValue(undefined)
   mocks.authStore.logout.mockReset().mockResolvedValue(undefined)
@@ -220,12 +228,33 @@ describe('FrontLayout overlay migration', () => {
     expect(sidebar.text()).toContain('Arena')
     expect(sidebar.get('.brand-logo-mark').text()).toBe('A')
     expect(sidebar.find('a[href="/projects?group=ungrouped"]').exists()).toBe(false)
-    expect(sidebar.text()).toContain('仪表盘')
-    expect(sidebar.text()).toContain('漏洞')
-    expect(sidebar.text()).toContain('Models')
-    expect(sidebar.text()).toContain('Workers')
-    expect(sidebar.text()).not.toContain('探索场景')
-    expect(sidebar.text()).not.toContain('Users')
+    expect(sidebar.get('.brand-link').attributes('href')).toBe('Projects')
+    expect(
+      sidebar
+        .get('section[aria-label="工作"]')
+        .findAll('a')
+        .map((link) => link.text()),
+    ).toEqual(['项目', '仪表盘'])
+    expect(
+      sidebar
+        .get('section[aria-label="成果"]')
+        .findAll('a')
+        .map((link) => link.text()),
+    ).toEqual(['漏洞', '复测', '报告', '流量'])
+    expect(
+      sidebar
+        .get('section[aria-label="研究支持"]')
+        .findAll('a')
+        .map((link) => link.text()),
+    ).toEqual(['计划'])
+    expect(document.querySelector('#sidebar-settings')).toBeNull()
+    await sidebar.get('button[aria-label="设置"]').trigger('click')
+    await flushPromises()
+    const settings = document.querySelector('#sidebar-settings')!
+    expect([...settings.querySelectorAll('a')].map((link) => link.textContent?.trim())).toEqual(['模型与 Worker', '漏洞复测配置'])
+    expect(sidebar.element.contains(settings)).toBe(false)
+    expect(settings.closest('[data-side]')?.getAttribute('data-side')).toBe('top')
+    expect(settings.querySelector('a[href="Monitoring"]')).toBeNull()
     expect(sidebar.find('.dispatcher-status').exists()).toBe(false)
 
     wrapper.unmount()
@@ -233,14 +262,25 @@ describe('FrontLayout overlay migration', () => {
     const adminWrapper = mountLayout()
     const adminSidebar = adminWrapper.get('aside[aria-label="主导航"]')
 
-    expect(adminSidebar.text()).toContain('探索场景')
-    expect(adminSidebar.text()).toContain('Users')
-    expect(adminSidebar.find('.dispatcher-status').exists()).toBe(true)
+    expect(
+      adminSidebar
+        .get('section[aria-label="研究支持"]')
+        .findAll('a')
+        .map((link) => link.text()),
+    ).toEqual(['资料库', '探索场景', '计划'])
+    expect(document.querySelector('#sidebar-settings')).toBeNull()
+    await adminSidebar.get('button[aria-label="设置"]').trigger('click')
+    await flushPromises()
+    expect([...document.querySelectorAll('#sidebar-settings a')].map((link) => link.textContent?.trim())).toEqual(['模型与 Worker', '漏洞复测配置', '用户管理', '提示词', '报告模板', '运行监控'])
+    expect(
+      adminSidebar.get('nav[aria-label="应用导航"]').find('a[href="Monitoring"]').exists(),
+    ).toBe(false)
+    expect(adminSidebar.find('.dispatcher-status').exists()).toBe(false)
   })
 
-  it('navigates to tasks without project groups and ignores the retired g n shortcut', async () => {
+  it('navigates to projects without project groups and ignores the retired g n shortcut', async () => {
     const wrapper = mountLayout()
-    const tasks = wrapper.findAll('a').find((link) => link.text() === '任务管理')!
+    const tasks = wrapper.get('section[aria-label="工作"] a[href="Projects"]')
     expect(tasks.attributes('href')).toBe('Projects')
     expect(wrapper.find('button[aria-label="新建项目组"]').exists()).toBe(false)
     expect(wrapper.find('[href*="?group="]').exists()).toBe(false)
@@ -249,6 +289,50 @@ describe('FrontLayout overlay migration', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'n', bubbles: true }))
     await flushPromises()
     expect(mocks.router.push).not.toHaveBeenCalled()
+  })
+
+  it('keeps keyboard destinations real and respects the monitoring role', async () => {
+    mountLayout()
+    const chord = async (key: string) => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', bubbles: true }))
+      window.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
+      await flushPromises()
+    }
+    await chord('s')
+    expect(mocks.router.push).toHaveBeenLastCalledWith({
+      name: 'ConsoleWorkers',
+      query: { section: 'models' },
+    })
+    mocks.router.push.mockClear()
+    await chord('m')
+    expect(mocks.router.push).not.toHaveBeenCalled()
+    mocks.authStore.isSuperAdmin = true
+    await chord('m')
+    expect(mocks.router.push).toHaveBeenLastCalledWith({ name: 'Monitoring' })
+    mocks.route.params = { id: 'project-a' }
+    mocks.route.matched = [{ path: '/projects/:id' }]
+    await chord('u')
+    expect(mocks.router.push).toHaveBeenLastCalledWith('/projects/project-a/runs')
+  })
+
+  it('does not intercept editing, composing or dialog single-key shortcuts', async () => {
+    mountLayout()
+    const select = document.createElement('select')
+    document.body.append(select)
+    select.focus()
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '[', bubbles: true }))
+    select.remove()
+    window.dispatchEvent(
+      new KeyboardEvent('keydown', { key: '[', isComposing: true, bubbles: true }),
+    )
+    expect(mocks.uiStore.toggleSidebar).not.toHaveBeenCalled()
+    await openCommandPalette()
+    const close = document.body.querySelector<HTMLButtonElement>(
+      '[role="dialog"] button[aria-label="关闭对话框"]',
+    )
+    close?.focus()
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '[', bubbles: true }))
+    expect(mocks.uiStore.toggleSidebar).not.toHaveBeenCalled()
   })
 
   it('provides a reachable mobile close control and closes after mobile navigation only', async () => {
@@ -260,6 +344,7 @@ describe('FrontLayout overlay migration', () => {
     expect(mocks.uiStore.toggleSidebar).toHaveBeenCalledTimes(1)
 
     mocks.uiStore.toggleSidebar.mockClear()
+    mocks.uiStore.isSidebarCollapsed = false
     const findingsLink = wrapper.findAll('a').find((link) => link.text() === '漏洞')
     if (!findingsLink) throw new Error('找不到漏洞导航')
     findingsLink.element.addEventListener('click', (event) => event.preventDefault())
@@ -267,17 +352,65 @@ describe('FrontLayout overlay migration', () => {
     expect(mocks.uiStore.toggleSidebar).toHaveBeenCalledTimes(1)
 
     mocks.uiStore.toggleSidebar.mockClear()
+    mocks.uiStore.isSidebarCollapsed = false
     mockMobileViewport(false)
     await findingsLink.trigger('click')
     expect(mocks.uiStore.toggleSidebar).not.toHaveBeenCalled()
   })
+
+  it('keeps settings in a Portal from the collapsed sidebar and restores focus on Escape', async () => {
+    mocks.authStore.isSuperAdmin = true
+    mocks.uiStore.isSidebarCollapsed = true
+    const wrapper = mountLayout()
+    const settingsButton = wrapper.get('button[aria-label="设置"]')
+    ;(settingsButton.element as HTMLButtonElement).focus()
+    await settingsButton.trigger('click')
+    await flushPromises()
+    expect(mocks.uiStore.isSidebarCollapsed).toBe(true)
+    expect(document.querySelector('#sidebar-settings')).not.toBeNull()
+    expect(wrapper.find('#sidebar-settings').exists()).toBe(false)
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushPromises()
+    expect(document.querySelector('#sidebar-settings')).toBeNull()
+    expect(document.activeElement).toBe(settingsButton.element)
+
+    await settingsButton.trigger('click')
+    await flushPromises()
+    mocks.route.name = 'Monitoring'
+    mocks.route.path = '/monitoring'
+    await flushPromises()
+    expect(document.querySelector('#sidebar-settings')).toBeNull()
+    expect(settingsButton.classes()).toContain('active')
+    await settingsButton.trigger('click')
+    await flushPromises()
+    expect(document.querySelector('#sidebar-settings a[href="Monitoring"]')?.getAttribute('aria-current')).toBe('page')
+  })
+
+  it.each([false, true])(
+    'refreshes through sidebar utilities and reports query failure: %s',
+    async (fails) => {
+      if (fails) mocks.invalidateQueries.mockRejectedValueOnce(new Error('refresh failed'))
+      const wrapper = mountLayout()
+      const refresh = wrapper.get('.sidebar-utilities button[aria-label="刷新页面数据"]')
+      await refresh.trigger('click')
+      await flushPromises()
+
+      expect(mocks.uiStore.triggerGlobalRefresh).toHaveBeenCalledTimes(1)
+      expect(mocks.invalidateQueries).toHaveBeenCalledWith({}, { throwOnError: true })
+      expect(refresh.attributes('disabled')).toBeUndefined()
+      if (fails) expect(mocks.uiStore.showToast).toHaveBeenCalledWith('刷新失败', 'danger')
+      else expect(mocks.uiStore.showToast).not.toHaveBeenCalled()
+    },
+  )
 
   it('shows account metadata and logs out through the Popover action', async () => {
     mountLayout()
 
     const trigger = document.body.querySelector<HTMLButtonElement>('.actor-trigger')
     if (!trigger) throw new Error('找不到账账户菜单触发器')
-    expect(trigger.textContent).toContain('A')
+    expect(trigger.getAttribute('aria-label')).toBe('账户：analyst')
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
     expect(trigger.textContent).toContain('analyst')
 
     trigger.click()
@@ -285,7 +418,10 @@ describe('FrontLayout overlay migration', () => {
 
     const popover = document.body.querySelector<HTMLElement>('[data-reka-popper-content-wrapper]')
     expect(popover?.textContent).toContain('个人账户')
-    expect(popover?.textContent).toContain('Tenant tenant-a')
+    expect(popover?.textContent).toContain('analyst')
+    expect(popover?.querySelector('[aria-label="账户信息"]')).toBeTruthy()
+    expect(trigger.getAttribute('aria-expanded')).toBe('true')
+    expect(popover?.textContent).not.toContain('tenant-a')
 
     bodyButton('退出登录').click()
     await flushPromises()
@@ -303,7 +439,10 @@ describe('FrontLayout overlay migration', () => {
     expect(dialog).toBeTruthy()
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false)
     expect(dialog?.getAttribute('aria-labelledby')).toBeTruthy()
-    expect(dialog?.getAttribute('aria-describedby')).toBeTruthy()
+    expect(dialog?.hasAttribute('aria-describedby')).toBe(false)
+    expect(dialog?.querySelector('.ui-dialog__description')).toBeNull()
+    expect(dialog?.querySelector('.item-subtitle')).toBeNull()
+    expect(dialog?.querySelector('.palette-footer')).toBeNull()
     expect(input.getAttribute('aria-label')).toBe('搜索命令')
     expect(input.getAttribute('aria-controls')).toBe('command-palette-results')
     expect(document.activeElement).toBe(input)
@@ -405,8 +544,8 @@ describe('FrontLayout overlay migration', () => {
 
     const optionText = paletteOptions().map((option) => option.textContent || '')
     expect(optionText.some((text) => text.includes('转到全局监控大屏'))).toBe(true)
-    await typePaletteQuery('管理 Users')
-    expect(paletteOptions().some((option) => option.textContent?.includes('管理 Users'))).toBe(true)
+    await typePaletteQuery('管理用户')
+    expect(paletteOptions().some((option) => option.textContent?.includes('管理用户'))).toBe(true)
 
     await typePaletteQuery('运行终端')
     const runsOption = paletteOptions().find((option) =>
@@ -423,50 +562,90 @@ describe('FrontLayout overlay migration', () => {
     expect(commandDialog()).toBeFalsy()
   })
 
-  it('renders semantic breadcrumb ancestors and updates only the project text after loading', async () => {
+  it('loads project context into the shared header host without repeating breadcrumbs', async () => {
     mocks.route.name = 'WorkspaceRuns'
     mocks.route.path = '/projects/project-a/runs'
     mocks.route.params = { id: 'project-a' }
     mocks.route.matched = [{ path: '/projects/:id' }]
-    const wrapper = mountLayout()
+    const wrapper = mountLayout('运行日志')
+    expect(mocks.workspaceStore.loadProject).toHaveBeenCalledWith('project-a')
+    expect(wrapper.get('#workbench-project-header').isVisible()).toBe(true)
+    expect(wrapper.find('nav[aria-label="面包屑"]').exists()).toBe(false)
+    expect(wrapper.get('main').text()).toBe('运行日志')
+    expect(wrapper.get('main').classes()).toContain('content-viewport--workspace')
+  })
 
-    const breadcrumb = wrapper.get('nav[aria-label="面包屑"]')
-    expect(breadcrumb.find('ol').exists()).toBe(true)
-    expect(breadcrumb.findAll('li')).toHaveLength(4)
-    expect(breadcrumb.findAll('a').map((link) => link.text())).toEqual([
-      'Arena',
-      '任务管理',
-      'project-a',
-    ])
-    expect(breadcrumb.findAll('[aria-current="page"]')).toHaveLength(1)
-    expect(breadcrumb.get('[aria-current="page"]').text()).toBe('运行日志')
-    expect(
-      breadcrumb
-        .findAll('.separator')
-        .every((separator) => separator.attributes('aria-hidden') === 'true'),
-    ).toBe(true)
+  it('keeps the project header host for the Agent workbench without adding shell breadcrumbs', () => {
+    mocks.route.name = 'WorkspaceAgent'
+    mocks.route.path = '/projects/project-a/agent'
+    mocks.route.params = { id: 'project-a' }
+    mocks.route.matched = [{ path: '/projects/:id' }]
+    const wrapper = mountLayout('项目对话')
 
-    mocks.workspaceStore.projectDetail = { project: { title: 'Loaded Project' } }
-    await flushPromises()
-
-    expect(breadcrumb.findAll('li')).toHaveLength(4)
-    expect(breadcrumb.text()).toContain('Loaded Project')
-    expect(breadcrumb.text()).not.toContain('project-a')
+    expect(wrapper.get('.app-layout').classes()).toContain('app-layout--agent')
+    expect(wrapper.get('header #workbench-project-header').text()).toBe('')
+    expect(wrapper.find('nav[aria-label="面包屑"]').exists()).toBe(false)
+    expect(wrapper.get('main').text()).toBe('项目对话')
+    expect(mocks.workspaceStore.loadProject).toHaveBeenCalledWith('project-a')
   })
 
   it.each([
+    { name: 'Projects', path: '/projects', label: '项目' },
+    { name: 'Overview', path: '/', label: '仪表盘' },
+    { name: 'ConsoleWorkers', path: '/console/workers', label: '模型与 Worker' },
     { name: 'Forbidden', path: '/forbidden', label: '无权访问' },
     { name: 'NotFound', path: '/missing/path', label: '页面不存在' },
-  ])('shows the $name status breadcrumb with one current page', ({ name, path, label }) => {
-    mocks.route.name = name
-    mocks.route.path = path
-    const wrapper = mountLayout()
-    const breadcrumb = wrapper.get('nav[aria-label="面包屑"]')
+  ])(
+    'does not repeat the current top-level location above page content: $name',
+    ({ name, path, label }) => {
+      mocks.route.name = name
+      mocks.route.path = path
+      const wrapper = mountLayout(label)
 
-    expect(breadcrumb.text()).toContain(`Arena/${label}`)
-    expect(breadcrumb.findAll('[aria-current="page"]')).toHaveLength(1)
-    expect(breadcrumb.get('[aria-current="page"]').text()).toBe(label)
-  })
+      expect(wrapper.find('nav[aria-label="面包屑"]').exists()).toBe(false)
+      expect(wrapper.get('main h1').text()).toBe(label)
+      expect(wrapper.findAll('h1')).toHaveLength(1)
+      expect(wrapper.get('.topbar').find('h1').exists()).toBe(false)
+    },
+  )
+
+  it.each([
+    {
+      name: 'VerificationDetail',
+      path: '/verifications/record-a',
+      parent: 'Verifications',
+      label: '复测',
+      title: '复测详情',
+    },
+    {
+      name: 'ProjectSchedule',
+      path: '/project-schedules/record-a',
+      parent: 'ProjectSchedules',
+      label: '计划',
+      title: '计划详情',
+    },
+  ])(
+    'retains the navigable parent and current location for $name without loading a project',
+    async ({ name, path, parent, label, title }) => {
+      mocks.route.name = name
+      mocks.route.path = path
+      mocks.route.params = { id: 'record-a' }
+      mocks.route.matched = [{ path: path.replace('record-a', ':id') }]
+      const wrapper = mountLayout(title)
+      const breadcrumb = wrapper.get('nav[aria-label="面包屑"]')
+
+      expect(breadcrumb.findAll('ol li')).toHaveLength(2)
+      expect(breadcrumb.get('a').text()).toBe(label)
+      expect(breadcrumb.get('a').attributes('href')).toBe(parent)
+      expect(breadcrumb.get('[aria-current="page"]').text()).toBe(title)
+      expect(wrapper.get('main h1').text()).toBe(title)
+      expect(mocks.workspaceStore.loadProject).not.toHaveBeenCalled()
+      expect(mocks.workspaceStore.clearProject).toHaveBeenCalledTimes(1)
+      await openCommandPalette()
+      await typePaletteQuery('运行终端')
+      expect(paletteOptions()).toHaveLength(0)
+    },
+  )
 
   it('hides privileged commands from tenant users and restores trigger focus after Escape', async () => {
     mountLayout()
@@ -474,9 +653,9 @@ describe('FrontLayout overlay migration', () => {
     const optionText = paletteOptions().map((option) => option.textContent || '')
 
     expect(optionText.some((text) => text.includes('转到全局监控大屏'))).toBe(false)
-    expect(optionText.some((text) => text.includes('管理 Users'))).toBe(false)
-    expect(optionText.some((text) => text.includes('管理 Models'))).toBe(true)
-    expect(optionText.some((text) => text.includes('管理 Workers'))).toBe(true)
+    expect(optionText.some((text) => text.includes('管理用户'))).toBe(false)
+    expect(optionText.some((text) => text.includes('模型与 Worker'))).toBe(true)
+    expect(optionText.some((text) => text.includes('漏洞复测配置'))).toBe(true)
     expect(optionText.some((text) => text.includes('查看运行终端'))).toBe(false)
 
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))

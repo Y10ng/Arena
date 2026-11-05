@@ -3,14 +3,15 @@
 from typing import Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 
 from cairn.server.auth import RequestPrincipal, protect_cookie_request, require_dispatcher
 from cairn.server.schemas.project_schedules import CreateScheduleRequest, ScheduleActionRequest, ScheduleTiming, UpdateScheduleRequest
 from cairn.server.schemas.projects import CreateProjectRequest
+from cairn.server.schemas.libraries import SelectableLibraryManifest
 from cairn.server.services.creation_requests import query_creation_request
 from cairn.server.services.project_schedules import (
-    consume_due_schedules, create_schedule, get_schedule, list_schedules,
+    consume_due_schedules, create_schedule, get_schedule, get_schedule_library_manifest, list_schedules,
     preview_schedule, schedule_action, schedule_history, update_schedule,
 )
 
@@ -44,6 +45,13 @@ def save(body: CreateScheduleRequest, principal: RequestPrincipal = Depends(prot
 @router.get("/project-schedules/{schedule_id}")
 def detail(schedule_id: str, principal: RequestPrincipal = Depends(protect_cookie_request)):
     return get_schedule(schedule_id, principal)
+
+
+@router.get("/project-schedules/{schedule_id}/library-manifests/{key}", response_model=SelectableLibraryManifest)
+def library_manifest(schedule_id: str, key: str, response: Response,
+                     principal: RequestPrincipal = Depends(protect_cookie_request)):
+    response.headers["Cache-Control"] = "no-store"
+    return get_schedule_library_manifest(schedule_id, key, principal)
 
 
 @router.get("/project-schedules/{schedule_id}/history")

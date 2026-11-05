@@ -76,7 +76,7 @@ from cairn.dispatcher.worker_result_gateway import (
     decode_pi_result,
     worker_failure_error_type,
 )
-from cairn.dispatcher.tasks.delivery import DeliveryUnavailable, DELIVERY_PROMPT, register_delivery, resume_continuation, resume_delivery, remaining_delivery_seconds
+from cairn.dispatcher.tasks.delivery import DeliveryUnavailable, DELIVERY_PROMPT, ResearchDeliveryBudget, register_delivery, resume_continuation, resume_delivery, remaining_delivery_seconds
 from cairn.dispatcher.workers.registry import get_driver
 from cairn.server.models import Intent, ProjectDetail, VulnerabilityVerifierTarget
 
@@ -205,6 +205,8 @@ def run_explore_task(
     lease.start()
     execute_result = None
     try:
+        cancellation.pause_clock = container_manager.research_clock(project.project.id)
+        delivery_budget = ResearchDeliveryBudget(cancellation.pause_clock)
         if delivery_context is None and structured_assessment:
             if verifier_assessment:
                 observation_id = str(intent.target_observation_id or "").strip()
@@ -290,6 +292,7 @@ def run_explore_task(
                 worker,
                 delivery_context,
                 ("explore_execute", "verifier_execute"),
+                client=client, budget=delivery_budget,
             )
             # 交付重试以冻结 phase 为准；实时项目开关或 Intent 角色漂移不能改写原执行身份。
             execute_phase = frozen_delivery["phase"]
@@ -321,7 +324,7 @@ def run_explore_task(
             frozen_delivery = register_delivery(
                 client, container_manager, container_name, project, task_run_id, worker,
                 phase=execute_phase, session=session, timeout_seconds=execution_timeout,
-                binding=request_binding, inputs=None,
+                binding=request_binding, inputs=None, budget=delivery_budget,
             )
 
             # Explore prompt 使用图谱快照、当前 Intent 和知识库上下文，输出必须落到该 Intent 上。
@@ -373,7 +376,7 @@ def run_explore_task(
         task_execution = None if delivery_context is not None else container_manager.prepare_task_execution(
             project.project, task_run_id, cancellation, container_runtime,
         )
-        execution_timeout = remaining_delivery_seconds(frozen_delivery)
+        execution_timeout = remaining_delivery_seconds(frozen_delivery, budget=delivery_budget)
         execute = driver.build_execute(
             worker, prompt, session, phase=execute_phase,
             project_id=project.project.id, task_run_id=task_run_id,
@@ -842,7 +845,8 @@ def run_explore_task(
         conclude_or_release_on_failure(client, project.project.id, intent.id, worker.name, "explore task crashed", task_run_id=task_run_id, enabled=failure_conclusion_enabled, structured=structured_assessment, slot_key=getattr(intent, "slot_key", None))
         return "container_failed"
     finally:
-        container_manager.stop_task_execution(project.project.id, task_run_id)
+        if not cancellation.detached:
+            container_manager.stop_task_execution(project.project.id, task_run_id)
         # 所有终态和异常路径都由任务所有者确定性回收进程输出文件。
         if execute_result is not None:
             execute_result.cleanup()

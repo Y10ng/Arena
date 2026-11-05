@@ -103,7 +103,7 @@ b.serve_forever()
         bridge = TrafficExecutionBridge(
             client, api.machine, root=root / 'runtime',
             dispatcher_id=api.task_runs[0]['runtime_context']['dispatcher_id'],
-            config=SimpleNamespace(traffic_gateway_image=image, task_executor_image='arena-task-executor:local'),
+            config=SimpleNamespace(traffic_gateway_image=image, image='arena-worker:local'),
             isolated=True, upstream_ca=site / 'ca.pem',
         )
         runtime = bridge._runtime(api.project_id)
@@ -151,7 +151,8 @@ b.serve_forever()
             for mode, task_run, (_, proxy_ip) in zip(('http', 'socks5'), api.task_runs, proxies):
                 public = configure(mode, proxy_ip, **auth)
                 bridge.prepare_task(project, task_run['id'], TaskCancellation(generation=task_run['execution_generation']))
-                scope = bridge.task(project.id, task_run['id']).scope
+                scope_id = bridge.task(project.id, task_run['id']).scope_id
+                scope = next(scope for scope in runtime.scopes if scope.id == scope_id)
                 scopes.append(scope)
                 assert runtime.manifest['scopes'][scope.id]['test_egress'] == public
                 start = len(paths)
@@ -255,7 +256,8 @@ for method, target in [('GET', 'http://controlled.test:8989/fragmented-proxy'), 
             assert admitted.status_code == 201
             task_run = admitted.data
             bridge.prepare_task(project, task_run['id'], TaskCancellation(generation=task_run['execution_generation']))
-            direct = bridge.task(project.id, task_run['id']).scope
+            scope_id = bridge.task(project.id, task_run['id']).scope_id
+            direct = next(scope for scope in runtime.scopes if scope.id == scope_id)
             for scheme in ('http', 'https'):
                 curl(direct, f'/direct-{scheme}', scheme=scheme)
             wait_for(lambda: sum(base64.b64decode(row['request']['target_base64']).startswith(b'/direct-') and row['state'] == 'complete' for row in flows()) == 2)
@@ -293,7 +295,7 @@ def test_loopback_capture_keeps_namespace_and_selected_egress(traffic_api):
         bridge = TrafficExecutionBridge(
             client, api.machine, root=root / 'runtime',
             dispatcher_id=api.task_runs[0]['runtime_context']['dispatcher_id'],
-            config=SimpleNamespace(traffic_gateway_image=image, task_executor_image='arena-task-executor:local'),
+            config=SimpleNamespace(traffic_gateway_image=image, image='arena-worker:local'),
             isolated=True, upstream_ca=site / 'ca.pem',
         )
         runtime = bridge._runtime(api.project_id)
@@ -351,7 +353,8 @@ def test_loopback_capture_keeps_namespace_and_selected_egress(traffic_api):
                 response = api.user.put(prefix + '/test-egress', json=config, timeout=10)
                 assert response.status_code == 200
                 bridge.prepare_task(project, task_run['id'], TaskCancellation(generation=task_run['execution_generation']))
-                scope = bridge.task(project.id, task_run['id']).scope
+                scope_id = bridge.task(project.id, task_run['id']).scope_id
+                scope = next(scope for scope in runtime.scopes if scope.id == scope_id)
                 scopes.append(scope)
                 if mode != 'direct':
                     proxies.append((proxy, scope))

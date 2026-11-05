@@ -1,5 +1,5 @@
 <template>
-  <div v-if="loading" class="data-table__state" role="status" aria-live="polite">
+  <div v-if="loading && rows.length === 0" class="data-table__state" role="status" aria-live="polite">
     {{ loadingLabel }}
   </div>
   <div v-else-if="rows.length === 0" class="data-table__state">
@@ -11,6 +11,7 @@
     class="data-table__scroll"
     role="region"
     :aria-label="caption"
+    :aria-busy="loading ? 'true' : undefined"
     tabindex="0"
   >
     <table
@@ -104,7 +105,7 @@
               <div class="data-table__actions">
                 <Button
                   class="data-table__action-trigger"
-                  variant="link"
+                  variant="ghost"
                   size="sm"
                   :aria-label="actionLabel?.(row, rowIndex)"
                   :aria-expanded="isRowExpanded ? Boolean(isRowExpanded(row, rowIndex)) : undefined"
@@ -118,13 +119,13 @@
                     :class="{ 'is-expanded': isRowExpanded(row, rowIndex) }"
                     aria-hidden="true"
                   />
-                  {{
+                  <span v-if="!actionIconOnly">{{
                     isRowExpanded
                       ? isRowExpanded(row, rowIndex)
                         ? '收起'
                         : '展开'
                       : actionColumnLabel
-                  }}
+                  }}</span>
                 </Button>
                 <slot name="row-actions" :row="row" :row-index="rowIndex" />
               </div>
@@ -151,6 +152,7 @@
 <script setup lang="ts" generic="Row, ColumnKey extends string = string">
 import { computed, ref, watch } from 'vue'
 import type { HTMLAttributes } from 'vue'
+import { toLogicalPixels } from '@/lib/uiScale'
 import Button from '../ui/Button.vue'
 import { ChevronDown } from '@lucide/vue'
 
@@ -203,6 +205,7 @@ const props = withDefaults(
     rowAttrs?: (row: Row, rowIndex: number) => DataTableRowAttrs
     actionLabel?: (row: Row, rowIndex: number) => string
     actionColumnLabel?: string
+    actionIconOnly?: boolean
   }>(),
   {
     density: 'default',
@@ -358,7 +361,7 @@ function resizeColumn(event: PointerEvent) {
   if (columnDrag?.pointerId !== event.pointerId) return
   setBoundaryWidth(
     columnDrag.index,
-    columnDrag.width + event.clientX - columnDrag.startX,
+    columnDrag.width + toLogicalPixels(event.clientX - columnDrag.startX),
     columnDrag.pairWidth,
   )
 }
@@ -406,8 +409,8 @@ defineOptions({ name: 'DataTable' })
 <style scoped>
 .data-table__state {
   width: 100%;
-  padding: var(--space-5);
-  border: 1px dashed var(--border);
+  padding: var(--space-8) var(--space-5);
+  border: 1px solid var(--border);
   border-radius: var(--radius-md);
   color: var(--text-faint);
   text-align: center;
@@ -449,9 +452,8 @@ defineOptions({ name: 'DataTable' })
   display: block;
   min-width: 0;
   max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .data-table__column-resizer {
@@ -470,7 +472,7 @@ defineOptions({ name: 'DataTable' })
   inset-block: 20%;
   inset-inline-end: 2px;
   width: 2px;
-  background: var(--border-strong);
+  background: var(--color-control-border);
 }
 
 .data-table__column-resizer:hover::after,
@@ -496,12 +498,14 @@ defineOptions({ name: 'DataTable' })
 
 .data-table th,
 .data-table td {
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-2) var(--space-4);
   border-bottom: 1px solid var(--border-subtle);
   vertical-align: middle;
 }
 
 .data-table th {
+  height: var(--table-heading-height);
+  padding-block: var(--space-2);
   background: var(--bg-inset);
   color: var(--text-muted);
   font-size: var(--text-sm);
@@ -510,7 +514,7 @@ defineOptions({ name: 'DataTable' })
 }
 
 .data-table tbody tr {
-  height: calc(var(--control-height) + var(--space-4));
+  height: var(--table-row-height);
   transition: background-color var(--dur-fast) var(--ease);
 }
 
@@ -518,8 +522,14 @@ defineOptions({ name: 'DataTable' })
   background: var(--surface-hover);
 }
 
-.data-table__row--active {
+.data-table tbody tr.data-table__row--active,
+.data-table tbody tr.data-table__row--active:hover {
   background: var(--surface-selected);
+}
+
+.data-table tbody tr:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .data-table tbody tr:last-child td {
@@ -536,17 +546,17 @@ defineOptions({ name: 'DataTable' })
 }
 
 .data-table--traffic {
-  font-size: var(--text-xs);
-  line-height: 18px;
+  font-size: var(--text-dense);
+  line-height: var(--leading-normal);
 }
 
 .data-table--traffic th,
 .data-table--traffic td {
-  padding: var(--space-1) var(--space-2);
+  padding: var(--space-1) var(--space-3);
 }
 
 .data-table--traffic tbody tr {
-  height: 30px;
+  height: var(--control-height);
 }
 
 .data-table__cell--start {
@@ -626,7 +636,7 @@ defineOptions({ name: 'DataTable' })
 
 .data-table__detail {
   min-width: 0;
-  padding: var(--space-4);
+  padding: var(--space-5) var(--space-6);
   border-block-start: 1px solid var(--border-subtle);
 }
 

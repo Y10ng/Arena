@@ -1,5 +1,5 @@
 """面向项目用户的运行事实白名单，不复用管理员完整诊断。"""
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -72,6 +72,8 @@ class _ProjectRuntimeBase(BaseModel):
     observed_at: str
     execution_generation: int
     project_status: ProjectStatus
+    # 与动作资格使用同一项目记录，供页面关联受理与物理回执。
+    execution_control: dict[str, Any] = Field(default_factory=dict)
     state: str
     code: str
     message: str

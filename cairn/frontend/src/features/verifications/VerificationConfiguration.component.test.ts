@@ -6,6 +6,7 @@ import type { AuthSession } from '@/api/auth'
 import type { VerificationConfiguration, VerificationConfigurationOptions } from '@/api/verificationRequests'
 import router from '@/router'
 import { commandItemsFromRegistry, sidebarNavigation } from '@/router/navigationRegistry'
+import { ConfirmAction } from '@/components/patterns'
 import VerificationIntegrations from './VerificationIntegrations.vue'
 import VerificationForm from './VerificationForm.vue'
 import Verifications from './Verifications.vue'
@@ -165,7 +166,7 @@ describe('个人复测执行配置', () => {
     if (entry !== '详情返回') {
       expect(mocks.replace).not.toHaveBeenCalled()
       total = 40
-      if (entry === '刷新') await click(wrapper, '刷新')
+      if (entry === '刷新') { await wrapper.get('button[aria-label="刷新复测记录"]').trigger('click'); await flushPromises() }
       else {
         wrapper.findComponent({ name: 'VerificationActions' }).vm.$emit('deleted', item.id)
         await flushPromises()
@@ -220,11 +221,23 @@ describe('个人复测执行配置', () => {
     expect(mocks.saveConfiguration).toHaveBeenCalledWith(undefined, { model_id: 'model-a', ...choices().defaults, display_name: '本人修改' })
     expect(wrapper.text()).toContain('本地保存失败')
     expect(fieldValue(wrapper)).toBe('本人修改')
-    vi.spyOn(window, 'confirm').mockReturnValue(false)
-    expect(mocks.leave.mock.calls[0]![0]()).toBe(false)
+    const leaving = mocks.leave.mock.calls[0]![0]()
+    await flushPromises()
+    const prompt = wrapper.findAllComponents(ConfirmAction).find((item) => item.props('title') === '确认离开当前编辑')!
+    expect(prompt.props('open')).toBe(true)
+    prompt.vm.$emit('update:open', false)
+    expect(await leaving).toBe(false)
     await click(wrapper, '重新读取已保存配置')
+    expect(prompt.props('open')).toBe(true)
+    prompt.vm.$emit('update:open', false)
+    await flushPromises()
     expect(mocks.configuration).toHaveBeenCalledTimes(1)
     expect(fieldValue(wrapper)).toBe('本人修改')
+    await click(wrapper, '重新读取已保存配置')
+    prompt.vm.$emit('confirm')
+    await flushPromises()
+    expect(mocks.configuration).toHaveBeenCalledTimes(2)
+    expect(fieldValue(wrapper)).toBe('已保存名称')
   })
 
   it('无模型时只引导个人模型；普通 URL 越界明确拒绝且不退回本人加载', async () => {
@@ -267,7 +280,7 @@ describe('个人复测执行配置', () => {
     const wrapper = await mountPage(VerificationIntegrations)
     await wrapper.get('#verification-config-name').setValue('旧身份提交')
     await wrapper.get('form.config-form').trigger('submit')
-    expect(mocks.leave.mock.calls[0]![0]()).toBe(false)
+    expect(await mocks.leave.mock.calls[0]![0]()).toBe(false)
     mocks.configuration.mockResolvedValueOnce(saved('tenant-a', '新身份配置'))
     identity('user-b')
     await flushPromises()

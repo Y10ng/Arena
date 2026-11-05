@@ -1,99 +1,16 @@
 <template>
   <article class="console-page knowledge-page">
+    <h1 class="sr-only">资料库</h1>
     <FilterBar label="资料库与文件搜索" class="knowledge-toolbar">
-      <Popover v-model:open="isLibraryPickerOpen" align="start" size="md">
-        <template #trigger>
-          <Button class="knowledge-library-trigger" variant="secondary" aria-label="选择资料库">
-            <template #icon><Library :size="16" /></template>
-            <span>{{
-              selectedKnowledgeKey ? knowledgeSetName(selectedKnowledgeKey) : '选择资料库'
-            }}</span>
-            <ChevronDown :size="16" />
-          </Button>
-        </template>
-        <div class="knowledge-library-picker">
-          <Input v-model="librarySearch" placeholder="搜索库名称或键值" aria-label="搜索资料库" />
-          <div class="knowledge-library-options" aria-label="资料库列表">
-            <button
-              v-for="set in filteredKnowledgeSets"
-              :key="set.key"
-              type="button"
-              class="knowledge-library-option"
-              :class="{ active: selectedKnowledgeKey === set.key }"
-              :aria-pressed="selectedKnowledgeKey === set.key"
-              @click="handleKnowledgeSetSelection(set.key)"
-            >
-              <span class="knowledge-set-main">
-                <span>{{ knowledgeSetName(set.key) }}</span>
-                <span
-                  v-if="knowledgeSetName(set.key) !== set.key"
-                  class="knowledge-secondary mono"
-                  >{{ set.key }}</span
-                >
-              </span>
-              <span class="knowledge-secondary">{{ set.file_count }} 文件</span>
-            </button>
-            <p v-if="!filteredKnowledgeSets.length" class="knowledge-empty-note">
-              {{ librarySearch ? '没有匹配的资料库' : '还没有资料库' }}
-            </p>
-          </div>
-        </div>
-      </Popover>
       <Input
         v-model="fileSearch"
         class="knowledge-path-search"
-        placeholder="搜索当前库的文件名或路径"
-        aria-label="搜索当前库的文件名或路径"
-        :disabled="!selectedKnowledgeSet"
+        placeholder="搜索资料库、文件名或路径"
+        aria-label="搜索资料库、文件名或路径"
       />
       <template #actions>
-        <IconButton
-          variant="secondary"
-          label="刷新资料库"
-          :loading="isRefreshingKnowledge"
-          @click="refreshKnowledgeLibrary"
-          ><RefreshCw :size="16"
-        /></IconButton>
-        <DropdownMenu
-          :items="[
-            {
-              value: 'upload',
-              label: isUploadingKnowledgeFile ? '正在上传…' : '上传文本',
-              disabled: !selectedKnowledgeSet || isUploadingKnowledgeFile,
-            },
-            { value: 'create-library', label: '新建资料库' },
-            {
-              value: 'archive-library',
-              label: isDeletingKnowledgeSet ? '正在归档…' : '归档资料库',
-              separatorBefore: true,
-              tone: 'danger',
-              disabled: !canDeleteSelectedKnowledgeSet || isDeletingKnowledgeSet,
-              description: selectedKnowledgeSet?.builtin
-                ? '内置资料库不可归档'
-                : selectedKnowledgeReferencedBy.length
-                  ? '资料库已被项目引用，不能归档'
-                  : undefined,
-            },
-          ]"
-          @select="handleLibraryAction"
-        >
-          <template #trigger
-            ><Button
-              variant="secondary"
-              aria-label="资料库更多操作"
-              data-console-action="knowledge-library-menu"
-              @click="rememberLibraryActionTrigger"
-              @keydown="rememberLibraryActionTrigger"
-              ><MoreHorizontal :size="16" />更多</Button
-            ></template
-          >
-        </DropdownMenu>
-        <Button
-          data-console-action="create-knowledge-file"
-          :disabled="!selectedKnowledgeSet"
-          @click="createNewKnowledgeFile"
-        >
-          <template #icon><FilePlus :size="16" /></template>新建文件
+        <Button variant="secondary" :loading="isRefreshingKnowledge" @click="refreshAllLibraries">
+          <template #icon><RefreshCw :size="16" /></template>刷新
         </Button>
       </template>
     </FilterBar>
@@ -111,113 +28,84 @@
       >加载资料库失败：{{ formatError(knowledgeSetsError) }}</Alert
     >
     <Alert v-if="knowledgeSelectionMessage" tone="warning">{{ knowledgeSelectionMessage }}</Alert>
+    <Alert v-if="targetActionError" tone="warning">{{ targetActionError }}</Alert>
     <Alert v-if="requestedFocusMissing" tone="warning">定位的资料库不可用，请重新选择。</Alert>
     <Alert v-if="isLibraryCatalogError" tone="warning"
       >资料库名称读取失败：{{ formatError(libraryCatalogError) }}</Alert
     >
 
     <MasterDetail
-      v-if="!isLoadingKnowledgeSets && !isKnowledgeSetsError && selectedKnowledgeSet"
+      v-if="!isLoadingKnowledgeSets && !isKnowledgeSetsError"
       class="knowledge-workspace"
-      :class="{ 'knowledge-workspace--reading': isReading }"
       fill-height
     >
       <template #master>
-        <header class="knowledge-navigation-heading">
-          <span>目录与文件</span>
-          <span class="knowledge-secondary">{{ knowledgeFiles.length }} 文件</span>
-        </header>
-        <nav class="knowledge-navigation" aria-label="库内目录与文件">
-          <Alert v-if="isLoadingKnowledgeFiles" tone="info"
-            ><Spinner size="sm" decorative />正在加载文件...</Alert
-          >
-          <Alert v-else-if="isKnowledgeFilesError" tone="danger"
-            >加载文件失败：{{ formatError(knowledgeFilesError) }}</Alert
-          >
-          <template v-else>
-            <div
-              v-for="entry in knowledgeNavigation"
-              :key="`${selectedKnowledgeSet.key}:${entry.kind}:${entry.path}`"
-              class="knowledge-navigation-row"
-              :class="{ active: entry.kind === 'file' && selectedKnowledgeFilePath === entry.path }"
-              :style="{ '--knowledge-depth': entry.depth }"
-            >
-              <button
-                type="button"
-                class="knowledge-navigation-item"
-                :class="{ 'knowledge-navigation-item--directory': entry.kind === 'directory' }"
-                :aria-expanded="entry.kind === 'directory' ? entry.expanded : undefined"
-                :aria-current="
-                  entry.kind === 'file' && selectedKnowledgeFilePath === entry.path
-                    ? 'page'
-                    : undefined
-                "
-                :title="entry.path"
-                @click="
-                  entry.kind === 'directory'
-                    ? toggleKnowledgeDirectory(entry.path)
-                    : openKnowledgeFile(entry.path)
-                "
-              >
-                <ChevronRight
-                  v-if="entry.kind === 'directory'"
-                  :size="14"
-                  class="knowledge-directory-chevron"
-                  :class="{ expanded: entry.expanded }"
-                />
-                <FolderOpen v-if="entry.kind === 'directory' && entry.expanded" :size="16" />
-                <Folder v-else-if="entry.kind === 'directory'" :size="16" />
-                <FileText v-else :size="16" />
-                <span>{{ entry.name }}</span>
+        <KnowledgeTreeMenu class="knowledge-navigation" role="navigation" aria-label="资料库文件树" hide-trigger
+          :target="{ key: rootLibrary?.key || '', kind: 'library', path: '' }" label="根目录"
+          :items="nodeActions(rootLibrary?.key || '', 'library', '')" @select="handleNodeAction">
+          <template v-for="library in treeLibraries" :key="library.set.key">
+            <KnowledgeTreeMenu class="knowledge-navigation-row knowledge-tree-entry" :data-library-key="library.set.key"
+              :class="{ active: isActive(library.set.key, 'library', '') }"
+              :style="{ '--knowledge-depth': library.set.builtin ? 0 : 1 }"
+              :target="{ key: library.set.key, kind: 'library', path: '' }"
+              :label="knowledgeTargetName(library.set.key)" :items="nodeActions(library.set.key, 'library', '')"
+              @select="handleNodeAction" @click="activateContainer(library.set.key, 'library', '')">
+              <button type="button" class="knowledge-tree-toggle"
+                :aria-label="`${library.expanded ? '收起' : '展开'}资料库 ${knowledgeTargetName(library.set.key)}`"
+                :aria-expanded="library.expanded" @click.stop="toggleLibrary(library.set.key)">
+                <ChevronRight :size="14" :class="{ expanded: library.expanded }" />
               </button>
-              <DropdownMenu
-                v-if="entry.kind === 'file'"
-                :items="[
-                  {
-                    value: 'delete',
-                    label: '删除文件',
-                    tone: 'danger',
-                    disabled: isDeletingKnowledgeFile,
-                  },
-                ]"
-                @select="handleKnowledgeFileAction($event, selectedKnowledgeSet.key, entry.path)"
-              >
-                <template #trigger>
-                  <IconButton
-                    class="knowledge-file-menu-trigger"
-                    :label="`文件更多操作：${entry.path}`"
-                    :data-console-action="`knowledge-file-menu:${selectedKnowledgeSet.key}:${entry.path}`"
-                    @click="
-                      rememberKnowledgeFileActionTarget($event, selectedKnowledgeSet.key, entry.path)
-                    "
-                    @keydown="
-                      rememberKnowledgeFileActionTarget($event, selectedKnowledgeSet.key, entry.path)
-                    "
-                  ><MoreHorizontal :size="16" /></IconButton>
-                </template>
-              </DropdownMenu>
-            </div>
-            <p v-if="!knowledgeNavigation.length" class="knowledge-empty-note">
-              {{ fileSearch ? '没有匹配的文件' : '资料库中还没有文件' }}
-            </p>
+              <button type="button" class="knowledge-navigation-item knowledge-library-root"
+                :title="library.set.key">
+                <FolderOpen v-if="library.expanded" :size="16" /><Folder v-else :size="16" />
+                <span>{{ knowledgeTargetName(library.set.key) }}</span>
+              </button>
+            </KnowledgeTreeMenu>
+            <template v-if="library.expanded">
+              <p v-if="library.loading" class="knowledge-empty-note" role="status">正在加载文件…</p>
+              <p v-else-if="library.error" class="knowledge-empty-note" role="alert">加载文件失败：{{ formatError(library.error) }}</p>
+              <template v-else>
+                <KnowledgeTreeMenu v-for="entry in library.entries" :key="`${library.set.key}:${entry.kind}:${entry.path}`"
+                  class="knowledge-navigation-row knowledge-tree-entry" :data-library-key="library.set.key"
+                  :class="{ active: isActive(library.set.key, entry.kind, entry.path) }"
+                  :style="{ '--knowledge-depth': entry.depth + (library.set.builtin ? 1 : 2) }"
+                  :target="{ key: library.set.key, kind: entry.kind, path: entry.path }"
+                  :label="entry.path" :items="nodeActions(library.set.key, entry.kind, entry.path)" @select="handleNodeAction"
+                  @click="entry.kind === 'directory' ? activateContainer(library.set.key, 'directory', entry.path) : openKnowledgeFile(library.set.key, entry.path)">
+                  <button v-if="entry.kind === 'directory'" type="button" class="knowledge-tree-toggle"
+                    :aria-label="`${entry.expanded ? '收起' : '展开'}目录 ${entry.path}`"
+                    :aria-expanded="entry.expanded" @click.stop="toggleKnowledgeDirectory(library.set.key, entry.path)">
+                    <ChevronRight :size="14" :class="{ expanded: entry.expanded }" />
+                  </button>
+                  <span v-else class="knowledge-tree-spacer" />
+                  <button type="button" class="knowledge-navigation-item"
+                    :class="{ 'knowledge-navigation-item--directory': entry.kind === 'directory' }"
+                    :aria-current="isActive(library.set.key, entry.kind, entry.path) ? 'true' : undefined"
+                    :title="entry.path" :data-knowledge-key="library.set.key" :data-knowledge-path="entry.path">
+                    <FolderOpen v-if="entry.kind === 'directory' && entry.expanded" :size="16" />
+                    <Folder v-else-if="entry.kind === 'directory'" :size="16" />
+                    <FileText v-else :size="16" /><span>{{ entry.name }}</span>
+                  </button>
+                </KnowledgeTreeMenu>
+                <p v-if="!library.entries.length && !fileSearch" class="knowledge-empty-note">资料库中还没有文件</p>
+              </template>
+            </template>
           </template>
-        </nav>
+          <p v-if="!treeLibraries.length" class="knowledge-empty-note">{{ fileSearch ? '没有匹配的资料' : '还没有资料库' }}</p>
+        </KnowledgeTreeMenu>
       </template>
 
       <template #detail>
         <section class="knowledge-reader" aria-label="资料阅读">
           <header class="knowledge-reader-header">
-            <Button class="knowledge-back" variant="ghost" size="sm" @click="returnToKnowledgeList">
-              <template #icon><ArrowLeft :size="16" /></template>
-              返回文件列表
-            </Button>
-            <h2>
-              {{
-                selectedKnowledgeFilePath
-                  ? knowledgeFileName(selectedKnowledgeFilePath)
-                  : '选择文件'
-              }}
-            </h2>
+            <div class="knowledge-reader-identity">
+              <h2>
+                {{ selectedKnowledgeFilePath ? knowledgeFileName(selectedKnowledgeFilePath) : '选择文件' }}
+              </h2>
+              <p v-if="selectedKnowledgeKey && selectedKnowledgeFilePath" class="knowledge-secondary">
+                {{ knowledgeTargetName(selectedKnowledgeKey) }} / {{ selectedKnowledgeFilePath }}
+              </p>
+            </div>
             <div class="knowledge-reader-actions">
               <Button
                 v-if="selectedKnowledgeFilePath && isMarkdown"
@@ -233,7 +121,7 @@
                 variant="secondary"
                 size="sm"
                 :disabled="isLoadingKnowledgeFile"
-                @click="editKnowledgeFile"
+                @click="rememberKnowledgeEditorTrigger($event); editKnowledgeFile()"
               >
                 <template #icon><Pencil :size="14" /></template>
                 编辑
@@ -266,77 +154,22 @@
               v-else-if="!isLoadingKnowledgeFile"
               title="选择文件阅读"
               :description="
-                knowledgeFiles.length ? '从左侧目录选择一个文件。' : '可新建文件或上传 UTF-8 文本。'
+                knowledgeFiles.length ? undefined : '仅支持 UTF-8 文本。'
               "
             />
-            <details class="knowledge-information">
-              <summary>文件与版本信息</summary>
-              <div class="knowledge-information-content">
-                <dl class="knowledge-file-meta">
-                  <div>
-                    <dt>资料库</dt>
-                    <dd>
-                      {{ knowledgeSetName(selectedKnowledgeSet.key) }}
-                      <span class="mono">{{ selectedKnowledgeSet.key }}</span>
-                    </dd>
-                  </div>
-                  <div v-if="selectedKnowledgeFilePath">
-                    <dt>文件路径</dt>
-                    <dd class="mono">{{ selectedKnowledgeFilePath }}</dd>
-                  </div>
-                  <div v-if="currentKnowledgeRevision">
-                    <dt>当前版本</dt>
-                    <dd>
-                      v{{ currentKnowledgeRevision.version }}
-                      <span class="mono">{{ currentKnowledgeRevision.digest_sha256 }}</span>
-                    </dd>
-                  </div>
-                  <div v-if="selectedKnowledgeReferencedBy.length">
-                    <dt>项目引用</dt>
-                    <dd>{{ selectedKnowledgeReferencedBy.join('、') }}</dd>
-                  </div>
-                </dl>
-                <details class="knowledge-revisions">
-                  <summary>版本历史（{{ knowledgeRevisions.length }}）</summary>
-                  <Alert v-if="isLoadingKnowledgeRevisions" tone="info"
-                    ><Spinner size="sm" decorative />正在加载版本历史...</Alert
-                  >
-                  <Alert v-else-if="isKnowledgeRevisionsError" tone="danger"
-                    >加载版本失败：{{ formatError(knowledgeRevisionsError) }}</Alert
-                  >
-                  <ol v-else class="knowledge-revision-list">
-                    <li
-                      v-for="revision in knowledgeRevisions"
-                      :key="revision.version"
-                      class="knowledge-revision-item"
-                    >
-                      <strong>v{{ revision.version }}</strong>
-                      <span>{{ revision.file_count }} 文件</span>
-                      <span class="mono">{{ revision.digest_sha256 }}</span>
-                      <span v-if="revision.message">{{ revision.message }}</span>
-                    </li>
-                    <li v-if="!knowledgeRevisions.length">尚未发布版本</li>
-                  </ol>
-                </details>
-              </div>
-            </details>
           </div>
         </section>
       </template>
     </MasterDetail>
-    <EmptyState
-      v-else-if="!isLoadingKnowledgeSets && !isKnowledgeSetsError"
-      title="请选择资料库"
-      description="选择资料库后浏览文件，或新建一个资料库。"
-    />
 
     <Dialog
       :open="isEditingKnowledgeFile"
       :title="selectedKnowledgeFilePath ? '编辑文件' : '新建文件'"
       description=""
-      size="lg"
+      size="editor"
       :dismissible="!isSavingKnowledgeFile"
       @update:open="handleEditorOpenChange"
+      @close-auto-focus="restoreKnowledgeEditorFocus"
     >
       <div class="knowledge-edit-form">
         <FormField v-slot="{ controlAttrs }" label="文件路径" required>
@@ -345,6 +178,7 @@
             v-bind="controlAttrs"
             class="mono"
             placeholder="README.md"
+            :readonly="Boolean(selectedKnowledgeFilePath && selectedKnowledgeFilePath === selectedKnowledgeSet?.safety_path)"
             :disabled="isLoadingKnowledgeFile"
           />
         </FormField>
@@ -395,6 +229,7 @@
       description=""
       size="sm"
       :dismissible="!isCreatingKnowledgeSet"
+      @close-auto-focus="restoreLibraryActionFocus"
     >
       <FormField v-slot="{ controlAttrs }" label="资料库键值" required>
         <Input
@@ -402,7 +237,7 @@
           v-bind="controlAttrs"
           class="mono"
           placeholder="new_knowledge_set"
-          @keyup.enter="handleCreateKnowledgeSet"
+          @keyup.enter="createLibrary"
         />
       </FormField>
       <template #footer>
@@ -415,16 +250,26 @@
         <Button
           :loading="isCreatingKnowledgeSet"
           :disabled="!newKnowledgeSetKey.trim()"
-          @click="handleCreateKnowledgeSet"
+          @click="createLibrary"
           >创建资料库</Button
         >
       </template>
     </Dialog>
 
     <ConfirmAction
+      :open="discardConfirmationOpen"
+      title="放弃未保存的资料修改？"
+      description="取消可继续编辑当前文件；已保存的正文不受影响。"
+      confirm-label="放弃修改"
+      cancel-label="继续编辑"
+      tone="warning"
+      @confirm="resolveDiscard(true)"
+      @update:open="!$event && resolveDiscard(false)"
+    />
+    <ConfirmAction
       :open="deleteKnowledgeSetTarget !== null"
       title="归档资料库"
-      :description="`确定归档资料库「${deleteKnowledgeSetTarget?.key || ''}」吗？归档不物理删除历史版本。`"
+      :description="`确定归档资料库「${deleteKnowledgeSetTarget?.key || ''}」吗？归档不删除已保存资料。`"
       confirm-label="确认归档"
       tone="danger"
       :loading="isDeletingKnowledgeSet"
@@ -446,32 +291,20 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router'
-import {
-  ArrowLeft,
-  ChevronDown,
-  ChevronRight,
-  FilePlus,
-  FileText,
-  Folder,
-  FolderOpen,
-  Library,
-  MoreHorizontal,
-  Pencil,
-  RefreshCw,
-  Save,
-} from '@lucide/vue'
+import { useQueries, useQueryClient } from '@tanstack/vue-query'
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute } from 'vue-router'
+import { ChevronRight, FileText, Folder, FolderOpen, Pencil, RefreshCw, Save } from '@lucide/vue'
+import KnowledgeTreeMenu, { type KnowledgeMenuTarget } from './KnowledgeTreeMenu.vue'
+import type { DropdownMenuOption } from '@/components/ui/DropdownMenu.vue'
+import { listKnowledgeFiles } from '@/api/client'
 import { ConfirmAction, FilterBar, MasterDetail, TextEditor } from '@/components/patterns'
 import {
   Alert,
   Button,
   Dialog,
-  DropdownMenu,
   EmptyState,
   FormField,
-  IconButton,
   Input,
-  Popover,
   Spinner,
 } from '@/components/ui'
 import { isMarkdownFile } from '@/lib/fileLanguage'
@@ -481,13 +314,13 @@ import { useKnowledgeConsole } from './useKnowledgeConsole'
 import './console.css'
 
 const route = useRoute()
-const router = useRouter()
+const queryClient = useQueryClient()
 const {
-  canDeleteSelectedKnowledgeSet,
+  discardConfirmationOpen,
+  resolveDiscard,
   closeKnowledgeFileEditor,
   confirmDiscardKnowledgeChanges,
   createNewKnowledgeFile,
-  currentKnowledgeRevision,
   deleteKnowledgeFileTarget,
   deleteKnowledgeSetTarget,
   editKnowledgeFile,
@@ -503,13 +336,9 @@ const {
   isDeletingKnowledgeSet,
   isEditingKnowledgeFile,
   isKnowledgeFileDirty,
-  isKnowledgeFilesError,
-  isKnowledgeRevisionsError,
   isKnowledgeSetsError,
   isLibraryCatalogError,
   isLoadingKnowledgeFile,
-  isLoadingKnowledgeFiles,
-  isLoadingKnowledgeRevisions,
   isLoadingKnowledgeSets,
   isRefreshingKnowledge,
   isSavingKnowledgeFile,
@@ -520,9 +349,6 @@ const {
   knowledgeFileReadError,
   knowledgeFileSavedSnapshot,
   knowledgeFiles,
-  knowledgeFilesError,
-  knowledgeRevisions,
-  knowledgeRevisionsError,
   knowledgeSelectionMessage,
   knowledgeSetName,
   knowledgeSets,
@@ -542,46 +368,192 @@ const {
   selectedKnowledgeFilePath,
   selectedKnowledgeFileSummary,
   selectedKnowledgeKey,
-  selectedKnowledgeReferencedBy,
   selectedKnowledgeSet,
   triggerKnowledgeUpload,
 } = useKnowledgeConsole()
 
-const librarySearch = ref('')
 const fileSearch = ref('')
-const isLibraryPickerOpen = ref(false)
 const isCreatingLibraryOpen = ref(false)
-let libraryActionTrigger: HTMLElement | null = null
-const rememberLibraryActionTrigger = (event: Event) => {
-  libraryActionTrigger = event.currentTarget as HTMLElement
-}
-const handleLibraryAction = (action: string) => {
-  if (action === 'create-library') isCreatingLibraryOpen.value = true
-  else if (action === 'upload' && selectedKnowledgeSet.value && !isUploadingKnowledgeFile.value)
-    triggerKnowledgeUpload()
-  else if (action === 'archive-library') openDeleteKnowledgeSet(libraryActionTrigger)
-}
-let knowledgeFileActionTarget: { key: string; path: string; trigger: HTMLElement } | null = null
-const rememberKnowledgeFileActionTarget = (event: Event, key: string, path: string) => {
-  knowledgeFileActionTarget = { key, path, trigger: event.currentTarget as HTMLElement }
-}
-const handleKnowledgeFileAction = (action: string, key: string, path: string) => {
-  const target = knowledgeFileActionTarget
-  if (action === 'delete' && target?.key === key && target.path === path)
-    openDeleteKnowledgeFile({ key, path }, target.trigger)
-}
-const isReading = ref(false)
-const showSource = ref(false)
-const expandedDirectories = ref(new Set<string>())
-const filteredKnowledgeSets = computed(() => {
-  const search = librarySearch.value.trim().toLocaleLowerCase()
-  return knowledgeSets.value.filter((set) =>
-    `${knowledgeSetName(set.key)} ${set.key}`.toLocaleLowerCase().includes(search),
-  )
+const target = ref<{ key: string; directory: string } | null>(null)
+const targetActionError = ref('')
+let fileSelectionGeneration = 0
+let targetSelectionGeneration = 0
+const duplicateKnowledgeNames = computed(() => {
+  const seen = new Set<string>()
+  const duplicates = new Set<string>()
+  for (const set of knowledgeSets.value) {
+    const name = knowledgeSetName(set.key)
+    if (seen.has(name)) duplicates.add(name)
+    else seen.add(name)
+  }
+  return duplicates
 })
-const knowledgeNavigation = computed(() =>
-  buildKnowledgeNavigation(knowledgeFiles.value, expandedDirectories.value, fileSearch.value),
-)
+const knowledgeTargetLabelsCollide = computed(() => {
+  const labels = knowledgeSets.value.map((set) => {
+    const name = knowledgeSetName(set.key)
+    return duplicateKnowledgeNames.value.has(name) ? `${name} (${set.key})` : name
+  })
+  return new Set(labels).size !== labels.length
+})
+const knowledgeTargetName = (key: string) => {
+  if (knowledgeSets.value.some((set) => set.key === key && set.builtin)) return '根目录'
+  const name = knowledgeSetName(key)
+  // 唯一库名也可能恰好等于另一库生成的“名称 (key)”标签。
+  return knowledgeTargetLabelsCollide.value || duplicateKnowledgeNames.value.has(name) ? `${name} (${key})` : name
+}
+const expandedLibraries = ref(new Set<string>())
+const expandedDirectories = ref<Record<string, Set<string>>>({})
+// 搜索自动展开命中祖先，但允许用户临时收起；退出搜索后恢复原展开状态。
+const collapsedSearchLibraries = ref(new Set<string>())
+const collapsedSearchDirectories = ref<Record<string, Set<string>>>({})
+watch(fileSearch, () => {
+  collapsedSearchLibraries.value = new Set()
+  collapsedSearchDirectories.value = {}
+})
+const activeNode = ref<KnowledgeMenuTarget | null>(null)
+const rootLibrary = computed(() => knowledgeSets.value.find((set) => set.builtin))
+const treeQueries = useQueries({
+  queries: computed(() => knowledgeSets.value.map((set) => ({
+    queryKey: ['knowledgeFiles', set.key],
+    queryFn: ({ signal }: { signal: AbortSignal }) => listKnowledgeFiles(set.key, signal),
+  }))),
+})
+const treeLibraries = computed(() => {
+  const query = fileSearch.value.trim().toLocaleLowerCase()
+  return knowledgeSets.value.map((set, index) => {
+    const result = treeQueries.value[index]
+    const files = result?.data || []
+    const matchesLibrary = `${knowledgeSetName(set.key)} ${set.key}`.toLocaleLowerCase().includes(query)
+    const matchesFile = files.some((file) => file.path.toLocaleLowerCase().includes(query))
+    return {
+      set,
+      loading: !result || result.isPending,
+      error: result?.isError ? result.error : null,
+      expanded: query ? !collapsedSearchLibraries.value.has(set.key) : expandedLibraries.value.has(set.key),
+      entries: buildKnowledgeNavigation(
+        files,
+        expandedDirectories.value[set.key] || new Set(),
+        matchesLibrary ? '' : query,
+        collapsedSearchDirectories.value[set.key] || new Set(),
+      ).sort((a, b) => Number(b.path === set.safety_path) - Number(a.path === set.safety_path)),
+      visible: set.builtin || !query || matchesLibrary || matchesFile || !result || result.isPending || result.isError,
+    }
+  }).filter((library) => library.visible && (library.set.builtin || (query
+    ? !collapsedSearchLibraries.value.has(rootLibrary.value?.key || '')
+    : expandedLibraries.value.has(rootLibrary.value?.key || ''))))
+})
+let knowledgeEditorTrigger: HTMLElement | null = null
+const rememberKnowledgeEditorTrigger = (event: MouseEvent) => {
+  knowledgeEditorTrigger = event.currentTarget as HTMLElement
+}
+const restoreKnowledgeEditorFocus = (event: Event) => {
+  event.preventDefault()
+  if (knowledgeEditorTrigger?.isConnected) knowledgeEditorTrigger.focus()
+}
+const restoreLibraryActionFocus = (event: Event) => {
+  event.preventDefault()
+  libraryActionTrigger?.focus()
+}
+let libraryActionTrigger: HTMLElement | null = null
+const isActive = (key: string, kind: KnowledgeMenuTarget['kind'], path: string) =>
+  activeNode.value?.key === key && activeNode.value.kind === kind && activeNode.value.path === path
+const activateContainer = (key: string, kind: 'library' | 'directory', path: string) => {
+  activeNode.value = { key, kind, path }
+  setTarget(key, path)
+  if (kind === 'library') toggleLibrary(key)
+  else toggleKnowledgeDirectory(key, path)
+}
+function nodeActions(key: string, kind: KnowledgeMenuTarget['kind'], path: string): DropdownMenuOption[] {
+  const set = knowledgeSets.value.find((item) => item.key === key)
+  if (!set) return []
+  if (kind === 'file') return [
+    { value: 'edit', label: '编辑正文', disabled: isSavingKnowledgeFile.value },
+    { value: 'delete', label: '删除文件', tone: 'danger',
+      disabled: isDeletingKnowledgeFile.value || path === set.safety_path,
+      description: path === set.safety_path ? '系统文件不可删除，路径不可更改' : undefined },
+  ]
+  return [
+    { value: 'create-file', label: '新建文件', disabled: isSavingKnowledgeFile.value },
+    { value: 'upload', label: '上传文本', disabled: isUploadingKnowledgeFile.value },
+    ...(set.builtin && kind === 'library' ? [{ value: 'create-library', label: '新建资料库' }] : []),
+    ...(kind === 'library' ? [{ value: 'archive', label: '归档资料库', tone: 'danger' as const,
+      separatorBefore: true, disabled: set.builtin || Boolean(set.referenced_by.length) || isDeletingKnowledgeSet.value,
+      description: set.builtin ? '根目录不可归档或删除' : set.referenced_by.length ? '资料库仍被引用' : undefined }] : []),
+  ]
+}
+async function handleNodeAction(action: string, node: KnowledgeMenuTarget, trigger: HTMLElement | null) {
+  libraryActionTrigger = trigger
+  knowledgeEditorTrigger = trigger
+  if (action === 'delete') { openDeleteKnowledgeFile({ key: node.key, path: node.path }, trigger); return }
+  if (action === 'archive') {
+    const set = knowledgeSets.value.find((item) => item.key === node.key)
+    if (set) openDeleteKnowledgeSet(trigger, set)
+    return
+  }
+  if (action === 'create-library') { isCreatingLibraryOpen.value = true; return }
+  if (action === 'edit') {
+    if (await openKnowledgeFile(node.key, node.path)) editKnowledgeFile()
+    return
+  }
+  setTarget(node.key, node.kind === 'file' ? knowledgeFileDirectory(node.path) : node.path)
+  await requestTarget(action === 'upload' ? 'upload' : 'file')
+}
+const setTarget = (key: string, directory: string) => {
+  targetSelectionGeneration++
+  target.value = { key, directory }
+}
+let rootInitialized = false
+watch(rootLibrary, (root) => {
+  if (!root || rootInitialized) return
+  rootInitialized = true
+  expandedLibraries.value = new Set([...expandedLibraries.value, root.key])
+  activeNode.value = { key: root.key, kind: 'library', path: '' }
+  setTarget(root.key, '')
+}, { immediate: true })
+const createLibrary = async () => {
+  const targetGeneration = targetSelectionGeneration
+  const key = await handleCreateKnowledgeSet()
+  if (!key) return
+  if (targetGeneration === targetSelectionGeneration) {
+    setTarget(key, '')
+    activeNode.value = { key, kind: 'library', path: '' }
+  }
+  expandedLibraries.value = new Set([...expandedLibraries.value, key])
+}
+const requestTarget = async (action: 'file' | 'upload') => {
+  const destination = target.value
+  targetActionError.value = ''
+  if (!destination || !knowledgeSets.value.some((set) => set.key === destination.key)) {
+    targetActionError.value = '目标资料库已不可用，请重新选择。'
+    return
+  }
+  if (action === 'upload') {
+    triggerKnowledgeUpload(destination)
+    return
+  }
+  const generation = ++fileSelectionGeneration
+  const targetGeneration = targetSelectionGeneration
+  // 等待文件清单时若用户另选写入位置，不再打开绑定旧目标的编辑器。
+  const isCurrent = () => generation === fileSelectionGeneration && targetGeneration === targetSelectionGeneration
+  try {
+    const files = await queryClient.fetchQuery({
+      queryKey: ['knowledgeFiles', destination.key],
+      queryFn: ({ signal }) => listKnowledgeFiles(destination.key, signal),
+    })
+    if (!isCurrent() || !(await selectKnowledgeSet(destination.key, { isCurrent }))) return
+    selectedKnowledgeDirectory.value = destination.directory
+    await createNewKnowledgeFile(files, isCurrent)
+  } catch (error) {
+    if (isCurrent()) targetActionError.value = `无法读取目标资料库的文件：${formatError(error)}`
+  }
+}
+const refreshAllLibraries = async () => {
+  await Promise.all([
+    refreshKnowledgeLibrary(),
+    queryClient.invalidateQueries({ queryKey: ['knowledgeFiles'] }),
+  ])
+}
+const showSource = ref(false)
 const isMarkdown = computed(() => isMarkdownFile(selectedKnowledgeFilePath.value || ''))
 const savedKnowledgeContent = computed(() =>
   knowledgeFileSavedSnapshot.value
@@ -592,9 +564,8 @@ const selectedFileOutsideSearch = computed(() =>
   Boolean(
     selectedKnowledgeFilePath.value &&
     fileSearch.value.trim() &&
-    !selectedKnowledgeFilePath.value
-      .toLocaleLowerCase()
-      .includes(fileSearch.value.trim().toLocaleLowerCase()),
+    !`${selectedKnowledgeKey.value || ''} ${knowledgeSetName(selectedKnowledgeKey.value || '')} ${selectedKnowledgeFilePath.value}`
+      .toLocaleLowerCase().includes(fileSearch.value.trim().toLocaleLowerCase()),
   ),
 )
 const requestedFocusMissing = computed(
@@ -605,57 +576,52 @@ const requestedFocusMissing = computed(
     !knowledgeSets.value.some((set) => set.key === route.query.focus),
 )
 
-const toggleKnowledgeDirectory = (directory: string) => {
-  selectedKnowledgeDirectory.value = directory
-  const expanded = new Set(expandedDirectories.value)
+const toggleLibrary = (key: string) => {
+  if (fileSearch.value.trim()) {
+    const collapsed = new Set(collapsedSearchLibraries.value)
+    if (collapsed.has(key)) collapsed.delete(key)
+    else collapsed.add(key)
+    collapsedSearchLibraries.value = collapsed
+    return
+  }
+  const expanded = new Set(expandedLibraries.value)
+  if (expanded.has(key)) expanded.delete(key)
+  else expanded.add(key)
+  expandedLibraries.value = expanded
+}
+const toggleKnowledgeDirectory = (key: string, directory: string) => {
+  const query = fileSearch.value.trim().toLocaleLowerCase()
+  const matchesLibrary = `${knowledgeSetName(key)} ${key}`.toLocaleLowerCase().includes(query)
+  if (query && !matchesLibrary) {
+    const collapsed = new Set(collapsedSearchDirectories.value[key] || [])
+    if (collapsed.has(directory)) collapsed.delete(directory)
+    else collapsed.add(directory)
+    collapsedSearchDirectories.value = { ...collapsedSearchDirectories.value, [key]: collapsed }
+    return
+  }
+  const expanded = new Set(expandedDirectories.value[key] || [])
   if (expanded.has(directory)) expanded.delete(directory)
   else expanded.add(directory)
-  expandedDirectories.value = expanded
+  expandedDirectories.value = { ...expandedDirectories.value, [key]: expanded }
 }
-const openKnowledgeFile = async (path: string) => {
-  const selection = selectKnowledgeFile(path)
-  if (isLoadingKnowledgeFile.value) isReading.value = true
-  if (await selection) isReading.value = true
-}
-const returnToKnowledgeList = () => {
-  if (confirmDiscardKnowledgeChanges()) isReading.value = false
+const openKnowledgeFile = async (key: string, path: string) => {
+  const generation = ++fileSelectionGeneration
+  activeNode.value = { key, kind: 'file', path }
+  setTarget(key, knowledgeFileDirectory(path))
+  const isCurrent = () => generation === fileSelectionGeneration
+  if (!(await selectKnowledgeSet(key, { isCurrent })) || !isCurrent()) return false
+  if (!(await selectKnowledgeFile(path, { isCurrent })) || !isCurrent()) return false
+  // 读取只更新阅读对象，不抢走树焦点，也不覆盖后来选择的活动节点或菜单目标。
+  return true
 }
 const handleEditorOpenChange = (open: boolean) => {
   if (!open) closeKnowledgeFileEditor()
 }
 void knowledgeUploadInput
 
-const replaceKnowledgeFocus = (key: string | null) => {
-  const query = { ...route.query }
-  if (key) query.focus = key
-  else delete query.focus
-  void router.replace({ query })
-}
-const handleKnowledgeSetSelection = (key: string) => {
-  if (!selectKnowledgeSet(key)) return
-  isLibraryPickerOpen.value = false
-  replaceKnowledgeFocus(key)
-}
-watch(selectedKnowledgeKey, () => {
-  expandedDirectories.value = new Set()
-  fileSearch.value = ''
-  isReading.value = false
+watch([selectedKnowledgeKey, selectedKnowledgeFilePath], () => {
+  // 迟到的读取不能重新展开用户随后收起的节点。
   showSource.value = false
-})
-watch(selectedKnowledgeFilePath, (path) => {
-  showSource.value = false
-  if (!path) {
-    isReading.value = isLoadingKnowledgeFile.value
-    return
-  }
-  isReading.value = true
-  const expanded = new Set(expandedDirectories.value)
-  let directory = knowledgeFileDirectory(path)
-  while (directory) {
-    expanded.add(directory)
-    directory = knowledgeFileDirectory(directory)
-  }
-  expandedDirectories.value = expanded
 })
 watch(isCreatingKnowledgeSet, (creating, wasCreating) => {
   if (wasCreating && !creating && !newKnowledgeSetKey.value) isCreatingLibraryOpen.value = false
@@ -670,7 +636,16 @@ watch(
     if (!key || !sets.some((set) => set.key === key)) return
     // 库数据刷新不代表导航意图；仅消费一次定位，延迟出现的库仍须保护草稿。
     pendingKnowledgeFocus = null
-    selectKnowledgeSet(key, { force: focusChanged && previous.length > 0 })
+    const generation = ++fileSelectionGeneration
+    const targetGeneration = targetSelectionGeneration
+    const isCurrent = () => generation === fileSelectionGeneration
+    void selectKnowledgeSet(key, { force: focusChanged && previous.length > 0, isCurrent }).then((selected) => {
+      if (!selected || !isCurrent()) return
+      if (targetGeneration !== targetSelectionGeneration) return
+      setTarget(key, '')
+      activeNode.value = { key, kind: 'library', path: '' }
+      expandedLibraries.value = new Set([...expandedLibraries.value, key])
+    })
   },
   { immediate: true },
 )

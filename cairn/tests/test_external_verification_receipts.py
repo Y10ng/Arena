@@ -509,7 +509,8 @@ def test_v4_production_handle_resolution_acceptance_and_report(execution, monkey
     for content in (originals[0][2].decode(), originals[1][2].decode(), originals[2][2].decode()):
         assert content in report
     assert "````text" in report and "交互原文见第 1 步" in report and "本条未记录响应" in report
-    assert "未记录步骤关联" in report and "原件不是 UTF-8 文本" in report and "受控查看原件" in report
+    assert "未记录步骤关联" in report and "原件不是 UTF-8 文本" in report
+    assert all(token not in report for token in ("受控查看原件", "/api/v1/", "需登录", "未提供可选数据包图片"))
     assert "原件不允许内嵌交付" in report and "synthetic-target-credential" not in report
     for artifact in artifacts[3:5]:
         with pytest.raises(HTTPException) as binary_preview:
@@ -522,7 +523,7 @@ def test_v4_production_handle_resolution_acceptance_and_report(execution, monkey
         _artifact_disk_path_from_row(response).unlink()
         _artifact_disk_path_from_row(observed).write_bytes(b"changed")
     damaged_report = service.verification_report(detail["id"], user)
-    assert data["summary"] in damaged_report and "原件不可读取" in damaged_report and "SHA256 不符" in damaged_report
+    assert data["summary"] in damaged_report and "原件不可读取" in damaged_report and "完整性校验失败" in damaged_report
 
 
 @pytest.mark.parametrize("version", [3, 4])
@@ -589,7 +590,8 @@ def test_versioned_report_keeps_flow_only_scope_and_relationships(execution, ver
     report = service.verification_report(detail["id"], user)
     for text in (data["summary"], data["tested_scope"], data["limitations"][0], data["key_evidence"][0]["reason"], data["test_steps"][1]["action"]):
         assert text in report
-    assert "Flow flow · revision 1 · partial" in report and projection["sha256"] in report
+    assert "结构化重建" in report
+    assert all(token not in report for token in ("Flow flow", "revision", projection["sha256"], "Body Artifact", "utf8-bytes=", "/api/v1/", "需登录"))
     assert "本交互未记录请求材料" in report and "本条未记录响应" not in report
     assert "HTTP/1.1 403 Forbidden" in report and body.decode() in report
     assert "````http" in report and "见第 1、2 步" in report and "交互原文见第 1 步" in report

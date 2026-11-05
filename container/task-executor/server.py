@@ -19,6 +19,15 @@ SOCKET_PATH = "/run/cairn-exec/execute.sock"
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 
 
+def execution_now() -> float:
+    # 宿主在解冻前原子更新累计暂停时间；命令预算不包含冻结窗口。
+    try:
+        paused = float(Path("/run/cairn-exec/paused-seconds").read_text())
+    except FileNotFoundError:
+        paused = 0.0
+    return time.monotonic() - paused
+
+
 def capture_ready() -> bool:
     try:
         timestamp = float(Path("/run/cairn-exec/traffic-ready").read_text())
@@ -105,12 +114,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     pass
 
             threading.Thread(target=feed, daemon=True).start()
-            deadline = time.monotonic() + timeout
+            deadline = execution_now() + timeout
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ, "stdout")
                 selector.register(process.stderr, selectors.EVENT_READ, "stderr")
                 while True:
-                    if time.monotonic() >= deadline:
+                    if execution_now() >= deadline:
                         self.terminate(process)
                         self.emit({"error": "execution_timeout"})
                         return

@@ -57,7 +57,8 @@ defineOptions({ name: 'UiIconButton', inheritAttrs: false })
 <style scoped>
 .ui-icon-button {
   min-width: 0;
-  border: calc(var(--space-1) / 4) solid transparent;
+  padding: 0;
+  border: 1px solid transparent;
   border-radius: var(--radius-md);
   display: inline-flex;
   align-items: center;
@@ -87,16 +88,16 @@ defineOptions({ name: 'UiIconButton', inheritAttrs: false })
 }
 
 .ui-icon-button--primary {
-  background: var(--accent);
-  color: var(--color-accent-contrast);
+  background: var(--color-primary);
+  color: var(--color-primary-contrast);
 }
 
 .ui-icon-button--primary:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: var(--color-primary-hover);
 }
 
 .ui-icon-button--secondary {
-  border-color: var(--border);
+  border-color: var(--color-control-border);
   background: var(--bg-surface);
   color: var(--text);
 }
@@ -136,11 +137,37 @@ defineOptions({ name: 'UiIconButton', inheritAttrs: false })
 }
 
 .ui-icon-button:focus-visible {
-  box-shadow: var(--ring);
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 按压不改尺寸或位移，连续操作时保持目标稳定。 */
+.ui-icon-button:active:not(:disabled) {
+  background: var(--color-surface-pressed);
+}
+
+.ui-icon-button--primary:active:not(:disabled) {
+  background: var(--color-primary-pressed);
+}
+
+.ui-icon-button--success:hover:not(:disabled),
+.ui-icon-button--success:active:not(:disabled) {
+  background: color-mix(in srgb, var(--success) 88%, var(--text));
+}
+
+.ui-icon-button--danger:hover:not(:disabled),
+.ui-icon-button--danger:active:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 88%, var(--text));
+}
+
+.ui-icon-button--warning:hover:not(:disabled),
+.ui-icon-button--warning:active:not(:disabled) {
+  background: color-mix(in srgb, var(--warning) 88%, var(--text));
 }
 
 .ui-icon-button:disabled {
   cursor: not-allowed;
+  border-color: var(--border);
   background: var(--surface-disabled);
   color: var(--text-disabled);
 }

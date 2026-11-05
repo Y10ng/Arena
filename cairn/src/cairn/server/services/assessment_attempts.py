@@ -8,6 +8,7 @@ from datetime import timedelta
 from fastapi import HTTPException
 
 from cairn.assessment_contracts import GOAL_DRIVEN_PROTOCOL
+from cairn.dispatcher.tasks.delivery import delivery_execution_deadline, project_paused_seconds
 from .assessment_policy import parse_scenario_snapshot, row_value
 from .time_utils import parse_utc_timestamp, utcnow
 
@@ -24,17 +25,28 @@ ACCEPTED_RESULT_CONTEXT_FIELDS = (
 )
 
 
+def _is_independent_report(run, context):
+    # 整体和单条报告都使用 Server claim 的报告代际；旧的无 claim 记录不获豁免。
+    claim = context.get("report_claim")
+    return (
+        run["task_type"] == "report"
+        and isinstance(claim, dict)
+        and isinstance(claim.get("generation_token"), str)
+        and bool(claim["generation_token"])
+    )
+
+
 def validate_delivery_registration(conn, project, run, body, snapshot):
     """仅当前 running owner 能一次登记；不接受失败后补造来源或任意上下文扩展。"""
     from re import fullmatch
     from uuid import UUID
 
     context = parse_scenario_snapshot(run["runtime_context_json"])
-    scoped_report = run["task_type"] == "report" and bool(context.get("report_claim", {}).get("scope_key"))
+    independent_report = _is_independent_report(run, context)
     if (
         run["status"] != "running"
         or body.status not in {None, "running"}
-        or (not scoped_report and run["execution_generation"] != project["execution_generation"])
+        or (not independent_report and run["execution_generation"] != project["execution_generation"])
         or run["pause_requested"]
     ):
         raise HTTPException(409, "execution_delivery_registration_closed")
@@ -53,6 +65,9 @@ def validate_delivery_registration(conn, project, run, body, snapshot):
         "binding",
         "inputs",
     }
+    research = run["task_type"] in {"bootstrap", "reason", "explore"}
+    if research:
+        fields |= {"authorization_expires_at", "paused_seconds"}
     if not isinstance(snapshot, dict) or set(snapshot) != fields:
         raise HTTPException(422, "execution_delivery_invalid")
     session = snapshot["session_id"]
@@ -100,20 +115,40 @@ def validate_delivery_registration(conn, project, run, body, snapshot):
         ).fetchone()
         if intent is not None and intent["assessment_role"] == "verifier":
             phases = {"verifier_execute"}
+    current = parse_utc_timestamp(utcnow())
     deadline = parse_utc_timestamp(snapshot["deadline_at"])
+    paused_seconds = None
+    if research:
+        try:
+            paused_seconds = project_paused_seconds(
+                parse_scenario_snapshot(row_value(project, "execution_control_json")), now=current,
+            )
+            deadline = delivery_execution_deadline(snapshot, paused_seconds=paused_seconds)
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+            raise HTTPException(422, "execution_delivery_invalid") from None
+        expiry = parse_utc_timestamp(snapshot["authorization_expires_at"])
+        project_expiry = parse_utc_timestamp(project["authorization_expires_at"])
+        if ((snapshot["authorization_expires_at"] is not None and expiry is None)
+                or expiry != project_expiry or (expiry is not None and expiry <= current)):
+            raise HTTPException(422, "execution_delivery_invalid")
     # Report 在探索截止后正常 finalization，只受原报告执行 deadline 约束。
     project_deadline = parse_utc_timestamp(project["explore_deadline"]) if run["task_type"] != "report" else None
     if (
         not isinstance(snapshot["phase"], str)
         or snapshot["phase"] not in phases
         or not deadline
-        or deadline <= parse_utc_timestamp(utcnow())
+        or deadline <= current
         or (project_deadline and deadline > project_deadline)
     ):
         raise HTTPException(422, "execution_delivery_invalid")
     output_retry = context.get("reason_output_retry")
-    if output_retry is not None and deadline > parse_utc_timestamp(output_retry["deadline_at"]):
-        raise HTTPException(422, "execution_delivery_invalid")
+    if output_retry is not None:
+        try:
+            retry_deadline = delivery_execution_deadline(output_retry, paused_seconds=paused_seconds)
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+            raise HTTPException(422, "execution_delivery_invalid") from None
+        if deadline > retry_deadline:
+            raise HTTPException(422, "execution_delivery_invalid")
     if not isinstance(snapshot["container_id"], str) or not snapshot["container_id"] or snapshot["container_id"] == "unknown" or len(snapshot["container_id"]) > 128:
         raise HTTPException(422, "execution_delivery_invalid")
     for digest_field in ("model_binding_sha256", "result_schema_sha256"):
@@ -286,7 +321,9 @@ def validate_delivery_registration(conn, project, run, body, snapshot):
         if (
             finalization is None
             or finalization["status"] != "running"
+            or finalization["cancel_requested_at"] is not None
             or finalization["claimed_by"] != run["worker_name"]
+            or context.get("report_claim", {}).get("attempt_count") != finalization["attempt_count"]
             or inputs["snapshot_path"] != f"/tmp/cairn-prompts/report-delivery-{run['id']}.json"
             or inputs["generation_token"] != finalization["generation_token"]
             or inputs["generation_token"] != context.get("report_claim", {}).get("generation_token")
@@ -427,7 +464,9 @@ def delivery_retry_routes(conn, project, *, executions=None):
     groups = {}
     latest_by_work = {}
     for run in executions:
-        if run["execution_generation"] > project["execution_generation"]:
+        context = parse_scenario_snapshot(run["runtime_context_json"])
+        independent_report = _is_independent_report(run, context)
+        if not independent_report and run["execution_generation"] > project["execution_generation"]:
             continue
         key = (run["task_type"], run["intent_id"])
         previous = latest_by_work.get(key)
@@ -435,9 +474,7 @@ def delivery_retry_routes(conn, project, *, executions=None):
             previous["execution_generation"], len(previous["id"]), previous["id"]
         ):
             latest_by_work[key] = run
-        context = parse_scenario_snapshot(run["runtime_context_json"])
-        scoped_report = run["task_type"] == "report" and bool(context.get("report_claim", {}).get("scope_key"))
-        if (not scoped_report and run["execution_generation"] != project["execution_generation"]) or run["pause_interrupted"]:
+        if (not independent_report and run["execution_generation"] != project["execution_generation"]) or run["pause_interrupted"]:
             continue
         work_id = run["intent_id"]
         if run["task_type"] == "report":
@@ -624,6 +661,7 @@ def _reason_output_retry_context(runs):
     return {
         "source_task_run_id": sources[-1][0]["id"],
         "deadline_at": first_context.get("execution_delivery", {}).get("deadline_at"),
+        "paused_seconds": first_context.get("execution_delivery", {}).get("paused_seconds"),
         "failure": sources[-1][1],
     }
 
@@ -648,15 +686,15 @@ def _delivery_predecessor_matches(runs, run):
             continue
         previous = parse_scenario_snapshot(source["runtime_context_json"])
         claim = context.get("report_claim", {})
-        scoped_report = run["task_type"] == "report" and bool(claim.get("scope_key"))
-        same_report = scoped_report and all(
-            claim.get(key) == previous.get("report_claim", {}).get(key)
+        independent_report = _is_independent_report(run, context)
+        same_report = independent_report and _is_independent_report(source, previous) and all(
+            claim.get(key) == previous["report_claim"].get(key)
             for key in ("scope_key", "generation_token")
         )
         return bool(
             source["status"] in {"failed", "timed_out"}
             and _is_delivery_execution(source)
-            and (same_report or source["execution_generation"] == run["execution_generation"])
+            and (same_report if independent_report else source["execution_generation"] == run["execution_generation"])
             and all(source[key] == run[key] for key in (
                 "project_id", "task_type", "intent_id", "assessment_attempt_id", "worker_name", "session_id",
             ))
@@ -678,15 +716,14 @@ def _logical_executions(conn, project, task_type, intent_id, report_generation_t
         if run["intent_id"] != intent_id:
             continue
         context = parse_scenario_snapshot(run["runtime_context_json"])
-        scoped_report = False
+        independent_report = _is_independent_report(run, context)
         if task_type == "report":
             claim = context.get("report_claim", {})
-            if not isinstance(claim, dict) or claim.get("generation_token") != report_generation_token:
+            if not independent_report or claim["generation_token"] != report_generation_token:
                 continue
-            scoped_report = bool(claim.get("scope_key"))
         elif "assessment_phase" in context and context["assessment_phase"] != phase:
             continue
-        if not scoped_report and run["execution_generation"] != project["execution_generation"]:
+        if not independent_report and run["execution_generation"] != project["execution_generation"]:
             continue
         runs.append(run)
     return _current_execution_chain(conn, project, task_type, runs, allow_new_decision=allow_new_decision)
@@ -699,12 +736,24 @@ def _delivery_source_usable(project, run, now):
     if not isinstance(snapshot, dict) or not isinstance(lifecycle, dict):
         return False
     deadline = parse_utc_timestamp(snapshot.get("deadline_at"))
+    current = parse_utc_timestamp(now)
+    if run["task_type"] in {"bootstrap", "reason", "explore"}:
+        try:
+            paused_seconds = project_paused_seconds(
+                parse_scenario_snapshot(row_value(project, "execution_control_json")), now=current,
+            )
+            deadline = delivery_execution_deadline(snapshot, paused_seconds=paused_seconds)
+            for value in (snapshot["authorization_expires_at"], row_value(project, "authorization_expires_at")):
+                expiry = parse_utc_timestamp(value)
+                if value is not None and (expiry is None or current is None or expiry <= current):
+                    return False
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+            return False
     # Report 在探索截止后正常 finalization，只受原报告执行 deadline 约束。
     project_deadline = parse_utc_timestamp(project["explore_deadline"]) if run["task_type"] != "report" else None
-    current = parse_utc_timestamp(now)
-    scoped_report = run["task_type"] == "report" and bool(context.get("report_claim", {}).get("scope_key"))
-    # 单条整理按自己的报告代际重试，项目暂停/恢复不改变原执行的物理证明。
-    expected_generation = run["execution_generation"] if scoped_report else project["execution_generation"]
+    independent_report = _is_independent_report(run, context)
+    # 报告按原 TaskRun 核验物理证明，研究代际变化不改变报告本身的身份。
+    expected_generation = run["execution_generation"] if independent_report else project["execution_generation"]
     # cleanup 证明不等于 session 保留；本地原 owner 还须验证原容器及 manifest。
     return bool(
         run["status"] in {"failed", "timed_out"}
@@ -955,8 +1004,13 @@ def execution_retry_eligibility(
                 ).fetchone() is not None
             ):
                 return {"allowed": False, "reason": "execution_retry_blocked", "retry_at": None}
-        deadline = parse_utc_timestamp(output_retry["deadline_at"])
         current = parse_utc_timestamp(now or utcnow())
+        try:
+            deadline = delivery_execution_deadline(output_retry, paused_seconds=project_paused_seconds(
+                parse_scenario_snapshot(row_value(project, "execution_control_json")), now=current,
+            ))
+        except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+            return {"allowed": False, "reason": "execution_delivery_unavailable", "retry_at": None}
         if not deadline or deadline <= current or any(
             (boundary := parse_utc_timestamp(project[field])) is not None and boundary <= current
             for field in ("explore_deadline", "authorization_expires_at")

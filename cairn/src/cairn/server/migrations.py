@@ -5229,6 +5229,239 @@ POSTGRES_AGENT_USER_TASKS = Migration(
 )
 
 
+from cairn.server.conversation_schema_v76 import SQL as POSTGRES_CONVERSATION_OWNERS_SQL
+
+
+def _apply_postgres_conversation_owners(conn) -> None:
+    conn.executescript(POSTGRES_CONVERSATION_OWNERS_SQL)
+
+
+POSTGRES_CONVERSATION_OWNERS = Migration(
+    version=76,
+    name="conversation-owned-history",
+    checksum=sha256(POSTGRES_CONVERSATION_OWNERS_SQL.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_conversation_owners,
+)
+
+
+from cairn.server.vulnerability_disposition_schema import SQL as POSTGRES_VULNERABILITY_DISPOSITIONS_SQL
+
+
+def _apply_postgres_vulnerability_dispositions(conn) -> None:
+    conn.executescript(POSTGRES_VULNERABILITY_DISPOSITIONS_SQL)
+
+
+POSTGRES_VULNERABILITY_DISPOSITIONS = Migration(
+    version=77,
+    name="vulnerability-human-dispositions",
+    checksum=sha256(POSTGRES_VULNERABILITY_DISPOSITIONS_SQL.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_vulnerability_dispositions,
+)
+
+
+PROJECT_HOT_CONTROL_V78 = "ALTER TABLE projects ADD COLUMN execution_control_json TEXT NOT NULL DEFAULT '{}';"
+
+
+POSTGRES_PROJECT_HOT_CONTROL = Migration(
+    version=78,
+    name="project-hot-execution-control",
+    checksum=sha256(PROJECT_HOT_CONTROL_V78.encode("utf-8")).hexdigest(),
+    apply=lambda conn: conn.executescript(PROJECT_HOT_CONTROL_V78),
+)
+
+
+from cairn.server.conversation_research_schema import SQL as CONVERSATION_RESEARCH_V79_SQL
+
+
+POSTGRES_CONVERSATION_RESEARCH = Migration(
+    version=79,
+    name="conversation-research-and-resource-reclamation",
+    checksum=sha256(CONVERSATION_RESEARCH_V79_SQL.encode("utf-8")).hexdigest(),
+    apply=lambda conn: conn.executescript(CONVERSATION_RESEARCH_V79_SQL),
+)
+
+
+PROJECT_PAUSE_TIMEOUT_CLOCK_V80 = "ordinary-paused-clock-policy-activation-v1"
+
+
+def _apply_postgres_pause_timeout_clock(conn) -> None:
+    from cairn.server.services.time_utils import parse_utc_timestamp
+
+    now = _utcnow()
+    rows = conn.execute(
+        "SELECT p.id, p.execution_control_json FROM projects p WHERE p.status = 'paused' "
+        "AND NOT EXISTS (SELECT 1 FROM verification_requests v WHERE v.project_id = p.id) "
+        "ORDER BY p.id FOR UPDATE OF p"
+    ).fetchall()
+    for row in rows:
+        control = json.loads(row["execution_control_json"])
+        if not isinstance(control, dict):
+            raise RuntimeError("project_execution_control_invalid")
+        if parse_utc_timestamp(control.get("paused_at")) is not None:
+            continue
+        # 旧记录没有可证明连续暂停起点的事件；明确从策略生效计时，不猜创建或控制请求时间。
+        # 这里只初始化时钟，不制造物理暂停回执或向旧现场发送控制动作。
+        control.update(paused_at=now, paused_at_source="policy_activation")
+        conn.execute("UPDATE projects SET execution_control_json = ? WHERE id = ?", (
+            json.dumps(control, ensure_ascii=False, separators=(",", ":")), row["id"],
+        ))
+
+
+POSTGRES_PROJECT_PAUSE_TIMEOUT_CLOCK = Migration(
+    version=80,
+    name="project-pause-timeout-clock",
+    checksum=sha256(PROJECT_PAUSE_TIMEOUT_CLOCK_V80.encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_pause_timeout_clock,
+)
+
+
+PROJECT_LIBRARY_SELECTION_V81 = """\
+ALTER TABLE project_advisory_library_bindings ADD COLUMN paths_json TEXT;
+ALTER TABLE project_advisory_library_bindings ADD COLUMN selection_sha256 TEXT;
+ALTER TABLE project_schedule_libraries ADD COLUMN paths_json TEXT;
+ALTER TABLE project_schedule_libraries ADD COLUMN selection_sha256 TEXT;
+ALTER TABLE projects ADD COLUMN library_selection_explicit INTEGER NOT NULL DEFAULT 0
+    CHECK (library_selection_explicit IN (0, 1));
+ALTER TABLE project_schedules ADD COLUMN library_selection_explicit INTEGER NOT NULL DEFAULT 0
+    CHECK (library_selection_explicit IN (0, 1));
+"""
+PROJECT_LIBRARY_SELECTION_V81_FINAL = """\
+ALTER TABLE project_advisory_library_bindings ALTER COLUMN selection_sha256 SET NOT NULL;
+ALTER TABLE project_schedule_libraries ALTER COLUMN selection_sha256 SET NOT NULL;
+"""
+
+
+def _apply_postgres_project_library_selection(conn) -> None:
+    from cairn.advisory_contract import selection_sha256
+
+    conn.executescript(PROJECT_LIBRARY_SELECTION_V81)
+    # 历史绑定始终表示冻结的整版，包含当时就是空库的情况。
+    for table, owner in (("project_advisory_library_bindings", "project_id"),
+                         ("project_schedule_libraries", "schedule_id")):
+        rows = conn.execute(
+            f"SELECT b.{owner}, b.library_key, b.version, v.digest_sha256 "
+            f"FROM {table} b JOIN advisory_library_versions v "
+            "ON v.library_key=b.library_key AND v.version=b.version"
+        ).fetchall()
+        for row in rows:
+            files = conn.execute(
+                "SELECT path,size_bytes,sha256 FROM advisory_library_files "
+                "WHERE library_key=? AND version=? ORDER BY path",
+                (row["library_key"], row["version"]),
+            ).fetchall()
+            digest = selection_sha256(row["library_key"], row["version"], row["digest_sha256"], files)
+            conn.execute(
+                f"UPDATE {table} SET selection_sha256=? WHERE {owner}=? AND library_key=?",
+                (digest, row[owner], row["library_key"]),
+            )
+    # 从每个计划自身的冻结引用重建；绝不按当下 latest 推断。
+    schedules = conn.execute("SELECT id, project_json FROM project_schedules WHERE project_json IS NOT NULL").fetchall()
+    for row in schedules:
+        project = json.loads(row["project_json"])
+        if not isinstance(project, dict):
+            raise RuntimeError("schedule_project_json_invalid")
+        bindings = conn.execute(
+            "SELECT library_key,version FROM project_schedule_libraries WHERE schedule_id=? ORDER BY library_key",
+            (row["id"],),
+        ).fetchall()
+        project.pop("library_keys", None)
+        project.pop("refresh_library_keys", None)
+        project["library_selections"] = [
+            {"library_key": item["library_key"], "version": item["version"], "paths": None}
+            for item in bindings
+        ]
+        conn.execute("UPDATE project_schedules SET project_json=? WHERE id=?", (
+            json.dumps(project, ensure_ascii=False, separators=(",", ":")), row["id"],
+        ))
+    conn.executescript(PROJECT_LIBRARY_SELECTION_V81_FINAL)
+
+
+POSTGRES_PROJECT_LIBRARY_SELECTION = Migration(
+    version=81,
+    name="project-library-selection",
+    checksum=sha256((PROJECT_LIBRARY_SELECTION_V81 + PROJECT_LIBRARY_SELECTION_V81_FINAL
+                     + "backfill-frozen-bindings-and-schedule-json-v1").encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_project_library_selection,
+)
+
+
+LIBRARY_CURRENT_FILES_V82 = """\
+CREATE TABLE advisory_library_current_files (
+    library_key TEXT NOT NULL REFERENCES advisory_libraries(key) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    content TEXT NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    sha256 TEXT NOT NULL,
+    PRIMARY KEY (library_key, path)
+);
+"""
+
+
+def _apply_postgres_library_current_files(conn) -> None:
+    from cairn.server.services.knowledge import knowledge_root
+    from cairn.server.services.libraries import (
+        import_legacy_knowledge, initialize_root_library, read_library_file,
+    )
+
+    conn.executescript(LIBRARY_CURRENT_FILES_V82)
+    # 只在前向转换时读取各库原最新版；包括归档库，不改任何旧绑定和摘要。
+    rows = conn.execute(
+        """SELECT f.library_key, f.version, f.path FROM advisory_library_files f
+           WHERE f.version = (SELECT MAX(v.version) FROM advisory_library_versions v
+                              WHERE v.library_key = f.library_key)"""
+    ).fetchall()
+    for row in rows:
+        item = read_library_file(conn, row["library_key"], row["path"], row["version"])
+        conn.execute(
+            """INSERT INTO advisory_library_current_files (library_key, path, content, size_bytes, sha256)
+               VALUES (?, ?, ?, ?, ?)""",
+            (row["library_key"], item.path, item.content, item.size_bytes, item.sha256),
+        )
+    import_legacy_knowledge(conn, knowledge_root())
+    initialize_root_library(conn)
+    # 周期配置不持有未提交的当前选择；唯一内容身份仍来自该计划自己的绑定。
+    schedules = conn.execute("SELECT id, project_json FROM project_schedules WHERE project_json IS NOT NULL").fetchall()
+    for row in schedules:
+        project = json.loads(row["project_json"])
+        bindings = conn.execute(
+            "SELECT library_key, paths_json FROM project_schedule_libraries WHERE schedule_id = ? ORDER BY library_key",
+            (row["id"],),
+        ).fetchall()
+        project["library_selections"] = [
+            {"library_key": item["library_key"], "source": "saved",
+             "paths": json.loads(item["paths_json"]) if item["paths_json"] is not None else None,
+             "expected_files": None}
+            for item in bindings
+        ]
+        conn.execute("UPDATE project_schedules SET project_json = ? WHERE id = ?", (
+            json.dumps(project, ensure_ascii=False, separators=(",", ":")), row["id"],
+        ))
+
+
+POSTGRES_LIBRARY_CURRENT_FILES = Migration(
+    version=82,
+    name="library-current-files",
+    checksum=sha256((LIBRARY_CURRENT_FILES_V82 + "latest-content-root-safety-saved-schedule-v1").encode("utf-8")).hexdigest(),
+    apply=_apply_postgres_library_current_files,
+)
+
+
+from cairn.server.consumption_schema import POSTGRES_CONSUMPTION_V83, import_chat_usage
+
+
+def _apply_postgres_consumption(conn):
+    conn.executescript(POSTGRES_CONSUMPTION_V83)
+    import_chat_usage(conn)
+
+
+POSTGRES_CONSUMPTION = Migration(
+    version=83,
+    name="model-consumption",
+    checksum=sha256((POSTGRES_CONSUMPTION_V83 + "terminal-chat-import-v2").encode()).hexdigest(),
+    apply=_apply_postgres_consumption,
+)
+
+
 SQLITE_MIGRATIONS = (
     SQLITE_BASELINE,
     SQLITE_IDENTITY_TENANT,
@@ -5363,6 +5596,14 @@ POSTGRES_MIGRATIONS = (
     POSTGRES_AGENT_ACTIONS,
     POSTGRES_INDEPENDENT_PROJECT_AGENT,
     POSTGRES_AGENT_USER_TASKS,
+    POSTGRES_CONVERSATION_OWNERS,
+    POSTGRES_VULNERABILITY_DISPOSITIONS,
+    POSTGRES_PROJECT_HOT_CONTROL,
+    POSTGRES_CONVERSATION_RESEARCH,
+    POSTGRES_PROJECT_PAUSE_TIMEOUT_CLOCK,
+    POSTGRES_PROJECT_LIBRARY_SELECTION,
+    POSTGRES_LIBRARY_CURRENT_FILES,
+    POSTGRES_CONSUMPTION,
 )
 
 

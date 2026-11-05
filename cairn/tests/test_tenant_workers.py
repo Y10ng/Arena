@@ -278,7 +278,7 @@ def test_project_execution_binding_is_scoped_and_secret_is_transient(
     assert "execution-secret" not in serialized
 
 
-def test_completed_and_stopped_projects_allow_report_binding_but_reject_reason() -> None:
+def test_report_binding_is_independent_of_research_lifecycle() -> None:
     principal = _principal("worker-completed-report")
     model = _model(principal, api_key="completed-report-secret")
     worker = _configure_worker(principal, model.id)
@@ -321,14 +321,17 @@ def test_completed_and_stopped_projects_allow_report_binding_but_reject_reason()
     )
     assert stopped_binding.worker_id == worker.id
 
-    with pytest.raises(HTTPException) as rejected:
-        resolve_project_worker_execution_binding(
-            "proj_report",
-            worker.id,
-            task_type="reason",
-        )
-    assert rejected.value.status_code == 409
-    assert rejected.value.detail == "Project is not active"
+    for status in ("active", "paused", "completed", "stopped"):
+        with db.get_conn() as conn:
+            conn.execute("UPDATE projects SET status = ? WHERE id = 'proj_report'", (status,))
+        assert resolve_project_worker_execution_binding("proj_report", worker.id, task_type="report").worker_id == worker.id
+        if status == "active":
+            assert resolve_project_worker_execution_binding("proj_report", worker.id, task_type="reason").worker_id == worker.id
+        else:
+            with pytest.raises(HTTPException) as rejected:
+                resolve_project_worker_execution_binding("proj_report", worker.id, task_type="reason")
+            assert rejected.value.status_code == 409
+            assert rejected.value.detail == "Project is not active"
 
 
 def _bind_project(principal: RequestPrincipal, worker, project_id: str = "proj_binding") -> str:

@@ -1,2 +1,20 @@
 @import './RunsPage-layout.css';
 @import './RunsPage-terminal.css';
+
+.runs-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  padding: var(--layout-content-padding);
+  gap: var(--space-3);
+  overflow: auto;
+  background: var(--bg-surface);
+}
+
+@container workspace (max-width: 760px) {
+  .runs-container {
+    padding: var(--space-4);
+  }
+}

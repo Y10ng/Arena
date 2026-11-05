@@ -1,5 +1,5 @@
-FROM node:24.16.0-bookworm-slim AS node-distribution
-FROM kalilinux/kali-rolling:latest AS worker-node-base
+FROM node:24.16.0-bookworm-slim@sha256:2c87ef9bd3c6a3bd4b472b4bec2ce9d16354b0c574f736c476489d09f560a203 AS node-distribution
+FROM kalilinux/kali-rolling@sha256:4be87f78671419c13dcf4f207ead1cfc0de178ea281b3f69c0f49b69ba4e79b1 AS worker-node-base
 
 # builder与运行镜像共用同一Node二进制和Kali libc，不复制宿主依赖。
 COPY --from=node-distribution /usr/local/ /usr/local/
@@ -148,6 +148,16 @@ ENV PLAYWRIGHT_MCP_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PYTHONUNBUFFERED=1
 
 USER root
+# 证书工具与字体先于应用层，更新 runner、执行服务或指引不会重装工具。
+RUN apt-get update && apt-get install -y --no-install-recommends libnss3-tools && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+COPY fonts/ /usr/local/share/fonts/arena-noto-sans-cjk/
+RUN cd /usr/local/share/fonts/arena-noto-sans-cjk && \
+    sha256sum -c SHA256SUMS && \
+    fc-cache -f /usr/local/share/fonts/arena-noto-sans-cjk && \
+    test -n "$(fc-list :lang=zh family)"
+
+COPY task-executor/server.py /opt/cairn/task-executor/server.py
 COPY --from=pi-agent-builder /build/pi-agent/package.json /opt/cairn/pi-agent/package.json
 COPY --from=pi-agent-builder /build/pi-agent/node_modules /opt/cairn/pi-agent/node_modules
 COPY --from=pi-agent-builder /build/pi-agent/dist /opt/cairn/pi-agent/dist
@@ -162,12 +172,3 @@ LABEL io.cairn.agent.engine="pi" \
 # runner显式加载工具说明，不使用旧CLI自动发现、hooks或配置注入。
 COPY ./AGENTS.md /opt/cairn/AGENTS.md
 WORKDIR /home/kali/workspace
-
-# 中文截图资源独立追加，不使未变化的工具安装层失效。
-USER root
-COPY fonts/ /usr/local/share/fonts/arena-noto-sans-cjk/
-RUN cd /usr/local/share/fonts/arena-noto-sans-cjk && \
-    sha256sum -c SHA256SUMS && \
-    fc-cache -f /usr/local/share/fonts/arena-noto-sans-cjk && \
-    test -n "$(fc-list :lang=zh family)"
-USER kali

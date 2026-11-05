@@ -74,8 +74,8 @@ def create_intent_record(conn, project_id: str, body: CreateIntentRequest, princ
                 return intent_to_model(conn, accepted, project_id)
             if run["status"] != "running":
                 raise HTTPException(409, "intent_submission_run_mismatch")
-    check_project_active(conn, project_id)
-    if policy_from_project_row(project).protocol == GOAL_DRIVEN_PROTOCOL:
+    check_project_active(conn, project_id, task_run_id=body.task_run_id)
+    if policy_from_project_row(project).protocol == GOAL_DRIVEN_PROTOCOL and project["status"] == "active":
         stop_reason = advance_goal_driven_convergence(conn, project_id)
         if stop_reason is not None:
             conn.commit()

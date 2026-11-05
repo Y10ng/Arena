@@ -197,6 +197,8 @@ class DriverResult:
     argv: list[str]
     session: str | None = None
     input_files: tuple[WorkerInputFile, ...] = ()
+    consumption_id: str | None = None
+    consumption_spool_path: str | None = None
     checkpoint_spool: WorkerCheckpointSpool | None = None
     candidate_spool: WorkerCandidateSpool | None = None
     report_segment_manifest_path: str | None = None

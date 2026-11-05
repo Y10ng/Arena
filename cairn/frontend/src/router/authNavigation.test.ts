@@ -23,6 +23,35 @@ describe('auth navigation guard', () => {
     })
   })
 
+  it('preserves deep-link queries through login and forced password changes', () => {
+    const destination = target({
+      name: 'WorkspaceRuns',
+      fullPath: '/projects/project-a/runs?runId=run-a#output',
+    })
+    expect(resolveAuthNavigation(destination, auth({ isAuthenticated: false }))).toEqual({
+      name: 'Login', query: { redirect: destination.fullPath },
+    })
+    expect(resolveAuthNavigation(destination, auth({ mustChangePassword: true }))).toEqual({
+      name: 'ChangePassword', query: { redirect: destination.fullPath },
+    })
+    expect(resolveAuthNavigation(destination, auth())).toBe(true)
+  })
+
+  it.each([false, true])('lands authenticated login visitors on projects (admin: %s)', (isSuperAdmin) => {
+    expect(resolveAuthNavigation(
+      target({ name: 'Login', fullPath: '/login', isPublic: true }),
+      auth({ isSuperAdmin }),
+    )).toBe('/projects')
+  })
+
+  it('still allows anonymous visitors to reach login and authenticated visitors to reach overview', () => {
+    expect(resolveAuthNavigation(
+      target({ name: 'Login', fullPath: '/login', isPublic: true }),
+      auth({ isAuthenticated: false }),
+    )).toBe(true)
+    expect(resolveAuthNavigation(target({ name: 'Overview', fullPath: '/' }), auth())).toBe(true)
+  })
+
   it('gives forced password changes precedence over authorization', () => {
     expect(resolveAuthNavigation(
       target({ name: 'ConsoleUsers', fullPath: '/console/users', requiresSuperAdmin: true }),
@@ -41,7 +70,7 @@ describe('auth navigation guard', () => {
     expect(resolveAuthNavigation(
       target({ name: 'ChangePassword', fullPath: '/change-password' }),
       auth(),
-    )).toBe('/')
+    )).toBe('/projects')
   })
 
   it('redirects an authenticated forced user away from login', () => {

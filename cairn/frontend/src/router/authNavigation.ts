@@ -22,7 +22,7 @@ export function resolveAuthNavigation(
 ): AuthNavigationResult {
   if (target.isPublic) {
     if (target.name === 'Login' && auth.isAuthenticated) {
-      return auth.mustChangePassword ? { name: 'ChangePassword' } : '/'
+      return auth.mustChangePassword ? { name: 'ChangePassword' } : '/projects'
     }
     return true
   }
@@ -32,7 +32,7 @@ export function resolveAuthNavigation(
   if (auth.mustChangePassword && target.name !== 'ChangePassword') {
     return { name: 'ChangePassword', query: { redirect: target.fullPath } }
   }
-  if (!auth.mustChangePassword && target.name === 'ChangePassword') return '/'
+  if (!auth.mustChangePassword && target.name === 'ChangePassword') return '/projects'
   if (target.requiresSuperAdmin && !auth.isSuperAdmin) return { name: 'Forbidden' }
   return true
 }

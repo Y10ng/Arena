@@ -35,11 +35,10 @@ DENIED_NAMES = {".env", "id_rsa", "id_ed25519", "auth.json", "credentials.json"}
 # Dispatcher的runtime源码必须保留；这里只排除宿主和pi-agent的运行态目录。
 DENIED_TREES = (Path("runtime"), Path("container/pi-agent/runtime"))
 RETIRED_FILES = {
+    Path("container/task-executor/Dockerfile"),
     Path("cairn/src/cairn/dispatcher/runtime/capture_tool.sh"),
     Path("cairn/src/cairn/dispatcher/runtime/traffic_capture.py"),
     Path("cairn/src/cairn/dispatcher/runtime/traffic_capture_addon.py"),
-    Path("cairn/src/cairn/server/routers/traffic.py"),
-    Path("cairn/src/cairn/server/services/traffic.py"),
     Path("container/traffic_capture.py"),
 }
 SECRET_PATTERNS = (

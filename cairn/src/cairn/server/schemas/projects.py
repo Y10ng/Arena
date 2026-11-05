@@ -13,10 +13,13 @@ from cairn.evidence_contracts import (
     VerificationTestStep,
     validate_verification_evidence_links,
 )
-from pydantic import ConfigDict, model_serializer
+from pydantic import ConfigDict, computed_field, model_serializer
+from cairn.vulnerability_number import vulnerability_number
 
 from .artifacts import Artifact, FactEvidence
 from .common import *
+from .consumption import ConsumptionSummary
+from .libraries import LibrarySelection
 from .resources import CreateProjectResourceRequest, ProjectResource
 from .tasks import TaskRun
 from .test_egress import TestEgressInput, TestEgressView
@@ -244,6 +247,7 @@ class AssessmentReportFinalizationView(BaseModel):
     template_compatibility_profiles: list[str] = Field(default_factory=list)
     input_snapshot_artifact_id: str | None = None
     input_snapshot_sha256: str | None = None
+    materialized_at: str | None = None
     report_policy_version: int | None = None
     report_execution_plan_sha256: str | None = None
     report_prompt_digest_sha256: str | None = None
@@ -496,6 +500,7 @@ class AssessmentReportFinishReplayRequest(AssessmentReportFinishPayload):
 
 class AssessmentReportPacket(BaseModel):
     version: int = 2
+    materialized_at: str | None = None
     scope_key: str = ""
     vulnerability_id: str | None = None
     observation_id: str | None = None
@@ -544,6 +549,7 @@ class ProjectMeta(BaseModel):
     schedule_id: str | None = None
     verification_request_id: str | None = None
     execution_generation: int = 0
+    execution_control: dict[str, Any] = Field(default_factory=dict)
     authorization_epoch: int = 0
     authorization_scope_digest: str | None = None
     authorization_scope_descriptor: dict[str, Any] | None = None
@@ -579,6 +585,7 @@ class ProjectMeta(BaseModel):
 
 
 class ProjectSummary(ProjectMeta):
+    consumption: ConsumptionSummary | None = None
     fact_count: int
     intent_count: int
     working_intent_count: int
@@ -592,9 +599,12 @@ class ProjectLibraryBinding(BaseModel):
     version: int
     digest_sha256: str
     file_count: int
+    paths: list[str] | None
+    selection_sha256: str
 
 
 class ProjectDetail(BaseModel):
+    consumption: ConsumptionSummary | None = None
     project: ProjectMeta
     facts: list[Fact]
     intents: list[Intent]
@@ -602,6 +612,7 @@ class ProjectDetail(BaseModel):
     targets: list[Target]
     resources: list[ProjectResource] = Field(default_factory=list)
     library_bindings: list[ProjectLibraryBinding] = Field(default_factory=list)
+    library_selection_explicit: bool
 
 
 class CreateTargetInline(BaseModel):
@@ -644,7 +655,7 @@ class CreateProjectRequest(BaseModel):
     # resources 保留旧版 JSON 创建兼容；大文件和 ZIP 使用临时批次。
     resources: list[CreateProjectResourceRequest] | None = None
     resource_batch_id: str | None = None
-    library_keys: list[str] = Field(default_factory=list)
+    library_selections: list[LibrarySelection]
     explore_deadline: str | None = None
     # 创建方必须显式选择未来期限或以 null 表示无限期，不能靠字段缺失推导授权。
     authorization_expires_at: str | None
@@ -709,20 +720,13 @@ class CreateProjectRequest(BaseModel):
             raise ValueError("resources and resource_batch_id cannot be used together")
         return self
 
-    @field_validator("library_keys")
+    @field_validator("library_selections")
     @classmethod
-    def validate_library_keys(cls, value: list[str]) -> list[str]:
-        cleaned: list[str] = []
-        seen: set[str] = set()
-        for item in value:
-            text = str(item).strip()
-            if not text:
-                raise ValueError("library keys must not be empty")
-            if text in seen:
-                raise ValueError(f"duplicate library key: {text}")
-            seen.add(text)
-            cleaned.append(text)
-        return cleaned
+    def validate_library_selections(cls, value: list[LibrarySelection]) -> list[LibrarySelection]:
+        keys = [item.library_key for item in value]
+        if len(keys) != len(set(keys)):
+            raise ValueError("duplicate library key")
+        return sorted(value, key=lambda item: item.library_key)
 
 class CreateHintRequest(BaseModel):
     content: str
@@ -1531,10 +1535,20 @@ class CreateVulnerabilityRequest(BaseModel):
         return max(0.0, min(1.0, float(value)))
 
 
+class VulnerabilityDispositionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1, strict=True)
+    # null 明确选择独立人工材料，不允许服务端悄悄改选最新发现。
+    observation_id: str | None
+    reason: str | None = None
+
+
 class UpdateVulnerabilityRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: str | None = None
+    disposition: VulnerabilityDispositionInput | None = None
     severity: str | None = None
     remediation: str | None = None
     confidence: float | None = None
@@ -1542,6 +1556,12 @@ class UpdateVulnerabilityRequest(BaseModel):
     evidence_items: list[EvidenceItem] | None = None
     # 报告阶段回写的编号复现步骤（markdown）；None=不改动。
     repro_steps: str | None = None
+
+    @model_validator(mode="after")
+    def validate_disposition(self):
+        if (self.status is not None) != (self.disposition is not None):
+            raise ValueError("状态变更必须同时提交人工处置的版本与来源")
+        return self
 
     @field_validator("status")
     @classmethod
@@ -1576,6 +1596,12 @@ class UpdateVulnerabilityRequest(BaseModel):
 class Vulnerability(BaseModel):
     id: str
     project_id: str
+
+    @computed_field
+    @property
+    def number(self) -> str:
+        return vulnerability_number(self.project_id, self.id)
+
     can_delete: bool = False
     delete_block_reason: str | None = None
     title: str
@@ -1614,6 +1640,7 @@ class VulnerabilitySourceFact(BaseModel):
 
     id: str
     description: str
+    preconditions: list[str] = Field(default_factory=list)
     task_run_id: str | None = None
     evidence: list[VulnerabilityEvidenceArtifact] = []
 
@@ -1741,15 +1768,34 @@ class VulnerabilityReadable(BaseModel):
     vulnerability_id: str
     observation_id: str | None
     description_markdown: str
+    preconditions: list[str] = Field(default_factory=list)
     reproduction_markdown: str
     remediation_markdown: str
     limitations_markdown: str
-    key_evidence_markdown: str
+    key_evidence_markdown: str = ""
+
+
+class VulnerabilityDisposition(BaseModel):
+    id: str
+    project_id: str
+    vulnerability_id: str
+    actor_id: str
+    actor_login: str
+    observation_id: str | None
+    source_snapshot: dict[str, Any]
+    reason: str | None
+    previous_status: str
+    status: str
+    previous_version: int
+    record_version: int
+    created_at: str
 
 
 class VulnerabilityDetail(Vulnerability):
     """主证据只选定一次真实发现；人工及未配对历史材料另保留可读入口。"""
 
+    record_version: int
+    dispositions: list[VulnerabilityDisposition] = Field(default_factory=list)
     readable: VulnerabilityReadable | None = None
     display_images: list[dict[str, Any]] = Field(default_factory=list)
     observation_id: str | None = None

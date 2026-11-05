@@ -68,7 +68,7 @@ const deferred = <T>() => {
   return { promise, resolve, reject }
 }
 const button = (wrapper: VueWrapper, text: string) => {
-  const target = wrapper.findAll('button').find((item) => item.text().trim() === text)
+  const target = wrapper.findAll('button').find((item) => item.text().trim() === text || (item.find('strong').exists() && item.find('strong').text() === `${text}.md`))
   if (!target) throw new Error(`找不到按钮：${text}`)
   return target
 }
@@ -98,6 +98,8 @@ async function mountConsole() {
   wrappers.push(wrapper)
   clients.push(queryClient)
   await flushPromises()
+  const edit = wrapper.findAll('button').find((item) => item.text() === '编辑')
+  if (edit) { await edit.trigger('click'); await flushPromises() }
   return { wrapper, router, queryClient }
 }
 
@@ -132,14 +134,14 @@ afterEach(() => {
 })
 
 describe('ReportTemplatesConsole current CRUD', () => {
-  it('copies the actual default body for a new draft and keeps the default undeletable', async () => {
-    templates = [template('aaa-first', '# 不是默认'), { ...template('system-default', '# 当前数据库默认\n\n三段正文'), is_default: true }]
+  it('starts plain Markdown without requiring a default and keeps both workspace panes', async () => {
+    templates = [{ ...template('system-default', null), is_default: true, validation_error: '正文缺失' }]
     const { wrapper } = await mountConsole()
     await button(wrapper, '新建').trigger('click')
-    expect((editor(wrapper).element as HTMLTextAreaElement).value).toBe('# 当前数据库默认\n\n三段正文')
-    await button(wrapper, '返回模板列表').trigger('click')
-    const defaultButton = wrapper.findAll('button').find((item) => item.text().includes('系统默认'))!
-    await defaultButton.trigger('click')
+    expect((editor(wrapper).element as HTMLTextAreaElement).value).toBe('')
+    expect(wrapper.find('.report-template-directory').exists()).toBe(true)
+    expect(wrapper.find('.report-template-detail').exists()).toBe(true)
+    await wrapper.get('[data-template-key="system-default"]').trigger('click')
     await flushPromises()
     expect(wrapper.findAll('button').some((item) => item.text() === '删除模板')).toBe(false)
   })
@@ -152,13 +154,13 @@ describe('ReportTemplatesConsole current CRUD', () => {
     await nameInput(wrapper).setValue('当前名称')
     await descriptionInput(wrapper).setValue('当前说明')
     await editor(wrapper).setValue(markdown)
-    await button(wrapper, '模板文字预览').trigger('click')
+    await button(wrapper, '预览').trigger('click')
     await flushPromises()
     expect(wrapper.get('.safe-report-markdown h1').text()).toBe('当前模板')
     expect(wrapper.get('.safe-report-markdown strong').text()).toBe('排版内容')
     expect(wrapper.find('.safe-report-markdown img').exists()).toBe(false)
     expect(wrapper.find('.safe-report-markdown script').exists()).toBe(false)
-    await button(wrapper, '正文编辑').trigger('click')
+    await button(wrapper, '编辑').trigger('click')
     expect((editor(wrapper).element as HTMLTextAreaElement).value).toBe(markdown)
     await button(wrapper, '保存').trigger('click')
     await flushPromises()
@@ -179,14 +181,14 @@ describe('ReportTemplatesConsole current CRUD', () => {
     await nameInput(wrapper).setValue('新模板')
     await descriptionInput(wrapper).setValue('说明')
     await editor(wrapper).setValue('# 首次正文')
-    await button(wrapper, '创建模板').trigger('click')
+    await button(wrapper, '保存').trigger('click')
     await flushPromises()
     expect(mocks.createReportTemplate).toHaveBeenCalledWith({
       name: '新模板',
       description: '说明',
       markdown_content: '# 首次正文',
     })
-    expect(wrapper.get('.report-template-item.active').text()).toBe('新模板')
+    expect(wrapper.get('.report-template-item.active strong').text()).toBe('新模板.md')
     expect((editor(wrapper).element as HTMLTextAreaElement).value).toBe('# 首次正文')
     expect(button(wrapper, '保存').attributes('disabled')).toBeDefined()
   })
@@ -194,7 +196,7 @@ describe('ReportTemplatesConsole current CRUD', () => {
   it('allows an old empty-content record to receive a body and omits empty profiles', async () => {
     templates = [template('security-report', null)]
     const { wrapper } = await mountConsole()
-    expect(wrapper.text()).toContain('待填写正文')
+    expect(wrapper.text()).toContain('安全评估报告.md')
     await editor(wrapper).setValue('# 补全正文')
     await button(wrapper, '保存').trigger('click')
     await flushPromises()
@@ -205,20 +207,34 @@ describe('ReportTemplatesConsole current CRUD', () => {
     })
   })
 
-  it('protects unsaved fields on switch, create, narrow back, reset and route leave', async () => {
+  it('awaits discard decisions on switch, create, back, reset and route leave', async () => {
     templates.push(template('other'))
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
     const { wrapper, router } = await mountConsole()
+    const discard = () => wrapper.findAllComponents(ConfirmAction).find((item) => item.props('title') === '放弃模板草稿？')!
     await nameInput(wrapper).setValue('未保存名称')
-    await button(wrapper, '另一模板').trigger('click')
-    await button(wrapper, '新建').trigger('click')
-    await button(wrapper, '返回模板列表').trigger('click')
-    await button(wrapper, '重置').trigger('click')
-    await router.push('/other')
+    for (const label of ['另一模板', '新建', '重置']) {
+      await button(wrapper, label).trigger('click')
+      await flushPromises()
+      expect(discard().props('open')).toBe(true)
+      expect((nameInput(wrapper).element as HTMLInputElement).value).toBe('未保存名称')
+      discard().vm.$emit('update:open', false)
+      await flushPromises()
+      expect((nameInput(wrapper).element as HTMLInputElement).value).toBe('未保存名称')
+    }
+    const leaving = router.push('/other')
+    await flushPromises()
+    expect(discard().props('open')).toBe(true)
     expect(router.currentRoute.value.path).toBe('/console/report-templates')
-    expect((nameInput(wrapper).element as HTMLInputElement).value).toBe('未保存名称')
-    expect(wrapper.get('.report-template-item.active').text()).toBe('安全评估报告')
-    expect(confirm).toHaveBeenCalledTimes(5)
+    discard().vm.$emit('update:open', false)
+    await leaving
+    expect(router.currentRoute.value.path).toBe('/console/report-templates')
+    expect(wrapper.get('.report-template-item.active strong').text()).toBe('安全评估报告.md')
+    await button(wrapper, '重置').trigger('click')
+    discard().vm.$emit('confirm')
+    await flushPromises()
+    expect((nameInput(wrapper).element as HTMLInputElement).value).toBe('安全评估报告')
+    expect(mocks.updateReportTemplate).not.toHaveBeenCalled()
+    expect(mocks.createReportTemplate).not.toHaveBeenCalled()
   })
 
   it('locks editing and route changes through save and the following directory refresh', async () => {
@@ -250,6 +266,7 @@ describe('ReportTemplatesConsole current CRUD', () => {
     const { wrapper } = await mountConsole()
     await button(wrapper, '另一模板').trigger('click')
     await flushPromises()
+    await button(wrapper, '编辑').trigger('click')
     await editor(wrapper).setValue('# 新草稿')
     reading.resolve(template('security-report', '# 迟到正文'))
     await flushPromises()
@@ -267,7 +284,7 @@ describe('ReportTemplatesConsole current CRUD', () => {
     reading.resolve(template('security-report', '# 迟到正文'))
     await flushPromises()
     expect((editor(wrapper).element as HTMLTextAreaElement).value).toBe('# 新建草稿')
-    expect(button(wrapper, '创建模板').exists()).toBe(true)
+    expect(button(wrapper, '保存').exists()).toBe(true)
   })
 
   it.each(['read failure', 'identity mismatch'])(
@@ -301,8 +318,10 @@ describe('ReportTemplatesConsole current CRUD', () => {
 
   it('truly deletes a built-in or custom template without affecting accepted reports', async () => {
     const { wrapper } = await mountConsole()
-    await button(wrapper, '删除模板').trigger('click')
-    const confirmation = wrapper.findComponent(ConfirmAction)
+    expect(wrapper.find('button[aria-label="模板更多操作"]').exists()).toBe(true)
+    wrapper.findComponent({ name: 'UiDropdownMenu' }).vm.$emit('select', 'delete')
+    await flushPromises()
+    const confirmation = wrapper.findAllComponents(ConfirmAction).find((item) => item.props('title') === '删除报告模板')!
     expect(confirmation.props('description')).toContain('已生成的报告和已受理任务不受影响')
     confirmation.vm.$emit('confirm')
     await flushPromises()

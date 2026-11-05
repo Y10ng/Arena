@@ -165,11 +165,8 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
                     continue
                 if state.get("status") in {"ready", "cancelled"}:
                     continue
-                if not state.get("scope_key"):
-                    if summary.status not in {"completed", "stopped"}:
-                        continue
-                    if summary.status == "stopped" and any(task.task_type not in {"report", "agent_chat"} for task in project_tasks):
-                        continue
+                if summary.status not in {"active", "paused", "completed", "stopped"}:
+                    continue
                 if state.get("status") == "running" and not _timestamp_is_due(state.get("lease_expires_at")):
                     continue
                 if state.get("delivery_retry_route") is None and not _report_retry_is_due(state):
@@ -178,10 +175,7 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
                     break
 
     def _try_dispatch_completed_report(self, project_id: str, *, report_state: dict | None = None) -> bool:
-        if self.container_manager.container_name(project_id) in self._cleanup_pending:
-            self._observe_decision(project_id, "cleanup_pending", task_type="report")
-            return False
-        if self._candidate_project_blocked(project_id):
+        if self._candidate_report_blocked(project_id):
             self._observe_decision(project_id, "cleanup_pending", task_type="report")
             return False
         if (self.report_finish_outbox.has_generation(project_id, report_state["generation_token"])
@@ -198,27 +192,8 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
         project = self.client.get_project(project_id)
         if not self._execution_supported(project):
             return False
-        try:
-            if report_state is not None and report_state.get("scope_key"):
-                import yaml
-                packet = self.client.get_assessment_report_packet(project_id, generation_token=report_state["generation_token"])
-                if not packet.ok or not isinstance(packet.data, dict):
-                    return False
-                export_yaml = yaml.safe_dump({"facts": packet.data["facts"], "intents": packet.data["intents"]}, allow_unicode=True)
-            else:
-                export_yaml = self.client.export_project(project_id)
-        except requests.RequestException:
-            self._observe_decision(project_id, "admission_failed", task_type="report")
-            return False
-        if not isinstance(export_yaml, str) or not export_yaml.strip():
-            self._observe_decision(project_id, "admission_failed", task_type="report")
-            self._log_changed(
-                f"project:{project_id}:report_graph_invalid",
-                logging.WARNING,
-                "skip report dispatch because exported graph is empty project=%s",
-                project_id,
-            )
-            return False
+        # 真正取材在报告 claim 后进行；不在排队时读取另一份项目全图。
+        export_yaml = ""
         scenario = self._scenario_for_project(project)
         container_runtime = self._container_runtime_options(scenario, project_id)
         if report_state is None:
@@ -411,6 +386,10 @@ class DispatchCycleMixin(DispatchDecisionsMixin):
                 summary.id,
                 project.project.status,
             )
+            return False
+        control = getattr(project.project, "execution_control", {}) or {}
+        if control and control.get("state") != "running":
+            self._observe_decision(summary.id, "execution_control_unconfirmed")
             return False
         # 每轮使用 Server 新鲜裁决，不从摘要推断授权，也不缓存上轮的 409。
         if project.project.authorization_block_reason is not None:

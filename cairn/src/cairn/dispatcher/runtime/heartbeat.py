@@ -33,12 +33,13 @@ class HeartbeatLease:
         scope: str,
         worker_name: str,
         interval: int,
+        *, cancellation: TaskCancellation | None = None,
     ):
         self._heartbeat = heartbeat
         self._scope = scope
         self._worker_name = worker_name
         self._interval = interval
-        self._cancellation = TaskCancellation()
+        self._cancellation = cancellation if cancellation is not None else TaskCancellation()
         self._failure: HeartbeatFailure | None = None
         self._last_success_at = time.monotonic()
         self._stop = threading.Event()

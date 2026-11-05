@@ -37,10 +37,12 @@ def list_requests(limit: int = Query(default=50, ge=1, le=200), offset: int = Qu
                   external_id: str | None = None, mode: str | None = None,
                   execution_status: str | None = None, outcome: str | None = None,
                   source_project_id: str | None = None, source_vulnerability_id: str | None = None,
+                  source_number: str | None = None,
                   principal: RequestPrincipal = Depends(require_verification_caller)):
     return service.list_verification_requests(principal, limit=limit, offset=offset, external_id=external_id,
                                              mode=mode, execution_status=execution_status, outcome=outcome,
-                                             source_project_id=source_project_id, source_vulnerability_id=source_vulnerability_id)
+                                             source_project_id=source_project_id, source_vulnerability_id=source_vulnerability_id,
+                                             source_number=source_number)
 
 
 @router.get("/verification-sources/projects/{project_id}/vulnerabilities/{vulnerability_id}/preview")
@@ -85,7 +87,7 @@ def read_material(request_id: str, resource_id: str, principal: RequestPrincipal
     material = service.verification_material(request_id, resource_id, principal)
     filename = PurePosixPath(material.path).name
     headers = NO_STORE | {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}"}
-    return Response(material.content, media_type="application/octet-stream", headers=headers)
+    return FileResponse(material.disk_path, media_type="application/octet-stream", headers=headers)
 
 
 @router.get("/verification-requests/{request_id}/materials/{resource_id}/preview")

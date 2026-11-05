@@ -34,6 +34,7 @@ export const normalizeKnowledgeSets = (sets: KnowledgeSet[] = []) => {
     key: BUILTIN_KNOWLEDGE_KEY,
     path: '',
     builtin: true,
+    safety_path: null,
     file_count: 0,
     referenced_by: [],
   })

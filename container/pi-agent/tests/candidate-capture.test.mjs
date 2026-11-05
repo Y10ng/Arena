@@ -444,10 +444,10 @@ test('admission rejects direct and standard JSON-escaped runtime literals before
     { configure: (request) => { request.model.custom_headers.push({ name: 'Authorization', value: 'HEADER_SECRET_a611' }); }, raw: '{"reason":"HEADER_SECRET_a611"}' },
     { configure: (request) => { request.capabilities.candidate_capture.forbidden_literals = ['FORBIDDEN_277f']; }, raw: '{"reason":"FORBIDDEN_277f"}' },
     { configure: (request) => { request.capabilities.candidate_capture.forbidden_literals = ['密钥\n']; }, raw: '{"reason":"\\u5bc6\\u94a5\\n"}' },
-    { configure: () => {}, raw: '{"reason":"-----BEGIN PRIVATE KEY-----\\ncanary"}' },
-    { configure: () => {}, raw: '{"reason":"-----BEGIN ENCRYPTED PRIVATE KEY-----\\ncanary"}' },
-    { configure: () => {}, raw: '{"reason":"-----BEGIN DSA PRIVATE KEY-----\\ncanary"}' },
-    { configure: () => {}, raw: '{"reason":"-----BEGIN PGP PRIVATE KEY BLOCK-----\\ncanary"}' },
+    ...[
+      'PRIVATE KEY', 'ENCRYPTED PRIVATE KEY', 'RSA PRIVATE KEY', 'DSA PRIVATE KEY',
+      'EC PRIVATE KEY', 'OPENSSH PRIVATE KEY', 'PGP PRIVATE KEY BLOCK',
+    ].map((kind) => ({ configure: () => {}, raw: JSON.stringify({ reason: `-----BEGIN ${kind}-----\ncanary` }) })),
   ];
   for (const [index, item] of cases.entries()) {
     const current = await requestWithSpool(t);

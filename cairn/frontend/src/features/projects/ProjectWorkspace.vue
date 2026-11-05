@@ -1,5 +1,5 @@
 <template>
-  <div class="workspace-layout" :class="{ 'workspace-layout--agent': isAgentView }">
+  <div class="workspace-layout">
     <Card
       v-if="workspaceStore.isLoading && !workspaceStore.projectDetail"
       class="loading-state"
@@ -22,169 +22,115 @@
       @retry="goBackToList"
     />
 
-    <!-- Main Workspace Content -->
+    <!-- 身份与动作共用短带，局部导航单独成组，避免与项目操作挤在一排。 -->
     <template v-else-if="project">
       <Teleport :to="compactHeaderTarget || 'body'" :disabled="!compactHeaderTarget">
-      <header class="workspace-header" :class="{ 'workspace-header--agent': isAgentView }">
-        <div class="header-left">
-          <IconButton label="返回项目列表" size="sm" variant="secondary" @click="goBackToList">
-            <ArrowLeft :size="16" />
-          </IconButton>
+        <header class="workspace-header">
+          <div class="header-left">
+            <IconButton label="返回项目列表" size="sm" variant="secondary" @click="goBackToList">
+              <ArrowLeft :size="16" />
+            </IconButton>
 
-          <div class="title-edit-container">
-            <div v-if="isEditingTitle" class="edit-row">
-              <Input
-                ref="titleInput"
-                v-model="editTitleValue"
-                class="title-input"
-                aria-label="项目名称"
-                :disabled="titleSaving"
-                @blur="saveTitle"
-                @keyup.enter="saveTitle"
-                @keyup.esc="cancelEditTitle"
-              />
-              <span v-if="titleSaving" class="title-saving" role="status">正在保存…</span>
-            </div>
-            <h2 v-else class="project-title-heading-wrap">
-              <button
-                type="button"
-                class="project-title-heading"
-                :disabled="titleSaving"
-                @dblclick="startEditTitle"
-                @click="startEditTitle"
-                title="双击就地编辑项目名称"
-              >
-                {{ project.title }}
-                <Pencil :size="12" class="edit-icon" />
-              </button>
-            </h2>
+            <h1 class="project-title-heading" :title="project.title">{{ project.title }}</h1>
+            <ProjectStatusObservation
+              :project="project"
+              :control-waiting-expired="observationExpired(project.id)"
+              :runtime="runtimeData"
+              :data-updated-at="runtimeUpdatedAtFor(project.id)"
+              :failed="runtimeError"
+              :fetching="runtimeFetching"
+              :now="runtimeNow"
+              @refresh="refetchRuntime({ cancelRefetch: false })"
+            />
           </div>
-          <Badge v-if="projectStatus" :tone="projectStatus.tone" size="sm" aria-label="项目状态">{{
-            projectStatus.label
-          }}</Badge>
-          <Popover v-if="isAgentView" v-model:open="researchNavigationOpen" align="start">
-            <template #trigger><Button variant="ghost" aria-label="切换研究视图">研究视图<ChevronDown :size="14" /></Button></template>
-            <nav class="workspace-research-navigation" aria-label="项目页面">
-              <router-link v-for="tab in tabs" :key="tab.routeName" :to="{ name: tab.routeName, params: { id: project.id } }" exact-active-class="active" @click="researchNavigationOpen = false">
-                {{ tab.label }}<span v-if="tab.badgeCount && tab.badgeCount.value > 0">{{ tab.badgeCount.value }}</span>
-              </router-link>
-            </nav>
-          </Popover>
-        </div>
 
-        <div class="header-right">
-          <Button
-            v-if="project.schedule_id || lifecycleStatus === 'pending'"
-            size="sm"
-            variant="secondary"
-            @click="
-              router.push(
-                project.schedule_id
-                  ? `/project-schedules/${project.schedule_id}`
-                  : pendingSchedule
-                    ? `/project-schedules/${pendingSchedule.id}`
-                    : '/projects?view=schedules',
-              )
-            "
-            >管理启动计划</Button
-          >
-          <Button
-            v-if="lifecycleStatus === 'pending' && runtimeData?.actions?.reauthorize?.allowed"
-            size="sm"
-            variant="warning"
-            :disabled="!canPerform('reauthorize')"
-            @click="openReauthorizationDialog"
-            >重新确认授权</Button
-          >
-          <Button size="sm" variant="secondary" @click="reportDialogOpen = true"> 查看成果 </Button>
-          <Button
-            v-if="lifecycleStatus === 'active'"
-            size="sm"
-            variant="warning"
-            :loading="statusSaving"
-            :disabled="!canPerform('pause')"
-            :title="disabledReason('pause')"
-            @click="changeStatus('pause')"
-          >
-            <template #icon><Pause :size="12" /></template>
-            暂停项目
-          </Button>
-          <template v-else-if="lifecycleStatus === 'paused'">
+          <div class="header-right">
+            <span v-if="['active', 'paused'].includes(project.status) && !project.verification_request_id && runtimeData?.actions?.finish?.reason !== 'verification_request_managed'" class="workspace-pause-policy">暂停满12小时将自动结束，工作文件保留</span>
             <Button
-              v-if="runtimeData?.actions?.reauthorize?.allowed"
-              size="sm"
-              variant="warning"
-              :loading="statusSaving"
-              :disabled="!canPerform('reauthorize')"
-              :title="disabledReason('reauthorize')"
-              @click="openReauthorizationDialog"
+              v-if="primaryAction.value !== 'report'"
+              variant="ghost"
+              @click="reportDialogOpen = true"
             >
-              <template #icon><ShieldCheck :size="12" /></template>
-              重新确认授权
+              查看成果
             </Button>
             <Button
-              size="sm"
-              variant="success"
-              :loading="statusSaving"
-              :disabled="!canPerform('resume')"
-              :title="disabledReason('resume')"
-              @click="changeStatus('resume')"
+              :loading="statusSaving && primaryAction.lifecycle"
+              :disabled="primaryAction.disabled"
+              @click="runPrimaryAction"
             >
-              <template #icon><Play :size="12" /></template>
-              继续项目
+              <template #icon><component :is="primaryAction.icon" :size="16" /></template>
+              {{ primaryAction.label }}
             </Button>
-          </template>
-          <Button
-            v-if="['active', 'paused'].includes(lifecycleStatus)"
-            size="sm"
-            variant="danger"
-            :disabled="statusSaving || !canPerform('finish')"
-            :title="disabledReason('finish')"
-            @click="showFinishDialog = true"
-            >结束并生成报告</Button
-          >
+            <DropdownMenu
+              v-model:open="isMoreOpen"
+              :items="moreMenuItems"
+              label="项目管理"
+              @select="handleMoreMenuSelect"
+            >
+              <template #trigger>
+                <Button variant="secondary" aria-label="项目更多操作">
+                  管理<ChevronDown :size="16" />
+                </Button>
+              </template>
+            </DropdownMenu>
+          </div>
 
-          <Button v-if="canReopen" size="sm" @click="openReopenPrompt">
-            <template #icon><RotateCcw :size="12" /></template>
-            重新开启 (Reopen)
-          </Button>
-
-          <DropdownMenu
-            v-model:open="isMoreOpen"
-            :items="moreMenuItems"
-            @select="handleMoreMenuSelect"
-          >
-            <template #trigger>
-              <Button size="sm" variant="secondary" aria-label="项目更多操作">
-                <template #icon><MoreHorizontal :size="14" /></template>
-                更多
-              </Button>
-            </template>
-            <template #icon="{ item }">
-              <Trash2 v-if="item.value === 'delete-project'" :size="12" />
-              <Download v-else-if="item.value.startsWith('export-')" :size="12" />
-              <FolderOpen v-else :size="12" />
-            </template>
-          </DropdownMenu>
-        </div>
-
-        <div v-if="lifecycleActionWarnings.length" class="header-action-reasons" role="status">
-          <span v-for="warning in lifecycleActionWarnings" :key="warning.action">
-            {{ warning.action }}：{{ warning.reason }}
-          </span>
-        </div>
-      </header>
+          <nav class="workspace-tabs" aria-label="项目页面">
+            <router-link
+              v-for="tab in tabs"
+              :key="tab.routeName"
+              :to="{ name: tab.routeName, params: { id: project.id } }"
+              class="tab-item"
+              exact-active-class="active"
+            >
+              {{ tab.label }}
+              <span class="tab-badge" v-if="tab.badgeCount && tab.badgeCount.value > 0">
+                {{ tab.badgeCount.value }}
+              </span>
+            </router-link>
+            <router-link v-if="project.schedule_id" :to="`/project-schedules/${project.schedule_id}`" class="tab-item">计划历史</router-link>
+          </nav>
+        </header>
       </Teleport>
+      <Alert v-if="lifecycleActionWarnings.length" class="header-action-reasons" tone="warning">
+        <ul>
+          <li v-for="warning in lifecycleActionWarnings" :key="warning.action">
+            {{ warning.action }}：{{ warning.reason }}
+          </li>
+        </ul>
+      </Alert>
+      <Dialog
+        :open="isEditingTitle"
+        title="重命名项目"
+        description=""
+        size="sm"
+        :dismissible="!titleSaving"
+        :close-on-outside="false"
+        @update:open="!$event && cancelEditTitle()"
+      >
+        <FormField label="项目名称" for="workspace-project-title" required>
+          <Input
+            id="workspace-project-title"
+            ref="titleInput"
+            v-model="editTitleValue"
+            :disabled="titleSaving"
+            @keyup.enter="saveTitle"
+          />
+        </FormField>
+        <Alert v-if="titleError" tone="danger">{{ titleError }}</Alert>
+        <template #footer>
+          <Button variant="secondary" :disabled="titleSaving" @click="cancelEditTitle">取消</Button>
+          <Button :loading="titleSaving" :disabled="!editTitleValue.trim()" @click="saveTitle"
+            >保存名称</Button
+          >
+        </template>
+      </Dialog>
       <Alert v-if="pendingSchedule?.block_reason || pendingScheduleError" tone="warning">
         {{ pendingSchedule?.block_reason || '启动计划查询失败，可进入计划任务视图重试。' }}
       </Alert>
-      <Dialog
-        v-model:open="projectInfoOpen"
-        title="项目信息"
-        description="项目归属、场景与执行期限。"
-        size="sm"
-      >
+      <Dialog v-model:open="projectInfoOpen" title="项目信息" description="" size="md">
         <dl class="workspace-project-information">
+          <div><dt>项目名称</dt><dd>{{ project.title }}</dd></div>
           <div>
             <dt>场景</dt>
             <dd>{{ getScenarioLabel(project) }}</dd>
@@ -192,6 +138,10 @@
           <div>
             <dt>执行停止时间</dt>
             <dd>{{ project.explore_deadline || '不限' }}</dd>
+          </div>
+          <div>
+            <dt>授权过期时间</dt>
+            <dd>{{ project.authorization_expires_at || '无限期' }}</dd>
           </div>
           <div v-if="pendingSchedule">
             <dt>启动计划</dt>
@@ -227,14 +177,23 @@
       </Alert>
 
       <Alert v-if="actionError" tone="danger" title="项目操作失败">{{ actionError }}</Alert>
-      <Alert v-if="finishAndReportPending" tone="info" title="正在确认评估已静默">
-        服务端已接受结束请求。确认项目已停止或完成且没有活动运行后，将自动打开报告流程。
-      </Alert>
+      <ConfirmAction
+        v-model:open="showResumeRetryDialog"
+        title="重试继续项目"
+        description="将重新核验并恢复原现场，不重跑已成功的 Bootstrap。物理恢复确认后可能继续后续研究并产生模型费用。"
+        confirm-label="确认重试继续"
+        tone="warning"
+        :loading="statusSaving"
+        :confirm-disabled="!canPerform('resume')"
+        @confirm="confirmResumeRetry"
+      >
+        <Alert v-if="actionError" tone="danger" title="项目操作失败">{{ actionError }}</Alert>
+      </ConfirmAction>
       <ConfirmAction
         :open="showFinishDialog"
-        title="结束并生成报告"
-        description="结束后不能恢复本次评估；系统会等待服务端确认所有运行静默，再基于已有证据进入报告流程。确认结束吗？"
-        confirm-label="确认结束并等待报告"
+        title="结束项目"
+        description="结束后不能恢复本次评估。系统将终止所属研究执行，保留已保存材料；独立报告、聊天和复测不受影响，不会自动生成报告。确认结束吗？"
+        confirm-label="确认结束项目"
         tone="danger"
         :loading="statusSaving"
         @update:open="
@@ -243,7 +202,7 @@
           }
         "
         :confirm-disabled="!canPerform('finish')"
-        @confirm="finishAndOpenReport"
+        @confirm="changeStatus('finish')"
       >
         <Alert v-if="actionError" tone="danger" title="项目操作失败">{{ actionError }}</Alert>
       </ConfirmAction>
@@ -325,121 +284,17 @@
         <Alert v-if="actionError" tone="danger" title="项目操作失败">{{ actionError }}</Alert>
       </ConfirmAction>
 
-      <nav v-if="!isAgentView" class="workspace-tabs" aria-label="项目页面">
-        <router-link
-          v-for="tab in tabs"
-          :key="tab.routeName"
-          :to="{ name: tab.routeName, params: { id: project.id } }"
-          class="tab-item"
-          exact-active-class="active"
-        >
-          {{ tab.label }}
-          <span class="tab-badge" v-if="tab.badgeCount && tab.badgeCount.value > 0">
-            {{ tab.badgeCount.value }}
-          </span>
-        </router-link>
-      </nav>
-
-      <!-- Viewport area -->
+      <!-- 保持子页原有路由及各自的滚动容器。 -->
       <main class="workspace-viewport">
-        <router-view></router-view>
+        <router-view v-slot="{ Component }"><component :is="Component" v-bind="route.name === 'WorkspaceOverview' ? { canMutateResources, resourceMutationMessage } : {}" /></router-view>
       </main>
-
-      <Dialog
-        :open="showResourcesDialog"
-        title="项目辅助资料"
-        description="任意文件只读提供给后续 TaskRun，允许携带授权测试凭据；Worker 必须按需读取并以实时证据验证，不会自动执行脚本或二进制文件。"
-        size="lg"
-        :dismissible="!resourcesSaving"
-        @update:open="handleResourcesDialogOpenChange"
-      >
-        <section class="workspace-library-bindings">
-          <strong>冻结资料库</strong>
-          <div
-            v-for="binding in projectLibraryBindings"
-            :key="binding.library_key"
-            class="workspace-library-binding"
-          >
-            <span>{{ binding.library_name }}</span>
-            <span class="mono">{{ binding.library_key }} · v{{ binding.version }}</span>
-            <span>{{ binding.file_count }} 文件</span>
-            <small class="mono">{{ binding.digest_sha256.slice(0, 12) }}…</small>
-          </div>
-          <div v-if="projectLibraryBindings.length === 0" class="empty-inline">
-            本项目未冻结资料库。
-          </div>
-        </section>
-
-        <div class="resource-mutation-note" :class="{ blocked: !canMutateResources }">
-          {{ resourceMutationMessage }}
-        </div>
-
-        <strong>项目本地资料</strong>
-        <div class="workspace-resource-list">
-          <div
-            v-for="resource in projectResources"
-            :key="resource.id"
-            class="workspace-resource-item"
-          >
-            <div>
-              <strong class="mono">{{ resource.path }}</strong>
-              <span
-                >{{ projectResourceKindLabel(resource.kind) }} ·
-                {{ formatProjectResourceSize(resource.size_bytes) }}</span
-              >
-              <small class="mono">SHA-256 {{ resource.sha256.slice(0, 12) }}…</small>
-            </div>
-            <Button
-              size="sm"
-              variant="secondary"
-              :disabled="!canMutateResources || resourcesSaving"
-              @click="deactivateResource(resource.id)"
-            >
-              停用
-            </Button>
-          </div>
-          <div v-if="projectResources.length === 0" class="empty-inline">
-            当前没有活动辅助资料。
-          </div>
-        </div>
-
-        <div class="resource-upload-panel">
-          <ProjectResourceBatchUploader
-            ref="workspaceResourceUploader"
-            v-model="resourceBatch"
-            :disabled="!canMutateResources || resourceCommitSaving"
-            :existing-count="projectResources.length"
-            :existing-bytes="projectResourceBytes"
-            :existing-paths="projectResourcePaths"
-            @busy="resourceUploadBusy = $event"
-            @pending="resourceUploadPending = $event"
-          />
-        </div>
-
-        <template #footer>
-          <Button variant="secondary" :disabled="resourcesSaving" @click="closeResourcesDialog">
-            关闭
-          </Button>
-          <Button
-            :loading="resourceCommitSaving"
-            :disabled="
-              !canMutateResources ||
-              resourcesSaving ||
-              resourceUploadPending ||
-              !resourceBatch?.members.length
-            "
-            @click="saveProjectResources"
-          >
-            原子导入资料
-          </Button>
-        </template>
-      </Dialog>
 
       <Dialog
         :open="showReopenDialog"
         title="重新开启项目"
         description="项目目前处于已完成状态。重开将撤销原 Goal 的完成状态，并允许加入新的已知事实让 Agent 继续推进探索。"
         :dismissible="!reopenSaving"
+        :close-on-outside="false"
         @update:open="handleReopenDialogOpenChange"
       >
         <FormField label="追加的已知反馈事实描述" for="workspace-reopen-feedback" required>
@@ -465,7 +320,14 @@
         </template>
       </Dialog>
 
-      <ProjectTestEgressDialog v-if="testEgressOpen" :key="project.id" :project-id="project.id" :value="project.test_egress" @close="testEgressOpen = false" @saved="project.test_egress = $event" />
+      <ProjectTestEgressDialog
+        v-if="testEgressOpen"
+        :key="project.id"
+        :project-id="project.id"
+        :value="project.test_egress"
+        @close="testEgressOpen = false"
+        @saved="project.test_egress = $event"
+      />
 
       <ProjectReportDialog
         v-model:open="reportDialogOpen"
@@ -494,16 +356,13 @@ import { useRoute, useRouter } from 'vue-router'
 import { useQuery } from '@tanstack/vue-query'
 import {
   ArrowLeft,
+  CalendarDays,
   ChevronDown,
-  Download,
-  FolderOpen,
-  MoreHorizontal,
+  FileText,
   Pause,
-  Pencil,
   Play,
   RotateCcw,
   ShieldCheck,
-  Trash2,
 } from '@lucide/vue'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/workspace'
@@ -511,7 +370,6 @@ import { useUIStore } from '@/stores/ui'
 import { navigationRegistry } from '@/router/navigationRegistry'
 import {
   Alert,
-  Badge,
   Button,
   Card,
   Checkbox,
@@ -520,7 +378,6 @@ import {
   FormField,
   IconButton,
   Input,
-  Popover,
   Skeleton,
   Textarea,
   type DropdownMenuOption,
@@ -528,34 +385,28 @@ import {
 import { ConfirmAction, ErrorState } from '@/components/patterns'
 import {
   api,
-  commitProjectResourceBatch,
-  deactivateProjectResource,
   fetchText,
   listVulnerabilities,
   type Vulnerability,
 } from '@/api/client'
 import type {
   ProjectDetail,
-  ProjectResourceBatch,
   ReauthorizeProjectRequest,
   Scenario,
 } from '@/api/types'
 import ProjectReportDialog from '@/features/reports/ProjectReportDialog.vue'
 import { vulnerabilityKeys } from '@/features/vulnerabilities/vulnerabilityQueries'
-import {
-  canMutateProjectResources,
-  formatProjectResourceSize,
-  projectResourceKindLabel,
-} from './projectResources'
-import ProjectResourceBatchUploader from './ProjectResourceBatchUploader.vue'
+import { canMutateProjectResources } from './projectResources'
 import ProjectTestEgressDialog from './ProjectTestEgressDialog.vue'
-import { resolveProjectStatus } from './workspaceStatus'
+import ProjectStatusObservation from './ProjectStatusObservation.vue'
 import {
   useProjectRuntime,
   useProjectLifecycle,
   projectActionAllowed,
   actionReasonText,
   isSupportedProjectRuntime,
+  isResumeRetry,
+  projectResumeLabel,
 } from './projectRuntime'
 import type { ProjectLifecycleAction } from '@/api/types'
 import {
@@ -571,21 +422,41 @@ const workspaceStore = useWorkspaceStore()
 const uiStore = useUIStore()
 const router = useRouter()
 const route = useRoute()
-const isAgentView = computed(() => route.name === 'WorkspaceAgent')
-const researchNavigationOpen = ref(false)
-const compactHeaderTarget = computed(() => isAgentView.value ? document.getElementById('workbench-project-header') : null)
-
-const project = computed(() => workspaceStore.projectDetail?.project || null)
-const hints = computed(() => workspaceStore.projectDetail?.hints || [])
-const projectResources = computed(() => workspaceStore.projectDetail?.resources || [])
-const projectResourceBytes = computed(() =>
-  projectResources.value.reduce((total, resource) => total + resource.size_bytes, 0),
+const compactHeaderTarget = computed(() =>
+  route.name ? document.getElementById('workbench-project-header') : null,
 )
-const projectResourcePaths = computed(() => projectResources.value.map((resource) => resource.path))
-const projectLibraryBindings = computed(() => workspaceStore.projectDetail?.library_bindings || [])
-const projectId = computed(() => project.value?.id || '')
 
-const { data: runtimeData, unavailable: runtimeUnavailable } = useProjectRuntime(projectId)
+const rawProject = computed(() => workspaceStore.projectDetail?.project || null)
+const hints = computed(() => workspaceStore.projectDetail?.hints || [])
+const projectId = computed(() => rawProject.value?.id || '')
+
+const {
+  data: rawRuntimeData,
+  dataUpdatedAt: rawRuntimeUpdatedAt,
+  isError: runtimeError,
+  isFetching: runtimeFetching,
+  refetch: refetchRuntime,
+  now: runtimeNow,
+} = useProjectRuntime(projectId)
+const {
+  pendingProjectId,
+  actionError,
+  perform,
+  clear: clearLifecycle,
+  projectFor,
+  runtimeFor,
+  runtimeUpdatedAtFor,
+  unavailableFor,
+  observationExpired,
+} = useProjectLifecycle(
+  (id) => (rawRuntimeData.value?.project_id === id ? rawRuntimeData.value : undefined),
+  () => ({ dataUpdatedAt: rawRuntimeUpdatedAt.value, failed: runtimeError.value, now: runtimeNow.value }),
+  (id) => workspaceStore.loadProject(id),
+  () => rawProject.value ? [rawProject.value] : [],
+)
+const project = computed(() => projectFor(projectId.value) || null)
+const runtimeData = computed(() => runtimeFor(projectId.value))
+const runtimeUnavailable = computed(() => unavailableFor(projectId.value))
 const lifecycleStatus = computed(() => project.value?.status || '')
 const { data: pendingSchedule, isError: pendingScheduleError } = useQuery({
   queryKey: computed(() => ['project-start-schedule', projectId.value, project.value?.schedule_id]),
@@ -619,9 +490,6 @@ const resourceMutationMessage = computed(() => {
     ? '项目已安全暂停，资料变更对恢复后的 TaskRun 生效。'
     : '项目已结束，资料变更仅用于后续允许的任务，不会恢复评估。'
 })
-const projectStatus = computed(() =>
-  project.value ? resolveProjectStatus(project.value.status) : null,
-)
 const canReopen = computed(
   () =>
     project.value?.status === 'completed' &&
@@ -661,7 +529,11 @@ const { data: vulnerabilitiesData } = useQuery<Vulnerability[]>({
   refetchInterval: 10000,
 })
 const vulnsCount = computed(() => (vulnerabilitiesData.value || []).length)
-const tabBadges = { WorkspaceRuns: workingIntentsCount, WorkspaceVulnerabilities: vulnsCount, WorkspaceHints: hintsCount }
+const tabBadges = {
+  WorkspaceRuns: workingIntentsCount,
+  WorkspaceVulnerabilities: vulnsCount,
+  WorkspaceHints: hintsCount,
+}
 const tabs = navigationRegistry
   .filter((item) => item.workspace)
   .sort((left, right) => left.workspace!.order - right.workspace!.order)
@@ -671,14 +543,15 @@ const tabs = navigationRegistry
     badgeCount: tabBadges[item.routeName as keyof typeof tabBadges],
   }))
 
-// Inline title edit state
 const isEditingTitle = ref(false)
+const titleError = ref('')
 const editTitleValue = ref('')
 const titleSaving = ref(false)
 const titleInput = ref<{ focus: (options?: FocusOptions) => void } | null>(null)
 
 const startEditTitle = () => {
   if (!project.value || titleSaving.value) return
+  titleError.value = ''
   isEditingTitle.value = true
   editTitleValue.value = project.value.title
   nextTick(() => {
@@ -700,13 +573,14 @@ const saveTitle = async () => {
 
   const id = project.value.id
   titleSaving.value = true
+  titleError.value = ''
   try {
     await api('PUT', `/projects/${id}/title`, { title: newTitle })
     isEditingTitle.value = false
     uiStore.showToast('项目名称更新成功', 'success')
     await workspaceStore.loadProject(id)
   } catch (err: any) {
-    uiStore.showToast(err.message || '重命名项目失败', 'danger')
+    titleError.value = err.message || '重命名项目失败，名称输入已保留。'
   } finally {
     titleSaving.value = false
   }
@@ -728,17 +602,6 @@ onUnmounted(() => {
   if (projectPollTimer) clearInterval(projectPollTimer)
 })
 
-const {
-  pendingProjectId,
-  actionError,
-  perform,
-  clear: clearLifecycle,
-} = useProjectLifecycle(
-  (id) => (runtimeData.value?.project_id === id ? runtimeData.value : undefined),
-  () => runtimeUnavailable.value,
-  (id) => workspaceStore.loadProject(id),
-  (id) => (project.value?.id === id ? project.value : undefined),
-)
 type DirectProjectLifecycleAction = Exclude<ProjectLifecycleAction, 'reauthorize'>
 type ReauthorizationTarget = {
   project: ProjectDetail['project']
@@ -747,28 +610,11 @@ type ReauthorizationTarget = {
 
 const statusSaving = computed(() => pendingProjectId.value !== null)
 const showFinishDialog = ref(false)
+const showResumeRetryDialog = ref(false)
+const hasResumeControl = computed(() => lifecycleStatus.value === 'active' &&
+  project.value?.execution_control?.action === 'resume' &&
+  ['failed', 'lost', 'requested'].includes(project.value.execution_control.state || ''))
 const reportDialogOpen = ref(false)
-const finishAndReportPending = ref(false)
-const reportReadyAfterFinish = computed(() => {
-  const currentProject = project.value
-  const runtime = runtimeData.value
-  if (
-    !currentProject ||
-    !isSupportedProjectRuntime(runtime) ||
-    runtimeUnavailable.value ||
-    !['stopped', 'completed'].includes(currentProject.status)
-  )
-    return false
-
-  return (
-    runtime.project_id === currentProject.id &&
-    runtime.project_status === currentProject.status &&
-    runtime.state === currentProject.status &&
-    runtime.dispatcher.freshness === 'fresh' &&
-    Array.isArray(runtime.active_runs) &&
-    runtime.active_runs.length === 0
-  )
-})
 const reauthorizationTarget = ref<ReauthorizationTarget | null>(null)
 const reauthorizationConfirmed = ref(false)
 const reauthorizationExpiresAt = ref('')
@@ -788,43 +634,106 @@ const disabledReason = (action: ProjectLifecycleAction) => {
   if (canPerform(action)) return undefined
   if (statusSaving.value) return '正在提交项目操作。'
   return actionReasonText(
-    action === 'reauthorize' && (!runtimeData.value || runtimeUnavailable.value)
+    ['reauthorize', 'resume'].includes(action) && (!runtimeData.value || runtimeUnavailable.value)
       ? 'runtime_unavailable'
       : runtimeData.value?.actions?.[action]?.reason,
   )
 }
+// 一个主动作随项目业务状态变化；低频与危险管理不挤占研究正文。
+const primaryAction = computed(() => {
+  let action: 'pause' | 'resume' | 'reauthorize' | null = null
+  if (hasResumeControl.value) action = 'resume'
+  else if (lifecycleStatus.value === 'active') action = 'pause'
+  else if (
+    ['paused', 'pending'].includes(lifecycleStatus.value) &&
+    runtimeData.value?.actions?.reauthorize?.allowed
+  )
+    action = 'reauthorize'
+  else if (lifecycleStatus.value === 'paused') action = 'resume'
+  if (action) {
+    const presentation = {
+      pause: { label: '暂停项目', icon: Pause },
+      resume: { label: projectResumeLabel(project.value), icon: Play },
+      reauthorize: { label: '重新确认授权', icon: ShieldCheck },
+    }[action]
+    return { value: action, ...presentation, disabled: !canPerform(action), lifecycle: true }
+  }
+  if (lifecycleStatus.value === 'pending')
+    return {
+      value: 'schedule',
+      label: '管理启动计划',
+      icon: CalendarDays,
+      disabled: false,
+      lifecycle: false,
+    }
+  if (canReopen.value)
+    return {
+      value: 'reopen',
+      label: '重新开启项目',
+      icon: RotateCcw,
+      disabled: reopenSaving.value,
+      lifecycle: false,
+    }
+  return { value: 'report', label: '查看成果', icon: FileText, disabled: false, lifecycle: false }
+})
+function manageStartSchedule() {
+  router.push(
+    project.value?.schedule_id
+      ? `/project-schedules/${project.value.schedule_id}`
+      : pendingSchedule.value
+        ? `/project-schedules/${pendingSchedule.value.id}`
+        : '/projects?view=schedules',
+  )
+}
+function runPrimaryAction() {
+  if (primaryAction.value.disabled) return
+  switch (primaryAction.value.value) {
+    case 'pause':
+      void changeStatus('pause')
+      break
+    case 'resume':
+      void changeStatus('resume')
+      break
+    case 'reauthorize':
+      openReauthorizationDialog()
+      break
+    case 'schedule':
+      manageStartSchedule()
+      break
+    case 'reopen':
+      openReopenPrompt()
+      break
+    default:
+      reportDialogOpen.value = true
+  }
+}
 const lifecycleActionWarnings = computed(() => {
   const actions: Array<{ action: ProjectLifecycleAction; label: string }> = []
   if (lifecycleStatus.value === 'active') actions.push({ action: 'pause', label: '暂停项目' })
-  if (lifecycleStatus.value === 'paused') {
-    if (runtimeData.value?.actions?.reauthorize?.allowed)
-      actions.push({ action: 'reauthorize', label: '重新确认授权' })
-    actions.push({ action: 'resume', label: '继续项目' })
-  }
+  if (
+    ['paused', 'pending'].includes(lifecycleStatus.value) &&
+    runtimeData.value?.actions?.reauthorize?.allowed
+  )
+    actions.push({ action: 'reauthorize', label: '重新确认授权' })
+  if (lifecycleStatus.value === 'paused' || hasResumeControl.value)
+    actions.push({ action: 'resume', label: projectResumeLabel(project.value) })
   if (['active', 'paused'].includes(lifecycleStatus.value))
-    actions.push({ action: 'finish', label: '结束并生成报告' })
+    actions.push({ action: 'finish', label: '结束项目' })
   return actions
     .filter(({ action }) => !canPerform(action))
     .map(({ action, label }) => ({ action: label, reason: disabledReason(action) }))
 })
 const changeStatus = async (action: DirectProjectLifecycleAction) => {
   if (!projectId.value) return
+  if (action === 'resume' && isResumeRetry(project.value)) {
+    showResumeRetryDialog.value = true
+    return
+  }
   if (await perform(projectId.value, action)) showFinishDialog.value = false
 }
-const finishAndOpenReport = async () => {
-  const id = projectId.value
-  if (!id) return
-  finishAndReportPending.value = false
-  if (!(await perform(id, 'finish')) || projectId.value !== id) return
-
-  showFinishDialog.value = false
-  finishAndReportPending.value = true
+const confirmResumeRetry = async () => {
+  if (projectId.value && await perform(projectId.value, 'resume')) showResumeRetryDialog.value = false
 }
-watch([finishAndReportPending, reportReadyAfterFinish], ([pending, ready]) => {
-  if (!pending || !ready) return
-  finishAndReportPending.value = false
-  reportDialogOpen.value = true
-})
 const openReauthorizationDialog = () => {
   if (
     !project.value ||
@@ -881,90 +790,24 @@ const saveReauthorization = async () => {
     reauthorizationConfirmed.value = false
     reauthorizationExpiresAt.value = ''
     reauthorizationUnlimited.value = false
-    uiStore.showToast('授权已更新，项目仍处于暂停状态', 'success')
+    uiStore.showToast(
+      lifecycleStatus.value === 'pending'
+        ? '授权已更新，项目仍保持待启动'
+        : '授权已更新，项目仍处于暂停状态',
+      'success',
+    )
   }
 }
 watch(projectId, () => {
   clearLifecycle()
   showFinishDialog.value = false
+  showResumeRetryDialog.value = false
   reportDialogOpen.value = false
-  finishAndReportPending.value = false
   reauthorizationTarget.value = null
   reauthorizationConfirmed.value = false
   reauthorizationExpiresAt.value = ''
   reauthorizationUnlimited.value = false
 })
-
-const showResourcesDialog = ref(false)
-const resourceBatch = ref<ProjectResourceBatch | null>(null)
-const resourceUploadBusy = ref(false)
-const resourceUploadPending = ref(false)
-const resourceCommitSaving = ref(false)
-const resourceMutationSaving = ref(false)
-const resourcesSaving = computed(
-  () => resourceUploadBusy.value || resourceCommitSaving.value || resourceMutationSaving.value,
-)
-const workspaceResourceUploader = ref<{ cancel: () => Promise<void> } | null>(null)
-
-const openResourcesDialog = async () => {
-  if (!project.value) return
-  showResourcesDialog.value = true
-  resourceBatch.value = null
-  await workspaceStore.loadProject(project.value.id)
-}
-
-const closeResourcesDialog = async () => {
-  if (resourcesSaving.value) return
-  try {
-    await workspaceResourceUploader.value?.cancel()
-    resourceBatch.value = null
-    showResourcesDialog.value = false
-  } catch (err: any) {
-    uiStore.showToast(err.message || '取消临时上传批次失败', 'danger')
-  }
-}
-
-const handleResourcesDialogOpenChange = (open: boolean) => {
-  if (!open) void closeResourcesDialog()
-}
-
-const saveProjectResources = async () => {
-  if (
-    !project.value ||
-    !resourceBatch.value?.members.length ||
-    !canMutateResources.value ||
-    resourceUploadPending.value ||
-    resourcesSaving.value
-  )
-    return
-  resourceCommitSaving.value = true
-  try {
-    await commitProjectResourceBatch(project.value.id, resourceBatch.value.id)
-    resourceBatch.value = null
-    showResourcesDialog.value = false
-    await workspaceStore.loadProject(project.value.id)
-    uiStore.showToast('辅助资料已原子导入，将用于后续 TaskRun', 'success')
-  } catch (err: any) {
-    await workspaceStore.loadProject(project.value.id)
-    uiStore.showToast(err.message || '导入辅助资料失败', 'danger')
-  } finally {
-    resourceCommitSaving.value = false
-  }
-}
-
-const deactivateResource = async (resourceId: string) => {
-  if (!project.value || !canMutateResources.value || resourcesSaving.value) return
-  resourceMutationSaving.value = true
-  try {
-    await deactivateProjectResource(project.value.id, resourceId)
-    await workspaceStore.loadProject(project.value.id)
-    uiStore.showToast('辅助资料已停用，历史 TaskRun 快照保持不变', 'info')
-  } catch (err: any) {
-    uiStore.showToast(err.message || '停用辅助资料失败', 'danger')
-  } finally {
-    resourceMutationSaving.value = false
-  }
-}
 
 // Reopen finished project
 const showReopenDialog = ref(false)
@@ -1004,23 +847,61 @@ const saveReopen = async () => {
 const isMoreOpen = ref(false)
 const projectInfoOpen = ref(false)
 const testEgressOpen = ref(false)
-const moreMenuItems = computed<readonly DropdownMenuOption[]>(() => [
-  { value: 'project-info', label: '项目信息' },
-  { value: 'test-egress', label: '代理设置' },
-  {
-    value: 'resources',
-    label: `资料${projectResources.value.length ? ` (${projectResources.value.length})` : ''}`,
-  },
-  { value: 'export-project-yaml', label: '导出项目配置 YAML', separatorBefore: true },
-  { value: 'export-vulnerability-evidence-archive', label: '下载漏洞证据 ZIP（按漏洞分组）' },
-  { value: 'delete-project', label: '彻底删除项目', separatorBefore: true, tone: 'danger' },
-])
+const moreMenuItems = computed<readonly DropdownMenuOption[]>(() => {
+  const items: DropdownMenuOption[] = [
+    { value: 'project-info', label: '项目信息' },
+    { value: 'rename', label: '重命名项目', disabled: titleSaving.value },
+    { value: 'test-egress', label: '代理设置', separatorBefore: true },
+  ]
+  if (
+    (project.value?.schedule_id || lifecycleStatus.value === 'pending') &&
+    primaryAction.value.value !== 'schedule'
+  )
+    items.push({ value: 'schedule', label: '管理启动计划' })
+  items.push(
+    { value: 'export-project-yaml', label: '导出项目配置 YAML', separatorBefore: true },
+    { value: 'export-vulnerability-evidence-archive', label: '下载漏洞证据 ZIP（按漏洞分组）' },
+  )
+  if (lifecycleStatus.value === 'active' && primaryAction.value.value !== 'pause')
+    items.push({
+      value: 'pause', label: '暂停项目', disabled: !canPerform('pause'),
+      description: disabledReason('pause'), separatorBefore: true,
+    })
+  if (lifecycleStatus.value === 'paused' && primaryAction.value.value !== 'resume')
+    items.push({
+      value: 'resume',
+      label: '继续项目',
+      disabled: !canPerform('resume'),
+      description: disabledReason('resume'),
+      separatorBefore: true,
+    })
+  if (['active', 'paused'].includes(lifecycleStatus.value))
+    items.push({
+      value: 'finish',
+      label: '结束项目',
+      disabled: !canPerform('finish'),
+      description: disabledReason('finish'),
+      separatorBefore: true,
+      tone: 'danger',
+    })
+  items.push({
+    value: 'delete-project',
+    label: '彻底删除项目',
+    separatorBefore: true,
+    tone: 'danger',
+  })
+  return items
+})
 
 function handleMoreMenuSelect(value: string) {
   isMoreOpen.value = false
   if (value === 'project-info') projectInfoOpen.value = true
+  else if (value === 'rename') startEditTitle()
+  else if (value === 'schedule') manageStartSchedule()
+  else if (value === 'resume') void changeStatus('resume')
+  else if (value === 'pause') void changeStatus('pause')
+  else if (value === 'finish' && canPerform('finish')) showFinishDialog.value = true
   else if (value === 'test-egress') testEgressOpen.value = true
-  else if (value === 'resources') void openResourcesDialog()
   else if (value === 'export-project-yaml') void exportProjectYaml()
   else if (value === 'export-vulnerability-evidence-archive') downloadVulnerabilityEvidenceArchive()
   else if (value === 'delete-project') confirmDeleteProject()
@@ -1091,6 +972,31 @@ const saveDelete = async () => {
     deleteSaving.value = false
   }
 }
+
+// 菜单项关闭后会被卸载，管理浮层不能把焦点交还给已消失的菜单项。
+watch(
+  () =>
+    [
+      showDeleteDialog.value,
+      isEditingTitle.value,
+      projectInfoOpen.value,
+      testEgressOpen.value,
+      showFinishDialog.value,
+    ].some(Boolean),
+  async (open, previous) => {
+    if (open || !previous) return
+    const closedProjectId = projectId.value
+    await nextTick()
+    requestAnimationFrame(() => {
+      if (projectId.value !== closedProjectId) return
+      if (!document.activeElement || document.activeElement === document.body) {
+        document
+          .querySelector<HTMLButtonElement>('.workspace-header [aria-label="项目更多操作"]')
+          ?.focus()
+      }
+    })
+  },
+)
 
 const goBackToList = () => {
   router.push('/projects')

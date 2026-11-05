@@ -12,16 +12,18 @@ class UnsafeArtifactPath(ValueError):
 
 def resolve_artifact_path(root: Path, row: Mapping[str, object]) -> Path:
     """按数据库记录解析路径，并拒绝 URI 欺骗、穿越和 symlink 逃逸。"""
-    project_id = _safe_segment(row["project_id"], "project_id")
+    conversation_id = row.get("conversation_id")
+    owner_kind = "conversations" if conversation_id else "projects"
+    owner_id = _safe_segment(conversation_id or row["project_id"], "owner_id")
     run_segment = _safe_segment(row.get("task_run_id") or "unscoped", "task_run_id")
     uri = str(row["uri"])
-    prefix = f"artifact://projects/{project_id}/runs/{run_segment}/"
+    prefix = f"artifact://{owner_kind}/{owner_id}/runs/{run_segment}/"
     if not uri.startswith(prefix):
         raise UnsafeArtifactPath("artifact URI does not match its project and task run")
     filename = _safe_segment(uri[len(prefix) :], "filename")
 
     resolved_root = root.resolve()
-    base = root / "projects" / project_id / "runs" / run_segment
+    base = root / owner_kind / owner_id / "runs" / run_segment
     disk_path = base / filename
     try:
         resolved_base = base.resolve()

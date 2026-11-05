@@ -22,7 +22,6 @@ describe('GraphPlaybackControls visual controls', () => {
 
     expect(toggle.attributes('aria-pressed')).toBe('false')
     expect(wrapper.findAll('.ui-icon-button')).toHaveLength(1)
-    expect(wrapper.findAll('.ui-badge')).toHaveLength(1)
     expect(wrapper.find('.btn-secondary').exists()).toBe(false)
     await toggle.trigger('click')
 

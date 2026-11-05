@@ -12,7 +12,7 @@ from cairn.server.schemas.models import (
     DiscoverTenantModelRequest,
     TestTenantModelRequest as ModelTestRequest,
 )
-from cairn.server.services import model_operations
+from cairn.server.services import direct_consumption, model_operations
 from cairn.server.services.model_transport import ModelTransportResponse
 
 
@@ -22,6 +22,14 @@ PRINCIPAL = RequestPrincipal(
     tenant_id="tenant_test",
     role="user",
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_receipt_submission(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    # 本文件只验证 HTTP 合同；实际回执写入由隔离 PostgreSQL 用例覆盖。
+    monkeypatch.setattr(direct_consumption, "_spool_root", lambda: tmp_path)
+    monkeypatch.setattr(direct_consumption, "_submit_receipt", lambda _receipt: None)
+    monkeypatch.setattr(direct_consumption, "_memory_receipts", {})
 
 
 def _config(**overrides):
@@ -156,6 +164,170 @@ def test_absolute_endpoint_override_is_used_exactly(monkeypatch: pytest.MonkeyPa
         principal=PRINCIPAL,
     )
     assert seen == ["https://gateway.example.test/invoke?mode=raw"]
+
+
+def test_consumption_spool_failure_keeps_http_result_and_writes_real_usage(monkeypatch, caplog):
+    captured = []
+    def unavailable():
+        raise OSError('fixture spool unavailable')
+    monkeypatch.setattr(direct_consumption, '_spool_root', unavailable)
+    monkeypatch.setattr(direct_consumption, '_submit_receipt', lambda receipt: captured.append(receipt.copy()))
+    monkeypatch.setattr(model_operations, 'request_json', lambda *args, **kwargs: _response({
+        'type': 'message', 'content': [], 'usage': {'input_tokens': 8, 'output_tokens': 3},
+    }))
+    result = model_operations.test_model_draft(ModelTestRequest(**_config()), principal=PRINCIPAL)
+    assert result.success and not captured
+    assert direct_consumption.replay_direct_consumption() == 1
+    assert len(captured) == 1
+    assert captured[0]['event']['usage']['input_tokens'] == 8
+    assert captured[0]['event']['usage']['output_tokens'] == 3
+    assert 'spool unavailable' in caplog.text
+    assert 'known-api-key-123' not in caplog.text
+
+
+def test_connectivity_inference_survives_spool_failure(monkeypatch):
+    from types import SimpleNamespace
+    from cairn.server.services import connectivity_tests
+    captured = []
+    def unavailable():
+        raise OSError('fixture spool unavailable')
+    monkeypatch.setattr(direct_consumption, '_spool_root', unavailable)
+    monkeypatch.setattr(direct_consumption, '_submit_receipt', lambda receipt: captured.append(receipt.copy()))
+    monkeypatch.setattr(connectivity_tests, '_validate_connectivity_destination', lambda url: None)
+    response = SimpleNamespace(status_code=200, close=lambda: None, iter_content=lambda **kwargs: iter([
+        json.dumps({'type': 'message', 'content': [], 'usage': {'input_tokens': 4}}).encode(),
+    ]))
+    monkeypatch.setattr(connectivity_tests.requests, 'post', lambda *args, **kwargs: response)
+    spec = connectivity_tests.ConnectivityTargetSpec(
+        target_type='model', target_id='fixture', provider_id='fixture', base_url='https://fixture.test',
+        credential='fixture-secret', credential_fingerprint='fixture', config_revision='fixture',
+        model_id='fixture', upstream_model='fixture-model', scope='messages_api',
+    )
+    outcome = connectivity_tests.perform_connectivity_request(spec, timeout_seconds=2)
+    assert outcome.category == 'ok' and not captured
+    assert direct_consumption.replay_direct_consumption() == 1
+    assert len(captured) == 1 and captured[0]['event']['usage']['input_tokens'] == 4
+    assert captured[0]['binding']['tenant_id'] is None
+
+
+def test_direct_consumption_failure_never_masks_model_error(monkeypatch, caplog):
+    from cairn.server.services.model_transport import ModelTransportError
+    def unavailable(*args, **kwargs):
+        raise OSError('fixture disk outage')
+    def database_unavailable(*args, **kwargs):
+        raise RuntimeError('fixture database outage')
+    def model_failure(*args, **kwargs):
+        raise ModelTransportError('timeout', 'controlled timeout')
+    monkeypatch.setattr(direct_consumption, '_spool_root', unavailable)
+    monkeypatch.setattr(direct_consumption, '_submit_receipt', database_unavailable)
+    monkeypatch.setattr(model_operations, 'request_json', model_failure)
+    with pytest.raises(ModelTransportError, match='controlled timeout'):
+        model_operations.test_model_draft(ModelTestRequest(**_config()), principal=PRINCIPAL)
+    assert 'receipt only in memory' in caplog.text
+    assert direct_consumption.replay_direct_consumption() == 0
+    assert len(direct_consumption._memory_receipts) == 1
+
+
+def test_direct_response_spool_failure_preserves_unknown_start_for_replay(monkeypatch, tmp_path, caplog):
+    written = direct_consumption._write_receipt
+    def fail_response(directory, receipt):
+        if receipt['event']['revision'] == 1:
+            raise OSError('fixture response write failed')
+        written(directory, receipt)
+    def database_unavailable(*args, **kwargs):
+        raise RuntimeError('fixture database outage')
+    monkeypatch.setattr(direct_consumption, '_write_receipt', fail_response)
+    monkeypatch.setattr(direct_consumption, '_submit_receipt', database_unavailable)
+    monkeypatch.setattr(model_operations, 'request_json', lambda *args, **kwargs: _response({
+        'type': 'message', 'content': [], 'usage': {'input_tokens': 8},
+    }))
+    result = model_operations.test_model_draft(ModelTestRequest(**_config()), principal=PRINCIPAL)
+    assert result.success
+    receipt_path, = tmp_path.glob('direct_*/receipt.json')
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt['event']['measurement'] == 'started'
+    assert receipt['event']['missing_responses'] == 1
+    assert all(value is None for value in receipt['event']['usage'].values())
+    assert 'receipt only in memory' in caplog.text
+    assert direct_consumption.replay_direct_consumption() == 0
+    submitted = []
+    monkeypatch.setattr(direct_consumption, '_submit_receipt', lambda body: submitted.append(body))
+    assert direct_consumption.replay_direct_consumption() == 2
+    assert submitted[0]['event']['usage']['input_tokens'] == 8
+    assert submitted[0]['binding'] == receipt['binding'] and submitted[1] == receipt
+
+
+def test_durable_direct_receipt_defers_database_until_replay(monkeypatch, tmp_path):
+    def forbidden(_receipt):
+        raise AssertionError('database must not be called from business request')
+    monkeypatch.setattr(direct_consumption, '_submit_receipt', forbidden)
+    monkeypatch.setattr(model_operations, 'request_json', lambda *args, **kwargs: _response({
+        'type': 'message', 'content': [], 'usage': {'input_tokens': 8},
+    }))
+    result = model_operations.test_model_draft(ModelTestRequest(**_config()), principal=PRINCIPAL)
+    assert result.success
+    receipt_path, = tmp_path.glob('direct_*/receipt.json')
+    assert json.loads(receipt_path.read_text())['event']['usage']['input_tokens'] == 8
+
+
+def test_direct_spool_close_failure_does_not_hide_result(monkeypatch, caplog):
+    import os
+    original_open, original_close = os.open, os.close
+    lock_descriptor = []
+    def tracked_open(path, flags, *args, **kwargs):
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if not lock_descriptor and str(path).split('/')[-1].startswith('direct_') and flags & os.O_DIRECTORY:
+            lock_descriptor.append(descriptor)
+        return descriptor
+    def failed_close(descriptor):
+        original_close(descriptor)
+        if lock_descriptor and descriptor == lock_descriptor[0]:
+            raise OSError('fixture close failed')
+    monkeypatch.setattr(direct_consumption.os, 'open', tracked_open)
+    monkeypatch.setattr(direct_consumption.os, 'close', failed_close)
+    monkeypatch.setattr(model_operations, 'request_json', lambda *args, **kwargs: _response({
+        'type': 'message', 'content': [], 'usage': {'input_tokens': 8},
+    }))
+    assert model_operations.test_model_draft(ModelTestRequest(**_config()), principal=PRINCIPAL).success
+    assert 'spool close failed' in caplog.text
+
+
+def test_blocked_replay_does_not_block_business_or_evict_older_memory_receipts(monkeypatch, caplog):
+    from threading import Event, Thread
+    entered, release = Event(), Event()
+    submitted = []
+    def unavailable():
+        raise OSError('fixture spool unavailable')
+    def blocked(receipt):
+        entered.set()
+        assert release.wait(timeout=10)
+        submitted.append(receipt)
+    monkeypatch.setattr(direct_consumption, '_spool_root', unavailable)
+    monkeypatch.setattr(direct_consumption, '_submit_receipt', blocked)
+    monkeypatch.setattr(direct_consumption, '_MEMORY_LIMIT', 2)
+    monkeypatch.setattr(model_operations, 'request_json', lambda *args, **kwargs: _response({
+        'type': 'message', 'content': [], 'usage': {'input_tokens': 8},
+    }))
+    assert model_operations.test_model_draft(
+        ModelTestRequest(**_config(prompt='fixture-private-prompt')), principal=PRINCIPAL).success
+    first_id, = direct_consumption._memory_receipts
+    worker = Thread(target=direct_consumption.replay_direct_consumption)
+    worker.start()
+    try:
+        assert entered.wait(timeout=5)
+        assert model_operations.test_model_draft(ModelTestRequest(**_config()), principal=PRINCIPAL).success
+        original_ids = set(direct_consumption._memory_receipts)
+        assert first_id in original_ids and len(original_ids) == 2
+        assert model_operations.test_model_draft(ModelTestRequest(**_config()), principal=PRINCIPAL).success
+        assert set(direct_consumption._memory_receipts) == original_ids
+        assert 'gap not fully retained' in caplog.text
+        memory = json.dumps(direct_consumption._memory_receipts)
+        assert 'known-api-key-123' not in memory and 'fixture-private-prompt' not in memory
+    finally:
+        release.set()
+        worker.join(timeout=10)
+    assert not worker.is_alive() and submitted[0]['binding']['id'] == first_id
+    assert first_id not in direct_consumption._memory_receipts
 
 
 def test_non_success_test_returns_complete_raw_body(monkeypatch: pytest.MonkeyPatch) -> None:

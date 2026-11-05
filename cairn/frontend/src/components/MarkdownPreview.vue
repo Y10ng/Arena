@@ -15,11 +15,11 @@ defineProps<{
   height: 100%;
   min-width: 0;
   overflow: auto;
-  padding: var(--space-4);
+  padding: var(--space-6);
   color: var(--text);
-  background-color: var(--bg-inset);
-  font-size: 13px;
-  line-height: 1.7;
+  background-color: var(--bg-surface);
+  font-size: var(--text-reading);
+  line-height: var(--leading-reading);
 }
 
 .markdown-preview__content {

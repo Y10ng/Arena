@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from hashlib import sha256
 import ipaddress
 import json
@@ -22,6 +23,7 @@ import requests
 from cairn.dispatcher.config import resolve_credential
 from cairn.server import db
 from cairn.server.schemas.monitoring_dispatcher import DispatcherConnectivityTest
+from .direct_consumption import record_direct_consumption
 from .dispatcher_config_store import DispatcherConfigStore
 from .time_utils import utcnow
 
@@ -281,15 +283,24 @@ def perform_connectivity_request(
     if destination_error is not None:
         return ConnectivityOutcome(destination_error[0], destination_error[1])
     try:
-        response = requests.post(
-            endpoint,
-            headers=headers,
-            json=payload,
-            timeout=(min(3, timeout_seconds), timeout_seconds),
-            stream=True,
-            allow_redirects=False,
-        )
-        body = _read_limited_response(response, deadline=started + timeout_seconds)
+        consumption = record_direct_consumption(
+            tenant_id=None, owner_id="server:connectivity", source="connectivity_test",
+            model={"model_id": spec.model_id, "model_revision": spec.config_revision,
+                   "model_name": spec.upstream_model, "display_name": spec.model_id,
+                   "protocol": "anthropic-messages", "pricing": {}},
+        ) if spec.upstream_model else nullcontext()
+        with consumption as recording:
+            response = requests.post(
+                endpoint,
+                headers=headers,
+                json=payload,
+                timeout=(min(3, timeout_seconds), timeout_seconds),
+                stream=True,
+                allow_redirects=False,
+            )
+            body = _read_limited_response(response, deadline=started + timeout_seconds)
+            if recording is not None:
+                recording.observe_response("anthropic-messages", body)
     except requests.exceptions.SSLError as exc:
         return ConnectivityOutcome("tls", _sanitize_detail(str(exc), spec.credential))
     except requests.exceptions.Timeout:

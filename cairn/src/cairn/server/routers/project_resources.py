@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse
 
 from cairn.server.auth import (
     RequestPrincipal,
@@ -82,6 +85,7 @@ async def upload_resource_batch_file(
     request: Request,
     path: str = Query(min_length=1),
     kind: str | None = Query(default=None),
+    upload_id: str | None = Query(default=None, pattern=r"^prm_[0-9a-f]{32}$"),
     principal: RequestPrincipal = Depends(protect_cookie_request),
 ):
     if kind is not None and kind not in {"note", "script", "file"}:
@@ -96,6 +100,7 @@ async def upload_resource_batch_file(
         request.stream(),
         path=path,
         kind=kind,
+        upload_id=upload_id,
         tenant_id=tenant_id,
         user_id=user_id,
     )
@@ -190,14 +195,19 @@ def list_project_resources(project_id: str):
     return list_project_resource_records(project_id)
 
 
+@router.head(
+    "/projects/{project_id}/resources/{resource_id}",
+    dependencies=[Depends(require_tenant_project)],
+)
 @router.get(
     "/projects/{project_id}/resources/{resource_id}",
     dependencies=[Depends(require_tenant_project)],
 )
 def read_project_resource(project_id: str, resource_id: str):
     resource = read_project_resource_content(project_id, resource_id)
-    return Response(
-        content=resource.content,
+    return FileResponse(
+        path=resource.disk_path,
+        filename=resource.path.rsplit("/", 1)[-1],
         media_type="application/octet-stream",
         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
     )
@@ -214,6 +224,10 @@ def list_project_advisory_library_files(project_id: str, key: str, version: int)
         return list_library_revision_files(conn, revision)
 
 
+@router.head(
+    "/projects/{project_id}/advisory-libraries/{key}/versions/{version}/files/{path:path}",
+    dependencies=[Depends(require_tenant_project)],
+)
 @router.get(
     "/projects/{project_id}/advisory-libraries/{key}/versions/{version}/files/{path:path}",
     dependencies=[Depends(require_tenant_project)],
@@ -224,8 +238,9 @@ def read_project_advisory_library_file(project_id: str, key: str, version: int, 
         content = read_library_revision_content(conn, revision, path)
     return Response(
         content=content,
-        media_type="text/plain; charset=utf-8",
-        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        media_type="application/octet-stream",
+        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+                 "Content-Disposition": f"attachment; filename*=UTF-8''{quote(path.rsplit('/', 1)[-1], safe='')}"},
     )
 
 

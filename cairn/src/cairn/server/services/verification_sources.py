@@ -21,7 +21,7 @@ from .project_resources import (
     validate_resource_content,
 )
 from .time_utils import utcnow
-from .vulnerabilities import read_vulnerability_evidence
+from .vulnerabilities import get_vulnerability_detail
 
 SOURCE_REPORT_PATH = "_verification/platform-vulnerability.json"
 SOURCE_MANIFEST_PATH = "_verification/source-manifest.json"
@@ -102,7 +102,8 @@ def _historical_resource_path(resource) -> str:
         raise HTTPException(409, "来源项目资料无法作为复测输入路径") from exc
 
 
-def _project_context(conn, project, missing: list[dict], *, resource_allowed, include_context_materials: bool) -> dict:
+def _project_context(conn, project, missing: list[dict], *, resource_allowed, include_context_materials: bool,
+                     check_materials: bool) -> dict:
     context = {
         "project_id": project["id"], "title": project["title"],
         "origin": None, "goal": None, "targets": [], "resource_refs": [],
@@ -143,8 +144,10 @@ def _project_context(conn, project, missing: list[dict], *, resource_allowed, in
         }
         context["resource_refs"].append(item)
         if not include_context_materials:
-            missing.append(_missing("project_context_not_reused_for_target", "project_resource", resource["id"],
-                                    "本次已明确指定目标，不自动复制来源环境资料或目标身份；原件仍保留。"))
+            item["reuse_status"] = "not_reused_for_target"
+            continue
+        if not check_materials:
+            item.update(available=None, validation="on_acceptance")
             continue
         try:
             path = _historical_resource_path(resource)
@@ -165,17 +168,21 @@ def _project_context(conn, project, missing: list[dict], *, resource_allowed, in
 def read_platform_vulnerability_source(conn, project_id: str, vulnerability_id: str,
                                       principal: RequestPrincipal, *, artifact_allowed, resource_allowed,
                                       observation_id: str | None = None, for_creation: bool = False,
-                                      include_context_materials: bool = True) -> tuple[dict, list]:
+                                      include_context_materials: bool = True,
+                                      check_materials: bool = True) -> tuple[dict, list]:
     project = source_project(conn, project_id, principal, for_creation=for_creation)
     vulnerability = conn.execute(
         "SELECT * FROM vulnerabilities WHERE project_id = ? AND id = ?", (project_id, vulnerability_id),
     ).fetchone()
     if vulnerability is None:
         raise HTTPException(404, "来源漏洞不存在")
-    selected = read_vulnerability_evidence(conn, project_id, vulnerability_id, observation_id)
+    detail = get_vulnerability_detail(conn, project_id, vulnerability_id, observation_id)
+    selected = {"observation_id": detail.observation_id, "source": detail.source,
+                "evidence_items": [item.model_dump(exclude_none=True) for item in detail.evidence_items]}
     snapshot = {
+        "readable": detail.readable.model_dump(mode="json"),
         "schema_version": 2,
-        "project_id": project_id, "vulnerability_id": vulnerability_id, "project_title": project["title"],
+        "project_id": project_id, "vulnerability_id": vulnerability_id, "number": detail.number, "project_title": project["title"],
         "captured_at": utcnow(),
         "material_role": "historical_input",
         "notice": "以下为受理时的历史主张与历史证据，不代表本轮观察，也不扩大本轮 Origin 授权。原文字段未经摘要或改写。",
@@ -184,10 +191,12 @@ def read_platform_vulnerability_source(conn, project_id: str, vulnerability_id: 
         "facts": [], "observations": [], "verifications": [], "fact_evidence": [],
         "history_path": f"/projects/{project_id}/vulnerabilities/{vulnerability_id}",
         "artifacts": [], "missing_materials": [],
+        "material_validation": "checked" if check_materials else "on_acceptance",
     }
     missing = snapshot["missing_materials"]
     snapshot["project_context"] = _project_context(conn, project, missing, resource_allowed=resource_allowed,
-                                                   include_context_materials=include_context_materials)
+                                                   include_context_materials=include_context_materials,
+                                                   check_materials=check_materials)
     observations = conn.execute(
         "SELECT * FROM vulnerability_observations WHERE project_id = ? AND vulnerability_id = ? ORDER BY observed_at, id",
         (project_id, vulnerability_id),
@@ -222,14 +231,28 @@ def read_platform_vulnerability_source(conn, project_id: str, vulnerability_id: 
 
     source_type = "observation" if selected_observation is not None else "vulnerability"
     source_id = selected["observation_id"] or vulnerability_id
-    for ref in evidence_refs(EvidenceItem.model_validate(item) for item in selected["evidence_items"]):
-        reference(ref.artifact_id, source_type, source_id, ref.pointer)
+    supplemental = json.loads(vulnerability["evidence_items_json"]) if selected_observation is not None else []
+    selected["supplemental_evidence_items"] = supplemental
+    all_items = [*selected["evidence_items"], *supplemental]
+    for items, ref_type, ref_id in ((selected["evidence_items"], source_type, source_id),
+                                    (supplemental, "vulnerability_supplement", vulnerability_id)):
+        for ref in evidence_refs(EvidenceItem.model_validate(item) for item in items):
+            reference(ref.artifact_id, ref_type, ref_id, ref.pointer)
     from .flow_evidence import flow_metadata_allowed, resolve_flow_evidence
 
     snapshot["flow_evidence"] = {}
-    for item in selected["evidence_items"]:
+    for item in all_items:
         flow_id = item.get("flow_id")
         if not flow_id or flow_id in snapshot["flow_evidence"]:
+            continue
+        if not check_materials:
+            flow_row = conn.execute("SELECT id, state, revision FROM http_flows WHERE project_id = ? AND id = ?", (project_id, flow_id)).fetchone()
+            if flow_row is None:
+                missing.append(_missing("source_flow_unreadable", "flow", flow_id, "关联的历史流量记录不存在。"))
+            else:
+                snapshot["flow_evidence"][flow_id] = {**dict(flow_row), "validation": "on_acceptance"}
+                for body in conn.execute("SELECT side, artifact_id FROM http_flow_bodies WHERE project_id = ? AND flow_id = ?", (project_id, flow_id)).fetchall():
+                    reference(body["artifact_id"], "flow", flow_id, body["side"])
             continue
         try:
             flow = resolve_flow_evidence(conn, project_id, flow_id)
@@ -272,12 +295,8 @@ def read_platform_vulnerability_source(conn, project_id: str, vulnerability_id: 
         if include_context_materials:
             for ref in context_fact["evidence_refs"]:
                 reference(ref["artifact_id"], "project_context", key, ref["pointer"])
-    if not observations:
-        missing.append(_missing("observations_not_recorded", "vulnerability", vulnerability_id, "来源未记录发现 Observation，不能据此宣称已有完整发现链。"))
-    if not fact_id:
-        missing.append(_missing("source_fact_not_recorded", "vulnerability", vulnerability_id, "选中来源未关联 Fact；本次仅保留实际存在的漏洞原文。"))
-    if not references:
-        missing.append(_missing("direct_evidence_not_recorded", "vulnerability", vulnerability_id, "选中来源未直接引用证据文件，历史证据并不齐全。"))
+    if not all_items and not references:
+        missing.append(_missing("direct_evidence_not_recorded", "vulnerability", vulnerability_id, "选中来源未记录证据材料；不据此推断漏洞已确认。"))
     artifacts = []
     for artifact_id, refs in sorted(references.items()):
         artifact = conn.execute("SELECT * FROM artifacts WHERE project_id = ? AND id = ?", (project_id, artifact_id)).fetchone()
@@ -292,30 +311,33 @@ def read_platform_vulnerability_source(conn, project_id: str, vulnerability_id: 
         if not artifact_is_verification_material(artifact):
             missing.append(_missing("source_artifact_not_input", "artifact", artifact_id, "该直接引用指向 Harness 内部运行流、会话、指引或配置，不作为复测输入复制。", artifact_id=artifact_id))
             continue
+        if not check_materials:
+            item.update(available=None, validation="on_acceptance")
+            continue
         try:
             path = _historical_artifact_path(artifact)
-            validate_resource_content(_artifact_disk_path_from_row(artifact), path=artifact_id,
-                                      size_bytes=artifact["size"], digest_sha256=artifact["sha256"])
+            from .assessment_reports import _artifact_content_bytes
+
+            content = _artifact_content_bytes(artifact, error_code="source_artifact_unreadable")
         except HTTPException as exc:
             if exc.status_code not in {404, 409}:
                 raise
             missing.append(_missing("source_artifact_unreadable", "artifact", artifact_id, "历史证据原件不可读取、路径不可用或完整性校验失败。", artifact_id=artifact_id))
             continue
-        if not artifact_allowed(conn, artifact):
+        if not artifact_allowed(conn, artifact, content=content):
             missing.append(_missing("source_artifact_not_deliverable", "artifact", artifact_id, "历史证据包含不允许携带的内部资料，或无法核实原执行的凭据边界，不能复制；原件未改写，资料并不齐全。", artifact_id=artifact_id))
             continue
         item.update(available=True, input_path=path)
-        artifacts.append(artifact)
+        artifacts.append({**dict(artifact), "verified_content": content})
     return snapshot, artifacts
 
 
 def save_platform_vulnerability_source(conn, project_id: str, snapshot: dict, artifacts: list, *, created_by: str):
     resources = []
     for artifact in artifacts:
-        # 复制时再次校验原字节；竞态删除或变化直接拒绝受理，不留下不完整的成功档案。
-        resources.extend(_copy_project_resource_records(conn, project_id, [(
-            "file", _historical_artifact_path(artifact), int(artifact["size"]), artifact["sha256"],
-            _artifact_disk_path_from_row(artifact),
+        # 保存本次受理已经核验的同一份字节，不重读可能已变化的文件。
+        resources.extend(_insert_prepared_project_resources(conn, project_id, [(
+            "file", _historical_artifact_path(artifact), artifact["verified_content"],
         )], created_by=created_by))
     for resource in snapshot["project_context"]["resource_refs"]:
         if not resource["available"]:
@@ -333,6 +355,8 @@ def save_platform_vulnerability_source(conn, project_id: str, snapshot: dict, ar
         "evidence": {"snapshot_path": SOURCE_REPORT_PATH, "pointer": "/evidence",
                      "source": snapshot["evidence"]["source"],
                      "item_ids": [item["id"] for item in snapshot["evidence"]["evidence_items"]]},
+        "supplemental_evidence": {"snapshot_path": SOURCE_REPORT_PATH, "pointer": "/evidence/supplemental_evidence_items",
+                                  "material_role": "historical_input", "item_ids": [item["id"] for item in snapshot["evidence"].get("supplemental_evidence_items", [])]},
         "project_context": {"snapshot_path": SOURCE_REPORT_PATH, "pointer": "/project_context"},
         "flow_evidence": {"snapshot_path": SOURCE_REPORT_PATH, "pointer": "/flow_evidence", "material_role": "historical_input"},
         "artifacts": snapshot["artifacts"], "resources": snapshot["project_context"]["resource_refs"],

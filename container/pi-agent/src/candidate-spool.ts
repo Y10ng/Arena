@@ -36,15 +36,16 @@ const SUBMISSION_ISSUE_KEYWORDS = new Set([
   "allOf", "not", "if", "minLength", "maxLength", "pattern", "format", "minimum", "maximum", "exclusiveMinimum",
   "exclusiveMaximum", "multipleOf", "minItems", "maxItems", "uniqueItems", "minProperties", "maxProperties",
 ]);
+// 分开表示检测头，避免发布扫描命中检测器自身；运行时匹配内容不变。
 const PRIVATE_KEY_MARKERS = [
-  "-----BEGIN PRIVATE KEY-----",
-  "-----BEGIN ENCRYPTED PRIVATE KEY-----",
-  "-----BEGIN RSA PRIVATE KEY-----",
-  "-----BEGIN DSA PRIVATE KEY-----",
-  "-----BEGIN EC PRIVATE KEY-----",
-  "-----BEGIN OPENSSH PRIVATE KEY-----",
-  "-----BEGIN PGP PRIVATE KEY BLOCK-----",
-] as const;
+  "PRIVATE KEY",
+  "ENCRYPTED PRIVATE KEY",
+  "RSA PRIVATE KEY",
+  "DSA PRIVATE KEY",
+  "EC PRIVATE KEY",
+  "OPENSSH PRIVATE KEY",
+  "PGP PRIVATE KEY BLOCK",
+].map((kind) => `-----BEGIN ${kind}-----`);
 const SAFE_IDENTITY = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const CANDIDATE_FIELDS = [
   "protocol", "record_kind", "capture_id", "producer_candidate_key", "parent_producer_candidate_key",

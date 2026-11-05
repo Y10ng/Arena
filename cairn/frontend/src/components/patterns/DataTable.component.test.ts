@@ -350,12 +350,32 @@ describe('DataTable 固定外缘调宽', () => {
     expect(wrapper.findAll('[role="separator"]')).toHaveLength(2)
     await wrapper.setProps({ columns: resizeColumns })
     expect(widths()).toEqual([100, 581, 819, 100])
-    await wrapper.setProps({ loading: true })
+    const region = wrapper.get('[role="region"]')
+    const table = wrapper.get('table').element
+    const rowElements = wrapper.findAll('tbody tr').map((row) => row.element)
+    const handle = wrapper.get<HTMLElement>('[aria-label="调整Host列宽"]')
+    document.body.appendChild(region.element)
+    handle.element.focus()
+    try {
+      expect(document.activeElement).toBe(handle.element)
+      await wrapper.setProps({ loading: true })
+      expect(region.attributes('aria-busy')).toBe('true')
+      expect(wrapper.get('table').element).toBe(table)
+      wrapper.findAll('tbody tr').forEach((row, index) => {
+        expect(row.element).toBe(rowElements[index])
+      })
+      expect(document.activeElement).toBe(handle.element)
+      expect(widths()).toEqual([100, 581, 819, 100])
+      expect(disconnect).not.toHaveBeenCalled()
+      await wrapper.setProps({ loading: false })
+      expect(region.attributes('aria-busy')).toBeUndefined()
+      expect(document.activeElement).toBe(handle.element)
+      expect(widths()).toEqual([100, 581, 819, 100])
+    } finally {
+      wrapper.unmount()
+      region.element.remove()
+    }
     expect(disconnect).toHaveBeenCalledTimes(1)
-    await wrapper.setProps({ loading: false })
-    expect(widths()).toEqual([100, 581, 819, 100])
-    wrapper.unmount()
-    expect(disconnect).toHaveBeenCalledTimes(2)
   })
 
   it('未启用调宽时不测量或注入布局，保留普通表格行为', async () => {

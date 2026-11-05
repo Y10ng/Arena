@@ -20,13 +20,14 @@
       left: `${node.position?.x}px`,
       top: `${node.position?.y}px`,
       width: `${node.data?.nodeWidth || 180}px`,
-      height: `${node.data?.nodeHeight || 80}px`,
+      minHeight: `${node.data?.nodeHeight || 80}px`,
     }"
     :data-node-id="node.id"
     role="button"
     tabindex="0"
     :aria-label="`${getNodeTypeLabel(node)}：${node.data?.conclusion || node.data?.label || node.id}，状态 ${status.label}`"
     :aria-pressed="selected"
+    :title="node.data?.label || node.id"
     @click="$emit('selectClick', $event, node)"
     @pointerdown="$emit('dragStart', $event, node)"
     @pointermove="$emit('dragMove', $event, node)"

@@ -22,7 +22,7 @@ export function validatePasswordChange(fields: PasswordChangeFields): string {
   return ''
 }
 
-export function safeRedirect(value: unknown, fallback = '/'): string {
+export function safeRedirect(value: unknown, fallback = '/projects'): string {
   if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//')) return fallback
   if (value === '/change-password' || value.startsWith('/change-password?')) return fallback
   return value

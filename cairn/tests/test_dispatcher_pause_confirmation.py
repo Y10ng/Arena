@@ -208,6 +208,7 @@ def test_two_manager_instances_serialize_activation_and_pause(runtime):
         activation = executor.submit(
             manager.activate_for_readiness, "p1", manager.default_runtime_options(),
             register=register, finish=lambda _token, _id: None,
+            abort=lambda _token, _daemon: pytest.fail("成功创建不能结算未创建"),
         )
         assert registered.wait(5)
         paused = executor.submit(pause)

@@ -110,3 +110,62 @@ def test_rejects_secret_symlink_without_exposing_value(tmp_path: Path) -> None:
     with pytest.raises(migrate_worker_config.MigrationError) as error:
         migrate_worker_config.migrate(config_path=config_path, secrets_dir=secrets)
     assert "must-not-appear" not in str(error.value)
+
+
+@pytest.mark.parametrize("research,executor", [
+    ("arena-worker:local", "arena-task-executor:local"),
+    ("custom:research", "arena-task-executor:local"),
+    ("custom:research", "custom:research"),
+])
+def test_executor_image_migrates_without_legacy_secrets(
+    tmp_path: Path, research: str, executor: str,
+) -> None:
+    config_path, secrets = _runtime(tmp_path, reference=provider_credential_ref("provider-main"))
+    config = yaml.safe_load(config_path.read_text())
+    config["container"].update(image=research, task_executor_image=executor)
+    config["common_env"] = {provider_credential_ref("provider-main"): "preserve-private-value"}
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+    before = config_path.read_bytes()
+    secrets.rmdir()
+
+    result = migrate_worker_config.migrate(config_path=config_path, secrets_dir=secrets)
+
+    expected = yaml.safe_load(before)
+    del expected["container"]["task_executor_image"]
+    assert yaml.safe_load(config_path.read_text()) == expected
+    assert result.changed and result.provider_count == 0
+    assert result.backup_path.read_bytes() == before
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    assert not migrate_worker_config.migrate(config_path=config_path, secrets_dir=secrets).changed
+
+
+def test_custom_executor_conflict_preserves_config_and_credentials(tmp_path: Path) -> None:
+    config_path, secrets = _runtime(tmp_path)
+    config = yaml.safe_load(config_path.read_text())
+    config["container"]["task_executor_image"] = "custom:executor"
+    config_path.write_text(yaml.safe_dump(config))
+    secret_path = secrets / "provider-main.secret"
+    secret_path.write_text("private-unchanged\n")
+    before = config_path.read_bytes()
+
+    with pytest.raises(migrate_worker_config.MigrationError, match="配套研究镜像"):
+        migrate_worker_config.migrate(config_path=config_path, secrets_dir=secrets)
+
+    assert config_path.read_bytes() == before
+    assert secret_path.read_text() == "private-unchanged\n"
+    assert not list(config_path.parent.glob("dispatch.yaml.pre-worker-migration.bak*"))
+
+
+def test_executor_and_credential_migration_are_written_together(tmp_path: Path) -> None:
+    config_path, secrets = _runtime(tmp_path)
+    config = yaml.safe_load(config_path.read_text())
+    config["container"]["task_executor_image"] = "arena-task-executor:local"
+    config_path.write_text(yaml.safe_dump(config))
+    (secrets / "provider-main.secret").write_text("private-value")
+
+    result = migrate_worker_config.migrate(config_path=config_path, secrets_dir=secrets)
+
+    migrated = yaml.safe_load(config_path.read_text())
+    assert result.changed and result.provider_count == 1
+    assert "task_executor_image" not in migrated["container"]
+    assert migrated["common_env"][provider_credential_ref("provider-main")] == "private-value"

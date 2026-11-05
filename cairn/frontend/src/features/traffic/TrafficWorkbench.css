@@ -4,83 +4,67 @@
   min-width: 0;
   min-height: 0;
   height: 100%;
-  padding: var(--space-4);
-  gap: var(--space-2);
+  padding: var(--layout-content-padding);
+  gap: var(--space-3);
   container: traffic / inline-size;
 }
-.traffic-toolbar, .traffic-filters, .traffic-pagination {
+.traffic-toolbar, .traffic-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: var(--space-2);
   min-width: 0;
 }
-.traffic-toolbar h2 { margin: 0; font-size: var(--text-xl); font-weight: var(--font-semibold); }
-.traffic-toolbar > :deep(.ui-select__trigger) { flex: 0 1 240px; width: auto; min-width: 120px; max-width: 260px; }
-.traffic-refresh-state { margin-inline-start: auto; color: var(--text-muted); font-size: var(--text-sm); }
-.traffic-filters > :deep(.ui-input) { flex: 1 1 230px; min-width: 140px; }
-.traffic-filters > :deep(.ui-select__trigger) { flex: 0 1 145px; width: auto; min-width: 120px; }
-.traffic-extra-filters { display: grid; gap: var(--space-3); font-size: var(--text-sm); }
-.traffic-extra-filters label { display: grid; gap: var(--space-1); min-width: 0; }
-.traffic-toolbar :deep(.ui-select__trigger),
-.traffic-filters :deep(.ui-select__trigger),
-.traffic-filters :deep(.ui-input),
-.traffic-extra-filters :deep(.ui-select__trigger),
-.traffic-extra-filters :deep(.ui-input),
-.traffic-pagination :deep(.ui-select__trigger) {
-  min-height: var(--control-height-sm);
-  padding-block: var(--space-1);
-  font-size: var(--text-sm);
-  line-height: 18px;
-}
-.traffic-return { display: inline-flex; align-items: center; min-height: var(--control-height-sm); color: var(--accent); font-size: var(--text-sm); }
-.traffic-notice { margin: 0; color: var(--warning); font-size: var(--text-sm); overflow-wrap: anywhere; }
-.traffic-scope-summary { margin: 0; color: var(--text-muted); font-size: var(--text-sm); }
-.traffic-body { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); flex: 1 1 0; min-height: 338px; min-width: 0; }
-.traffic-body--inspector { grid-template-columns: minmax(0, 1fr) 320px; gap: var(--space-3); }
-.traffic-main { display: grid; min-height: 0; min-width: 0; }
+.traffic-toolbar { gap: var(--space-3); }
+.traffic-actions { margin-left: auto; }
+.traffic-refresh-state { color: var(--text-muted); font-size: var(--text-sm); }
+/* 查询条件作为一组换行，刷新与选中操作保持独立。 */
+.traffic-filters { display: flex; flex: 1 1 700px; align-items: center; flex-wrap: wrap; gap: var(--space-2); min-width: 0; }
+.traffic-search { position: relative; flex: 1 1 240px; min-width: 200px; max-width: 360px; }
+.traffic-search > :deep(.ui-input) { padding-right: var(--control-height); }
+.traffic-search > :deep(.ui-button) { position: absolute; inset-block: 0; right: 0; width: var(--control-height); padding: 0; }
+.traffic-filters > :deep(.ui-select__trigger) { flex: 0 1 auto; width: auto; min-width: 130px; max-width: 200px; }
+.traffic-filters > :deep(.ui-select__trigger[aria-label="筛选项目"]) { max-width: 220px; }
+.traffic-filters :deep(.traffic-filter) { border-style: dashed; font-size: var(--text-control); }
+.traffic-filters :deep(.traffic-filter--active) { border-style: solid; color: var(--accent); }
+.traffic-extra-filters { display: grid; gap: var(--space-4); font-size: var(--text-md); }
+.traffic-extra-filters label { display: grid; gap: var(--space-2); min-width: 0; }
+.traffic-filters { --field-control-height: var(--control-height-filter); }
+.traffic-filters :deep(.ui-button) { min-height: var(--control-height-filter); }
+.traffic-filters :deep(.ui-button) { font-size: var(--text-control); }
+.traffic-return { display: inline-flex; align-items: center; gap: var(--space-2); width: fit-content; min-height: 36px; color: var(--text-muted); font-size: var(--text-md); text-decoration: none; }
+.traffic-return:hover { color: var(--accent); }
+.traffic-notice { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0; color: var(--warning); font-size: var(--text-md); overflow-wrap: anywhere; }
+.traffic-scope-summary { margin: 0 0 var(--space-4); color: var(--text-muted); font-size: var(--text-sm); line-height: 1.7; }
+.traffic-body { display: flex; flex: 1 1 0; min-height: 452px; min-width: 0; }
+.traffic-main { display: grid; flex: 1; min-height: 0; min-width: 0; }
 .traffic-list { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
-.traffic-list :deep(.data-table__scroll) { flex: 1 1 0; min-height: 0; overflow: auto; }
-.traffic-list :deep(.data-table th) { position: sticky; top: 0; z-index: 1; }
-.traffic-list :deep(.data-table td) { white-space: nowrap; }
-.traffic-list :deep(.data-table tbody tr) { cursor: pointer; }
-.traffic-list :deep(.data-table tbody tr:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
-.traffic-target { display: block; width: 100%; max-width: 100%; min-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0; border: 0; color: var(--text); background: transparent; font: inherit; text-align: left; cursor: pointer; }
-.traffic-target:hover { color: var(--accent); }
-.traffic-method { font-family: var(--font-mono); font-weight: var(--font-medium); }
-.traffic-project { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.traffic-list .traffic-secondary { font-size: inherit; }
+.traffic-list :deep(.data-table__scroll) { flex: 1 1 0; min-height: 0; overflow: auto; border-radius: var(--radius-lg); }
+.traffic-list :deep(tbody tr:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
 .traffic-warning { color: var(--warning); }
-.traffic-association-link { min-height: 20px; padding: 0; border: 0; background: transparent; color: var(--accent); font: inherit; cursor: pointer; text-underline-offset: 3px; }
-.traffic-association-link:hover { text-decoration: underline; }
-.traffic-pagination { flex: 0 0 auto; padding-block-start: var(--space-1); font-size: var(--text-sm); }
-.traffic-pagination :deep(.ui-select__trigger) { width: 130px; }
-.traffic-page-position { color: var(--text-muted); white-space: nowrap; }
 .traffic-splitter { cursor: row-resize; touch-action: none; position: relative; }
-.traffic-splitter::after { content: ''; position: absolute; top: 3px; height: 2px; left: 40%; right: 40%; border-radius: var(--radius-sm); background: var(--border-strong); }
+.traffic-splitter::before { content: ''; position: absolute; top: 5px; left: 0; right: 0; border-top: 1px solid var(--border); }
+.traffic-splitter::after { content: ''; position: absolute; top: 4px; height: 3px; left: calc(50% - 28px); width: 56px; border-radius: var(--radius-sm); background: var(--border-strong); }
 .traffic-splitter:hover::after, .traffic-splitter:focus-visible::after { background: var(--accent); }
-.traffic-splitter:focus-visible, .traffic-target:focus-visible, .traffic-association-link:focus-visible, .traffic-association-section:focus-visible, .traffic-return:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.traffic-reading { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; min-height: 0; overflow: auto; }
+.traffic-splitter:focus-visible, .traffic-association-section:focus-visible, .traffic-return:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.traffic-reading { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; min-height: 0; overflow: auto; padding-top: var(--space-2); }
+.traffic-reading > .traffic-notice { flex: 0 0 auto; }
 .traffic-reading > :deep(.evidence-reader) { flex: 1 1 0; min-height: 0; }
-.traffic-selection-context { font-size: var(--text-xs); color: var(--text-muted); overflow-wrap: anywhere; }
-.traffic-empty { margin: auto; padding: var(--space-4); color: var(--text-muted); }
+.traffic-selection-context { font-size: var(--text-sm); color: var(--text-muted); overflow-wrap: anywhere; }
+.traffic-empty { margin: 0; padding: var(--space-4); color: var(--text-muted); text-align: center; font-size: var(--text-md); }
 .traffic-secondary { color: var(--text-muted); font-size: var(--text-sm); }
-.traffic-inspector { min-height: 0; min-width: 0; overflow: auto; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-surface); }
-.traffic-inspector > header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
-.traffic-inspector h3 { margin: 0; font-size: var(--text-lg); }
-.traffic-inspector h4 { margin: var(--space-4) 0 var(--space-2); font-size: var(--text-md); }
-.traffic-inspector dl { display: grid; gap: var(--space-1); margin: var(--space-3) 0; font-size: var(--text-sm); }
-.traffic-inspector dt { color: var(--text-muted); }
-.traffic-inspector dd { margin: 0 0 var(--space-2); overflow-wrap: anywhere; }
-.traffic-inspector details { padding-block: var(--space-2); border-top: 1px solid var(--border); }
-.traffic-inspector summary { cursor: pointer; overflow-wrap: anywhere; }
-.traffic-associations { display: grid; gap: var(--space-2); }
+.traffic-metadata { min-width: 0; }
+.traffic-metadata h4 { margin: var(--space-6) 0 var(--space-3); font-size: var(--text-md); font-weight: var(--font-medium); }
+.traffic-metadata > .traffic-association-section:first-child h4 { margin-top: 0; }
+.traffic-metadata dl { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(0, 3fr); gap: var(--space-3) var(--space-4); margin: var(--space-4) 0; font-size: var(--text-sm); line-height: 1.7; }
+.traffic-metadata dt { color: var(--text-muted); }
+.traffic-metadata dd { margin: 0; overflow-wrap: anywhere; }
+.traffic-metadata details { padding-block: var(--space-3); border-top: 1px solid var(--border); }
+.traffic-metadata summary { cursor: pointer; overflow-wrap: anywhere; font-size: var(--text-md); }
+.traffic-metadata summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.traffic-associations { display: grid; gap: var(--space-3); }
 .traffic-associations a { color: var(--accent); overflow-wrap: anywhere; }
-.traffic-associations span { display: block; }
-@container traffic (max-width: 1000px) {
-  .traffic-body--inspector { grid-template-columns: minmax(0, 1fr); }
-  .traffic-inspector { position: absolute; inset-block: 0; right: 0; width: min(360px, 100%); z-index: 3; box-shadow: var(--shadow-lg); }
-}
-@container traffic (max-width: 620px) {
-  .traffic-refresh-state { flex-basis: 100%; margin: 0; order: 1; }
+.traffic-associations span { display: block; margin-top: var(--space-1); }
+@media (max-width: 760px) {
+  .traffic-workbench { padding: var(--space-4); }
 }

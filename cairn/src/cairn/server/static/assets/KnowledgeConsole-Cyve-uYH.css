@@ -1,0 +1,1 @@
+.knowledge-context-menu{max-height:min(calc(var(--reka-context-menu-content-available-height) / var(--ui-scale)), calc(70 * var(--ui-dvh)))}

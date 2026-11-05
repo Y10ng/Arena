@@ -34,13 +34,14 @@ def worker():
 
 
 def claim():
-    return {"project_id": "p1", "conversation_id": "c1", "message_id": 9, "task_run_id": "tr1",
-            "session_id": f"pi:{uuid.uuid4()}", "resume": False, "prompt": "查询项目进度", "worker_id": "w1", "execution_generation": 0}
+    return {"project_id": None, "conversation_id": "c1", "message_id": 9, "task_run_id": "tr1",
+            "session_id": f"pi:{uuid.uuid4()}", "resume": False, "prompt": "查询项目进度", "worker_id": "w1", "status": "running", "session_machine_id": "d1",
+            "allowed_tools": ["query_project_progress"]}
 
 
 def runtime():
     return ContainerRuntimeOptions.build(image="worker:fixture", network_mode="bridge", dns=[], cap_add=[],
-                                         features={"project_chat": 1}, scenario_key="project-chat")
+                                         features={"conversation_chat": 1}, scenario_key="conversation-chat")
 
 
 def finish_storage(loop, root):
@@ -57,8 +58,8 @@ class Client:
     def __init__(self):
         self.calls = []
 
-    def agent_turn_action(self, project, conversation, message, action, body):
-        self.calls.append((project, conversation, message, action, body))
+    def agent_turn_action(self, conversation, message, action, body):
+        self.calls.append((None, conversation, message, action, body))
         if action == "tools":
             assert body == {"task_run_id": "tr1", "method": "query_project_progress", "params": {}, "tool_call_id": "sdk-call-1"}
             return ApiResult(200, {"status": "completed"})
@@ -78,7 +79,7 @@ class Manager:
         self.answer = answer
 
     def ensure_chat_running(self, project, options):
-        assert project == "p1" and options.features == {"project_chat": 1}
+        assert project == "c1" and options.features == {"conversation_chat": 1}
         return "owned-p1-chat"
 
     def chat_directory(self, project):
@@ -122,7 +123,7 @@ class Manager:
                     assert response == {"ok": True, "data": {"status": "completed"}}
                 return ProcessResult(0, json.dumps({
                     "protocol": "cairn-agent-result-v1", "engine": "pi", "phase": "chat_turn",
-                    "project_id": "p1", "task_run_id": "tr1", "session": request["session"],
+                    "project_id": None, "conversation_id": "c1", "task_run_id": "tr1", "session": request["session"],
                     "status": "succeeded", "result": {"text": manager.answer}, "submission_id": None,
                     "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_tokens": None, "cache_write_tokens": None},
                     "error": None,
@@ -136,8 +137,10 @@ def test_claim_runs_through_driver_process_and_private_socket_without_public_dia
     config = SimpleNamespace(runtime=SimpleNamespace(interval=30), tasks=SimpleNamespace(reason=SimpleNamespace(timeout=10)))
     result = run_agent_turn(config, client, manager, worker(), TaskCancellation(), claim(), runtime())
     assert result == {"status": "succeeded", "text": "项目已完成。", "error_code": None,
-                      "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_tokens": None, "cache_write_tokens": None}}
+                      "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_tokens": None, "cache_write_tokens": None},
+                      "usage_missing_responses": None, "session_initialized": None}
     assert manager.starts == 1
+    assert manager.request["capabilities"]["project_tools"]["allowed_tools"] == claim()["allowed_tools"]
     assert not manager.files
     assert list((tmp_path / "prompts").iterdir()) == []
     assert [call[3] for call in client.calls] == ["heartbeat", "tools"]
@@ -145,12 +148,12 @@ def test_claim_runs_through_driver_process_and_private_socket_without_public_dia
 
 
 def test_project_tool_bridge_preserves_sdk_identity_and_only_exposes_public_business_errors():
-    detail = {"code": "verification_config_missing", "message": "请先配置复测模型。", "action_url": "/settings/verification"}
+    detail = {"code": "assessment_report_project_active", "message": "项目仍在研究中，不能生成综合报告。"}
     client = SimpleNamespace(agent_turn_action=Mock(return_value=ApiResult(409, {"detail": detail})))
     binding = ProjectToolBinding(client, "p1", "c1", "m1", "tr1", ["synthetic-secret"])
-    request = {"method": "request_vulnerability_retest", "params": {"vulnerability_id": "v001"}, "tool_call_id": "sdk-call-1"}
+    request = {"method": "request_project_report", "params": {}, "tool_call_id": "sdk-call-1"}
     assert binding.dispatch(request) == {"error": detail}
-    client.agent_turn_action.assert_called_once_with("p1", "c1", "m1", "tools", {"task_run_id": "tr1", **request})
+    client.agent_turn_action.assert_called_once_with("c1", "m1", "tools", {"task_run_id": "tr1", **request})
     for data in ({"detail": "private-stack"}, {"detail": {**detail, "trace": "private-stack"}}, None):
         client.agent_turn_action.return_value = ApiResult(500, data, text="private-response")
         with pytest.raises(ValueError, match="^project_tool_failed$"):
@@ -160,12 +163,50 @@ def test_project_tool_bridge_preserves_sdk_identity_and_only_exposes_public_busi
         binding.dispatch(request)
 
 
+@pytest.mark.parametrize("allowed", [None, "all", ["_validate_workspace_claim"], ["query_agent_work", "query_agent_work"]])
+def test_chat_driver_rejects_missing_or_malformed_capability(tmp_path, allowed):
+    from cairn.dispatcher.workers.adapters.pi import PiDriver
+    from cairn.dispatcher.worker_result_gateway import WorkerRequestError
+
+    with pytest.raises(WorkerRequestError):
+        PiDriver().build_execute(
+            worker(), "只读查询", claim()["session_id"], phase="chat_turn", project_id=None, conversation_id="c1", task_run_id="tr1",
+            timeout_seconds=10, session_root="/home/kali/.cairn/pi",
+            project_tools_socket_path="/tmp/cairn-prompts/pi-project-" + "a" * 32 + ".sock",
+            project_tools_workspace_path="/home/kali/workspace/c1", project_tools_allowed_tools=allowed,
+        )
+
+
 def test_chat_consumer_rejects_known_secret_without_reexecution(tmp_path):
     client, manager = Client(), Manager(tmp_path, answer="synthetic-model-secret")
     config = SimpleNamespace(runtime=SimpleNamespace(interval=30), tasks=SimpleNamespace(reason=SimpleNamespace(timeout=10)))
     result = run_agent_turn(config, client, manager, worker(), TaskCancellation(), claim(), runtime())
     assert result["status"] == "failed" and result["error_code"] == "public_output_forbidden"
     assert result["text"] == "" and manager.starts == 1
+    assert result["usage"] == {"input_tokens": 10, "output_tokens": 5, "cache_read_tokens": None, "cache_write_tokens": None}
+
+
+def test_pending_chat_cursor_advances_after_rejected_full_page(tmp_path):
+    loop = finish_storage(AgentChatMixin(), tmp_path)
+    loop.futures = {}
+    loop.config = SimpleNamespace(container=SimpleNamespace(image="worker:fixture", network_mode="bridge", dns=[]))
+    loop.container_manager = SimpleNamespace(chat_container_name=lambda project: "owned-" + project + "-chat")
+    page = [{"project_id": "p1", "conversation_id": f"c{index:03d}", "execution_generation": 0} for index in range(101)]
+    loop.client = SimpleNamespace(
+        pending_agent_turns=Mock(side_effect=[ApiResult(200, page[:100]), ApiResult(503), ApiResult(200, page[100:]), ApiResult(200, [])]),
+        claim_agent_turn=Mock(return_value=ApiResult(403)),
+    )
+    loop._dispatch_agent_turns()
+    assert loop.client.claim_agent_turn.call_count == 100
+    assert loop._agent_pending_after == "c099"
+    loop._dispatch_agent_turns()
+    assert loop._agent_pending_after == "c099"
+    loop._dispatch_agent_turns()
+    assert loop.client.claim_agent_turn.call_count == 101
+    assert loop.client.claim_agent_turn.call_args.args[0] == "c100"
+    assert loop._agent_pending_after == ""
+    loop._dispatch_agent_turns()
+    assert [call.kwargs["after"] for call in loop.client.pending_agent_turns.call_args_list] == ["", "c099", "c099", ""]
 
 
 def test_agent_has_real_executor_capacity_when_research_is_full_and_retries_only_finish(monkeypatch, tmp_path):
@@ -195,7 +236,7 @@ def test_agent_has_real_executor_capacity_when_research_is_full_and_retries_only
             {"project_id": "p2", "conversation_id": "c2", "execution_generation": 0},
         ])),
         get_project=Mock(side_effect=AssertionError("聊天不能解析或清理研究 Worker")),
-        claim_agent_turn=Mock(return_value=ApiResult(200, current)),
+        claim_agent_turn=Mock(side_effect=lambda cid, rid: ApiResult(200, {**current, "request_id": rid})),
         agent_turn_action=Mock(side_effect=[ApiResult(0), ApiResult(200, {})]),
     )
     execute = Mock(return_value={"status": "succeeded", "text": "你好", "error_code": None, "usage": None})
@@ -227,7 +268,7 @@ def test_agent_has_real_executor_capacity_when_research_is_full_and_retries_only
             loop._reap_agent_turn(future, task)
             assert list(loop.futures) == [research_future] and execute.call_count == 1
             assert loop.client.agent_turn_action.call_args_list[0] == loop.client.agent_turn_action.call_args_list[1]
-            assert loop.client.agent_turn_action.call_args.args[2] == "9"
+            assert loop.client.agent_turn_action.call_args.args[1] == "9"
             assert not loop.futures[research_future].cancellation.is_cancelled
             loop.client.get_project.assert_not_called()
         finally:
@@ -241,7 +282,7 @@ def test_stopped_project_does_not_cancel_readonly_chat():
     cleanup._cancel_inactive_tasks([SimpleNamespace(id="p1", status="stopped")])
     assert not task.cancellation.is_cancelled
     cleanup._cancel_inactive_tasks([])
-    assert task.cancellation.is_cancelled
+    assert not task.cancellation.is_cancelled
 
 
 def test_chat_container_uses_persistent_private_mounts_without_research_topology(tmp_path):
@@ -252,10 +293,10 @@ def test_chat_container_uses_persistent_private_mounts_without_research_topology
     manager.traffic_execution = SimpleNamespace(root=tmp_path / "traffic")
     manager._get_container = Mock(return_value=None)
     manager._require_created_running_container = Mock()
-    manager._container_labels = Mock(return_value={"cairn.project_id": "p1"})
+    manager.instance_id = "fixture"
     manager._client = SimpleNamespace(containers=SimpleNamespace(run=Mock()))
     name = manager.ensure_chat_running("p1", runtime())
-    assert name == "owned-p1-chat"
+    assert name == "owned-conversation-p1"
     volumes = manager._client.containers.run.call_args.kwargs["volumes"]
     assert {item["bind"] for item in volumes.values()} == {"/home/kali/workspace", "/home/kali/.cairn", "/tmp/cairn-prompts"}
     saved = manager.chat_directory("p1") / "control" / "session-fixture"
@@ -263,6 +304,21 @@ def test_chat_container_uses_persistent_private_mounts_without_research_topology
     manager.ensure_chat_running("p1", runtime())
     assert saved.read_text() == "synthetic transcript"
     assert manager._client.containers.run.call_count == 2
+    labels = manager._client.containers.run.call_args.kwargs["labels"]
+    assert labels["cairn.conversation_id"] == "p1" and "cairn.project_id" not in labels
+    assert labels["cairn.scenario_key"] == "conversation-chat"
+    manager._startup_prefix = "startup-"
+    container = SimpleNamespace(name=name, attrs={"Config": {"Labels": labels}, "State": {"Status": "running"}},
+                                reload=Mock(), remove=Mock(), stop=Mock())
+    manager._get_container.side_effect = lambda requested: container if requested == name else None
+    manager._client.containers.list = Mock(return_value=[container])
+    assert manager._owns_container(container)
+    assert manager.project_id_from_container_name(name) is None
+    assert manager.managed_container_names() == []
+    assert manager.cleanup_orphan(name) is False
+    assert name not in manager._project_container_names("p1")
+    container.remove.assert_not_called()
+    container.stop.assert_not_called()
 
 
 @pytest.mark.parametrize("restart", [False, True])
@@ -295,7 +351,7 @@ def test_three_finish_failures_recover_exact_result_without_rerunning_model(tmp_
     assert saved.result == result and saved.attempts == 3 and saved.state == "pending"
     receipt_path = loop._agent_finish_directory() / f"{saved.key}.json"
     assert json.loads(receipt_path.read_text())["message_id"] == "9"
-    assert finish.call_args.args[2] == "9"
+    assert finish.call_args.args[1] == "9"
     loop._dispatch_agent_turns()
     assert finish.call_count == 3
     loop.client.claim_agent_turn.assert_not_called()
@@ -341,7 +397,8 @@ def test_finish_protected_answer_retains_original_and_recovers_only_failure_rece
     assert len(calls) == 5 and calls[0].args[-1]["text"] == original["text"]
     for call in calls[1:]:
         assert call.args[-1] == {"task_run_id": "tr1", "status": "failed", "text": "",
-                                "error_code": "public_output_forbidden", "usage": None}
+                                "error_code": "public_output_forbidden", "usage": None,
+                                "usage_missing_responses": None, "session_initialized": None}
 
 
 @pytest.mark.parametrize("status", [0, 401, 403, 404, 409])
@@ -454,7 +511,9 @@ def test_unconfirmed_execution_keeps_running_slot_without_terminal_finish(tmp_pa
     config = SimpleNamespace(runtime=SimpleNamespace(interval=30), tasks=SimpleNamespace(reason=SimpleNamespace(timeout=10)))
     cancellation = TaskCancellation()
     result = run_agent_turn(config, client, manager, worker(), cancellation, claim(), runtime())
-    assert result is None
+    assert result["status"] == ("cancelled" if failure == "return" else "failed")
+    assert result["text"] == ""
+    assert result["error_code"] == ("execution_cancelled" if failure == "return" else "chat_execution_failed")
     assert cancellation.execution_lifecycle(task_finished=True)["termination_confirmed"] is False
     task = RunningTask("p1", "agent_chat", "w1", "pi", cancellation, runtime(),
                        task_run_id="tr1", agent_conversation_id="c1", agent_message_id=9)
@@ -468,3 +527,71 @@ def test_unconfirmed_execution_keeps_running_slot_without_terminal_finish(tmp_pa
     assert not any(call[3] == "finish" for call in client.calls)
     assert caplog.text.count("code=execution_unconfirmed") == 1
     assert "synthetic-private-error" not in caplog.text
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+@pytest.mark.parametrize("execution_error", [False, True])
+def test_research_close_result_survives_finally_and_real_scheduler_reap(tmp_path, monkeypatch, confirmed, execution_error):
+    from docker.errors import DockerException
+
+    from cairn.dispatcher.runtime.chat_workspace import ChatWorkspace
+    from cairn.dispatcher.runtime.traffic_execution import TaskTrafficExecution
+    from cairn.dispatcher.scheduler.loop import DispatcherLoop
+
+    client, manager = Client(), Manager(tmp_path)
+    cancellation = TaskCancellation()
+    stop_scope = Mock(side_effect=[DockerException("synthetic-stop-unavailable"), {"termination_confirmed": confirmed}])
+    research = TaskTrafficExecution(SimpleNamespace(stop_scope=stop_scope), "scope1", cancellation)
+
+    def workspace(*args):
+        workspace = ChatWorkspace(*args)
+        workspace.research_execution = research
+        return workspace
+
+    monkeypatch.setattr("cairn.dispatcher.tasks.agent_chat.ChatWorkspace", workspace)
+    if execution_error:
+        monkeypatch.setattr(manager, "build_exec_process", Mock(side_effect=RuntimeError("synthetic-private-error")))
+    config = SimpleNamespace(runtime=SimpleNamespace(interval=30), tasks=SimpleNamespace(reason=SimpleNamespace(timeout=10)))
+    loop = finish_storage(DispatcherLoop.__new__(DispatcherLoop), tmp_path / "receipts")
+    loop.client = client
+    client.pending_agent_turns = Mock(return_value=ApiResult(200, []))
+    action = client.agent_turn_action
+    saved_results = []
+
+    def verify_finish(conversation, message, operation, body):
+        if operation == "finish":
+            saved = json.loads(next(loop._agent_finish_directory().glob("*.json")).read_bytes())
+            assert saved["conversation_id"] == conversation == "c1"
+            assert saved["message_id"] == message == "9"
+            assert saved["task_run_id"] == body["task_run_id"] == "tr1"
+            assert body == {"task_run_id": "tr1", **saved["result"]}
+            saved_results.append(saved["result"])
+        return action(conversation, message, operation, body)
+
+    client.agent_turn_action = verify_finish
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(run_agent_turn, config, client, manager, worker(), cancellation, claim(), runtime())
+        task = RunningTask(None, "agent_chat", "w1", "pi", cancellation, runtime(),
+                           task_run_id="tr1", agent_conversation_id="c1", agent_message_id=9)
+        loop.futures = {future: task}
+        result = future.result(timeout=5)
+        assert result["status"] == ("failed" if execution_error else "succeeded")
+        assert result["text"] == ("" if execution_error else manager.answer)
+        assert result["error_code"] == ("chat_execution_failed" if execution_error else None)
+        assert stop_scope.call_count == 2
+        assert cancellation.execution_lifecycle(task_finished=True)["termination_confirmed"] is confirmed
+        loop._reap_futures()
+        loop._reap_futures()
+        loop._dispatch_agent_turns()
+
+    if confirmed:
+        assert saved_results == [result]
+        assert not loop.futures and not loop._pending_agent_finishes()
+        assert not list(loop._agent_finish_directory().glob("*.json"))
+        client.pending_agent_turns.assert_called_once()
+    else:
+        assert not saved_results and future in loop.futures and task.agent_execution_unconfirmed
+        assert not any(call[3] == "finish" for call in client.calls)
+        assert not list(loop._agent_finish_directory().glob("*.json"))
+        client.pending_agent_turns.assert_not_called()
+    assert stop_scope.call_count == 2

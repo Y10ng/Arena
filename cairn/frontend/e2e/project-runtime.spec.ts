@@ -59,7 +59,7 @@ const runtime = {
 
 async function mockRuntimeApp(
   page: Page,
-  options: { unavailable?: boolean; empty?: boolean; paused?: boolean; resumeReady?: boolean; rejectResume?: boolean } = {},
+  options: { unavailable?: boolean; empty?: boolean; paused?: boolean; resumeReady?: boolean; rejectResume?: boolean; liveClock?: boolean } = {},
 ) {
   const metadata = { ...project, status: options.paused ? 'paused' : 'active' }
   const snapshot: typeof runtime = {
@@ -93,7 +93,7 @@ async function mockRuntimeApp(
   )
   const unexpected: string[] = []
   const posts: string[] = []
-  await page.clock.setFixedTime(new Date(now))
+  if (!options.liveClock) await page.clock.setFixedTime(new Date(now))
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await page.route('**/*', async (route) => {
     const request = route.request()
@@ -193,6 +193,327 @@ async function mockRuntimeApp(
     await route.fulfill({ json })
   })
   return { unexpected, posts, pageErrors, confirmPause }
+}
+
+for (const entry of ['workspace', 'list'] as const) {
+  for (const clockOffset of [-120_000, 120_000]) {
+    test(`runtime freshness uses selected local reads: ${entry}, clock ${clockOffset}`, async ({ page }) => {
+      await page.setViewportSize({ width: 1920, height: 1080 })
+      const mock = await mockRuntimeApp(page, { empty: true, liveClock: true })
+      const browserTime = new Date(Date.parse(now) + clockOffset)
+      await page.clock.install({ time: browserTime })
+      await page.clock.pauseAt(browserTime)
+      type Control = import('../src/api/types').ProjectExecutionControl
+      const pending: Control = {
+        request_id: 'freshness-pause', action: 'pause', state: 'requested', requested_at: now,
+      }
+      const confirmed: Control = { ...pending, state: 'paused', confirmed_at: now }
+      let metadata = { ...project, status: 'paused', execution_control: pending }
+      const confirmedSnapshot = {
+        ...runtime, project_status: 'paused', state: 'paused', code: 'project_paused',
+        execution_control: confirmed, last_error: null,
+        dispatcher: { status: 'idle', freshness: 'fresh', updated_at: now },
+        actions: { ...runtime.actions, resume: { allowed: true, reason: null as string | null } },
+      }
+      const pendingSnapshot = {
+        ...confirmedSnapshot, state: 'pausing', code: 'execution_control_pending',
+        execution_control: pending,
+        actions: { ...runtime.actions, resume: { allowed: false, reason: 'execution_control_pending' } },
+      }
+      let reply = pendingSnapshot
+      let failed = false
+      let omitProject = false
+      let singleReads = 0
+      let batchReads = 0
+      const posts: string[] = []
+      await page.route('**/*', async (route) => {
+        const request = route.request()
+        const path = new URL(request.url()).pathname
+        if (request.method() === 'POST' && path.startsWith('/projects')) {
+          posts.push(path)
+          return route.fulfill({ status: 409, json: { detail: 'project_authorization_expired' } })
+        }
+        if (path === '/projects') return route.fulfill({ json: [metadata] })
+        if (path === `/projects/${project.id}`) return route.fulfill({ json: {
+          project: metadata, facts: [], intents: [], hints: [], targets: [], resources: [], library_bindings: [],
+        } })
+        if (path === '/projects/runtime' || path === `/projects/${project.id}/runtime`) {
+          if (path === '/projects/runtime') batchReads++
+          else singleReads++
+          return route.fulfill({
+            status: failed ? 503 : 200,
+            json: failed ? { detail: 'runtime_unavailable' } : path === '/projects/runtime'
+              ? { items: omitProject ? [{ ...reply, project_id: 'other-project' }] : [reply] } : reply,
+          })
+        }
+        return route.fallback()
+      })
+      await page.goto(entry === 'workspace' ? `/#/projects/${project.id}/runs` : '/#/projects')
+      const statusBadge = page.getByLabel('项目状态', { exact: true })
+      await expect(statusBadge).toHaveText('正在暂停')
+      const expectResume = async (allowed: boolean) => {
+        if (entry === 'list') await page.getByLabel('项目操作菜单').click()
+        const resume = page.getByRole(entry === 'list' ? 'menuitem' : 'button', { name: '继续项目', exact: true })
+        if (entry === 'list') {
+          if (allowed) await expect(resume).not.toHaveAttribute('data-disabled', '')
+          else await expect(resume).toHaveAttribute('data-disabled', '')
+          await page.keyboard.press('Escape')
+        } else if (allowed) await expect(resume).toBeEnabled()
+        else await expect(resume).toBeDisabled()
+      }
+      const refresh = async () => {
+        await page.getByLabel('运行详情', { exact: true }).click()
+        const response = page.waitForResponse((r) => new URL(r.url()).pathname ===
+          (entry === 'list' ? '/projects/runtime' : `/projects/${project.id}/runtime`))
+        await page.getByRole('button', { name: '刷新观测', exact: true }).click()
+        await response
+        await page.keyboard.press('Escape')
+      }
+      // 从 requested 自动快读到确认，不提交任何项目动作；Server 时间固定，只有浏览器偏移。
+      await expect.poll(() => singleReads).toBeGreaterThan(0)
+      reply = confirmedSnapshot
+      await page.clock.runFor(800)
+      await expect(statusBadge).toHaveText('已暂停')
+      await expectResume(true)
+      await expect(page.getByText('观测已失效', { exact: true })).toHaveCount(0)
+      await page.getByLabel('运行详情', { exact: true }).click()
+      await expect(page.locator('.project-observation-details')).toContainText(now)
+      await expect(page.locator('.project-observation-details')).not.toContainText('历史观测时间')
+      await page.keyboard.press('Escape')
+
+      // 普通查询／batch 的相同响应也是新读取；Query 结构共享不能让旧本地年龄一直保留。
+      await page.clock.fastForward(40_000)
+      await refresh()
+      if (entry === 'list') expect(batchReads).toBeGreaterThan(1)
+      metadata = { ...metadata, execution_control: confirmed }
+      reply = pendingSnapshot
+      await page.clock.fastForward(40_000)
+      await refresh()
+      await expect(statusBadge).toHaveText('已暂停')
+      await expectResume(true)
+      // 被丢弃的旧 requested、元数据确认，以及其他项目的 batch 成功均不能续期。
+      if (entry === 'list') omitProject = true
+      await page.clock.fastForward(24_001)
+      await refresh()
+      await expect(page.getByText('观测已失效', { exact: true }).first()).toBeVisible()
+      await expectResume(false)
+      await page.getByLabel('运行详情', { exact: true }).click()
+      await expect(page.locator('.project-observation-details')).toContainText('历史观测时间')
+      await expect(page.locator('.project-observation-details')).toContainText(now)
+      await page.keyboard.press('Escape')
+
+      omitProject = false
+      reply = { ...confirmedSnapshot, actions: {
+        ...confirmedSnapshot.actions, resume: { allowed: false, reason: 'project_authorization_expired' },
+      } }
+      await refresh()
+      await expect(page.getByText('观测已失效', { exact: true })).toHaveCount(0)
+      await expectResume(false)
+      reply = confirmedSnapshot
+      await page.clock.runFor(1)
+      await refresh()
+      await expectResume(true)
+      failed = true
+      await refresh()
+      await expect(page.getByText('观测未更新', { exact: true }).first()).toBeVisible()
+      await expectResume(false)
+      expect(posts).toEqual([])
+      expect(mock.posts).toEqual([])
+      expect(mock.unexpected).toEqual([])
+      expect(mock.pageErrors).toEqual([])
+    })
+  }
+
+  test(`hot control feedback closes the delayed receipt seam: ${entry}`, async ({ page }) => {
+    test.setTimeout(60_000)
+    await page.setViewportSize({ width: 1920, height: 1080 })
+    const mock = await mockRuntimeApp(page, { empty: true, liveClock: true })
+    type Control = import('../src/api/types').ProjectExecutionControl
+    let control: Control = {}
+    let status = 'active'
+    let staleMetadata = { ...project, execution_control: {} as Control }
+    let physicalAt = 0
+    let acceptedAt = 0
+    let activeReads = 0
+    let maxActiveReads = 0
+    let reads = 0
+    let releaseOld: (() => Promise<void>) | undefined
+    let holdOld = false
+    let resumeDenied = false
+    const posts: string[] = []
+    const times: Record<string, number | string>[] = []
+    const snapshot = () => ({
+      ...runtime, observed_at: new Date().toISOString(), project_status: status,
+      execution_control: { ...control }, last_error: null,
+      dispatcher: { status: 'running', freshness: 'fresh', updated_at: new Date().toISOString() },
+      state: control.state === 'requested' ? (control.action === 'pause' ? 'pausing' : 'starting') : status === 'paused' ? 'paused' : 'running',
+      code: control.state === 'requested' ? 'execution_control_pending' : 'process_started',
+      actions: { ...runtime.actions, resume: {
+        allowed: status === 'paused' && control.state === 'paused' && !resumeDenied,
+        reason: resumeDenied ? 'project_authorization_expired' : null,
+      } },
+    })
+    let pendingSnapshot: ReturnType<typeof snapshot> | undefined
+    let returnPending = false
+    await page.route('**/*', async (route) => {
+      const request = route.request()
+      const path = new URL(request.url()).pathname
+      if (path === '/project-schedules') return route.fulfill({ json: [] })
+      if (path === '/projects') return route.fulfill({ json: [staleMetadata] })
+      if (path === `/projects/${project.id}`) return route.fulfill({ json: {
+        project: staleMetadata, facts: [], intents: [], hints: [], targets: [], resources: [], library_bindings: [],
+      } })
+      if (path === '/projects/runtime' || path === `/projects/${project.id}/runtime`) {
+        reads++
+        activeReads++
+        maxActiveReads = Math.max(maxActiveReads, activeReads)
+        let view = snapshot()
+        if (control.state === 'requested') pendingSnapshot = view
+        if (returnPending && pendingSnapshot) {
+          // 同一请求的旧 requested 即使晚到，也不能撤回已确认的动作资格。
+          view = { ...pendingSnapshot, observed_at: view.observed_at }
+          returnPending = false
+        }
+        const body = path === '/projects/runtime' ? { items: [view] } : view
+        const respond = async () => {
+          activeReads--
+          await route.fulfill({ json: body })
+        }
+        if (holdOld) {
+          holdOld = false
+          releaseOld = respond
+          return
+        }
+        return respond()
+      }
+      if (request.method() === 'POST' && [
+        `/projects/${project.id}/pause`, `/projects/${project.id}/resume`,
+      ].includes(path)) {
+        const action = path.endsWith('/pause') ? 'pause' : 'resume'
+        posts.push(action)
+        acceptedAt = performance.now()
+        status = action === 'pause' ? 'paused' : 'active'
+        control = { request_id: `request-${posts.length}`, action, state: 'requested', requested_at: new Date().toISOString(), confirmed_at: null }
+        if (action === 'pause') staleMetadata = { ...project, status, execution_control: { ...control } }
+        return route.fulfill({ json: { ...project, status, execution_control: control } })
+      }
+      return route.fallback()
+    })
+    await page.goto(entry === 'workspace' ? `/#/projects/${project.id}/runs` : '/#/projects')
+    const statusBadge = page.getByLabel('项目状态', { exact: true })
+    await expect(statusBadge).toHaveText('进行中')
+    const act = async (label: string) => {
+      if (entry === 'list') {
+        await page.getByLabel('项目操作菜单').click()
+        await page.getByRole('menuitem', { name: label, exact: true }).click()
+      } else await page.getByRole('button', { name: label, exact: true }).click()
+    }
+    await act('暂停项目')
+    await expect(statusBadge).toHaveText('正在暂停')
+    times.push({ action: 'pause', accepted_ui_ms: performance.now() - acceptedAt })
+    await expect(statusBadge).not.toHaveText('已暂停')
+    // 让普通元数据读取先确认，runtime 仍是同请求 requested；不手动刷新或 invalidate。
+    await new Promise((resolve) => setTimeout(resolve, 2200))
+    staleMetadata = { ...project, status, execution_control: {
+      ...control, state: 'paused', confirmed_at: new Date().toISOString(),
+    } }
+    await expect(statusBadge).toHaveText('已暂停', { timeout: 11_000 })
+    await expect(page.getByText('动作资格观测未更新', { exact: true }).first()).toBeVisible()
+    const expectResume = async (allowed: boolean) => {
+      if (entry === 'list') await page.getByLabel('项目操作菜单').click()
+      const resume = page.getByRole(entry === 'list' ? 'menuitem' : 'button', { name: '继续项目', exact: true })
+      if (entry === 'list') {
+        if (allowed) await expect(resume).not.toHaveAttribute('data-disabled', '', { timeout: 1200 })
+        else await expect(resume).toHaveAttribute('data-disabled', '')
+        await page.keyboard.press('Escape')
+      } else if (allowed) await expect(resume).toBeEnabled({ timeout: 1200 })
+      else await expect(resume).toBeDisabled()
+    }
+    await expectResume(false)
+    physicalAt = performance.now()
+    control = { ...staleMetadata.execution_control }
+    await expectResume(true)
+    times.push({ action: 'pause-metadata-first', runtime_ready_to_action_ms: performance.now() - physicalAt })
+    await expect(page.getByText('动作资格观测未更新', { exact: true })).toHaveCount(0)
+    expect(maxActiveReads).toBe(1)
+    await page.screenshot({ path: test.info().outputPath('metadata-first-pause.png') })
+
+    // 同一窗口内正常恢复应自动反馈，不依靠后面的超时手动刷新场景。
+    await act('继续项目')
+    await expect(statusBadge).toHaveText('正在恢复')
+    times.push({ action: 'resume-auto', accepted_ui_ms: performance.now() - acceptedAt })
+    await new Promise((resolve) => setTimeout(resolve, 2200))
+    physicalAt = performance.now()
+    control = { ...control, state: 'running', confirmed_at: new Date().toISOString() }
+    await expect(statusBadge).toHaveText('进行中', { timeout: 1200 })
+    times.push({ action: 'resume-auto', physical_ms: physicalAt - acceptedAt, physical_to_ui_ms: performance.now() - physicalAt })
+    expect(posts).toEqual(['pause', 'resume'])
+    await page.screenshot({ path: test.info().outputPath('automatic-resume.png') })
+
+    // 保留 runtime 先确认顺序；合法拒绝也是完整资格，不能持续快读直到允许。
+    await act('暂停项目')
+    await expect(statusBadge).toHaveText('正在暂停')
+    await new Promise((resolve) => setTimeout(resolve, 2200))
+    physicalAt = performance.now()
+    resumeDenied = true
+    control = { ...control, state: 'paused', confirmed_at: new Date().toISOString() }
+    await expect(statusBadge).toHaveText('已暂停', { timeout: 1200 })
+    times.push({ action: 'pause-runtime-first', physical_ms: physicalAt - acceptedAt, physical_to_ui_ms: performance.now() - physicalAt })
+    await expectResume(false)
+    const afterDenied = reads
+    await new Promise((resolve) => setTimeout(resolve, 1800))
+    expect(reads - afterDenied).toBeLessThanOrEqual(1)
+    await expectResume(false)
+    resumeDenied = false
+    await page.getByLabel('运行详情', { exact: true }).click()
+    await page.getByRole('button', { name: '刷新观测', exact: true }).click()
+    await page.keyboard.press('Escape')
+    await expectResume(true)
+    await page.screenshot({ path: test.info().outputPath('confirmed-pause.png') })
+    returnPending = true
+    await page.getByLabel('运行详情', { exact: true }).click()
+    await page.getByRole('button', { name: '刷新观测', exact: true }).click()
+    await expect.poll(() => returnPending).toBe(false)
+    await expect(statusBadge).toHaveText('已暂停')
+    await page.keyboard.press('Escape')
+    // 下一次常规读取先取得旧 pause，再延迟到新 resume 已受理后返回。
+    holdOld = true
+    await expect.poll(() => Boolean(releaseOld), { timeout: 9000 }).toBe(true)
+    await act('继续项目')
+    await expect(statusBadge).toHaveText('正在恢复')
+    times.push({ action: 'resume', accepted_ui_ms: performance.now() - acceptedAt })
+    await releaseOld!()
+    await expect(statusBadge).toHaveText('正在恢复')
+    expect(posts).toEqual(['pause', 'resume', 'pause', 'resume'])
+    await expect(page.getByText(/物理状态尚未确认，请刷新观测/).first()).toBeVisible({ timeout: 16_000 })
+    const afterWindow = reads
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    // 快观察已退出；期间至多碰到一次常规 8 秒读取。
+    expect(reads - afterWindow).toBeLessThanOrEqual(1)
+    expect(posts).toEqual(['pause', 'resume', 'pause', 'resume'])
+    await expect(statusBadge).toHaveText('正在恢复')
+    await page.screenshot({ path: test.info().outputPath('unconfirmed-resume.png') })
+    physicalAt = performance.now()
+    control = { ...control, state: 'running', confirmed_at: new Date().toISOString() }
+    await page.getByLabel('运行详情', { exact: true }).click()
+    await page.getByRole('button', { name: '刷新观测', exact: true }).click()
+    await expect(statusBadge).toHaveText('进行中')
+    times.push({ action: 'resume', physical_ms: physicalAt - acceptedAt, manual_refresh_to_ui_ms: performance.now() - physicalAt })
+    expect(posts).toEqual(['pause', 'resume', 'pause', 'resume'])
+    await page.keyboard.press('Escape')
+    // 带着尚未确认的请求离开 SPA 页面，核验作用域清理，而不是关闭浏览器来中断请求。
+    await act('暂停项目')
+    await expect(statusBadge).toHaveText('正在暂停')
+    expect(posts).toEqual(['pause', 'resume', 'pause', 'resume', 'pause'])
+    await page.evaluate(() => { location.hash = '#/feedback-exit-not-found' })
+    await expect(statusBadge).toHaveCount(0)
+    const afterExit = reads
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    expect(reads).toBe(afterExit)
+    expect(mock.pageErrors).toEqual([])
+    expect(mock.unexpected).toEqual([])
+    console.log('CONTROL_FEEDBACK_TIMINGS', entry, JSON.stringify(times))
+  })
 }
 
 async function closeMobileNavigation(page: Page) {

@@ -39,8 +39,8 @@ function setMode(value: string | number) {
 function setAuth(value: string | number) { update({ auth_action: value as TestEgressDraft['auth_action'], username: '', password: '' }) }
 </script>
 <style scoped>
-.test-egress-fields { min-width: 0; display: grid; gap: var(--space-3); padding: 0; margin: 0; border: 0; }
-.test-egress-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+.test-egress-fields { min-width: 0; display: grid; gap: var(--space-5); padding: 0; margin: 0; border: 0; }
+.test-egress-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
 .test-egress-note, .test-egress-error { margin: 0; font-size: var(--text-sm); line-height: var(--leading-normal); overflow-wrap: anywhere; }
 .test-egress-note { color: var(--text-muted); }
 .test-egress-error { color: var(--danger); }

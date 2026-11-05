@@ -6,6 +6,8 @@ import base64
 from hashlib import sha256
 import json
 import os
+from functools import wraps
+from types import SimpleNamespace
 from pathlib import Path
 from typing import AsyncIterable
 
@@ -18,7 +20,7 @@ from cairn.server.auth import RequestPrincipal
 from cairn.server.db import artifact_root, get_conn
 from cairn.server.models import CreateRawArtifactRequest
 from cairn.server.traffic_schema import traffic_request_address
-from cairn.server.schemas.traffic import TRAFFIC_CHUNK_BYTES, TrafficBodySeal, TrafficRecord, TrafficScope, TrafficScopeStatus
+from cairn.server.schemas.traffic import TRAFFIC_CHUNK_BYTES, TrafficBodySeal, TrafficOwner, TrafficRecord, TrafficScope, TrafficScopeStatus
 from .audit_artifacts import StagedRawArtifact, artifact_content_file, publish_raw_artifact
 from .ids import get_project_or_404
 from .time_utils import utcnow
@@ -27,24 +29,43 @@ SIDES = ("request", "response")
 PREVIEW_BYTES = 64 * 1024
 
 
-def _lock_project(conn, project_id: str):
-    # 所有游标分配都持有同一项目行锁直至提交，避免 sequence 的提交乱序漏更新。
-    conn.execute("SELECT id FROM projects WHERE id = ? FOR UPDATE", (project_id,))
-    return get_project_or_404(conn, project_id)
+def _owned_traffic(function):
+    @wraps(function)
+    def call(project_id, *args, **kwargs):
+        return function(TrafficOwner.normalize(project_id), *args, **kwargs)
+    return call
 
 
-def _next_cursor(conn, project_id: str) -> int:
+def _get_owner(conn, owner):
+    if owner.conversation_id is not None:
+        from .agent_conversations import _conversation
+        return _conversation(conn, owner.conversation_id, include_deleted=True)
+    return get_project_or_404(conn, owner.project_id)
+
+
+def _lock_project(conn, owner):
+    # 两种 owner 各锁自己的权威行，游标与材料接受保持同一提交顺序。
+    table = "agent_conversations" if owner.conversation_id is not None else "projects"
+    identity = owner.conversation_id or owner.project_id
+    conn.execute(f"SELECT id FROM {table} WHERE id = ? FOR UPDATE", (identity,))
+    return _get_owner(conn, owner)
+
+
+def _next_cursor(conn, owner) -> int:
+    if owner.conversation_id is not None:
+        return conn.execute("UPDATE agent_conversations SET traffic_cursor = traffic_cursor + 1 WHERE id = ? RETURNING traffic_cursor",
+                            (owner.conversation_id,)).fetchone()["traffic_cursor"]
     row = conn.execute(
         "INSERT INTO scoped_counters(project_id, kind, value) VALUES (?, 'http_flow', 1) "
         "ON CONFLICT (project_id, kind) DO UPDATE SET value = scoped_counters.value + 1 RETURNING value",
-        (project_id,),
+        (owner.project_id,),
     ).fetchone()
     return row["value"]
 
 
 def _scope(conn, project_id: str, scope_id: str, principal: RequestPrincipal):
     row = conn.execute(
-        "SELECT * FROM http_capture_scopes WHERE project_id = ? AND id = ?", (project_id, scope_id),
+        "SELECT * FROM http_capture_scopes WHERE owner_key = ? AND id = ?", (project_id, scope_id),
     ).fetchone()
     if row is None:
         raise HTTPException(404, "traffic_scope_not_found")
@@ -54,36 +75,44 @@ def _scope(conn, project_id: str, scope_id: str, principal: RequestPrincipal):
 
 
 def _binding(row) -> dict:
-    return {key: row[key] for key in ("id", "project_id", "task_run_id", "generation", "container_id")} | {
+    return {key: row[key] for key in ("id", "task_run_id", "generation", "container_id")} | TrafficOwner.from_binding(row).fields | {
         "test_egress": json.loads(row["test_egress_json"]),
     }
 
 
+def _run(conn, owner, task_run_id):
+    column = "conversation_id" if owner.conversation_id is not None else "project_id"
+    return conn.execute(f"SELECT * FROM task_runs WHERE {column} = ? AND id = ?",
+                        (owner.conversation_id or owner.project_id, task_run_id)).fetchone()
+
+
 def _validate_run(conn, project, binding: dict, dispatcher_id: str) -> None:
-    run = conn.execute(
-        "SELECT execution_generation, runtime_context_json FROM task_runs WHERE project_id = ? AND id = ?",
-        (binding["project_id"], binding["task_run_id"]),
-    ).fetchone()
+    owner = TrafficOwner.from_binding(binding)
+    run = _run(conn, owner, binding["task_run_id"])
     if run is None:
         raise HTTPException(404, "traffic_task_run_not_found")
-    if json.loads(run["runtime_context_json"]).get("dispatcher_id") != dispatcher_id:
+    context = json.loads(run["runtime_context_json"])
+    if context.get("dispatcher_id") != dispatcher_id:
         raise HTTPException(403, "traffic_dispatcher_mismatch")
     if run["execution_generation"] != binding["generation"]:
         raise HTTPException(409, "traffic_generation_mismatch")
-    # 历史执行已结束或项目已进入下一代，不阻止恢复上传既有材料。
-    if binding["generation"] > project["execution_generation"]:
+    if owner.conversation_id is not None:
+        if run["task_type"] != "agent_chat" or not context.get("conversation_research"):
+            raise HTTPException(409, "conversation_research_not_admitted")
+    elif binding["generation"] > project["execution_generation"]:
         raise HTTPException(409, "traffic_generation_future")
 
 
+@_owned_traffic
 def register_traffic_scope(project_id: str, body: TrafficScope, principal: RequestPrincipal) -> dict:
     binding = body.model_dump()
-    if body.project_id != project_id:
+    if TrafficOwner.from_binding(binding) != project_id:
         raise HTTPException(409, "traffic_project_mismatch")
     with get_conn() as conn:
         project = _lock_project(conn, project_id)
         _validate_run(conn, project, binding, principal.subject_id)
         row = conn.execute(
-            "SELECT * FROM http_capture_scopes WHERE project_id = ? AND id = ?", (project_id, body.id),
+            "SELECT * FROM http_capture_scopes WHERE owner_key = ? AND id = ?", (project_id, body.id),
         ).fetchone()
         if row is not None:
             if row["dispatcher_id"] != principal.subject_id:
@@ -93,9 +122,9 @@ def register_traffic_scope(project_id: str, body: TrafficScope, principal: Reque
             return _binding(row)
         conn.execute(
             "INSERT INTO http_capture_scopes "
-            "(id, project_id, task_run_id, generation, container_id, dispatcher_id, created_at, test_egress_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (body.id, project_id, body.task_run_id, body.generation, body.container_id, principal.subject_id, utcnow(), body.test_egress.model_dump_json()),
+            "(id, project_id, conversation_id, task_run_id, generation, container_id, dispatcher_id, created_at, test_egress_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (body.id, project_id.project_id, project_id.conversation_id, body.task_run_id, body.generation, body.container_id, principal.subject_id, utcnow(), body.test_egress.model_dump_json()),
         )
         return binding
 
@@ -108,6 +137,7 @@ def _current_scope_status(status: dict | None, generation: int, runtime_context:
     return status
 
 
+@_owned_traffic
 def update_traffic_scope_status(project_id: str, scope_id: str, body: TrafficScopeStatus, principal: RequestPrincipal) -> dict:
     with get_conn() as conn:
         project = _lock_project(conn, project_id)
@@ -116,29 +146,29 @@ def update_traffic_scope_status(project_id: str, scope_id: str, body: TrafficSco
         now = utcnow()
         status = body.model_dump()
         conn.execute(
-            "UPDATE http_capture_scopes SET status_json = ?, status_updated_at = ? WHERE project_id = ? AND id = ?",
+            "UPDATE http_capture_scopes SET status_json = ?, status_updated_at = ? WHERE owner_key = ? AND id = ?",
             (json.dumps(status, separators=(",", ":")), now, project_id, scope_id),
         )
-        run = conn.execute("SELECT runtime_context_json FROM task_runs WHERE project_id = ? AND id = ?",
-                           (project_id, scope["task_run_id"])).fetchone()
+        run = _run(conn, project_id, scope["task_run_id"])
         return {**_binding(scope), "dispatcher_id": scope["dispatcher_id"],
                 "status": _current_scope_status(status, scope["generation"], run["runtime_context_json"]),
                 "status_updated_at": now}
 
 
+@_owned_traffic
 def list_traffic_scope_status(
     project_id: str, *, cursor: str = "", limit: int = 100, task_run_id: str | None = None,
 ) -> dict:
-    filters = ["s.project_id = ?", "s.id > ?"]
+    filters = ["s.owner_key = ?", "s.id > ?"]
     params = [project_id, cursor]
     if task_run_id is not None:
         filters.append("s.task_run_id = ?")
         params.append(task_run_id)
     with get_conn() as conn:
-        get_project_or_404(conn, project_id)
+        _get_owner(conn, project_id)
         rows = conn.execute(
             "SELECT s.*, r.runtime_context_json FROM http_capture_scopes s JOIN task_runs r "
-            "ON r.project_id = s.project_id AND r.id = s.task_run_id "
+            "ON (r.project_id = s.project_id OR r.conversation_id = s.conversation_id) AND r.id = s.task_run_id "
             f"WHERE {' AND '.join(filters)} ORDER BY s.id LIMIT ?",
             (*params, limit + 1),
         ).fetchall()
@@ -154,7 +184,7 @@ def list_traffic_scope_status(
 
 def _flow(conn, project_id: str, flow_id: str):
     row = conn.execute(
-        "SELECT * FROM http_flows WHERE project_id = ? AND id = ?", (project_id, flow_id),
+        "SELECT * FROM http_flows WHERE owner_key = ? AND id = ?", (project_id, flow_id),
     ).fetchone()
     if row is None:
         raise HTTPException(404, "traffic_flow_not_found")
@@ -163,13 +193,13 @@ def _flow(conn, project_id: str, flow_id: str):
 
 def _body_rows(conn, project_id: str, flow_id: str) -> list:
     return conn.execute(
-        "SELECT * FROM http_flow_bodies WHERE project_id = ? AND flow_id = ?", (project_id, flow_id),
+        "SELECT * FROM http_flow_bodies WHERE owner_key = ? AND flow_id = ?", (project_id, flow_id),
     ).fetchall()
 
 
 def _stream_rows(conn, project_id: str, flow_id: str) -> list:
     return conn.execute(
-        "SELECT * FROM http_flow_body_streams WHERE project_id = ? AND flow_id = ?", (project_id, flow_id),
+        "SELECT * FROM http_flow_body_streams WHERE owner_key = ? AND flow_id = ?", (project_id, flow_id),
     ).fetchall()
 
 
@@ -206,13 +236,13 @@ def _sync(record: dict, bodies: list, streams: list | None = None) -> dict:
 def _view(conn, row, bodies: list | None = None, streams: list | None = None) -> dict:
     record = json.loads(row["record_json"])
     if bodies is None:
-        bodies = _body_rows(conn, row["project_id"], row["id"])
+        bodies = _body_rows(conn, TrafficOwner.from_binding(row), row["id"])
     if streams is None:
-        streams = _stream_rows(conn, row["project_id"], row["id"])
+        streams = _stream_rows(conn, TrafficOwner.from_binding(row), row["id"])
     return {
         **record,
         "source_state": record["state"], "state": row["state"],
-        "project_id": row["project_id"], "capture_scope_id": row["capture_scope_id"],
+        **TrafficOwner.from_binding(row).fields, "capture_scope_id": row["capture_scope_id"],
         "record_sha256": row["record_sha256"],
         "created_cursor": row["created_cursor"], "updated_cursor": row["updated_cursor"],
         "received_at": row["received_at"], "updated_at": row["updated_at"],
@@ -251,6 +281,7 @@ def _validate_progress(previous: dict, record: dict) -> None:
             raise HTTPException(409, "traffic_message_conflict")
 
 
+@_owned_traffic
 def accept_traffic_record(
     project_id: str, scope_id: str, flow_id: str, record: dict, *, principal: RequestPrincipal,
 ) -> dict:
@@ -268,7 +299,7 @@ def _accept_record(
     except (ValidationError, ValueError):
         # Pydantic 错误中的 input 可能含认证头；入站错误只返回稳定诊断码。
         raise HTTPException(422, "traffic_record_invalid") from None
-    if parsed.id != flow_id or parsed.scope.id != scope_id or parsed.scope.project_id != project_id:
+    if parsed.id != flow_id or parsed.scope.id != scope_id or TrafficOwner.from_binding(parsed.scope.model_dump()) != project_id:
         raise HTTPException(409, "traffic_record_binding_mismatch")
     digest = sha256(serialized.encode("utf-8")).hexdigest()
     scope = _scope(conn, project_id, scope_id, principal)
@@ -276,13 +307,13 @@ def _accept_record(
         raise HTTPException(409, "traffic_scope_conflict")
     _validate_run(conn, project, _binding(scope), principal.subject_id)
     row = conn.execute(
-        "SELECT * FROM http_flows WHERE project_id = ? AND id = ?", (project_id, flow_id),
+        "SELECT * FROM http_flows WHERE owner_key = ? AND id = ?", (project_id, flow_id),
     ).fetchone()
     if row is not None:
         if row["capture_scope_id"] != scope_id:
             raise HTTPException(409, "traffic_flow_scope_conflict")
         receipt = conn.execute(
-            "SELECT record_sha256 FROM http_flow_receipts WHERE project_id = ? AND flow_id = ? AND revision = ?",
+            "SELECT record_sha256 FROM http_flow_receipts WHERE owner_key = ? AND flow_id = ? AND revision = ?",
             (project_id, flow_id, parsed.revision),
         ).fetchone()
         if receipt is not None:
@@ -301,10 +332,10 @@ def _accept_record(
         if row is None:
             conn.execute(
                 "INSERT INTO http_flows "
-                "(id, project_id, capture_scope_id, revision, record_json, record_sha256, state, "
+                "(id, project_id, conversation_id, capture_scope_id, revision, record_json, record_sha256, state, "
                 "method, host, status_code, created_cursor, updated_cursor, received_at, updated_at, request_url, request_path) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (flow_id, project_id, scope_id, parsed.revision, serialized, digest, state,
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (flow_id, project_id.project_id, project_id.conversation_id, scope_id, parsed.revision, serialized, digest, state,
                  parsed.request.method, address["host"], status, cursor, cursor, now, now,
                  address["request_url"], address["request_path"]),
             )
@@ -312,14 +343,14 @@ def _accept_record(
             conn.execute(
                 "UPDATE http_flows SET revision = ?, record_json = ?, record_sha256 = ?, state = ?, "
                 "method = ?, host = ?, status_code = ?, updated_cursor = ?, updated_at = ?, "
-                "request_url = ?, request_path = ? WHERE project_id = ? AND id = ?",
+                "request_url = ?, request_path = ? WHERE owner_key = ? AND id = ?",
                 (parsed.revision, serialized, digest, state, parsed.request.method, address["host"],
                  status, cursor, now, address["request_url"], address["request_path"], project_id, flow_id),
             )
     # 即使首次遇到的是旧版本，也持久记录其 hash，之后的同版本冲突不可绕过。
     conn.execute(
-        "INSERT INTO http_flow_receipts(project_id, flow_id, revision, record_sha256) VALUES (?, ?, ?, ?)",
-        (project_id, flow_id, parsed.revision, digest),
+        "INSERT INTO http_flow_receipts(project_id, conversation_id, flow_id, revision, record_sha256) VALUES (?, ?, ?, ?, ?)",
+        (project_id.project_id, project_id.conversation_id, flow_id, parsed.revision, digest),
     )
     return _view(conn, _flow(conn, project_id, flow_id))
 
@@ -339,7 +370,8 @@ def _body_target(conn, project_id: str, scope_id: str, flow_id: str, side: str, 
 
 def _staging_path(project_id: str, flow_id: str, side: str) -> Path:
     # 不把采集器传入的 body_file 当作服务器路径；staging 随项目 Artifact 根一起删除。
-    return artifact_root() / "projects" / project_id / ".traffic" / f"{sha256(flow_id.encode()).hexdigest()}-{side}.body"
+    directory = ("conversations", project_id.conversation_id) if project_id.conversation_id is not None else ("projects", project_id.project_id)
+    return artifact_root().joinpath(*directory) / ".traffic" / f"{sha256(flow_id.encode()).hexdigest()}-{side}.body"
 
 
 def _fsync_directory(path: Path) -> None:
@@ -373,7 +405,7 @@ def _open_prefix(path: Path, accepted: int):
 
 def _accepted_bytes(conn, project_id: str, flow_id: str, side: str) -> int:
     row = conn.execute(
-        "SELECT accepted_bytes FROM http_flow_body_streams WHERE project_id = ? AND flow_id = ? AND side = ?",
+        "SELECT accepted_bytes FROM http_flow_body_streams WHERE owner_key = ? AND flow_id = ? AND side = ?",
         (project_id, flow_id, side),
     ).fetchone()
     return row["accepted_bytes"] if row else 0
@@ -381,7 +413,7 @@ def _accepted_bytes(conn, project_id: str, flow_id: str, side: str) -> int:
 
 def _touch_body(conn, project_id: str, flow_id: str, record: dict) -> None:
     conn.execute(
-        "UPDATE http_flows SET state = ?, updated_cursor = ?, updated_at = ? WHERE project_id = ? AND id = ?",
+        "UPDATE http_flows SET state = ?, updated_cursor = ?, updated_at = ? WHERE owner_key = ? AND id = ?",
         (_published_state(record, _body_rows(conn, project_id, flow_id)),
          _next_cursor(conn, project_id), utcnow(), project_id, flow_id),
     )
@@ -398,10 +430,10 @@ def _accept_chunk(conn, project, project_id, scope_id, flow_id, side, offset, si
     _validate_run(conn, project, _binding(scope), principal.subject_id)
     receipt = conn.execute(
         "SELECT size, sha256 FROM http_flow_body_chunks "
-        "WHERE project_id = ? AND flow_id = ? AND side = ? AND byte_offset = ?",
+        "WHERE owner_key = ? AND flow_id = ? AND side = ? AND byte_offset = ?",
         (project_id, flow_id, side, offset),
     ).fetchone()
-    result = {"project_id": project_id, "flow_id": flow_id, "side": side,
+    result = {**project_id.fields, "flow_id": flow_id, "side": side,
               "offset": offset, "size": size, "sha256": digest, "next_offset": offset + size}
     if receipt is not None:
         if receipt["size"] != size or receipt["sha256"] != digest:
@@ -422,18 +454,19 @@ def _accept_chunk(conn, project, project_id, scope_id, flow_id, side, offset, si
     _fsync_directory(path.parent)
     # 文件与目录均持久化之后才提交接受长度和幂等回执；响应在事务提交之后发送。
     conn.execute(
-        "INSERT INTO http_flow_body_streams(project_id, flow_id, side, accepted_bytes) VALUES (?, ?, ?, ?) "
-        "ON CONFLICT (project_id, flow_id, side) DO UPDATE SET accepted_bytes = EXCLUDED.accepted_bytes",
-        (project_id, flow_id, side, offset + size),
+        "INSERT INTO http_flow_body_streams(project_id, conversation_id, flow_id, side, accepted_bytes) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT (owner_key, flow_id, side) DO UPDATE SET accepted_bytes = EXCLUDED.accepted_bytes",
+        (project_id.project_id, project_id.conversation_id, flow_id, side, offset + size),
     )
     conn.execute(
-        "INSERT INTO http_flow_body_chunks(project_id, flow_id, side, byte_offset, size, sha256) VALUES (?, ?, ?, ?, ?, ?)",
-        (project_id, flow_id, side, offset, size, digest),
+        "INSERT INTO http_flow_body_chunks(project_id, conversation_id, flow_id, side, byte_offset, size, sha256) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (project_id.project_id, project_id.conversation_id, flow_id, side, offset, size, digest),
     )
     _touch_body(conn, project_id, flow_id, json.loads(row["record_json"]))
     return result
 
 
+@_owned_traffic
 async def accept_traffic_body(
     project_id: str, scope_id: str, flow_id: str, side: str,
     offset: int, size: int, digest: str, chunks: AsyncIterable[bytes], *, principal: RequestPrincipal,
@@ -455,6 +488,7 @@ async def accept_traffic_body(
     )
 
 
+@_owned_traffic
 def seal_traffic_body(
     project_id: str, scope_id: str, flow_id: str, side: str, body: TrafficBodySeal, *, principal: RequestPrincipal,
 ) -> dict:
@@ -473,7 +507,7 @@ def _seal_body(
     if message["body_revision"] != body.revision or message["body_bytes"] != body.size:
         raise HTTPException(409, "traffic_body_version_conflict")
     receipt = conn.execute(
-        "SELECT * FROM http_flow_bodies WHERE project_id = ? AND flow_id = ? AND side = ? AND revision = ?",
+        "SELECT * FROM http_flow_bodies WHERE owner_key = ? AND flow_id = ? AND side = ? AND revision = ?",
         (project_id, flow_id, side, body.revision),
     ).fetchone()
     if receipt is not None:
@@ -494,37 +528,44 @@ def _seal_body(
     _fsync_directory(path.parent)
     if digest.hexdigest() != body.sha256:
         raise HTTPException(409, "traffic_body_digest_mismatch")
-    # publish 会 rename；保留同 inode 的 staging 链接，使提交前崩溃/回滚仍能恢复。
-    # 封存后禁止任何写入，链接不复制正文，且与原件同属项目生命周期。
-    publishing = path.with_suffix(".publish")
-    publishing.unlink(missing_ok=True)
-    os.link(path, publishing)
-    upload = StagedRawArtifact(publishing, body.size, body.sha256)
-    artifact = publish_raw_artifact(
-        conn, project_id,
-        CreateRawArtifactRequest(
-            task_run_id=scope["task_run_id"], kind="file", category="evidence", filename=f"traffic-{side}.bin",
-            metadata_json=json.dumps({"capture_scope_id": scope_id, "flow_id": flow_id,
-                                      "side": side, "body_revision": body.revision}),
-        ),
-        upload, emit_event=False,
-    )
-    # publish 已 fsync 最末目录；补齐本次可能新建的 runs 等祖先目录后才确认封存。
-    directory = upload.final_path.parent
-    root = artifact_root()
-    while directory != root.parent:
-        _fsync_directory(directory)
-        directory = directory.parent
+    metadata = {"capture_scope_id": scope_id, "flow_id": flow_id,
+                "side": side, "body_revision": body.revision}
+    if project_id.conversation_id is not None:
+        from .conversation_files import create_artifact
+        with path.open("rb") as source:
+            artifact = create_artifact(conn, project_id.conversation_id, content=source, kind="file",
+                                       filename=f"traffic-{side}.bin", metadata=metadata,
+                                       task_run_id=scope["task_run_id"], allow_deleted=True)
+        artifact_id = artifact["id"]
+    else:
+        # 同 inode staging 留作提交前崩溃恢复；已封存材料禁止再写。
+        publishing = path.with_suffix(".publish")
+        publishing.unlink(missing_ok=True)
+        os.link(path, publishing)
+        upload = StagedRawArtifact(publishing, body.size, body.sha256)
+        artifact = publish_raw_artifact(
+            conn, project_id.project_id,
+            CreateRawArtifactRequest(task_run_id=scope["task_run_id"], kind="file", category="evidence",
+                                     filename=f"traffic-{side}.bin", metadata_json=json.dumps(metadata)),
+            upload, emit_event=False,
+        )
+        artifact_id = artifact.id
+        directory = upload.final_path.parent
+        root = artifact_root()
+        while directory != root.parent:
+            _fsync_directory(directory)
+            directory = directory.parent
     conn.execute(
-        "INSERT INTO http_flow_bodies(project_id, flow_id, side, revision, artifact_id, size, sha256) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (project_id, flow_id, side, body.revision, artifact.id, body.size, body.sha256),
+        "INSERT INTO http_flow_bodies(project_id, conversation_id, flow_id, side, revision, artifact_id, size, sha256) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (project_id.project_id, project_id.conversation_id, flow_id, side, body.revision, artifact_id, body.size, body.sha256),
     )
     _touch_body(conn, project_id, flow_id, json.loads(row["record_json"]))
-    return {"project_id": project_id, "flow_id": flow_id, "side": side, "revision": body.revision,
-            "artifact_id": artifact.id, "size": body.size, "sha256": body.sha256}
+    return {**project_id.fields, "flow_id": flow_id, "side": side, "revision": body.revision,
+            "artifact_id": artifact_id, "size": body.size, "sha256": body.sha256}
 
 
+@_owned_traffic
 def accept_traffic_batch(project_id: str, scope_id: str, payload: dict, *, principal: RequestPrincipal) -> dict:
     """合并小包往返，每条 flow 独立提交；单条冲突不回滚其它已持久回执。"""
     from cairn.server.schemas.traffic import TRAFFIC_BATCH_BODY_BYTES, TRAFFIC_BATCH_FLOWS
@@ -577,21 +618,27 @@ def accept_traffic_batch(project_id: str, scope_id: str, payload: dict, *, princ
     return {"items": results}
 
 
+@_owned_traffic
 def read_traffic_record(project_id: str, flow_id: str) -> dict:
     with get_conn() as conn:
         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        get_project_or_404(conn, project_id)
+        _get_owner(conn, project_id)
         view = _view(conn, _flow(conn, project_id, flow_id))
-        # 关系只从已接受的 Observation 派生，不将候选留存冒充漏洞确认。
-        rows = conn.execute(
-            "SELECT o.id AS observation_id, o.vulnerability_id, v.status, o.task_run_id "
-            "FROM vulnerability_observations o JOIN vulnerabilities v "
-            "ON v.project_id = o.project_id AND v.id = o.vulnerability_id "
-            "WHERE o.project_id = ? AND EXISTS (SELECT 1 FROM "
-            "jsonb_array_elements(o.evidence_items_json::jsonb) item WHERE item->>'flow_id' = ?) "
-            "ORDER BY o.observed_at, o.id",
-            (project_id, flow_id),
-        ).fetchall()
+        # 人工补充与自动发现分别定位，不为人工关系构造 Observation。
+        rows = []
+        if project_id.project_id is not None:
+            rows = conn.execute(
+                "SELECT o.id AS observation_id, o.vulnerability_id, v.status, o.task_run_id, 'observation' AS source "
+                "FROM vulnerability_observations o JOIN vulnerabilities v "
+                "ON v.project_id = o.project_id AND v.id = o.vulnerability_id "
+                "WHERE o.project_id = ? AND o.evidence_items_json::jsonb "
+                "@> jsonb_build_array(jsonb_build_object('flow_id', ?::text)) "
+                "UNION ALL SELECT NULL, v.id, v.status, NULL, 'record' FROM vulnerabilities v "
+                "WHERE v.project_id = ? AND v.evidence_items_json::jsonb "
+                "@> jsonb_build_array(jsonb_build_object('flow_id', ?::text)) "
+                "ORDER BY vulnerability_id, observation_id NULLS LAST",
+                (project_id.project_id, flow_id, project_id.project_id, flow_id),
+            ).fetchall()
         view["observations"] = [dict(row) for row in rows]
         view["location"] = traffic_request_address(view["request"])
         # 头部派生不读取正文，避免阅读器为显示头部下载大包或复制 v1 转义规则。
@@ -604,6 +651,7 @@ def read_traffic_record(project_id: str, flow_id: str) -> dict:
         return view
 
 
+@_owned_traffic
 def list_traffic_records(
     project_id: str, *, limit: int = 50, cursor: int = 0, after_update: int | None = None,
     scope_id: str | None = None, task_run_id: str | None = None,
@@ -612,16 +660,18 @@ def list_traffic_records(
 ) -> dict:
     with get_conn() as conn:
         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        get_project_or_404(conn, project_id)
-        counter = conn.execute(
-            "SELECT value FROM scoped_counters WHERE project_id = ? AND kind = 'http_flow'", (project_id,),
-        ).fetchone()
-        watermark = counter["value"] if counter else 0
+        _get_owner(conn, project_id)
+        if project_id.conversation_id is not None:
+            watermark = _get_owner(conn, project_id)["traffic_cursor"]
+        else:
+            counter = conn.execute("SELECT value FROM scoped_counters WHERE project_id = ? AND kind = 'http_flow'",
+                                   (project_id.project_id,)).fetchone()
+            watermark = counter["value"] if counter else 0
         if after_update is not None and after_update > watermark:
             raise HTTPException(422, "traffic_update_cursor_future")
         column = "updated_cursor" if after_update is not None else "created_cursor"
         params = [project_id, after_update if after_update is not None else cursor, watermark]
-        clauses = ["f.project_id = ?", f"f.{column} > ?", f"f.{column} <= ?"]
+        clauses = ["f.owner_key = ?", f"f.{column} > ?", f"f.{column} <= ?"]
         for name, value in (("capture_scope_id", scope_id), ("method", method), ("host", host), ("state", state), ("status_code", status_code)):
             if value is not None:
                 clauses.append(f"f.{name} = ?")
@@ -631,7 +681,7 @@ def list_traffic_records(
             params.append(task_run_id)
         rows = conn.execute(
             "SELECT f.* FROM http_flows f JOIN http_capture_scopes s "
-            "ON s.id = f.capture_scope_id AND s.project_id = f.project_id WHERE "
+            "ON s.id = f.capture_scope_id AND s.owner_key = f.owner_key WHERE "
             + " AND ".join(clauses) + f" ORDER BY f.{column} LIMIT ?",
             (*params, limit + 1),
         ).fetchall()
@@ -642,13 +692,13 @@ def list_traffic_records(
         if rows:
             placeholders = ",".join("?" for _ in rows)
             bodies = conn.execute(
-                f"SELECT * FROM http_flow_bodies WHERE project_id = ? AND flow_id IN ({placeholders})",
+                f"SELECT * FROM http_flow_bodies WHERE owner_key = ? AND flow_id IN ({placeholders})",
                 (project_id, *(row["id"] for row in rows)),
             ).fetchall()
             for body in bodies:
                 bodies_by_flow.setdefault(body["flow_id"], []).append(body)
             streams = conn.execute(
-                f"SELECT * FROM http_flow_body_streams WHERE project_id = ? AND flow_id IN ({placeholders})",
+                f"SELECT * FROM http_flow_body_streams WHERE owner_key = ? AND flow_id IN ({placeholders})",
                 (project_id, *(row["id"] for row in rows)),
             ).fetchall()
             for stream in streams:
@@ -661,23 +711,35 @@ def list_traffic_records(
         }
 
 
+@_owned_traffic
 def read_traffic_body(project_id: str, flow_id: str, side: str, *, preview: bool, offset: int = 0, limit: int = PREVIEW_BYTES):
     with get_conn() as conn:
         conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        get_project_or_404(conn, project_id)
+        _get_owner(conn, project_id)
         row = _flow(conn, project_id, flow_id)
         record = json.loads(row["record_json"])
         message = record[side]
         if message is None:
             raise HTTPException(404, "traffic_side_absent")
         receipt = conn.execute(
-            "SELECT * FROM http_flow_bodies WHERE project_id = ? AND flow_id = ? AND side = ? AND revision = ?",
+            "SELECT * FROM http_flow_bodies WHERE owner_key = ? AND flow_id = ? AND side = ? AND revision = ?",
             (project_id, flow_id, side, message["body_revision"]),
         ).fetchone()
         if not preview and receipt is None:
             raise HTTPException(409, "traffic_body_pending" if message["body_sealed"] else "traffic_body_receiving")
         accepted = receipt["size"] if receipt else _accepted_bytes(conn, project_id, flow_id, side)
-    content = artifact_content_file(project_id, receipt["artifact_id"]) if receipt else None
+    content = None
+    if receipt:
+        if project_id.conversation_id is not None:
+            from .conversation_files import artifact_file
+            with get_conn() as conn:
+                artifact = conn.execute("SELECT * FROM artifacts WHERE conversation_id = ? AND id = ?",
+                                        (project_id.conversation_id, receipt["artifact_id"])).fetchone()
+                if artifact is None:
+                    raise HTTPException(404, "traffic_artifact_not_found")
+                content = SimpleNamespace(disk_path=artifact_file(conn, artifact), filename=f"traffic-{side}.bin")
+        else:
+            content = artifact_content_file(project_id.project_id, receipt["artifact_id"])
     if not preview:
         return content
     # 一次 DB 快照确定上限；即使文件随后增长，也不读取未确认或快照之后的字节。

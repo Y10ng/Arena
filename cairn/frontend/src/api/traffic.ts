@@ -6,10 +6,11 @@ export function getTrafficReadable(projectId: string, flowId: string, side: Traf
 }
 
 export interface TrafficAssociation {
-  observation_id: string
+  observation_id: string | null
+  source: 'observation' | 'record'
   vulnerability_id: string
   status: string
-  task_run_id: string
+  task_run_id: string | null
 }
 
 export interface TrafficSummary {
@@ -29,6 +30,8 @@ export interface TrafficSummary {
   address_issue?: string | null
   url: string
   path: string
+  display_host: string
+  display_target: string
   status_code: number | null
   state: TrafficState
   source_state: TrafficState
@@ -44,16 +47,19 @@ export interface TrafficSummary {
 
 export interface TrafficPage {
   items: TrafficSummary[]
-  next_cursor: string | null
-  previous_cursor: string | null
-  has_more: boolean
-  has_previous: boolean
+  page: number
+  limit: number
+  total: number
+  total_pages: number
 }
 
 export interface TrafficFilters {
   project_id?: string
   task_run_id?: string
   flow_id?: string
+  vulnerability_id?: string
+  observation_id?: string
+  include_record_evidence?: boolean
   method?: string
   url?: string
   state?: TrafficState
@@ -61,7 +67,7 @@ export interface TrafficFilters {
   status_code?: number
   error_code?: string
   associated?: boolean
-  cursor?: string
+  page?: number
   limit?: number
 }
 

@@ -1,5 +1,5 @@
 <template>
-  <section ref="reader" class="evidence-reader" :class="{ 'evidence-reader--step': presentation === 'step', 'evidence-reader--fill': fillHeight }" :aria-label="presentation === 'step' ? '步骤证据' : '关键证据'">
+  <section ref="reader" class="evidence-reader" @keydown.esc="collapsePair" :class="{ 'evidence-reader--step': presentation === 'step', 'evidence-reader--fill': fillHeight }" :aria-label="presentation === 'step' ? '步骤证据' : '关键证据'">
     <header v-if="!isHttp && (presentation === 'standalone' || $slots['header-context'] || $slots['header-actions'])" class="evidence-reader__header">
       <slot name="header-context"><h3 v-if="presentation === 'standalone'">关键证据</h3></slot>
       <span v-if="source" class="evidence-reader__source">{{ sourceLabels[source] }}</span>
@@ -50,7 +50,7 @@
           <span v-if="flow" class="evidence-reader__flow-state" :class="{ 'evidence-reader__flow-state--warning': flow.state !== 'complete' || flow.source_state === 'failed' }">{{ flowStates[flow.source_state === 'failed' ? 'failed' : flow.state] }}</span>
           <span v-if="!flowId || selected.source !== 'capture'" class="evidence-reader__source">{{ sourceLabels[selected.source] }}</span>
           <div v-if="$slots['header-actions']" class="evidence-reader__header-actions"><slot name="header-actions" /></div>
-          <Button v-if="pairOverflows || pairExpanded" class="evidence-reader__icon" variant="ghost" size="sm" :aria-label="pairExpanded ? '收起成对报文' : '放大成对报文'" :title="pairExpanded ? '收起成对报文' : '放大成对报文'" :aria-expanded="pairExpanded" @click="pairExpanded = !pairExpanded"><Minimize2 v-if="pairExpanded" :size="15" /><Maximize2 v-else :size="15" /></Button>
+          <Button v-if="fillHeight || pairOverflows || pairExpanded" class="evidence-reader__icon" variant="ghost" size="sm" :aria-label="pairExpanded ? '收起成对报文' : '放大成对报文'" :title="pairExpanded ? '收起成对报文' : '放大成对报文'" :aria-expanded="pairExpanded" @click="pairExpanded = !pairExpanded"><Minimize2 v-if="pairExpanded" :size="15" /><Maximize2 v-else :size="15" /></Button>
         </header>
         <template v-if="flowId">
           <p v-if="flowLoading && !flow" class="evidence-reader__notice" role="status">正在读取流量来源…</p>
@@ -111,7 +111,7 @@
               <p v-else-if="!flowId && !panel.reference && panel.inline === null" class="evidence-reader__notice">{{ isHttp ? `未记录${panel.label}` : '未记录证据内容' }}</p>
               <p v-else-if="previews[panel.key]?.loading" class="evidence-reader__notice" role="status">正在读取{{ panel.label }}…<Button size="sm" variant="ghost" @click="cancelPanel(panel)">取消读取</Button></p>
               <div v-else-if="previews[panel.key]?.error" class="evidence-reader__notice" role="alert">{{ previews[panel.key]?.error }}<Button size="sm" variant="ghost" @click="loadPanel(panel, previews[panel.key]?.offset, previews[panel.key]?.excerpt)">重试</Button></div>
-              <MonacoEditor v-else-if="panel.content !== null" :ref="(editor) => registerEditor(panel.key, editor)" :key="`${entityKey}:${selected.id}:${panel.key}`" :model-value="panel.state.mode === 'pretty' ? panel.view.pretty ?? panel.content : panel.content" :language="panel.state.mode === 'hex' ? 'plaintext' : panel.view.language" :variant="isHttp ? 'http' : 'packet'" :http-density="isHttp ? 'compact' : undefined" :reading-state="panel.state" :reading-view="panel.state.mode === 'pretty' ? `${panel.state.textMode}-pretty` : panel.state.mode" read-only :word-wrap="panel.state.wrap ? 'on' : 'off'" :auto-height="!isHttp" :height="isHttp ? packetHeight : undefined" :max-height="panel.state.expanded ? '80dvh' : 'min(48dvh, 520px)'" :min-height="64" :aria-label="panel.label" @content-height-change="contentHeights[panel.key] = $event" @overflow-change="overflowPanels[panel.key] = $event" />
+              <MonacoEditor v-else-if="panel.content !== null" :ref="(editor) => registerEditor(panel.key, editor)" :key="`${entityKey}:${selected.id}:${panel.key}`" :model-value="panel.state.mode === 'pretty' ? panel.view.pretty ?? panel.content : panel.content" :language="panel.state.mode === 'hex' ? 'plaintext' : panel.view.language" :variant="isHttp ? 'http' : 'packet'" :reading-state="panel.state" :reading-view="panel.state.mode === 'pretty' ? `${panel.state.textMode}-pretty` : panel.state.mode" read-only :word-wrap="panel.state.wrap ? 'on' : 'off'" :auto-height="!isHttp" :height="isHttp ? packetHeight : undefined" :max-height="panel.state.expanded ? 'calc(80 * var(--ui-dvh))' : 'min(calc(48 * var(--ui-dvh)), 520px)'" :min-height="64" :aria-label="panel.label" @content-height-change="contentHeights[panel.key] = $event" @overflow-change="overflowPanels[panel.key] = $event" />
               <p v-else-if="previews[panel.key]?.preview" class="evidence-reader__notice">二进制内容不作文本预览，请读取原件。</p>
               <div v-if="previews[panel.key]?.deferred && !previews[panel.key]?.loading && !previews[panel.key]?.error" class="evidence-reader__pagination"><Button size="sm" variant="secondary" @click="loadBody(panel)">加载{{ panel.label }}{{ isHttp ? '正文' : '内容' }}</Button><span>{{ savedSizeLabel(panel) }}</span></div>
               <p v-if="readStatus(panel)" class="evidence-reader__notice" :role="panel.readable && ['invalid-encoding', 'unsupported-encoding'].includes(panel.readable.decode_status) ? 'alert' : 'status'">{{ readStatus(panel) }}</p>
@@ -154,6 +154,7 @@ import type { EvidenceItem, EvidenceRef, EvidenceSource, FlowEvidenceExcerpt, Tr
 import type { MonacoReadingState } from '@/components/MonacoEditor.vue'
 import { httpMessageSummary, httpMessageView } from '@/lib/httpMessageView'
 import { copyText } from '@/lib/copyText'
+import { toLogicalPixels } from '@/lib/uiScale'
 import { Button, DropdownMenu, Popover, Select } from '@/components/ui'
 const MonacoEditor = defineAsyncComponent(() => import('@/components/MonacoEditor.vue'))
 const props = withDefaults(defineProps<{
@@ -172,7 +173,7 @@ const props = withDefaults(defineProps<{
   autoRefresh?: boolean
   readingStates?: EvidenceReadingStates
 }>(), { presentation: 'standalone', emptyLabel: '未记录关键证据', fillHeight: false, autoRefresh: true })
-const emit = defineEmits<{ 'update:selectedItemId': [id: string]; flowLoaded: [detail: TrafficFlowDetail] }>()
+const emit = defineEmits<{ 'update:selectedItemId': [id: string]; flowLoaded: [detail: TrafficFlowDetail]; expandedChange: [expanded: boolean] }>()
 const sourceLabels: Record<EvidenceSource, string> = { capture: '采集原件', manual: '人工记录', historical: '历史原文' }
 const primary = computed(() => props.items.filter((item) => item.role === 'primary'))
 const supporting = computed(() => props.items.filter((item) => item.role === 'supporting'))
@@ -198,8 +199,16 @@ const contentHeights = ref<Record<string, number>>({})
 const expandedItems = reactive(new Set<string>())
 const pairExpanded = computed({ get: () => expandedItems.has(selectedId.value), set: (value: boolean) => { if (value) expandedItems.add(selectedId.value); else expandedItems.delete(selectedId.value) } })
 const pairOverflows = computed(() => Object.values(overflowPanels.value).some(Boolean))
+watch(pairExpanded, (expanded) => emit('expandedChange', expanded))
+function collapsePair(event: KeyboardEvent) {
+  if (!pairExpanded.value || event.defaultPrevented) return
+  event.preventDefault()
+  event.stopPropagation()
+  pairExpanded.value = false
+  void nextTick(() => reader.value?.querySelector<HTMLButtonElement>('[aria-label="放大成对报文"]')?.focus())
+}
 // 使用真实内容测量值而非已协调的视窗高度，避免左右高度互相回写。
-const packetHeight = computed(() => props.fillHeight ? `${Math.max(100, availableHeight.value)}px` : `min(${Math.max(64, ...Object.values(contentHeights.value))}px, ${pairExpanded.value ? '80dvh' : 'clamp(280px, 36dvh, 400px)'})`)
+const packetHeight = computed(() => props.fillHeight ? `${Math.max(100, availableHeight.value)}px` : `min(${Math.max(64, ...Object.values(contentHeights.value))}px, ${pairExpanded.value ? 'calc(80 * var(--ui-dvh))' : 'clamp(280px, calc(36 * var(--ui-dvh)), 400px)'})`)
 interface Panel { key: TrafficSide | 'artifact'; label: string; reference: EvidenceRef | null; inline: string | null }
 const AUTO_BODY_LIMIT = 256 * 1024
 interface PreviewState { deferred?: boolean; loading: boolean; preview: ArtifactPreview | null; readable?: TrafficReadable; projection?: TrafficProjection; live?: TrafficPreview; body?: TrafficBodyPreview; error: string; offset?: number; excerpt?: FlowEvidenceExcerpt }
@@ -250,7 +259,7 @@ const splitBounds = computed(() => {
 function compactPanel(panel: Panel) {
   const width = containerWidth.value
   const panelWidth = width < 600 ? width : (width - 6) * (panel.key === 'request' ? splitRatio.value : 100 - splitRatio.value) / 100
-  return isHttp.value && width > 0 && panelWidth < 360
+  return isHttp.value && width > 0 && panelWidth < 560
 }
 function panelMenuItems(panel: (typeof displayedPanels.value)[number]) {
   if (panel.content === null) return []
@@ -287,10 +296,10 @@ let layoutObserver: ResizeObserver | undefined
 function measureLayout() {
   if (!reader.value || !panelContainer.value) return
   const bounds = panelContainer.value.getBoundingClientRect()
-  containerWidth.value = bounds.width; setSplit(splitRatio.value)
-  const toolbar = panelContainer.value.querySelector('.evidence-reader__toolbar')?.getBoundingClientRect().height || (isHttp.value ? 32 : 44)
-  const footers = Array.from(panelContainer.value.querySelectorAll('.evidence-reader__content')).map((content) => Array.from(content.children).reduce((sum, child) => sum + (child.classList.contains('monaco-reader') ? 0 : child.getBoundingClientRect().height), 0))
-  availableHeight.value = Math.max(100, reader.value.getBoundingClientRect().bottom - bounds.top - toolbar - Math.max(0, ...footers) - 2)
+  containerWidth.value = toLogicalPixels(bounds.width); setSplit(splitRatio.value)
+  const toolbar = toLogicalPixels(panelContainer.value.querySelector('.evidence-reader__toolbar')?.getBoundingClientRect().height || 0) || 44
+  const footers = Array.from(panelContainer.value.querySelectorAll('.evidence-reader__content')).map((content) => Array.from(content.children).reduce((sum, child) => sum + (child.classList.contains('monaco-reader') ? 0 : toLogicalPixels(child.getBoundingClientRect().height)), 0))
+  availableHeight.value = Math.max(100, toLogicalPixels(reader.value.getBoundingClientRect().bottom - bounds.top) - toolbar - Math.max(0, ...footers) - 2)
 }
 const readerId = useId()
 const editorRefs = new Map<string, InstanceType<typeof MonacoEditor>>()
@@ -313,7 +322,10 @@ async function revealPendingBody() {
   if (pendingReveal !== pending) return
   if (pending.generation !== generation || pending.itemId !== selectedId.value) { pendingReveal = undefined; return }
   if (flowLoading.value || Object.values(previews.value).some((preview) => preview.loading)) return
-  const contentPanels = displayedPanels.value.filter((entry) => entry.content !== null)
+  // 缺侧或读取失败可能仍有缓存头部，但模板显示提示而非编辑器，不能等待其注册。
+  const contentPanels = displayedPanels.value.filter((entry) => entry.content !== null
+    && !flowSideNotice(entry) && !previews.value[entry.key]?.error
+    && !(entry.reference && props.imageUrl?.(entry.reference) && previews.value[entry.key] && !previews.value[entry.key]?.deferred))
   const panel = contentPanels[0] || displayedPanels.value[0]
   if (!panel || contentPanels.some((entry) => !editorRefs.has(entry.key))) return
   selectSide(panel.key)
@@ -674,18 +686,21 @@ onBeforeUnmount(() => { cancel(); clearTimeout(refreshTimer); stopSplit?.(); lay
 .evidence-reader__header h3 { flex: 1; margin: 0; font-size: var(--text-md); font-weight: var(--font-semibold); }
 .evidence-reader__source, .evidence-reader__identity { color: var(--text-muted); font-size: var(--text-sm); }
 .evidence-reader__identity strong { color: var(--text); }
-.evidence-reader__navigation .ui-button { max-width: 100%; height: auto; min-height: 32px; white-space: normal; overflow-wrap: anywhere; }
-.evidence-reader__packets { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-xl); background: var(--color-surface); }
-.evidence-reader__summary { display: flex; flex-wrap: wrap; align-items: center; gap: 0 var(--space-2); min-height: 36px; padding: 0 var(--space-2); border-bottom: 1px solid var(--border); border-radius: var(--radius-xl) var(--radius-xl) 0 0; background: var(--color-surface-inset); }
-.evidence-reader__summary h3 { flex: none; margin: 0; font-size: var(--text-sm); font-weight: var(--font-semibold); }
+.evidence-reader__navigation .ui-button { max-width: 100%; height: auto; min-height: var(--control-height-sm); white-space: normal; overflow-wrap: anywhere; }
+.evidence-reader__packets { min-width: 0; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--color-surface); }
+.evidence-reader__summary { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); min-height: 48px; padding: var(--space-1) var(--space-4); border-bottom: 1px solid var(--border); border-radius: var(--radius-lg) var(--radius-lg) 0 0; background: var(--color-surface-inset); }
+.evidence-reader__summary h3 { flex: none; margin: 0; font-size: var(--text-md); font-weight: var(--font-medium); }
 .evidence-reader__header-context { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); }
 .evidence-reader__header-actions { min-width: 0; margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); }
-.evidence-reader__summary :deep(.ui-button) { min-height: 32px; padding-block: 0; }
+.evidence-reader__summary :deep(.ui-button) { min-height: var(--control-height-sm); padding-block: 0; font-size: var(--text-sm); }
+.evidence-reader__packets--http :deep(.ui-button svg) { width: 16px; height: 16px; }
 .evidence-reader__interaction { display: flex; align-items: center; min-width: 0; flex: 1 1 240px; gap: var(--space-1); }
-.evidence-reader__interaction :deep(.ui-select__trigger) { flex: 1; width: 0; min-width: 48px; min-height: 32px; padding: 0 var(--space-2); border-color: transparent; background: transparent; font-size: var(--text-sm); }
+.evidence-reader__interaction { --field-control-height: var(--control-height-filter); }
+.evidence-reader__interaction :deep(.ui-select__trigger) { flex: 1; width: 0; min-width: 48px; }
 .evidence-reader__position { flex: none; font-size: var(--text-xs); color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .evidence-reader__info.ui-button { flex: none; padding-inline: var(--space-1); font-size: var(--text-xs); color: var(--text-muted); }
-.evidence-reader__flow-state { flex: none; font-size: var(--text-xs); color: var(--text-muted); }
+.evidence-reader__flow-state { display: inline-flex; align-items: center; gap: 6px; flex: none; font-size: var(--text-xs); color: var(--text-muted); }
+.evidence-reader__flow-state::before { content: ''; width: 6px; height: 6px; border-radius: var(--radius-full); background: currentColor; }
 .evidence-reader__flow-state--warning { color: var(--color-warning); }
 .evidence-reader__target { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font: var(--text-sm)/var(--leading-normal) var(--font-mono); }
 .evidence-reader__summary .evidence-reader__source { flex: none; }
@@ -702,28 +717,28 @@ onBeforeUnmount(() => { cancel(); clearTimeout(refreshTimer); stopSplit?.(); lay
 .evidence-reader--fill .evidence-reader__content { min-height: 0; overflow: auto; }
 .evidence-reader__content { min-width: 0; background: var(--color-surface); scroll-margin-block-start: var(--space-2); }
 .evidence-reader__content:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.evidence-reader__panel:first-child .evidence-reader__content { border-bottom-left-radius: var(--radius-xl); }
-.evidence-reader__panel:last-child .evidence-reader__content { border-bottom-right-radius: var(--radius-xl); }
+.evidence-reader__panel:first-child .evidence-reader__content { border-bottom-left-radius: var(--radius-lg); }
+.evidence-reader__panel:last-child .evidence-reader__content { border-bottom-right-radius: var(--radius-lg); }
 .evidence-reader__side-switch { display: none; padding: var(--space-1) var(--space-2); border-bottom: 1px solid var(--border); background: var(--color-surface-inset); }
-.evidence-reader__toolbar { display: flex; align-items: center; flex-wrap: nowrap; gap: var(--space-1); min-width: 0; min-height: 44px; padding: var(--space-1) var(--space-2); border-bottom: 1px solid var(--border); background: var(--color-surface-inset); }
-.evidence-reader__packets--http .evidence-reader__toolbar { min-height: 32px; padding: 0 var(--space-1); }
-.evidence-reader__packets--http .evidence-reader__toolbar .ui-button { min-height: 32px; padding-block: 0; font-size: var(--text-xs); }
+.evidence-reader__toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-1); min-width: 0; min-height: 44px; padding: var(--space-1) var(--space-2); border-bottom: 1px solid var(--border); background: var(--color-surface-inset); }
+.evidence-reader__packets--http .evidence-reader__toolbar { min-height: 44px; padding: var(--space-1) var(--space-3); background: var(--color-surface); }
+.evidence-reader__packets--http .evidence-reader__toolbar .ui-button { min-height: var(--control-height-sm); padding-block: 0; font-size: var(--text-sm); }
 .evidence-reader__toolbar h4 { flex: none; margin: 0; font-size: var(--text-sm); font-weight: var(--font-semibold); }
-.evidence-reader__current-mode { padding-inline: var(--space-1); font-size: var(--text-xs); border-bottom: 2px solid var(--accent); line-height: 30px; }
-.evidence-reader__protocol { flex: 0 1 auto; max-width: 52px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font: var(--text-xs)/var(--leading-normal) var(--font-mono); padding-inline: var(--space-1); }
-.evidence-reader__toolbar--compact .evidence-reader__protocol { max-width: 32px; }
+.evidence-reader__current-mode { padding-inline: var(--space-1); font-size: var(--text-xs); border-bottom: 2px solid var(--accent); line-height: var(--control-height-sm); }
+/* 方法与状态码不省略；空间不足时由工具带换行，异常长方法名在自身范围内折行。 */
+.evidence-reader__protocol { flex: none; max-width: 100%; overflow-wrap: anywhere; color: var(--text-muted); font: var(--text-xs)/var(--leading-normal) var(--font-mono); padding-inline: var(--space-1); }
 .evidence-reader__modes, .evidence-reader__tools { display: flex; flex: none; align-items: center; gap: 0; }
 .evidence-reader__tools { margin-left: auto; }
-.evidence-reader__modes .ui-button { position: relative; min-height: 32px; padding-inline: var(--space-1); border-radius: 0; color: var(--text-muted); font-weight: var(--font-normal); }
+.evidence-reader__modes .ui-button { position: relative; min-height: var(--control-height-sm); padding-inline: var(--space-1); border-radius: 0; color: var(--text-muted); font-weight: var(--font-normal); }
 .evidence-reader__modes .ui-button[aria-pressed="true"] { color: var(--text); background: transparent; }
 .evidence-reader__modes .ui-button[aria-pressed="true"]::after { content: ''; position: absolute; height: 2px; bottom: 0; inset-inline: var(--space-1); background: var(--accent); }
-.evidence-reader__icon.ui-button { flex: none; width: 32px; min-height: 32px; padding: 0; color: var(--text-muted); }
+.evidence-reader__icon.ui-button { flex: none; width: var(--control-height-sm); min-height: var(--control-height-sm); padding: 0; color: var(--text-muted); }
 .evidence-reader__icon[aria-pressed="true"] { color: var(--text); background: var(--surface-selected); }
 .evidence-reader__notice { margin: 0; padding: var(--space-2) var(--space-3); color: var(--text-muted); font-size: var(--text-sm); line-height: 1.7; overflow-wrap: anywhere; }
 .evidence-reader__pagination { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); font-size: var(--text-sm); }
 .evidence-reader__pagination .ui-button { height: auto; white-space: normal; overflow-wrap: anywhere; }
 .evidence-reader__menu-hint { max-width: 280px; margin: 0; padding: var(--space-2) var(--space-3); color: var(--text-muted); font-size: var(--text-sm); line-height: 1.5; }
-.evidence-reader__limit.ui-button { flex: none; min-height: 32px; padding-inline: var(--space-1); color: var(--color-warning); white-space: nowrap; font-size: var(--text-sm); }
+.evidence-reader__limit.ui-button { flex: none; min-height: var(--control-height-sm); padding-inline: var(--space-1); color: var(--color-warning); white-space: nowrap; font-size: var(--text-sm); }
 .evidence-reader__preview-details { display: grid; gap: var(--space-3); overflow-wrap: anywhere; }
 .evidence-reader__preview-details section { display: grid; gap: var(--space-2); }
 .evidence-reader__preview-details p { margin: 0; line-height: 1.6; }
@@ -731,10 +746,11 @@ onBeforeUnmount(() => { cancel(); clearTimeout(refreshTimer); stopSplit?.(); lay
 .evidence-reader__copy-feedback { overflow-wrap: anywhere; }
 .evidence-reader__copy-body { display: flex; flex-direction: column; align-items: start; gap: var(--space-2); }
 .evidence-reader__copy-feedback--error { color: var(--color-warning); }
-.evidence-reader__copy-feedback .ui-button { min-height: 32px; height: auto; padding: 0; white-space: normal; text-align: left; }
+.evidence-reader__copy-feedback .ui-button { min-height: var(--control-height-sm); height: auto; padding: 0; white-space: normal; text-align: left; }
 .evidence-reader__live { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.evidence-reader__image { display: block; max-width: 100%; max-height: 60dvh; object-fit: contain; }
-.evidence-reader__supporting summary { color: var(--text-muted); cursor: pointer; padding-block: var(--space-2); font-size: var(--text-sm); }
+.evidence-reader__image { display: block; max-width: 100%; max-height: calc(60 * var(--ui-dvh)); object-fit: contain; }
+.evidence-reader__supporting summary { color: var(--text-muted); cursor: pointer; padding-block: var(--space-3); font-size: var(--text-sm); }
+.evidence-reader__supporting summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @container evidence-reader (max-width: 599px) {
   .evidence-reader__separator { display: none; }
   .evidence-reader__side-switch { display: flex; }

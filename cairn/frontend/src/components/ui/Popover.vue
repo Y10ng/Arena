@@ -77,11 +77,11 @@ defineOptions({ name: 'UiPopover' })
 <!-- Popover 通过 Portal 挂载到 body，浮层样式使用组件专属类名全局生效。 -->
 <style>
 .ui-popover__content {
-  max-width: calc(100vw - var(--space-4));
-  max-height: min(var(--reka-popover-content-available-height), 70dvh);
-  border: calc(var(--space-1) / 4) solid var(--border-strong);
+  max-width: calc(100 * var(--ui-vw) - var(--space-4));
+  max-height: min(calc(var(--reka-popover-content-available-height) / var(--ui-scale)), calc(70 * var(--ui-dvh)));
+  border: calc(var(--space-1) / 4) solid var(--border);
   border-radius: var(--radius-lg);
-  padding: var(--space-3);
+  padding: var(--space-4);
   z-index: var(--z-overlay-child);
   overflow: auto;
   background: var(--bg-elevated);
@@ -95,15 +95,15 @@ defineOptions({ name: 'UiPopover' })
 }
 
 .ui-popover__content--sm {
-  width: min(240px, calc(100vw - var(--space-4)));
+  width: min(240px, calc(100 * var(--ui-vw) - var(--space-4)));
 }
 
 .ui-popover__content--md {
-  width: min(360px, calc(100vw - var(--space-4)));
+  width: min(360px, calc(100 * var(--ui-vw) - var(--space-4)));
 }
 
 .ui-popover__content--lg {
-  width: min(520px, calc(100vw - var(--space-4)));
+  width: min(520px, calc(100 * var(--ui-vw) - var(--space-4)));
 }
 
 .ui-popover__content[data-state='open'] {
@@ -113,7 +113,7 @@ defineOptions({ name: 'UiPopover' })
 @keyframes ui-popover-enter {
   from {
     opacity: 0;
-    transform: scale(0.98);
+    transform: translateY(var(--space-1));
   }
 }
 

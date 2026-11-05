@@ -6,12 +6,13 @@ import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { createChatFileTools } from '../dist/chat-workspace.js';
 import { runRequest } from '../dist/runner.js';
 import { parseRequest } from '../dist/protocol.js';
-import { CHAT_SYSTEM_PROMPT, createProjectTools } from '../dist/project-tools.js';
+import { acquireSession } from '../dist/session.js';
+import { CHAT_SYSTEM_PROMPT, createProjectTools, PROJECT_TOOL_NAMES } from '../dist/project-tools.js';
 import { fixture } from './fixtures.mjs';
 
 function chatRequest(request) {
-  return parseRequest({ ...request, phase: 'chat_turn', binding: null, max_result_repairs: 0, result_schema: {}, capabilities: {
-    project_tools: { protocol: 'cairn-project-tools-v1', socket_path: `/tmp/cairn-prompts/pi-project-${'a'.repeat(32)}.sock`, workspace_path: join(request.cwd, 'conversation'), forbidden_literals: ['fixture-worker-secret'] },
+  return parseRequest({ ...request, conversation_id: 'conversation', project_id: null, phase: 'chat_turn', binding: null, max_result_repairs: 0, result_schema: {}, capabilities: {
+    project_tools: { protocol: 'cairn-project-tools-v1', socket_path: `/tmp/cairn-prompts/pi-project-${'a'.repeat(32)}.sock`, workspace_path: join(request.cwd, 'conversation'), research_execution: { protocol: 'cairn-conversation-research-v1', conversation_id: 'conversation', task_run_id: request.task_run_id }, forbidden_literals: ['fixture-worker-secret'], allowed_tools: PROJECT_TOOL_NAMES },
   } });
 }
 
@@ -27,10 +28,13 @@ test('chat naturally completes then resumes the same session through a real priv
   assert.equal(answer.status, 'succeeded', JSON.stringify(answer));
   assert.deepEqual(answer.result, { text: '你好，请问需要查询什么？' });
   assert.equal(answer.submission_id, null);
+  assert.equal(answer.conversation_id, 'conversation');
+  assert.equal(answer.project_id, null);
+  assert.equal(answer.session_initialized, true);
   assert.equal(calls.length, 1);
   const names = calls[0].body.tools.map((tool) => tool.function.name);
-  assert.ok(['bash', 'read', 'write', 'edit', 'list_conversation_attachments', 'publish_custom_markdown', 'create_project', 'append_project_intent'].every((name) => names.includes(name)));
-  assert.ok(!names.includes('submit_result'));
+  assert.deepEqual(new Set(names), new Set(['bash', 'read', 'write', 'edit', ...PROJECT_TOOL_NAMES]));
+  assert.ok(['submit_result', 'create_project', 'append_project_intent', 'request_vulnerability_retest', '_validate_workspace_claim'].every((name) => !names.includes(name)));
   const received = [];
   const path = join(request.session_root, 'project.sock');
   const server = createServer((socket) => {
@@ -72,10 +76,9 @@ test('R2a tools preserve action identity and expose public business errors throu
   });
   await new Promise((resolve) => server.listen(path, resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
-  const tools = createProjectTools({ protocol: 'cairn-project-tools-v1', socket_path: path, forbidden_literals: [] }, () => {});
+  const tools = createProjectTools({ protocol: 'cairn-project-tools-v1', socket_path: path, forbidden_literals: [], allowed_tools: ['request_project_report', 'query_agent_work'] }, () => {});
+  assert.deepEqual(tools.map(({ name }) => name), ['request_project_report', 'query_agent_work']);
   const cases = [
-    ['request_vulnerability_retest', { vulnerability_id: 'v001', observation_id: 'o002' }],
-    ['request_vulnerability_retest', { vulnerability_id: 'v001', observation_id: 'o002', target_url: 'https://new.example.test/instance' }],
     ['request_project_report', {}],
     ['query_agent_work', { action_id: 'action-1' }],
   ];
@@ -92,6 +95,18 @@ test('R2a tools preserve action identity and expose public business errors throu
     assert.deepEqual(JSON.parse(error.message), businessError);
     return true;
   });
+});
+
+test('missing or tampered tool capability fails closed; empty means no project tools', async (t) => {
+  const { request } = await fixture(t);
+  const chat = chatRequest(request);
+  for (const allowed_tools of [undefined, null, 'all', ['create_project'], ['append_project_intent'], ['request_vulnerability_retest'], ['_read_conversation_attachment_bytes'], ['_validate_workspace_claim'], ['query_agent_work', 'query_agent_work']]) {
+    const binding = { ...chat.capabilities.project_tools, allowed_tools };
+    assert.throws(() => parseRequest({ ...chat, capabilities: { project_tools: binding } }), { code: 'invalid_request' });
+    assert.throws(() => createProjectTools(binding, () => {}), { code: 'invalid_request' });
+  }
+  const binding = { ...chat.capabilities.project_tools, allowed_tools: [] };
+  assert.deepEqual(createProjectTools(parseRequest({ ...chat, capabilities: { project_tools: binding } }).capabilities.project_tools, () => {}), []);
 });
 
 test('chat blocks complete protected output and does not retry the model', async (t) => {
@@ -155,10 +170,42 @@ test('workspace files reject outside paths and dangling symlinks while preservin
   await assert.rejects(read.execute('secret', { path: 'secret.txt' }), { code: 'public_output_forbidden' });
 });
 
-test('chat cannot repurpose an existing batch session or register target tools', async (t) => {
+test('chat cannot change conversation owner or register target tools', async (t) => {
   const { request } = await fixture(t);
-  assert.equal((await runRequest(request)).status, 'succeeded');
-  const resumed = chatRequest({ ...request, task_run_id: 'next', resume: true });
-  assert.equal((await runRequest(resumed)).error.code, 'session_ownership');
-  assert.throws(() => parseRequest({ ...resumed, capabilities: { ...resumed.capabilities, task_execution: request.capabilities.task_execution } }), { code: 'invalid_request' });
+  const chat = chatRequest(request);
+  const lease = await acquireSession(chat);
+  const originalId = lease.manager.getSessionId();
+  assert.equal(await lease.finish(), false);
+  const invalid = { ...chat, conversation_id: 'different', task_run_id: 'next' };
+  const result = await runRequest(invalid);
+  assert.equal(result.error.code, 'session_ownership');
+  assert.equal(result.session_initialized, null);
+  const retained = await acquireSession(chat);
+  assert.equal(retained.manager.getSessionId(), originalId);
+  assert.equal(await retained.finish(), false);
+  const manifestPath = join(chat.session_root, chat.session.slice(3), 'manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  await writeFile(manifestPath, JSON.stringify({ ...manifest, current_binding_sha256: manifest.binding_sha256, binding_sha256: '0'.repeat(64) }));
+  await assert.rejects(acquireSession(chat), { code: 'session_ownership' });
+  assert.throws(() => parseRequest({ ...chat, capabilities: { ...chat.capabilities, task_execution: request.capabilities.task_execution } }), { code: 'invalid_request' });
+  assert.throws(() => parseRequest({ ...request, project_id: null }), { code: 'invalid_request' });
+});
+
+test('verified uninitialized SDK session continues its same ID and entries without duplicate header', async (t) => {
+  const { request } = await fixture(t, 'openai-chat-completions', [{ text: '继续同一会话。' }]);
+  const chat = chatRequest(request);
+  const lease = await acquireSession(chat);
+  lease.manager.appendMessage({ role: 'user', content: '受控历史材料', timestamp: Date.now() });
+  const id = lease.manager.getSessionId();
+  assert.equal(await lease.finish(), false);
+  const path = join(chat.session_root, chat.session.slice(3), 'session.jsonl');
+  const before = await readFile(path, 'utf8');
+  const result = await runRequest({ ...chat, task_run_id: 'next', project_id: 'explicit-context' });
+  assert.equal(result.status, 'succeeded', JSON.stringify(result));
+  assert.equal(result.session_initialized, true);
+  const after = await readFile(path, 'utf8');
+  assert.ok(after.startsWith(before));
+  const entries = after.trimEnd().split('\n').map(JSON.parse);
+  assert.equal(entries.filter((entry) => entry.type === 'session').length, 1);
+  assert.equal(entries[0].id, id);
 });

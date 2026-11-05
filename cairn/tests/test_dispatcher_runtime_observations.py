@@ -185,11 +185,15 @@ def test_global_capacity_is_observed_and_next_round_does_not_refresh_old_decisio
 
 
 @pytest.mark.parametrize("full_capacity", [False, True])
-def test_schedule_consumption_precedes_project_list_and_capacity(full_capacity):
+def test_schedule_consumption_precedes_project_list_and_capacity(full_capacity, monkeypatch):
+    # 周期路径测试不启动独立控制观察线程；热控制本身由专门的 owner 测试覆盖。
+    monkeypatch.setattr("cairn.dispatcher.scheduler.loop.ExecutionControlObserver", Mock())
     loop = _loop(max_workers=1, max_running_projects=1, worker_count=0)
+    loop.container_manager.traffic_execution = SimpleNamespace(recover=Mock())
+    loop.bootstrap = SimpleNamespace(hard_cap=1)
     events = []
     if full_capacity:
-        loop.futures[object()] = SimpleNamespace(project_id="other", worker_name="w")
+        loop.futures[object()] = SimpleNamespace(project_id="other", worker_name="w", task_type="explore")
     summaries = [_summary("p1")] if full_capacity else []
 
     def consume():
@@ -201,14 +205,15 @@ def test_schedule_consumption_precedes_project_list_and_capacity(full_capacity):
         return summaries
 
     loop.client.consume_project_schedules = consume
+    loop.client.expire_paused_projects = lambda: events.append("expire") or 0
     loop.client.list_projects = projects
     loop._record_dispatcher_heartbeat = lambda **_kw: events.append("heartbeat")
     for method in (
         "_ensure_config_loaded", "run_startup_healthchecks", "_cancel_inactive_tasks",
         "_refresh_config", "_reap_futures", "_flush_pending_report_finishes",
-        "_flush_pending_task_run_finishes", "_reap_cleanup_futures",
+        "_flush_pending_task_run_finishes", "_reap_cleanup_futures", "_schedule_consumption_recovery",
         "_initialize_reason_checkpoints", "_refresh_runtime_projects",
-        "_queue_container_cleanups", "close",
+        "_queue_container_cleanups", "_dispatch_agent_turns", "_dispatch_available_verifications", "close",
     ):
         setattr(loop, method, Mock())
     loop._refresh_candidate_recovery = Mock(return_value=True)
@@ -221,7 +226,7 @@ def test_schedule_consumption_precedes_project_list_and_capacity(full_capacity):
 
     loop._dispatch_available = observe_capacity
     loop.run(once=True)
-    assert events == ["heartbeat", "consume", "projects", "capacity", "heartbeat"]
+    assert events == ["heartbeat", "consume", "expire", "projects", "capacity", "heartbeat"]
     if full_capacity:
         assert loop._dispatcher_runtime_summary()["project_decisions"][0]["code"] == "global_capacity"
     else:

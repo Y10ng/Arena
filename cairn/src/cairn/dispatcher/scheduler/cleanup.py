@@ -18,7 +18,7 @@ class CleanupMixin:
             and summary.coverage_stop_reason == "user_stopped"
         ):
             return "user_stopped"
-        if summary.status in {"paused", "stopped"}:
+        if summary.status == "stopped":
             return summary.status
         return None
 
@@ -104,21 +104,21 @@ class CleanupMixin:
             if delivery.get("container_id") not in {None, "", "unknown"}:
                 container_ids.append(delivery["container_id"])
         try:
-            # 复用既有锁、owner 检查、精确 ID 删除及删除后的不存在复核；不删除 Project。
-            removed = self.container_manager.cleanup_finishing(project_id, container_ids=container_ids)
+            # 复用既有锁与精确 owner 核验；仅停止执行，项目材料与容器层继续保留。
+            stopped = self.container_manager.cleanup_finishing(project_id, container_ids=container_ids)
         except (DockerException, OSError, RuntimeError) as exc:
             LOG.warning("verification cleanup deferred project=%s error=%s", project_id, type(exc).__name__)
-            removed = False
+            stopped = False
         cleanup = {
-            "status": "removed" if removed else "pending",
-            "error": None if removed else {"code": "container_remove_pending", "message": "本次执行环境尚未确认移除，将继续回收。"},
+            "status": "stopped" if stopped else "pending",
+            "error": None if stopped else {"code": "container_stop_pending", "message": "本次执行环境尚未确认停止，将继续核验。"},
         }
         acknowledged = True
         for run in runs:
             context = {"external_verification_cleanup": cleanup}
             status = run["status"]
             kwargs = {}
-            if removed:
+            if stopped:
                 lifecycle = run["runtime_context"].get("execution_lifecycle") or {}
                 context["execution_lifecycle"] = {
                     **lifecycle, "generation": run["execution_generation"],
@@ -130,13 +130,13 @@ class CleanupMixin:
                     status = "cancelled" if cancelled else "failed"
                     kwargs = {
                         "error_type": "cancelled" if cancelled else "delivery_unavailable",
-                        "error_message": "本次验证已停止并移除执行环境；未交付的结果不能视为完成。",
+                        "error_message": "本次验证已停止，研究材料仍保留；未交付的结果不能视为完成。",
                     }
             response = self.client.update_task_run(
                 project_id, run["id"], status=status, runtime_context=context, **kwargs,
             )
             acknowledged = response.ok and acknowledged
-        return removed and acknowledged
+        return stopped and acknowledged
 
     def _cleanup_external_verification_containers(self, summaries: list[ProjectSummary]) -> None:
         for summary in summaries:
@@ -158,7 +158,7 @@ class CleanupMixin:
                 continue
             if any(not isinstance(run.get("runtime_context"), dict) or run["runtime_context"].get("dispatcher_id") != self.dispatcher_id for run in runs):
                 continue
-            if all((run["runtime_context"].get("external_verification_cleanup") or {}).get("status") == "removed" for run in runs):
+            if all((run["runtime_context"].get("external_verification_cleanup") or {}).get("status") in {"removed", "stopped"} for run in runs):
                 continue
             # 无本地 future 的旧 run 同样先保全 candidate，再物理隔离；不启动重叠替代执行。
             future = self.cleanup_executor.submit(
@@ -198,9 +198,9 @@ class CleanupMixin:
             if self._inactive_cleanup_done.get(summary.id) == summary.status:
                 continue
             if any(
-                task.project_id == summary.id for task in self.futures.values()
+                task.project_id == summary.id and task.task_type not in {"report", "agent_chat"} for task in self.futures.values()
             ):
-                # reason/bootstrap 的完成回调可能仍在同一 future 内生成报告。
+                # 仅等待仍使用研究容器的执行，独立报告容器不阻挡研究清理。
                 continue
             if self._retain_report_delivery_container(summary.id):
                 continue
@@ -226,12 +226,6 @@ class CleanupMixin:
             if summary.status != "stopped" or summary.verification_request_id is not None:
                 continue
             if self._inactive_cleanup_done.get(summary.id) == summary.status:
-                continue
-            if any(
-                task.project_id == summary.id and task.task_type == "report"
-                for task in self.futures.values()
-            ):
-                # 暂停报告仍在使用项目容器，结束后再执行 stopped cleanup。
                 continue
             if self._retain_report_delivery_container(summary.id):
                 continue
@@ -264,7 +258,7 @@ class CleanupMixin:
             # 只允许暂停项目的保留式 stop 越过 candidate fence；结束项目的删除路径仍须等待捕获完成。
             if cleanup_state != "paused" and self._candidate_container_blocked(name):
                 continue
-            if name in self._cleanup_pending or any(task.project_id == summary.id for task in self.futures.values()):
+            if name in self._cleanup_pending or any(task.project_id == summary.id and task.task_type not in {"report", "agent_chat"} for task in self.futures.values()):
                 continue
             if cleanup_state == "paused" and self._retain_report_delivery_container(summary.id):
                 continue
@@ -373,6 +367,30 @@ class CleanupMixin:
         self._cleanup_paused_containers(summaries)
         self._reconcile_orphan_containers(summaries)
         self._queue_browser_cleanups()
+        self._queue_conversation_cleanups()
+
+    def _queue_conversation_cleanups(self) -> None:
+        from cairn.dispatcher.runtime.conversation_cleanup import cleanup_conversation
+
+        futures = getattr(self, "conversation_cleanup_futures", None)
+        if futures is None:
+            futures = self.conversation_cleanup_futures = {}
+        for conversation_id, future in list(futures.items()):
+            if future.done():
+                try:
+                    future.result()
+                except Exception:
+                    LOG.warning("conversation cleanup deferred conversation=%s", conversation_id)
+                del futures[conversation_id]
+        response = self.client.pending_conversation_cleanups()
+        if not response.ok:
+            return
+        for request in response.data:
+            conversation_id = request["conversation_id"]
+            if conversation_id not in futures and len(futures) < 2:
+                futures[conversation_id] = self.cleanup_executor.submit(
+                    cleanup_conversation, self.container_manager, self.client, request,
+                )
 
     def _queue_browser_cleanups(self) -> None:
         manager = getattr(self, "container_manager", None)
@@ -406,11 +424,11 @@ class CleanupMixin:
         bridge = self.container_manager.traffic_execution
         if bridge is not None:
             # 控制容器可能已删除，私有 manifest 仍是测试物理资源的独立清理来源。
-            for project_id in bridge.pending_cleanup_projects() - known_ids:
+            for project_id in bridge.retained_projects() - known_ids:
                 name = self.container_manager.container_name(project_id)
                 if name in self._cleanup_pending or self._candidate_container_blocked(name):
                     continue
-                future = self.cleanup_executor.submit(bridge.cleanup_project, project_id)
+                future = self.cleanup_executor.submit(bridge.destroy_project, project_id)
                 self.cleanup_futures[future] = (name, None, None)
                 self._cleanup_pending.add(name)
         for name in self.container_manager.managed_container_names():
@@ -504,17 +522,19 @@ class CleanupMixin:
         for task in self.futures.values():
             summary = summary_by_project.get(task.project_id)
             status = summary.status if summary is not None else "deleted"
-            if task.task_type == "agent_chat" and summary is not None:
-                # 只读项目对话不随研究暂停/完成取消；轮次取消由专用heartbeat裁决。
+            if task.task_type == "agent_chat":
+                # 会话不是项目子资源；删除来源项目也只由会话 heartbeat 裁决取消。
+                continue
+            if status == "paused" and task.task_type != "report":
+                # 热暂停保留原 claim、future 和进程；物理控制由独立观察线程执行。
                 continue
             if task.task_type == "report" and task.report_generation_token is not None and summary is not None:
                 state = self.client.get_assessment_report_finalization(task.project_id, generation_token=task.report_generation_token)
                 if state.ok and isinstance(state.data, dict):
                     if state.data.get("cancel_requested_at") or state.data.get("status") == "cancelled":
                         task.cancellation.cancel("report_cancelled")
-                if task.report_scope_key:
-                    # 单条只读整理不随项目暂停取消；短暂读取失败也不能把暂停误作显式取消。
-                    continue
+                # 独立受理的报告只按自己的取消意图结束，不跟随研究项目控制。
+                continue
             user_stopping = bool(
                 summary is not None
                 and status == "active"
@@ -526,7 +546,10 @@ class CleanupMixin:
             if (status == "stopped" or user_stopping) and task.task_type == "report":
                 # durable 暂停报告不会恢复自治任务，应允许其自然完成并写入冻结交付物。
                 continue
-            cancellation_reason = "user_stopped" if user_stopping else status
+            cancellation_reason = (
+                summary.coverage_stop_reason or "user_stopped"
+                if summary is not None and (status == "stopped" or user_stopping) else status
+            )
             if (status != "active" or user_stopping) and task.cancellation.cancel(
                 cancellation_reason
             ):

@@ -5,6 +5,8 @@ from __future__ import annotations
 from contextlib import contextmanager
 from io import BytesIO
 import re
+import threading
+import time
 from typing import BinaryIO, Iterator
 
 from .common_base import *
@@ -28,7 +30,7 @@ def _pi_tool_events(
     task_run_id: str,
     phase: str,
     session: str | None,
-    artifact_id: str,
+    artifact_id: str | None,
 ) -> Iterator[dict[str, object]]:
     while line := stream.readline(256 * 1024 + 1):
         if len(line) > 256 * 1024:
@@ -86,6 +88,90 @@ def _pi_tool_events(
         yield payload
 
 
+class PiToolEventRecorder:
+    """独立尾读现有 stderr 文件；上传慢或失败均不反压 Docker 输出。"""
+
+    def __init__(self, client: CairnClient, project_id: str, task_run_id: str, *, phase: str, session: str | None):
+        self.client = client
+        self.project_id = project_id
+        self.task_run_id = task_run_id
+        self.phase = phase
+        self.session = session
+        self.incomplete = False
+        self._finished = threading.Event()
+        self._deadline: float | None = None
+        self._thread: threading.Thread | None = None
+
+    def start(self, path: str) -> None:
+        try:
+            self._thread = threading.Thread(target=self._observe, args=(path,), daemon=True)
+            self._thread.start()
+        except Exception as exc:
+            # 线程资源不足同样属于观测失败，不能让收尾 join 未启动线程影响任务结果。
+            self._thread = None
+            self.incomplete = True
+            LOG.warning("pi live audit start failed project=%s task_run=%s phase=%s error=%s", self.project_id, self.task_run_id, self.phase, type(exc).__name__)
+
+    def finish(self) -> None:
+        # 收尾只排空同一游标，不再从头投影；含网络 ACK 未知的事件也不盲目重发。
+        if self._finished.is_set():
+            return
+        self._deadline = time.monotonic() + 2.0
+        self._finished.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.1)
+        if self._thread is None or self._thread.is_alive():
+            self.incomplete = True
+        if self.incomplete:
+            LOG.warning("pi live audit incomplete project=%s task_run=%s phase=%s", self.project_id, self.task_run_id, self.phase)
+
+    def _observe(self, path: str) -> None:
+        pending = bytearray()
+        skipping = False
+        seen: set[tuple[object, ...]] = set()
+        try:
+            with open(path, "rb") as stream:
+                while self._deadline is None or time.monotonic() < self._deadline:
+                    part = stream.readline(256 * 1024 + 1)
+                    if part:
+                        if not skipping:
+                            pending.extend(part)
+                            if len(pending) > 256 * 1024:
+                                pending.clear()
+                                skipping = True
+                        if not part.endswith(b"\n"):
+                            continue
+                    elif not self._finished.is_set():
+                        self._finished.wait(0.1)
+                        continue
+                    # 半行只在真实 EOF 收尾后解析；超长非协议行原样留在 stderr。
+                    if not skipping and pending:
+                        for payload in _pi_tool_events(
+                            BytesIO(pending), project_id=self.project_id, task_run_id=self.task_run_id,
+                            phase=self.phase, session=self.session, artifact_id=None,
+                        ):
+                            key = (payload["hook_event_name"], payload.get("operation_id"), payload.get("prompt_hash"))
+                            if key in seen:
+                                continue
+                            seen.add(key)
+                            kind = "prompt_rendered" if payload["hook_event_name"] == "instructions_loaded" else "hook_operation"
+                            response = self.client.create_agent_event(
+                                self.project_id, task_run_id=self.task_run_id, kind=kind, payload=payload, timeout=1.0,
+                            )
+                            if not response.ok:
+                                self.incomplete = True
+                                # 不反复请求故障端点；完整已保存原文仍走原有 Artifact 链。
+                                return
+                    pending.clear()
+                    skipping = False
+                    if not part:
+                        return
+                self.incomplete = True
+        except Exception as exc:
+            self.incomplete = True
+            LOG.warning("pi live audit failed project=%s task_run=%s phase=%s error=%s", self.project_id, self.task_run_id, self.phase, type(exc).__name__)
+
+
 def record_pi_tool_events(
     client: CairnClient | None,
     project_id: str | None,
@@ -94,9 +180,11 @@ def record_pi_tool_events(
     phase: str,
     session: str | None,
     result: ProcessResult,
+    live_recorder: PiToolEventRecorder | None = None,
 ) -> None:
     if client is None or project_id is None or task_run_id is None or result.stderr_blank:
         return
+    artifact_id = None
     try:
         with _open_pi_stderr(result) as stream:
             response = client.create_artifact(
@@ -105,13 +193,20 @@ def record_pi_tool_events(
                 kind="hook_log",
                 content=stream,
                 filename=f"{phase}-pi-events.jsonl",
-                metadata={"phase": phase, "hook_source": "pi", "stream": "stderr"},
+                metadata={
+                    "phase": phase, "hook_source": "pi", "stream": "stderr",
+                    "session_id": session,
+                    "projection_complete": not live_recorder.incomplete if live_recorder is not None else None,
+                },
             )
         if not response.ok:
             LOG.warning("pi audit artifact failed project=%s task_run=%s phase=%s", project_id, task_run_id, phase)
             return
         artifact_id = _artifact_id_from_response(response.data)
         if artifact_id is None:
+            return
+        if live_recorder is not None:
+            # 增量观测复用同一游标，收尾不重新投影开始／结束。
             return
         with _open_pi_stderr(result) as stream:
             for payload in _pi_tool_events(
@@ -128,3 +223,21 @@ def record_pi_tool_events(
     except Exception as exc:
         # 采集失败不能吞掉执行结果；任务层仍独立保存 stdout/stderr 原始输出。
         LOG.warning("pi audit collection failed project=%s task_run=%s phase=%s error=%s", project_id, task_run_id, phase, type(exc).__name__)
+    finally:
+        if live_recorder is not None:
+            # 原件上传失败也尝试明确观测缺口；标记自身失败只记诊断，不覆盖任务结果。
+            incomplete = live_recorder.incomplete or artifact_id is None
+            try:
+                response = client.create_agent_event(
+                    project_id, task_run_id=task_run_id, kind="hook_operation",
+                    payload={
+                        "hook_source": "pi", "phase": phase, "session_id": session,
+                        "hook_event_name": "observation_incomplete" if incomplete else "observation_saved",
+                        "status": "unknown" if incomplete else "succeeded",
+                        "artifact_id": artifact_id,
+                    }, timeout=1.0,
+                )
+                if not response.ok:
+                    LOG.warning("pi audit source link failed project=%s task_run=%s phase=%s", project_id, task_run_id, phase)
+            except Exception as exc:
+                LOG.warning("pi audit source link failed project=%s task_run=%s phase=%s error=%s", project_id, task_run_id, phase, type(exc).__name__)

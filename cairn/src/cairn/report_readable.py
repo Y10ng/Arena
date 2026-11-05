@@ -306,8 +306,29 @@ def _fenced(text: str, language: str) -> str:
     return f"{fence}{language}\n{text}\n{fence}"
 
 
+def disposition_markdown(records: list[dict]) -> ReportMarkdown:
+    """确定性呈现保存的人工原文；与实验复核、模型解释明确分开。"""
+    if not records:
+        return ReportMarkdown("")
+    labels = {"new": "新发现", "confirmed": "已确认", "dismissed": "误报", "remediated": "已修复"}
+    blocks = ["**人工处置历史（不是实验复核或漏洞成立证明）**"]
+    for item in records:
+        source = ("发现 " + item["observation_id"] if item["observation_id"] is not None
+                  else "独立人工材料 · 版本 " + str(item["previous_version"]))
+        blocks.append(
+            f"操作者：{readable_markdown(item['actor_login'])}（{readable_markdown(item['actor_id'])}） · "
+            f"时间：{readable_markdown(item['created_at'])}\n\n"
+            f"{labels[item['previous_status']]} → {labels[item['status']]} · "
+            f"记录版本 {item['previous_version']} → {item['record_version']}\n\n"
+            f"所选来源：{readable_markdown(source)}\n\n"
+            + ("未填写理由。" if item["reason"] is None or item["reason"] == "" else "理由原文：\n\n" + _fenced(item["reason"], "text"))
+            + "\n\n处置时来源：\n\n" + _fenced(json.dumps(item["source_snapshot"], ensure_ascii=False, sort_keys=True, indent=2), "json")
+        )
+    return ReportMarkdown("\n\n".join(blocks))
+
+
 def readable_finding_context(finding: ReportFinding | dict, packet: dict) -> dict:
-    """详情与所有导出共用同一说明、真实节选及可独立定位的证据身份。"""
+    """新报告共用说明与真实节选；核验身份保留在冻结材料，不注入交付正文。"""
     finding = validate_readable_finding(finding, packet)
     items = _finding_material(finding, packet)
     artifacts = {item["id"]: item for item in packet.get("artifacts", [])}
@@ -322,37 +343,29 @@ def readable_finding_context(finding: ReportFinding | dict, packet: dict) -> dic
                           "step.evidence_status": "根据已有材料整理；不是新增测试。"})
         for evidence in step.evidence:
             item = items[evidence.evidence_item_id]
-            blocks = [f"**步骤 {index} · {readable_markdown(item.get('title') or '相关交互')}**",
-                      f"项目 {readable_markdown(packet['project']['id'])} / 漏洞 {readable_markdown(finding.vulnerability_id)} / "
-                      f"Observation {readable_markdown(finding.observation_id or '无')} / Evidence {readable_markdown(item['id'])}"]
+            blocks = [f"**步骤 {index} · {readable_markdown(item.get('title') or '相关交互')}**"]
             selected_sides = {selection.side for selection in evidence.selections}
             for selection in evidence.selections:
                 text, complete = selected_original(selection, packet)
                 label = {"request": "请求", "response": "响应", "artifact": "材料"}[selection.side]
-                identity = (f"Flow {readable_markdown(selection.flow_id)} · revision {selection.revision} · "
-                            f"{selection.representation} · SHA-256 {selection.sha256} · 结构化重建，非原始字节流"
-                            if selection.flow_id else f"Artifact {readable_markdown(selection.artifact_id)}")
-                blocks.extend([f"{label}（{'完整投影' if complete and selection.flow_id else '完整原件' if complete else '关键节选；其余内容省略'} · "
-                               f"{identity} · utf8-bytes={selection.byte_start}:{selection.byte_end}）",
-                               _fenced(text, "http" if item["kind"] == "http" else "text")])
+                scope = "完整原件" if complete else "关键节选；其余内容省略"
+                if selection.flow_id:
+                    scope = ("完整重建文本" if complete else scope) + "；结构化重建，非原始网络字节流"
+                blocks.extend([f"{label}（{scope}）", _fenced(text, "http" if item["kind"] == "http" else "text")])
             for side, label in (("request", "请求"), ("response", "响应"), ("artifact", "材料")):
                 if side in selected_sides:
                     continue
                 reference = item.get(side)
                 if item.get("flow_id") and side != "artifact":
-                    flow = packet.get("flow_evidence", {}).get(item["flow_id"])
-                    projection = flow["projections"].get(side) if flow else None
                     content = packet.get("flow_contents", {}).get(item["flow_id"], {}).get(side, {})
-                    note = content.get("unavailable") or "未选择投影内容，不能据此补全交互。"
-                    identity = f"Flow {readable_markdown(item['flow_id'])}"
-                    if projection:
-                        identity += f" · revision {flow['revision']} · {flow['representation']} · SHA-256 {projection['sha256']}"
-                    blocks.append(f"{label} · {identity}（结构化重建，非原始字节流）：{note}")
+                    note = ("长流量未选择可交付关键选段，未补写其余内容。" if "selections" in content
+                            else content.get("unavailable") or "未选择重建文本，不能据此补全交互。")
+                    blocks.append(f"{label}：{note}")
                 elif reference is not None:
                     artifact_id = reference["artifact_id"]
                     artifact = artifacts.get(artifact_id)
                     note = "原件未记录关键选段，未截取内容充当证明。" if artifact and artifact["size"] > 8192 else "未选择原件内容，不能据此补全交互。"
-                    blocks.append(f"{label} · Artifact {readable_markdown(artifact_id)}：{note}")
+                    blocks.append(f"{label}：{note}")
                 elif item["kind"] == "http" and side != "artifact":
                     blocks.append(f"本交互未记录{label}材料。")
             for image in packet.get("display_images", []):
@@ -371,11 +384,19 @@ def readable_finding_context(finding: ReportFinding | dict, packet: dict) -> dic
                     blocks.append(image.get("unavailable_reason") or
                                   f"![{image['caption']}](arena-image:{image['artifact_id']})")
             evidence_blocks.append("\n\n".join(blocks))
+    vulnerability = next(item for item in packet["vulnerabilities"] if item["id"] == finding.vulnerability_id)
+    source = (next(item for item in packet["observations"] if item["id"] == finding.observation_id)
+              if finding.observation_id else vulnerability)
+    fact = next((item for item in packet.get("facts", []) if item["id"] == source.get("source_fact_id")), None)
+    preconditions = fact.get("assessment_record", {}).get("preconditions", []) if fact else []
+    conditions = "；".join(str(readable_markdown(value)) for value in preconditions) or "未记录"
+    description = ReportMarkdown(str(readable_markdown(finding.description)) + "\n\n**成立条件：**" + conditions)
+    limitations = readable_markdown(finding.limitations or "结论仅适用于已记录条件；修复建议不代表已修复。")
     return {
-        "finding.description": readable_markdown(finding.description),
+        "finding.description": description,
         "finding.recorded_steps": ReportMarkdown("\n\n".join(steps) or "现有材料不足以整理真实操作步骤。"),
         "finding.remediation": readable_markdown(finding.remediation),
-        "finding.limitations": readable_markdown(finding.limitations or "结论仅适用于已记录条件；修复建议不代表已修复。"),
+        "finding.limitations": limitations,
         "finding.steps": step_rows,
         "finding.key_evidence": ReportMarkdown("\n\n".join(evidence_blocks) or "未选择可交付的关键证据；不能据此补全未记录的交互。"),
     }

@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from hashlib import sha256
+import errno
+from hashlib import file_digest, sha256
 import json
 import os
 from pathlib import Path, PurePosixPath
 from re import fullmatch
 import shutil
+import stat
 import tempfile
 from typing import Iterable
 
+from cairn.advisory_contract import selection_sha256
 from cairn.dispatcher.prompting import resolved_knowledge_base_path
 from cairn.dispatcher.protocol.client import CairnClient
 from cairn.server.models import LibraryFile, ProjectLibraryBinding, ProjectResource
@@ -46,23 +49,25 @@ def stage_advisory_bundle(
     legacy_key: str | None,
 ) -> AdvisoryBundle | None:
     """优先物化冻结资料库，并合并项目资料；旧项目才回退场景知识集。"""
-    bindings = sorted(
-        client.list_project_library_bindings(project_id),
-        key=lambda item: item.library_key,
-    )
+    project = client.get_project(project_id)
+    # 旧服务无法表达显式空选择；不能把缺失字段当作旧项目而静默挂载场景资料。
+    if "library_selection_explicit" not in project.model_fields_set:
+        raise RuntimeError("server does not provide advisory selection state")
+    bindings = sorted(project.library_bindings, key=lambda item: item.library_key)
+    if len({binding.library_key for binding in bindings}) != len(bindings):
+        raise RuntimeError("duplicate advisory library binding")
     library_revisions = [
         _read_library_revision(client, project_id, binding) for binding in bindings
     ]
 
-    normalized_legacy_key = None if bindings else _normalized_legacy_key(legacy_key)
+    normalized_legacy_key = (
+        None if bindings or project.library_selection_explicit else _normalized_legacy_key(legacy_key)
+    )
     legacy_files = _legacy_files(normalized_legacy_key)
     resources = sorted(client.list_project_resources(project_id), key=lambda item: item.path)
-    resource_files: list[tuple[ProjectResource, bytes]] = []
+    resource_files = resources
     for resource in resources:
-        content = client.read_project_resource(project_id, resource.id)
-        _verify_resource(resource, content)
         _safe_relative_path(resource.path, source="project resource")
-        resource_files.append((resource, content))
     if not library_revisions and not legacy_files and not resource_files:
         return None
 
@@ -75,6 +80,12 @@ def stage_advisory_bundle(
                 "name": revision.binding.library_name,
                 "version": revision.binding.version,
                 "digest_sha256": revision.binding.digest_sha256,
+                # 历史整库保持 v3 manifest 原字节；子集显式记录其身份。
+                **(
+                    {"paths": sorted(revision.binding.paths),
+                     "selection_sha256": revision.binding.selection_sha256}
+                    if revision.binding.paths is not None else {}
+                ),
                 "files": [
                     {
                         "path": metadata.path,
@@ -99,7 +110,7 @@ def stage_advisory_bundle(
                 "size_bytes": resource.size_bytes,
                 "sha256": resource.sha256,
             }
-            for resource, _content in resource_files
+            for resource in resource_files
         ],
     }
     manifest_bytes = json.dumps(
@@ -113,8 +124,9 @@ def stage_advisory_bundle(
     project_segment = sha256(project_id.encode("utf-8")).hexdigest()[:32]
     project_root = local_root / project_segment
     final_path = project_root / digest
-    if not final_path.is_dir():
+    if not os.path.lexists(final_path):
         _materialize_bundle(
+            client, project_id,
             library_revisions,
             legacy_files,
             resource_files,
@@ -122,6 +134,9 @@ def stage_advisory_bundle(
             project_root,
             final_path,
         )
+    _verify_materialized_bundle(
+        final_path, library_revisions, legacy_files, resource_files, manifest_bytes,
+    )
 
     source_path = _docker_source_path(local_root, final_path)
     return AdvisoryBundle(
@@ -143,20 +158,33 @@ def _read_library_revision(
     binding: ProjectLibraryBinding,
 ) -> _LibraryRevisionFiles:
     key = _normalized_library_key(binding.library_key)
+    if not {"paths", "selection_sha256"}.issubset(binding.model_fields_set):
+        raise RuntimeError(f"server does not provide advisory selection identity: {key}")
+    selected_paths = binding.paths
+    if selected_paths is not None and (
+        not selected_paths or len(selected_paths) != len(set(selected_paths))
+    ):
+        raise RuntimeError(f"invalid advisory library selection: {key}")
     metadata_files = sorted(
         client.list_project_library_files(project_id, key, binding.version),
         key=lambda item: item.path,
     )
+    paths = [_safe_relative_path(item.path, source="library file").as_posix() for item in metadata_files]
+    if len(paths) != len(set(paths)) or len(paths) != binding.file_count:
+        raise RuntimeError(f"library selection file count mismatch: {key} v{binding.version}")
+    if selected_paths is not None and set(paths) != set(selected_paths):
+        raise RuntimeError(f"library selection paths mismatch: {key} v{binding.version}")
+    actual_selection_digest = selection_sha256(
+        key, binding.version, binding.digest_sha256,
+        [{"path": item.path, "size_bytes": item.size_bytes, "sha256": item.sha256} for item in metadata_files],
+    )
+    if actual_selection_digest != binding.selection_sha256:
+        raise RuntimeError(f"library selection sha256 mismatch: {key} v{binding.version}")
+
     files: list[tuple[LibraryFile, bytes]] = []
     digest_files: dict[str, bytes] = {}
-    for metadata in metadata_files:
-        path = _safe_relative_path(metadata.path, source="library file").as_posix()
-        content = client.read_project_library_file(
-            project_id,
-            key,
-            binding.version,
-            path,
-        )
+    for metadata, path in zip(metadata_files, paths):
+        content = client.read_project_library_file(project_id, key, binding.version, path)
         _verify_file(
             source=f"library {key} v{binding.version} file {path}",
             size_bytes=metadata.size_bytes,
@@ -165,19 +193,23 @@ def _read_library_revision(
         )
         digest_files[path] = content
         files.append((metadata, content))
-    actual_revision_digest = _library_digest(digest_files)
-    if actual_revision_digest != binding.digest_sha256:
-        raise RuntimeError(
-            f"library revision sha256 mismatch: {key} v{binding.version} "
-            f"expected={binding.digest_sha256} actual={actual_revision_digest}"
-        )
+    # 子集不等于整版，只有整库选择才能与原版内容摘要比较。
+    if selected_paths is None:
+        actual_revision_digest = _library_digest(digest_files)
+        if actual_revision_digest != binding.digest_sha256:
+            raise RuntimeError(
+                f"library revision sha256 mismatch: {key} v{binding.version} "
+                f"expected={binding.digest_sha256} actual={actual_revision_digest}"
+            )
     return _LibraryRevisionFiles(binding=binding, files=tuple(files))
 
 
 def _materialize_bundle(
+    client: CairnClient,
+    project_id: str,
     library_revisions: list[_LibraryRevisionFiles],
     legacy_files: list[tuple[bytes, dict[str, object]]],
-    resource_files: list[tuple[ProjectResource, bytes]],
+    resource_files: list[ProjectResource],
     manifest_bytes: bytes,
     project_root: Path,
     final_path: Path,
@@ -198,23 +230,96 @@ def _materialize_bundle(
             destination = temporary / str(metadata["bundle_path"])
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(content)
-        for resource, content in resource_files:
+        for resource in resource_files:
             destination = temporary / "project" / _safe_relative_path(
                 resource.path,
                 source="project resource",
             )
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(content)
-        # manifest 只记录来源元数据，不复制资源内容；目录 rename 使读者只看到完整版本。
+            with destination.open("xb") as output:
+                client.download_project_resource(project_id, resource, output)
+        # 先固定权限再原子发布，避免并发读者看到尚未设为只读的完整目录。
         (temporary / MANIFEST_NAME).write_bytes(manifest_bytes)
+        _make_read_only(temporary)
         try:
             temporary.rename(final_path)
-            _make_read_only(final_path)
-        except FileExistsError:
-            pass
+        except OSError as exc:
+            # 不同系统对非空目标目录分别返回 EEXIST 或 ENOTEMPTY；由调用方校验胜出的缓存。
+            if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                raise
     finally:
         if temporary.exists():
+            # 并发落败时只清理由本次创建的临时目录，先恢复目录写权限以支持非 root 运行。
+            for directory, _subdirectories, _files in os.walk(temporary, followlinks=False):
+                os.chmod(directory, 0o700, follow_symlinks=False)
             shutil.rmtree(temporary)
+
+
+def _verify_materialized_bundle(
+    root: Path,
+    library_revisions: list[_LibraryRevisionFiles],
+    legacy_files: list[tuple[bytes, dict[str, object]]],
+    resource_files: list[ProjectResource],
+    manifest_bytes: bytes,
+) -> None:
+    # 缓存可能已被修改，不能只校验本次下载的数据后就挂载旧目录。
+    expected: dict[Path, tuple[int, str]] = {
+        Path(MANIFEST_NAME): (len(manifest_bytes), sha256(manifest_bytes).hexdigest())
+    }
+
+    def add(path: Path, size: int, digest: str) -> None:
+        if path in expected:
+            raise RuntimeError(f"duplicate advisory bundle path: {path}")
+        expected[path] = (size, digest)
+
+    for revision in library_revisions:
+        key = _normalized_library_key(revision.binding.library_key)
+        for metadata, content in revision.files:
+            add(Path("library") / key / _safe_relative_path(metadata.path, source="library file"), metadata.size_bytes, metadata.sha256)
+    for content, metadata in legacy_files:
+        add(_safe_relative_path(str(metadata["bundle_path"]), source="legacy bundle file"), len(content), sha256(content).hexdigest())
+    for resource in resource_files:
+        add(Path("project") / _safe_relative_path(resource.path, source="project resource"), resource.size_bytes, resource.sha256)
+
+    directories = {parent for path in expected for parent in path.parents}
+    seen_files: set[Path] = set()
+    seen_directories: set[Path] = set()
+    pending = [Path(".")]
+    while pending:
+        relative = pending.pop()
+        directory = root / relative
+        mode = directory.lstat().st_mode
+        if not stat.S_ISDIR(mode) or mode & 0o222:
+            raise RuntimeError(f"invalid advisory bundle directory: {relative}")
+        seen_directories.add(relative)
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                child = relative / entry.name
+                entry_stat = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(entry_stat.st_mode):
+                    if child not in directories:
+                        raise RuntimeError(f"unexpected advisory bundle directory: {child}")
+                    pending.append(child)
+                elif stat.S_ISREG(entry_stat.st_mode):
+                    if child not in expected or entry_stat.st_mode & 0o222:
+                        raise RuntimeError(f"invalid advisory bundle file: {child}")
+                    size, expected_digest = expected[child]
+                    # 打开后再次检查类型和权限，避免替换成链接或特殊文件。
+                    fd = os.open(directory / entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    with os.fdopen(fd, "rb") as source:
+                        opened_stat = os.fstat(source.fileno())
+                        if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_mode & 0o222:
+                            raise RuntimeError(f"invalid advisory bundle file: {child}")
+                        if opened_stat.st_size != size:
+                            raise RuntimeError(f"advisory bundle file size mismatch: {child}")
+                        actual_digest = file_digest(source, "sha256").hexdigest()
+                    if actual_digest != expected_digest:
+                        raise RuntimeError(f"advisory bundle file sha256 mismatch: {child}")
+                    seen_files.add(child)
+                else:
+                    raise RuntimeError(f"invalid advisory bundle entry: {child}")
+    if seen_files != set(expected) or seen_directories != directories:
+        raise RuntimeError("advisory bundle is missing expected files or directories")
 
 
 def _legacy_files(legacy_key: str | None) -> list[tuple[bytes, dict[str, object]]]:
@@ -260,15 +365,6 @@ def _legacy_files(legacy_key: str | None) -> list[tuple[bytes, dict[str, object]
             )
         )
     return files
-
-
-def _verify_resource(resource: ProjectResource, content: bytes) -> None:
-    _verify_file(
-        source=f"project resource {resource.id}",
-        size_bytes=resource.size_bytes,
-        digest=resource.sha256,
-        content=content,
-    )
 
 
 def _verify_file(

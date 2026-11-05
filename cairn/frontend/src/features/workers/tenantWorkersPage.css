@@ -2,190 +2,57 @@
   width: 100%;
   min-width: 0;
   container-type: inline-size;
+  padding-inline: var(--layout-content-padding);
+  gap: 0;
 }
-
-.tenant-workers-page > .section-header {
-  min-height: var(--control-height);
-  align-items: center;
-}
-
-.tenant-workers-page .worker-table-container {
-  overflow-x: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-surface);
-}
-
-.tenant-workers-page .worker-table {
-  width: 100%;
-  border-collapse: collapse;
-  text-align: left;
-  font-size: var(--text-sm);
-}
-
+.tenant-workers-page .resource-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 38px; }
+.tenant-workers-page .resource-section-heading h2 { margin: 0; font-size: var(--text-section); font-weight: 600; }
+.tenant-workers-page .resource-section-heading > span { color: var(--text-muted); font-size: var(--text-sm); }
+.worker-model-content { display: grid; gap: 16px; min-width: 0; padding-top: var(--space-3); }
+.tenant-workers-page .worker-table-container { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-surface); }
+.tenant-workers-page .worker-table { width: 100%; border-collapse: collapse; text-align: left; font-size: var(--text-md); }
 .tenant-workers-page .worker-table th,
-.tenant-workers-page .worker-table td {
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--border-subtle);
-  vertical-align: middle;
-}
-
-.tenant-workers-page .worker-table thead {
-  background: var(--bg-surface);
-  color: var(--text-muted);
-}
-
-.tenant-workers-page .worker-table th {
-  font-weight: var(--font-medium);
-}
-
-.tenant-workers-page .worker-table tbody tr:last-child > * {
-  border-bottom: 0;
-}
-.tenant-workers-page .worker-table th[scope='row'] {
-  min-width: 130px;
-  width: 20%;
-}
-.tenant-workers-page .worker-table td:nth-child(2) {
-  min-width: 260px;
-}
-.tenant-workers-page .worker-table td:nth-child(2) .ui-select__trigger {
-  max-width: 560px;
-}
-.tenant-workers-page .worker-table td:nth-child(3) {
-  min-width: 128px;
-  width: 128px;
-}
-.tenant-workers-page .worker-table td:nth-child(4) {
-  min-width: 144px;
-  width: 144px;
-}
-.tenant-workers-page .worker-table td:last-child {
-  min-width: 208px;
-  width: 208px;
-}
-.tenant-workers-page .worker-role-id {
-  display: block;
-  color: var(--text-muted);
-  font-size: var(--text-sm);
-  font-weight: var(--font-normal);
-}
-.worker-model-content {
-  display: grid;
-  gap: var(--space-4);
-  min-width: 0;
-}
-.worker-model-content h3,
-.runtime-settings-panel h3 {
-  margin: 0 0 var(--space-3);
-  font-size: var(--text-lg);
-}
-#worker-models {
-  margin-top: var(--space-4);
-  scroll-margin-top: var(--space-4);
-}
-.runtime-settings-panel {
-  min-width: 0;
-}
-.runtime-settings-panel fieldset {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-6);
-  min-width: 0;
-  border: 0;
-  margin: 0;
-  padding: 0;
-}
-.runtime-fields {
-  display: grid;
-  gap: var(--space-3);
-  max-width: 480px;
-}
-.runtime-fields .form-group {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 140px;
-  gap: var(--space-4);
-  align-items: center;
-}
-.runtime-settings-panel .section-desc {
-  margin: var(--space-3) 0 0;
-}
-.runtime-advanced {
-  grid-column: 1 / -1;
-  border-top: 1px solid var(--border);
-  padding-top: var(--space-4);
-}
-.runtime-advanced summary {
-  cursor: pointer;
-}
-.runtime-advanced[open] summary {
-  margin-bottom: var(--space-4);
-}
-.runtime-save-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  border-top: 1px solid var(--border);
-  padding-top: var(--space-4);
-}
-.runtime-save-actions .section-desc {
-  margin: 0;
-}
-.runtime-load-status {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-.runtime-review {
-  display: grid;
-  justify-items: start;
-  gap: var(--space-3);
-  overflow-x: auto;
-}
-.tenant-workers-page .worker-actions {
-  display: flex;
-  align-items: start;
-  gap: var(--space-3);
-}
-.tenant-workers-page .worker-advanced {
-  min-width: 0;
-}
-.tenant-workers-page .worker-advanced summary {
-  min-height: var(--control-height-sm);
-  align-content: center;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.tenant-workers-page .worker-advanced[open] summary {
-  margin-bottom: var(--space-2);
-}
-.tenant-workers-page .worker-advanced .form-group {
-  margin-top: var(--space-2);
-}
-.tenant-workers-page .worker-feedback {
-  max-width: 24em;
-  margin: var(--space-2) 0 0;
-  overflow-wrap: anywhere;
-}
-@container (max-width: 900px) {
-  .runtime-settings-panel fieldset {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-@container (max-width: 600px) {
-  .runtime-save-actions {
-    align-items: start;
-    flex-direction: column;
-  }
-}
-@container (max-width: 360px) {
-  .runtime-fields .form-group {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--space-1);
-  }
-  .runtime-fields .ui-input {
-    max-width: 140px;
-  }
-}
+.tenant-workers-page .worker-table td { padding: 16px 20px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.tenant-workers-page .worker-table thead { background: var(--bg-inset); color: var(--text-muted); }
+.tenant-workers-page .worker-table thead th { padding-block: 10px; font-size: var(--text-sm); }
+.tenant-workers-page .worker-table th { font-weight: 500; }
+.tenant-workers-page .worker-table tbody tr { height: var(--table-row-height-detail); }
+.tenant-workers-page .worker-table tbody tr:last-child > * { border-bottom: 0; }
+.tenant-workers-page .worker-table th[scope='row'] { min-width: 150px; width: 18%; }
+.tenant-workers-page .worker-table td:nth-child(2) { min-width: 280px; }
+.tenant-workers-page .worker-table td:nth-child(2) .ui-select__trigger { max-width: 560px; }
+.tenant-workers-page .worker-table td:nth-child(3) { width: 132px; min-width: 132px; }
+.tenant-workers-page .worker-table td:nth-child(4) { width: 168px; min-width: 168px; padding-top: 25px; }
+.tenant-workers-page .worker-table td:last-child { width: 230px; min-width: 230px; }
+.tenant-workers-page .worker-model-content .worker-table tbody th,
+.tenant-workers-page .worker-model-content .worker-table tbody td { padding-block: 8px; vertical-align: middle; }
+.tenant-workers-page .worker-role-label { display: grid; gap: var(--space-1); }
+.tenant-workers-page .worker-role-id { color: var(--text-muted); font-size: var(--text-sm); font-weight: 400; }
+.tenant-workers-page .worker-actions { display: flex; align-items: start; gap: 16px; }
+.tenant-workers-page .worker-advanced { min-width: 0; }
+.tenant-workers-page .worker-advanced summary { min-height: var(--control-height-sm); align-content: center; cursor: pointer; white-space: nowrap; font-size: var(--text-md); }
+.tenant-workers-page .worker-advanced[open] summary { margin-bottom: 12px; }
+.tenant-workers-page .worker-advanced .form-group { margin-top: 12px; }
+.tenant-workers-page .worker-feedback { max-width: 28em; margin: 12px 0 0; overflow-wrap: anywhere; color: var(--danger); }
+#worker-models { margin-top: 16px; padding-top: 24px; border-top: 1px solid var(--border); scroll-margin-top: 24px; }
+.runtime-settings-panel { min-width: 0; padding-top: 28px; }
+.runtime-settings-panel .managed-form { display: grid; gap: 28px; }
+.runtime-settings-panel fieldset { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px 64px; min-width: 0; border: 0; margin: 0; padding: 0; }
+.runtime-settings-panel h3 { margin: 0 0 20px; font-size: var(--text-section); font-weight: 600; }
+.runtime-unit { margin-left: 10px; color: var(--text-muted); font-size: var(--text-sm); font-weight: 400; }
+.runtime-fields { display: grid; gap: 16px; max-width: 600px; }
+.runtime-fields .form-group { display: grid; grid-template-columns: minmax(0, 1fr) 160px; gap: 24px; align-items: center; margin: 0; }
+.runtime-settings-panel .section-desc { margin: 16px 0 0; max-width: 65em; font-size: var(--text-sm); line-height: 1.7; }
+.runtime-advanced { grid-column: 1 / -1; border-top: 1px solid var(--border); padding-top: 16px; }
+.runtime-advanced summary { cursor: pointer; font-size: var(--text-md); min-height: 38px; align-content: center; }
+.runtime-advanced[open] summary { margin-bottom: 20px; }
+.runtime-save-actions { display: flex; align-items: center; justify-content: space-between; gap: 24px; border-top: 1px solid var(--border); padding-top: 20px; }
+.runtime-save-actions .section-desc { margin: 0; }
+.runtime-load-status { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: var(--text-sm); color: var(--text-muted); }
+.runtime-review { display: grid; justify-items: start; gap: 16px; overflow-x: auto; padding: 20px; background: var(--bg-inset); border: 1px solid var(--border); border-radius: 8px; }
+.runtime-review .worker-table { min-width: 600px; }
+.runtime-review p { margin: 0; }
+@media (max-width: 640px) { .tenant-workers-page { padding-inline: 12px; } }
+@container (max-width: 900px) { .runtime-settings-panel fieldset { grid-template-columns: minmax(0, 1fr); } }
+@container (max-width: 600px) { .runtime-save-actions { align-items: start; flex-direction: column; } }
+@container (max-width: 360px) { .runtime-fields .form-group { grid-template-columns: minmax(0, 1fr); gap: 8px; } .runtime-fields .ui-input { max-width: 160px; } }

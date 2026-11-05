@@ -17,10 +17,9 @@ export function fetchReportMarkdown(url: string, signal?: AbortSignal) {
 export function vulnerabilityReportUrl(
   projectId: string,
   vulnerabilityId: string,
-  templateKey: string,
   observationId?: string,
 ) {
-  const query = new URLSearchParams({ template_key: templateKey })
+  const query = new URLSearchParams()
   if (observationId) query.set('observation_id', observationId)
   return `/projects/${encodeURIComponent(projectId)}/vulnerabilities/${encodeURIComponent(vulnerabilityId)}/report?${query}`
 }

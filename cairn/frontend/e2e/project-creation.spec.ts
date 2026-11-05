@@ -63,6 +63,11 @@ async function mockCreation(page: Page, createStatus = 422) {
       '/library-catalog': [
         { key: 'reference-check', name: '接口参考资料', latest_version: 1, file_count: 2 },
       ],
+      '/library-catalog/reference-check/manifest': {
+        library_key: 'reference-check', library_name: '接口参考资料', version: 1,
+        digest_sha256: 'a'.repeat(64), file_count: 2, selection_proof: 'controlled-proof',
+        files: ['guide.md', 'docs/intro.md'].map((path) => ({ path, size_bytes: 1, sha256: 'b'.repeat(64) })),
+      },
       '/project-resource-config': resourceConfig,
       '/monitoring/summary': {
         project_count: 0,
@@ -136,7 +141,7 @@ test('creation HTTP-equivalent randomUUID absence and optional cache failure sti
   await page.locator('#np-origin-input').fill('  仅核验已有资料\n排除任何外部访问  ')
   await page.locator('#np-goal-input').fill('保留用户目标')
   await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeEnabled()
-  await expect(page.locator('#np-proxy-trigger')).toContainText('直接连接')
+  await expect(dialog.getByLabel('连接方式', { exact: true })).toContainText('直接连接')
   expect(await page.evaluate(() => typeof crypto.randomUUID)).toBe('undefined')
   await dialog.getByRole('button', { name: '创建并启动' }).click()
   await expect(dialog.getByText('受控字段拒绝', { exact: true })).toBeVisible()
@@ -144,13 +149,12 @@ test('creation HTTP-equivalent randomUUID absence and optional cache failure sti
   await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeEnabled()
   expect(submitted).toHaveLength(1)
   for (const [index, mode, label] of [[1, 'once', '单次定时'], [2, 'daily', '每日重复'], [3, 'weekly', '每周重复']] as const) {
-    await page.locator('#schedule-mode').click()
-    await page.getByRole('option', { name: label, exact: true }).click()
+    await dialog.locator(`.schedule-mode-options label:has(input[value="${mode}"])`).click()
+    await expect(dialog.getByRole('radio', { name: label, exact: true })).toBeChecked()
     await page.locator('#schedule-timezone').fill('Asia/Shanghai')
     await page.locator('#schedule-start').fill('2099-06-01T09:00')
-    await dialog.getByRole('button', { name: '完成设置', exact: true }).click()
     await expect(dialog.locator('#np-targets')).toHaveCount(0)
-    await expect(page.locator('#np-proxy-trigger')).toContainText('直接连接')
+    await expect(dialog.getByLabel('连接方式', { exact: true })).toContainText('直接连接')
     await dialog.getByRole('button', { name: mode === 'once' ? '保存单次预约' : '保存重复计划', exact: true }).click()
     await expect(dialog.getByText('受控 Origin 计划拒绝', { exact: true })).toBeVisible()
     expect(submitted).toHaveLength(index + 1)
@@ -188,18 +192,17 @@ test('creation uses fixed tenant Workers without selection and preserves indepen
   const dialog = page.getByRole('dialog', { name: '新建项目', exact: true })
   await expect(dialog.locator('#np-worker-template')).toHaveCount(0)
   await expect(dialog.getByRole('checkbox', { name: /选择 Worker/ })).toHaveCount(0)
-  await expect(page.locator('#np-proxy-trigger')).toHaveAttribute('aria-expanded', 'false')
-  await expect(page.locator('#np-proxy-trigger')).toContainText('直接连接')
+  await expect(dialog.getByLabel('连接方式', { exact: true })).toBeVisible()
+  await expect(dialog.getByLabel('连接方式', { exact: true })).toContainText('直接连接')
+  await expect(dialog.getByRole('textbox', { name: '代理地址', exact: true })).toHaveCount(0)
   await page.locator('#np-title').fill('受控固定 Worker 创建')
-  await page.locator('#np-proxy-trigger').click()
   await dialog.getByLabel('连接方式', { exact: true }).click()
   await page.getByRole('option', { name: 'HTTP 代理', exact: true }).click()
-  await dialog.getByLabel('代理地址', { exact: true }).fill('proxy.example.test')
-  await dialog.getByLabel('代理端口', { exact: true }).fill('8080')
+  await dialog.getByRole('textbox', { name: '代理地址', exact: true }).fill('proxy.example.test')
+  await dialog.getByRole('spinbutton', { name: '代理端口', exact: true }).fill('8080')
   await refreshCreationQueries(page)
-  await expect(dialog.getByLabel('代理地址', { exact: true })).toHaveValue('proxy.example.test')
-  await expect(page.locator('#np-proxy-trigger')).toContainText('HTTP 代理')
-  await dialog.getByRole('button', { name: '完成设置', exact: true }).click()
+  await expect(dialog.getByRole('textbox', { name: '代理地址', exact: true })).toHaveValue('proxy.example.test')
+  await expect(dialog.getByLabel('连接方式', { exact: true })).toContainText('HTTP 代理')
   await dialog.getByRole('button', { name: '创建并启动' }).click()
   await expect(dialog.getByText('受控字段拒绝', { exact: true })).toBeVisible()
   expect(immediate).toHaveLength(1)
@@ -208,15 +211,14 @@ test('creation uses fixed tenant Workers without selection and preserves indepen
   for (const [mode, label] of [
     ['once', '单次定时'], ['daily', '每日重复'], ['weekly', '每周重复'],
   ]) {
-    await page.locator('#schedule-mode').click()
-    await page.getByRole('option', { name: label, exact: true }).click()
+    await dialog.locator(`.schedule-mode-options label:has(input[value="${mode}"])`).click()
+    await expect(dialog.getByRole('radio', { name: label, exact: true })).toBeChecked()
     await page.locator('#schedule-timezone').fill('Asia/Shanghai')
     await page.locator('#schedule-start').fill('2099-06-01T09:00')
     if (mode !== 'once') {
       await page.locator('#schedule-end').fill('2099-06-30')
       await page.locator('#schedule-max').fill('2')
     }
-    await dialog.getByRole('button', { name: '完成设置', exact: true }).click()
     await dialog.getByRole('button', { name: mode === 'once' ? '保存单次预约' : '保存重复计划', exact: true }).click()
     await expect.poll(() => schedules.length).toBe(mode === 'once' ? 1 : mode === 'daily' ? 2 : 3)
     expect(schedules.at(-1)).toMatchObject({ mode, project: { test_egress: { mode: 'http', host: 'proxy.example.test', port: 8080 } } })
@@ -279,7 +281,7 @@ test('Worker configuration rejection preserves creation input and historical sch
   await page.locator('#np-title').fill('保留固定 Worker 拒绝草稿')
   await page.locator('#np-origin-input').fill('不丢失用户原始背景')
   await dialog.getByRole('button', { name: '创建并启动' }).click()
-  await expect(dialog.getByText('Worker explore (worker-explore) 不可用：model_unconfigured', { exact: true })).toBeVisible()
+  await expect(dialog.getByRole('alert')).toContainText('Worker explore (worker-explore) 不可用：model_unconfigured')
   const configuration = dialog.getByRole('link', { name: '前往 Worker 配置' })
   await expect(configuration).toHaveAttribute('href', '#/console/workers')
   await expect(configuration).toHaveAttribute('target', '_blank')
@@ -291,7 +293,7 @@ test('Worker configuration rejection preserves creation input and historical sch
   const editor = page.getByRole('dialog', { name: '编辑未来配置', exact: true })
   await expect(editor.locator('#np-worker-template')).toHaveCount(0)
   await expect(editor.getByRole('checkbox', { name: /选择 Worker/ })).toHaveCount(0)
-  await expect(editor.locator('#np-proxy-trigger')).toContainText('直接连接')
+  await expect(editor.getByLabel('连接方式', { exact: true })).toContainText('直接连接')
   await editor.getByRole('button', { name: '保存未来配置' }).click()
   await expect.poll(() => updates.length).toBe(1)
   expect(updates[0]).toMatchObject({ version: 1, project: { origin: '历史背景', targets: [] } })
@@ -300,11 +302,13 @@ test('Worker configuration rejection preserves creation input and historical sch
   await expect(editor.getByText('受控历史组合拒绝', { exact: true })).toBeVisible()
 })
 
-test('project dialog preserves edits, nests the library picker, contains focus and scrolls at desktop and narrow widths', async ({
+test('project dialog preserves edits, nests the library picker, contains focus and scrolls on desktop', async ({
   page,
 }) => {
   await mockCreation(page)
-  await page.setViewportSize({ width: 1440, height: 900 })
+  const pageErrors: string[] = []
+  page.on('pageerror', (error) => pageErrors.push(error.message))
+  await page.setViewportSize({ width: 1920, height: 1080 })
   await page.goto('/#/projects')
   const trigger = page.getByRole('button', { name: '新建项目', exact: true }).first()
   await trigger.click()
@@ -312,7 +316,7 @@ test('project dialog preserves edits, nests the library picker, contains focus a
   await expect(dialog).toBeVisible()
   await expect(page.locator('#np-title')).toBeFocused()
   await expect(dialog.getByRole('button', { name: '关闭', exact: true })).toBeVisible()
-  await expect(page.locator('#np-proxy-trigger')).toHaveAttribute('aria-expanded', 'false')
+  await expect(dialog.getByLabel('连接方式', { exact: true })).toContainText('直接连接')
   await page.keyboard.press('Escape')
   await expect(dialog).not.toBeVisible()
   await expect(trigger).toBeFocused()
@@ -320,23 +324,27 @@ test('project dialog preserves edits, nests the library picker, contains focus a
   await trigger.click()
   await page.locator('#np-title').fill('受控弹窗检查')
   await page.locator('#np-origin-input').fill('保留用户改写的背景与资料说明')
-  await expect(dialog.locator('#np-proxy-settings')).not.toBeVisible()
-  await expect(dialog.locator('#np-timing-settings')).not.toBeVisible()
-  await page.screenshot({
-    path: test.info().outputPath('project-dialog-compact.png'),
-    fullPage: true,
-  })
-  await dialog.locator('.project-materials > summary').click()
-  await page.getByRole('button', { name: '从资料库选择', exact: true }).click()
+  await expect(dialog.locator('#np-proxy-settings')).toBeVisible()
+  await expect(dialog.locator('#np-timing-settings')).toBeVisible()
+  await expect(dialog.getByRole('textbox', { name: '代理地址', exact: true })).toHaveCount(0)
+  await page.screenshot({ path: test.info().outputPath('project-dialog-default.png') })
+  await expect(dialog.getByText('安全约束文件的资料库和路径尚未确认，无法加入。请明确关闭安全限制后继续。')).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeDisabled()
+  await dialog.getByRole('switch', { name: '安全限制' }).uncheck()
+  await dialog.getByRole('button', { name: '从资料库选择', exact: true }).click()
   const picker = page.getByRole('dialog', { name: '从资料库选择', exact: true })
-  await picker.getByRole('button', { name: /接口参考资料/ }).click()
+  const library = picker.getByRole('checkbox', { name: '选择资料库 接口参考资料 (reference-check)' })
+  await library.check()
+  await picker.getByRole('button', { name: '展开 接口参考资料' }).click()
+  await picker.getByRole('checkbox', { name: '选择文件 reference-check guide.md' }).uncheck()
+  await expect(library).toHaveJSProperty('indeterminate', true)
+  await page.screenshot({ path: test.info().outputPath('project-library-subset.png') })
   await page.keyboard.press('Escape')
   await expect(picker).not.toBeVisible()
   await expect(dialog).toBeVisible()
-  await expect(dialog.getByText('资料库 · 接口参考资料')).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '移除 reference-check v1 docs/intro.md' })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '移除 reference-check v1 guide.md' })).toHaveCount(0)
   await expect(dialog.getByRole('button', { name: '从资料库选择', exact: true })).toBeFocused()
-  await dialog.getByRole('button', { name: '取消关联' }).click()
-  await expect(dialog.getByText('资料库 · 接口参考资料')).not.toBeVisible()
 
   await page.keyboard.press('Escape')
   const discard = page.getByRole('alertdialog', { name: '放弃本次填写？' })
@@ -346,60 +354,54 @@ test('project dialog preserves edits, nests the library picker, contains focus a
   await page.locator('.ui-dialog__overlay').click({ position: { x: 4, y: 4 }, force: true })
   await expect(dialog).toBeVisible()
 
-  // 展开当前可编辑的代理字段，保留长表单的滚动与焦点覆盖。
-  await page.locator('#np-proxy-trigger').click()
+  await dialog.locator('.schedule-mode-options label:has(input[value="once"])').click()
+  await expect(dialog.getByRole('radio', { name: '单次定时' })).toBeChecked()
+  await expect(dialog.locator('#schedule-timezone')).toBeVisible()
   await dialog.getByLabel('连接方式', { exact: true }).click()
   await page.getByRole('option', { name: 'HTTP 代理', exact: true }).click()
-  await dialog.getByLabel('代理地址', { exact: true }).fill('proxy.example.test')
-  await dialog.getByLabel('代理端口', { exact: true }).fill('8080')
-  for (const width of [1440, 480]) {
-    await page.setViewportSize({ width, height: 900 })
-    if ((await page.locator('#np-proxy-trigger').getAttribute('aria-expanded')) === 'false')
-      await page.locator('#np-proxy-trigger').click()
-    const geometry = await dialog.evaluate((element) => {
-      const body = element.querySelector<HTMLElement>('.ui-dialog__body')!
-      const footer = element.querySelector<HTMLElement>('.ui-dialog__footer')!
-      const header = element.querySelector<HTMLElement>('.ui-dialog__header')!
-      const unobstructed = (region: HTMLElement) => {
-        const rect = region.getBoundingClientRect()
-        return element.contains(
-          document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2),
-        )
-      }
-      body.scrollTop = 0
-      return {
-        horizontalOverflow: element.scrollWidth > element.clientWidth,
-        scrollable: body.scrollHeight > body.clientHeight,
-        footerBottom: footer.getBoundingClientRect().bottom,
-        viewportHeight: innerHeight,
-        headerUnobstructed: unobstructed(header),
-        footerUnobstructed: unobstructed(footer),
-      }
-    })
-    expect(geometry.horizontalOverflow).toBe(false)
-    expect(geometry.scrollable).toBe(true)
-    expect(geometry.footerBottom).toBeLessThanOrEqual(geometry.viewportHeight)
-    expect(geometry.headerUnobstructed).toBe(true)
-    expect(geometry.footerUnobstructed).toBe(true)
-    await page.screenshot({
-      path: test.info().outputPath(`project-dialog-${width}-top.png`),
-      fullPage: true,
-    })
-    await dialog.locator('.ui-dialog__body').evaluate((body) => {
-      body.scrollTop = body.scrollHeight
-    })
-    await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeVisible()
-    await page.screenshot({
-      path: test.info().outputPath(`project-dialog-${width}.png`),
-      fullPage: true,
-    })
-    for (let i = 0; i < 20; i++) {
-      await page.keyboard.press('Tab')
-      expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(
-        true,
-      )
+  await dialog.getByRole('textbox', { name: '代理地址', exact: true }).fill('proxy.example.test')
+  await dialog.getByRole('spinbutton', { name: '代理端口', exact: true }).fill('8080')
+  const geometry = await dialog.evaluate((element) => {
+    const body = element.querySelector<HTMLElement>('.ui-dialog__body')!
+    const footer = element.querySelector<HTMLElement>('.ui-dialog__footer')!
+    const header = element.querySelector<HTMLElement>('.ui-dialog__header')!
+    const main = element.querySelector<HTMLElement>('.creation-main')!.getBoundingClientRect()
+    const settings = element.querySelector<HTMLElement>('.creation-settings')!.getBoundingClientRect()
+    const unobstructed = (region: HTMLElement) => {
+      const rect = region.getBoundingClientRect()
+      return element.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2))
     }
+    body.scrollTop = 0
+    return {
+      viewport: [innerWidth, innerHeight],
+      scale: getComputedStyle(document.documentElement).getPropertyValue('--ui-scale').trim(),
+      mainWidth: main.width,
+      settingsWidth: settings.width,
+      horizontalOverflow: element.scrollWidth > element.clientWidth,
+      scrollable: body.scrollHeight > body.clientHeight,
+      footerBottom: footer.getBoundingClientRect().bottom,
+      headerUnobstructed: unobstructed(header),
+      footerUnobstructed: unobstructed(footer),
+    }
+  })
+  expect(geometry.viewport).toEqual([1920, 1080])
+  expect(Number(geometry.scale)).toBe(0.9)
+  expect(geometry.mainWidth).toBeGreaterThan(geometry.settingsWidth)
+  expect(geometry.horizontalOverflow).toBe(false)
+  expect(geometry.scrollable).toBe(true)
+  expect(geometry.footerBottom).toBeLessThanOrEqual(1080)
+  expect(geometry.headerUnobstructed).toBe(true)
+  expect(geometry.footerUnobstructed).toBe(true)
+  await page.screenshot({ path: test.info().outputPath('project-dialog-timing-proxy.png') })
+  await dialog.locator('.ui-dialog__body').evaluate((body) => { body.scrollTop = body.scrollHeight })
+  await expect(dialog.getByRole('button', { name: '保存单次预约' })).toBeVisible()
+  for (let i = 0; i < 20; i++) {
+    await page.keyboard.press('Tab')
+    expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true)
   }
+  await dialog.getByRole('radio', { name: '单次定时' }).focus()
+  await page.keyboard.press('ArrowLeft')
+  await expect(dialog.getByRole('radio', { name: '立即启动' })).toBeChecked()
   const payloads: Array<Record<string, unknown>> = []
   page.on('request', (request) => {
     if (new URL(request.url()).pathname === '/projects' && request.method() === 'POST')
@@ -407,23 +409,26 @@ test('project dialog preserves edits, nests the library picker, contains focus a
   })
   await expect(page.locator('#np-explore-deadline')).toHaveCount(0)
   await expect(page.locator('#np-authorization-expires-at')).toHaveCount(0)
-  await page.keyboard.press('Escape')
-  await expect(dialog.locator('#np-proxy-settings')).not.toBeVisible()
-  await expect(page.locator('#np-proxy-trigger')).toBeFocused()
   await dialog.getByRole('button', { name: '创建并启动' }).click()
   expect(payloads).toHaveLength(1)
   expect(payloads[0]).toMatchObject({
     origin: '保留用户改写的背景与资料说明',
     scenario: 'goal-driven-v1',
-    library_keys: [],
+    library_selections: [{ library_key: 'reference-check', version: 1, paths: ['docs/intro.md'], proof: 'controlled-proof' }],
     explore_deadline: null,
     authorization_expires_at: null,
   })
   expect(payloads[0]).not.toHaveProperty('targets')
   expect(payloads[0]).not.toHaveProperty('tenant_worker_ids')
-  await expect(dialog.getByText('受控字段拒绝', { exact: true })).toBeVisible()
+  const rejection = dialog.getByRole('alert').filter({ hasText: '受控字段拒绝' })
+  await expect(rejection).toBeVisible()
+  await expect(rejection.getByRole('button', { name: '按原请求重试' })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeDisabled()
+  await rejection.getByRole('button', { name: '修改内容并使用新请求' }).click()
   await expect(page.locator('#np-title')).toHaveValue('受控弹窗检查')
+  await expect(dialog.getByRole('button', { name: '移除 reference-check v1 docs/intro.md' })).toBeVisible()
   await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeEnabled()
+  expect(pageErrors).toEqual([])
 })
 
 test('the project list opens the dialog and a lost creation response cannot be blindly repeated or discarded', async ({
@@ -435,6 +440,7 @@ test('the project list opens the dialog and a lost creation response cannot be b
   const dialog = page.getByRole('dialog', { name: '新建项目', exact: true })
   await expect(dialog).toBeVisible()
   await expect(page).toHaveURL(/#\/projects$/)
+  await dialog.getByRole('switch', { name: '安全限制' }).uncheck()
   await page.locator('#np-title').fill('未知创建结果')
   await dialog.getByRole('button', { name: '创建并启动' }).click()
   await expect(dialog.getByText('保存结果未确认', { exact: true })).toBeVisible()
@@ -449,7 +455,7 @@ test('the project list opens the dialog and a lost creation response cannot be b
   expect(requests.some((request) => request.startsWith('DELETE '))).toBe(false)
 })
 
-test('scheduled creation preserves edited content, exposes settings on demand and keeps timing payloads', async ({
+test('scheduled creation preserves edited content, exposes inline settings and keeps timing payloads', async ({
   page,
 }) => {
   const requests = await mockCreation(page)
@@ -547,20 +553,15 @@ test('scheduled creation preserves edited content, exposes settings on demand an
   await page.goto('/#/projects')
   await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
   const dialog = page.getByRole('dialog', { name: '新建项目', exact: true })
-  await expect(dialog.locator('.scenario-settings')).toHaveAttribute('open')
-  await expect(dialog.locator('.scenario-purpose')).toHaveCount(0)
-  await expect(dialog.locator('.scenario-desc')).toHaveCount(0)
+  await expect(dialog.locator('#np-scenario')).toBeVisible()
   await page.locator('#np-title').fill('受控计划界面检查')
   await page.locator('#np-origin-input').fill('用户自行改写的背景')
   await page.locator('#np-goal-input').fill('用户自行改写的目标')
-  await dialog.getByRole('button', { name: /资料核验场景/ }).click()
+  await dialog.locator('#np-scenario').click()
+  await page.getByRole('option', { name: '资料核验场景', exact: true }).click()
   await expect(page.locator('#np-origin-input')).toHaveValue('用户自行改写的背景')
   await expect(page.locator('#np-goal-input')).toHaveValue('用户自行改写的目标')
-  await expect(dialog.locator('.scenario-settings')).toHaveAttribute('open')
-  await dialog.locator('.scenario-settings > summary').click()
-  await expect(dialog.locator('.scenario-settings')).not.toHaveAttribute('open')
-  await dialog.locator('.scenario-settings > summary').click()
-  await expect(dialog.getByText('查看场景填写建议', { exact: true })).toHaveCount(0)
+  await expect(dialog.locator('#np-scenario')).toContainText('资料核验场景')
   await page.screenshot({
     path: test.info().outputPath('project-dialog-scenario.png'),
     fullPage: true,
@@ -571,8 +572,8 @@ test('scheduled creation preserves edited content, exposes settings on demand an
     ['daily', '每日重复'],
     ['weekly', '每周重复'],
   ]) {
-    await page.locator('#schedule-mode').click()
-    await page.getByRole('option', { name: label, exact: true }).click()
+    await dialog.locator(`.schedule-mode-options label:has(input[value="${mode}"])`).click()
+    await expect(dialog.getByRole('radio', { name: label, exact: true })).toBeChecked()
     await page.locator('#schedule-timezone').fill('Asia/Shanghai')
     await page.locator('#schedule-start').fill('2099-06-01T09:00')
     if (mode !== 'once') {
@@ -592,20 +593,16 @@ test('scheduled creation preserves edited content, exposes settings on demand an
     })
     expect(previews.at(-1)!.project).not.toHaveProperty('targets')
     expect(previews.at(-1)!.project).not.toHaveProperty('tenant_worker_ids')
-    await dialog.getByRole('button', { name: '完成设置', exact: true }).click()
-    await expect(page.locator('#np-timing-trigger')).toContainText('Asia/Shanghai')
-    await expect(page.locator('#np-timing-trigger')).toContainText(
-      mode === 'once' ? '2099-06-01 09:00' : '14:30',
+    await expect(page.locator('#schedule-timezone')).toHaveValue('Asia/Shanghai')
+    await expect(page.locator(mode === 'once' ? '#schedule-start' : '#schedule-local-time')).toHaveValue(
+      mode === 'once' ? '2099-06-01T09:00' : '14:30',
     )
-    await expect(page.locator('#np-proxy-trigger')).toContainText('直接连接')
+    await expect(dialog.getByLabel('连接方式', { exact: true })).toContainText('直接连接')
   }
   expect(previews.at(-1)).toMatchObject({ local_time: '14:30', weekdays: [0, 1], max_runs: 2 })
   await page.screenshot({ path: test.info().outputPath('schedule-timing.png'), fullPage: true })
-  await page.locator('#np-timing-trigger').click()
   await dialog.locator('.timing-preview').scrollIntoViewIfNeeded()
   await page.screenshot({ path: test.info().outputPath('schedule-preview.png'), fullPage: true })
-  await page.keyboard.press('Escape')
-  await expect(page.locator('#np-timing-trigger')).toBeFocused()
   await expect(dialog).toBeVisible()
   await expect(dialog.locator('#np-targets')).toHaveCount(0)
   await expect(dialog.getByRole('button', { name: '添加授权目标' })).toHaveCount(0)
@@ -636,11 +633,11 @@ test('scheduled creation preserves edited content, exposes settings on demand an
     .getByRole('button', { name: '放弃并关闭' })
     .click()
   await expect(dialog).not.toBeVisible()
-  await page.getByRole('button', { name: '计划任务', exact: true }).click()
+  await page.getByRole('navigation', { name: '项目与计划视图' }).getByRole('link', { name: '启动计划', exact: true }).click()
   const entry = page.getByRole('link', { name: '受控每日计划', exact: true })
   await expect(entry).toBeVisible()
   await expect(entry).toHaveAttribute('href', '#/project-schedules/schedule-check')
-  await expect(page.getByText('尚未生成项目', { exact: true })).toBeVisible()
+  await expect(page.getByText('无可进入的关联项目', { exact: true })).toBeVisible()
   await page.screenshot({ path: test.info().outputPath('schedule-list.png'), fullPage: true })
   await entry.click()
   await expect(page.getByRole('heading', { name: '受控每日计划', exact: true })).toBeVisible()
@@ -675,23 +672,18 @@ test('once stop options use the plan timezone, isolate mode drafts and keep the 
   await page.goto('/#/projects')
   await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
   const dialog = page.getByRole('dialog', { name: '新建项目', exact: true })
-  const scene = dialog.locator('.scenario-settings')
-  await expect(scene).toHaveAttribute('open')
-  await scene.locator('summary').click()
+  await expect(dialog.locator('#np-scenario')).toContainText('目标驱动探索')
   await page.locator('#np-title').fill('单次可选停止验证')
-  await expect(scene).not.toHaveAttribute('open')
-  await scene.locator('summary').click()
-  await dialog.getByRole('button', { name: /目标驱动探索/ }).click()
-  await expect(scene).toHaveAttribute('open')
-  await dialog.locator('.project-materials > summary').click()
-  await page.locator('#np-proxy-trigger').click()
+  await expect(dialog.locator('.project-materials')).toBeVisible()
+  await expect(dialog.getByLabel('连接方式', { exact: true })).toBeVisible()
   for (const text of ['场景 ·', '自由描述已有信息', '自由描述希望达成的目标', '文件先加入临时批次', '文件先进入临时批次', '普通上传按原始字节保存', '项目只会使用这里选择的 Tenant Worker', '探索场景 (Scenario)', '执行边界'])
     await expect(dialog.getByText(text, { exact: false })).toHaveCount(0)
   await expect(page.locator('#np-authorization-expires-at')).toHaveCount(0)
   await page.screenshot({ path: test.info().outputPath('creation-trimmed.png'), fullPage: true })
   async function mode(label: string) {
-    await page.locator('#schedule-mode').click()
-    await page.getByRole('option', { name: label, exact: true }).click()
+    const radio = dialog.getByRole('radio', { name: label, exact: true })
+    await dialog.locator(`.schedule-mode-options label:has(input[aria-label="${label}"])`).click()
+    await expect(radio).toBeChecked()
   }
   async function stop(label: string) {
     await page.locator('#schedule-stop-mode').click()
@@ -709,10 +701,9 @@ test('once stop options use the plan timezone, isolate mode drafts and keep the 
   expect(submissions[0]).toMatchObject({ end_date: null, max_runs: null, project: { explore_deadline: null, authorization_expires_at: null } })
   await stop('指定停止时间')
   await page.locator('#np-origin-input').fill('')
-  await dialog.getByRole('button', { name: '完成设置', exact: true }).click()
   await dialog.getByRole('button', { name: '保存单次预约' }).click()
   await expect(dialog.locator('#np-origin').getByText('已知信息不能为空')).toBeVisible()
-  await expect(page.locator('#np-timing-settings')).not.toBeVisible()
+  await expect(page.locator('#np-timing-settings')).toBeVisible()
   await expect.poll(() => dialog.locator('#np-origin').evaluate((field) => {
     const body = field.closest('.ui-dialog__body')!
     const rect = field.getBoundingClientRect(), view = body.getBoundingClientRect()
@@ -749,8 +740,7 @@ test('once stop options use the plan timezone, isolate mode drafts and keep the 
   await expect.poll(() => submissions.length).toBe(4)
   expect(submissions[3]).toMatchObject({ end_date: null, max_runs: null, project: { explore_deadline: null } })
   await page.setViewportSize({ width: 480, height: 900 })
-  await page.locator('#np-timing-trigger').click()
-  await expect(page.locator('#np-timing-trigger')).toContainText('不限制停止时间')
+  await expect(page.locator('#schedule-stop-mode')).toContainText('不限制停止时间')
   expect(await dialog.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(false)
   await page.screenshot({ path: test.info().outputPath('once-stop-narrow.png'), fullPage: true })
 })
@@ -826,9 +816,8 @@ test('historical once rescheduling and recurring edits preserve or explicitly cl
   await page.goto('/#/project-schedules/recurring-history')
   await page.getByRole('button', { name: '编辑未来配置' }).click()
   const editor = page.getByRole('dialog', { name: '编辑未来配置', exact: true })
-  await expect(editor.locator('#np-proxy-trigger')).toContainText('直接连接')
-  if (await page.locator('#np-timing-trigger').getAttribute('aria-expanded') !== 'true')
-    await page.locator('#np-timing-trigger').click()
+  await expect(editor.getByLabel('连接方式', { exact: true })).toContainText('直接连接')
+  await expect(editor.locator('#np-timing-settings')).toBeVisible()
   await expect(editor.locator('#np-proxy-settings #np-explore-deadline')).toHaveCount(0)
   await expect(editor.getByRole('heading', { name: '既有期限' })).toBeVisible()
   await editor.getByRole('button', { name: '保存未来配置' }).click()
@@ -843,7 +832,7 @@ test('historical once rescheduling and recurring edits preserve or explicitly cl
   expect(pageErrors).toEqual([])
 })
 
-test('resource session survives collapsing during upload, failure, unsaved paths and unknown results', async ({
+test('resource session survives the library picker during upload, failure, unsaved paths and unknown results', async ({
   page,
 }) => {
   const requests = await mockCreation(page)
@@ -894,15 +883,22 @@ test('resource session survives collapsing during upload, failure, unsaved paths
       await route.fulfill({ json: currentBatch() })
     } else await route.fulfill({ status: 503, json: { detail: '禁止真实资料操作' } })
   })
-  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.setViewportSize({ width: 1920, height: 1080 })
   await page.goto('/#/projects')
   await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
   const dialog = page.getByRole('dialog', { name: '新建项目', exact: true })
+  await dialog.getByRole('switch', { name: '安全限制' }).uncheck()
   await page.locator('#np-title').fill('受控资料会话检查')
   const materials = dialog.locator('.project-materials')
-  const summary = materials.locator(':scope > summary')
-  await summary.click()
+  const summary = materials.locator('.materials-summary')
   const uploader = materials.locator('.resource-batch-uploader')
+  async function openAndClosePicker() {
+    await dialog.getByRole('button', { name: '从资料库选择', exact: true }).click()
+    const picker = page.getByRole('dialog', { name: '从资料库选择', exact: true })
+    await expect(picker).toBeVisible()
+    await picker.getByRole('button', { name: '完成选择', exact: true }).click()
+    await expect(picker).not.toBeVisible()
+  }
   await uploader
     .locator('input[type=file]')
     .first()
@@ -912,44 +908,43 @@ test('resource session survives collapsing during upload, failure, unsaved paths
       { name: 'unknown.txt', mimeType: 'text/plain', buffer: Buffer.from('end') },
     ])
   await expect.poll(() => Boolean(releaseFailure)).toBe(true)
-  await summary.click()
+  await openAndClosePicker()
   await expect(summary).toContainText('上传中')
   await expect(summary).toContainText('本地文件 3')
   releaseFailure!()
   await expect(summary).toContainText('失败 1 项')
   await expect(summary).toContainText('待上传 1 项')
-  await summary.click()
+  await openAndClosePicker()
   await uploader.getByRole('button', { name: '补传', exact: true }).click()
   await expect(summary).not.toContainText('失败 1 项')
   await expect(uploader.locator('.resource-batch-member')).toHaveCount(2)
+  await materials.scrollIntoViewIfNeeded()
+  await page.screenshot({ path: test.info().outputPath('resource-file-tags.png'), fullPage: true })
   await uploader.locator('.resource-member-details > summary').first().click()
   const pathInput = uploader.getByRole('textbox', { name: '资源相对路径' }).first()
-  // 构造尚未触发 blur 自动保存的草稿，单独验证折叠不会卸载上传器。
+  // 构造尚未触发 blur 自动保存的草稿，验证打开选择器不会卸载上传器。
   await pathInput.evaluate((element) => {
     const input = element as HTMLInputElement
     input.value = 'unsaved/first.txt'
     input.dispatchEvent(new Event('input', { bubbles: true }))
   })
-  await summary.click()
+  await openAndClosePicker()
   await expect(summary).toContainText('未保存路径 1 项')
-  await summary.click()
   await expect(pathInput).toHaveValue('unsaved/first.txt')
   await page.keyboard.press('Control+Enter')
-  await expect(materials).toHaveAttribute('open')
+  await expect(materials).toBeVisible()
   await expect(dialog.getByText('仍有未完成的资料，请补传、核对或明确移除后再创建。')).toBeVisible()
   await pathInput.fill('first.txt')
   await uploader.getByRole('button', { name: '上传', exact: true }).click()
   await expect(uploader.getByText('资料结果未确认', { exact: true })).toBeVisible()
-  await summary.click()
+  await openAndClosePicker()
   await expect(summary).toContainText('结果未确认')
   await expect(dialog.getByRole('button', { name: '创建并启动' })).toBeDisabled()
-  await page.setViewportSize({ width: 480, height: 900 })
   await summary.scrollIntoViewIfNeeded()
   await page.screenshot({
-    path: test.info().outputPath('resource-session-collapsed.png'),
+    path: test.info().outputPath('resource-session-unknown.png'),
     fullPage: true,
   })
-  await summary.click()
   await expect(uploader.locator('.resource-pending-item')).toContainText('unknown.txt')
   await expect(uploader.locator('.resource-batch-member')).toHaveCount(2)
   expect(filesReceived).toEqual(['first.txt', 'failed.txt', 'failed.txt', 'unknown.txt'])

@@ -32,7 +32,7 @@ defineOptions({ name: 'UiCard', inheritAttrs: false })
   flex-direction: column;
   gap: var(--space-3);
   background: var(--bg-surface);
-  box-shadow: var(--shadow-xs);
+  box-shadow: none;
 }
 
 .ui-card--padding-none {

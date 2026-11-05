@@ -1,33 +1,45 @@
 .tenant-models-panel {
   min-width: 0;
   display: grid;
-  gap: var(--space-3);
+  gap: 16px;
 }
+.tenant-models-panel .resource-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.tenant-models-panel .resource-section-heading h2 { margin: 0; font-size: var(--text-section); font-weight: 600; }
 
 .model-table-container {
   overflow-x: auto;
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
 }
 
 .model-table {
   width: 100%;
+  min-width: 1080px;
+  table-layout: fixed;
   border-collapse: collapse;
   text-align: left;
-  font-size: var(--text-sm);
+  font-size: var(--text-md);
 }
 
 .model-table th,
 .model-table td {
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--border-subtle);
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
 
 .model-table thead {
-  background: var(--bg-surface);
+  background: var(--bg-inset);
   color: var(--text-muted);
 }
+.model-table thead th { padding-block: 10px; font-size: var(--text-sm); }
+.model-table thead th:first-child { width: 32%; }
+.model-table thead th:nth-child(3) { width: 120px; }
+.model-table thead th:nth-child(4) { width: 130px; }
+.model-table thead th:last-child { width: 180px; }
+.model-table tbody tr { height: var(--table-row-height-detail); }
+.model-table tbody tr:hover { background: var(--surface-hover); }
 
 .model-table th {
   font-weight: var(--font-medium);
@@ -37,21 +49,38 @@
   border-bottom: 0;
 }
 
-.model-table th[scope='row'] {
-  min-width: 130px;
-  max-width: 280px;
-  overflow-wrap: anywhere;
+.model-cell-inline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+.model-cell-inline > .model-id {
+  grid-column: 1 / -1;
+  grid-row: 2;
+}
+
+.model-name,
+.model-id {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-protocol {
+  flex: none;
 }
 
 .model-table td:last-child {
-  width: 1%;
   white-space: nowrap;
 }
 
 .model-id {
-  margin-top: var(--space-1);
-  overflow-wrap: anywhere;
   color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: 400;
 }
 
 .tenant-model-dialog .model-form,
@@ -75,17 +104,23 @@
   gap: var(--space-4);
 }
 
+.tenant-model-dialog .model-pricing {
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.tenant-model-dialog .model-pricing legend { padding-inline: var(--space-2); }
+.tenant-model-dialog .model-pricing p { margin-bottom: 0; color: var(--text-muted); font-size: var(--text-sm); }
+.tenant-model-dialog .model-pricing .field-error { color: var(--danger); }
+
 .tenant-model-dialog .model-discovery-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: end;
   gap: var(--space-3);
-}
-
-.tenant-model-dialog .model-enabled {
-  min-height: var(--control-height);
-  display: flex;
-  align-items: center;
 }
 
 .tenant-model-dialog .model-advanced {
@@ -137,7 +172,7 @@
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font: var(--text-sm)/1.55 var(--font-mono);
+  font: var(--text-md)/1.65 var(--font-mono);
 }
 
 @media (max-width: 640px) {

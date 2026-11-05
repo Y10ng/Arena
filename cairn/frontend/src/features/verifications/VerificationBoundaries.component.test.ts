@@ -74,7 +74,7 @@ const SelectStub = defineComponent({
 const OverlayStub = { template: '<div><slot name="title" /><slot name="trigger" /><slot /><slot name="footer" /></div>' }
 const wrappers: VueWrapper[] = []
 const clients: QueryClient[] = []
-async function mountPage(component: typeof NewVerification | typeof VerificationForm | typeof VerificationIntegrations | typeof VulnerabilityDetail | typeof VerificationDetail | typeof EvidenceReader | typeof VerificationSourcePreview, props = {}) {
+async function mountPage(component: typeof NewVerification | typeof VerificationForm | typeof VerificationIntegrations | typeof VulnerabilityDetail | typeof VerificationDetail | typeof EvidenceReader | typeof VerificationSourcePreview, props = {}, realDialogs = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
   clients.push(client)
   const wrapper = mount(component, {
@@ -82,7 +82,7 @@ async function mountPage(component: typeof NewVerification | typeof Verification
     global: {
       plugins: [[VueQueryPlugin, { queryClient: client }]],
       stubs: {
-        UiDialog: OverlayStub, UiDrawer: OverlayStub, UiPopover: OverlayStub, UiSelect: SelectStub,
+        UiDialog: realDialogs ? false : OverlayStub, UiDrawer: OverlayStub, UiPopover: OverlayStub, UiSelect: SelectStub,
         RouterLink: { template: '<a><slot /></a>' },
         MonacoEditor: defineComponent({ props: ['modelValue'], setup: (props, { expose }) => { expose({ selectAll: mocks.selectRaw, selectTextRange: mocks.selectTextRange }); return () => h('pre', { 'data-testid': 'evidence-content' }, props.modelValue) } }), MarkdownPreview: true,
       },
@@ -186,6 +186,28 @@ afterEach(() => {
 })
 
 describe('复测收尾交互边界', () => {
+  it('高级区折叠保留期限和外部编号，主资料与补充说明不被折叠且原样提交', async () => {
+    mocks.createRequest.mockRejectedValue(new ApiError('受控拒绝', 422, {}))
+    const wrapper = await mountPage(NewVerification)
+    const advanced = wrapper.get<HTMLDetailsElement>('.verification-extra-settings')
+    expect(advanced.element.open).toBe(false)
+    expect(wrapper.get('#new-verification-content').element.closest('details')).toBeNull()
+    expect(wrapper.get('#new-verification-origin').element.closest('details')).toBeNull()
+    advanced.element.open = true
+    await wrapper.get('#new-verification-external').setValue('LOCAL-123')
+    await wrapper.get('#new-verification-authorization').setValue('2099-01-01T10:00')
+    advanced.element.open = false
+    await fillManual(wrapper)
+    await submit(wrapper)
+    expect(mocks.createRequest.mock.calls[0]![0]).toMatchObject({
+      external_id: 'LOCAL-123',
+      authorization_expires_at: new Date('2099-01-01T10:00').toISOString(),
+      origin: '仅本地工程资料，不访问目标',
+      report: { type: 'markdown', content: '原正文，保留换行\n第二行' },
+    })
+    expect(advanced.element.open).toBe(false)
+  })
+
   it('本次目标独立提交，响应未知时锁定且重试不改变目标', async () => {
     mocks.createRequest.mockRejectedValue(new TypeError('response lost'))
     const wrapper = await mountPage(NewVerification)
@@ -218,9 +240,12 @@ describe('复测收尾交互边界', () => {
     expect(fields.props('modelValue').mode).toBe('direct')
     fields.vm.$emit('update:modelValue', { mode: 'socks5', host: 'proxy.example.test', port: 1080, auth_action: 'replace', username: 'sample-user', password: 'sample-password' })
     await flushPromises()
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
-    expect(wrapper.getComponent(VerificationForm).vm.canLeave()).toBe(false)
-    expect(confirm).toHaveBeenCalled()
+    const leave = wrapper.getComponent(VerificationForm).vm.canLeave()
+    expect(leave).toBeInstanceOf(Promise)
+    await flushPromises()
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain('放弃本次复测输入')
+    await click(new DOMWrapper(document.body), '继续编辑')
+    await expect(leave).resolves.toBe(false)
     await fillManual(wrapper)
     const store = vi.spyOn(Storage.prototype, 'setItem')
     await submit(wrapper)
@@ -337,7 +362,7 @@ describe('复测收尾交互边界', () => {
   })
 
 
-  it.each([3, 4])('v%s仅展示三段结果并按实际步骤读取证据，不读取输入快照', async (version) => {
+  it.each([3, 4])('v%s保留结论条件，通过阅读切换定位实际证据，不读取输入快照', async (version) => {
     const item = { id: 'http-a', kind: 'http', role: 'primary', source: 'capture', title: '关键交互', request: { artifact_id: 'result-artifact' }, response: null }
     const result = {
       schema_version: version, ...(version === 4 ? { remediation: '**检查归属**\n\n- 增加跨身份验证。' } : {}), outcome: 'not_reproduced', summary: '本次请求被拒绝，不能据此断言已修复。', tested_scope: '仅使用隔离样本，未测试其他身份。', limitations: ['未验证生产环境，不据此判断已修复。'], reason_code: null,
@@ -354,12 +379,15 @@ describe('复测收尾交互边界', () => {
     })
     mocks.artifactPreview.mockResolvedValue({ project_id: 'execution-project', artifact_id: 'result-artifact', content: 'GET /current HTTP/1.1', truncated: false })
     const wrapper = await mountPage(VerificationDetail)
-    expect(wrapper.text()).toContain('历史来源：http://old.example.test/')
-    expect(wrapper.text()).toContain('本次目标：https://new.example.test/instance')
+    const fields = wrapper.get('.verification-object-fields')
+    expect(fields.findAll('div').find((field) => field.get('dt').text() === '历史来源')?.get('dd').text()).toBe('http://old.example.test/')
+    expect(fields.findAll('div').find((field) => field.get('dt').text() === '本次目标')?.get('dd').text()).toBe('https://new.example.test/instance')
     expect(wrapper.find('a[href="https://new.example.test/instance"]').exists()).toBe(false)
-    expect(wrapper.findAll('.verification-report-section h2').map((item) => item.text())).toEqual(['一、漏洞概述', '二、复现过程与数据包', '三、修复建议'])
+    expect(wrapper.get('.verification-process').isVisible()).toBe(false)
+    await click(wrapper, '修复建议')
     if (version === 4) expect(wrapper.get('.verification-remediation strong').text()).toBe('检查归属')
     else expect(wrapper.get('.verification-remediation').text()).toContain('历史结果未记录本轮修复建议')
+    await click(wrapper, '关键证据')
     expect(wrapper.text()).toContain('本次未复现')
     expect(wrapper.text()).toContain('请求未返回受保护内容。')
     expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(0)
@@ -370,7 +398,8 @@ describe('复测收尾交互边界', () => {
     const conclusion = wrapper.get('.verification-conclusion')
     expect(conclusion.text()).toContain(result.tested_scope)
     expect(conclusion.text()).toContain(result.limitations[0])
-    expect(wrapper.find('[role="tablist"]').exists()).toBe(false)
+    expect(wrapper.get('.verification-process').isVisible()).toBe(true)
+    expect(wrapper.get('[role="tab"][data-state="active"]').text()).toBe('测试过程与数据包')
     expect(wrapper.text()).not.toContain('原发现')
     expect(mocks.artifactPreview).toHaveBeenCalledWith('request-a', 'result-artifact', expect.any(AbortSignal))
     expect(mocks.fetchText).not.toHaveBeenCalled()
@@ -411,6 +440,7 @@ describe('复测收尾交互边界', () => {
     expect(wrapper.text()).toContain('同一交互的独立观察原文')
     expect(wrapper.text()).not.toContain('GET /sample HTTP/1.1')
     expect(wrapper.findComponent(EvidenceReader).props('selectedItemId')).toBe('log-a')
+    await click(wrapper, '关键证据')
     await click(wrapper, '受保护响应 · 步骤 2')
     expect(wrapper.findAllComponents(EvidenceReader)).toHaveLength(2)
     expect(wrapper.findAll('.verification-test-step')[1]!.text()).toContain('HTTP/1.1 403 Forbidden')
@@ -458,6 +488,7 @@ describe('复测收尾交互边界', () => {
       expect(wrapper.text()).toContain('本次未记录已执行的测试步骤。')
       expect(wrapper.text()).not.toContain('步骤 1')
     } else {
+      await click(wrapper, '关键证据')
       await click(wrapper, '本轮交互 · 步骤 1')
       expect(wrapper.findAll('.verification-test-step')[0]!.text()).toContain(contents['request-original'])
       expect(wrapper.findAll('.verification-test-step')[1]!.findComponent(EvidenceReader).exists()).toBe(false)
@@ -621,7 +652,7 @@ describe('复测收尾交互边界', () => {
     await click(wrapper, 'Hex')
     expect(mocks.trafficBody).toHaveBeenCalledWith('project-a', 'flow-a', 'request', 0, expect.any(AbortSignal))
     expect(wrapper.get('[data-testid="evidence-content"]').text()).toContain('00000000  00 ff 41 42')
-    expect(wrapper.get('button[aria-label="请求复制当前 Hex 展示"]').exists()).toBe(true)
+    expect(wrapper.find('button[aria-label="请求复制当前 Hex 展示"]').exists()).toBe(true)
     await wrapper.get('button[aria-label="请求更多"]').trigger('click')
     await flushPromises()
     expect(document.body.textContent).toContain('正文 Hex / ASCII 显示已保存的正文原字节')
@@ -824,9 +855,11 @@ describe('复测收尾交互边界', () => {
     })
     const wrapper = await mountPage(VerificationDetail)
     expect(wrapper.text()).toContain('Original historical conclusion remains unchanged.')
-    expect(wrapper.text()).toContain('Historical observations stay in their original language.')
     expect(wrapper.text()).toContain('历史实际限制')
     expect(wrapper.text()).toContain('历史记录未单独记录判断依据')
+    await click(wrapper, '测试过程与数据包')
+    expect(wrapper.get('.verification-process').isVisible()).toBe(true)
+    expect(wrapper.get('.verification-process').text()).toContain('Historical observations stay in their original language.')
     expect(wrapper.find('.verification-test-steps').exists()).toBe(false)
     if (version === 1) {
       expect(wrapper.text()).toContain('历史结果未记录交互配对')
@@ -846,14 +879,46 @@ describe('复测收尾交互边界', () => {
     const materials = wrapper.findComponent({ name: 'VerificationMaterials' })
     materials.vm.$emit('update:files', [{ id: 'pending-a', file, path: 'input.txt', kind: 'other', error: '' }])
     await flushPromises()
-    await click(wrapper, '收起')
+    await click(wrapper, '返回复测表单')
     expect(materials.props('files')[0].file).toBe(file)
     expect(wrapper.text()).toContain('1 个待上传')
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false)
     await click(wrapper, '取消')
-    expect(confirm).toHaveBeenCalledOnce()
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain('待上传文件将丢失')
+    await click(new DOMWrapper(document.body), '继续编辑')
     expect(wrapper.emitted('close')).toBeUndefined()
     expect(materials.props('files')[0].file).toBe(file)
+    // 路由守卫必须等待异步决定，不把 Promise 当成已允许离开。
+    const leave = mocks.leave.mock.calls[0]![0]()
+    expect(leave).toBeInstanceOf(Promise)
+    await flushPromises()
+    await click(new DOMWrapper(document.body), '放弃并离开')
+    await expect(leave).resolves.toBe(true)
+    expect(mocks.createRequest).not.toHaveBeenCalled()
+  })
+
+  it('真实嵌套资料Dialog收起重开保留同一File，放弃确认只关闭所属复测', async () => {
+    const wrapper = await mountPage(VerificationForm, { initialInput: 'manual' }, true)
+    const body = new DOMWrapper(document.body)
+    await click(body, '资料')
+    const file = new File(['保留原件'], 'input.txt', { type: 'text/plain' })
+    const input = body.get('input[type="file"]')
+    Object.defineProperty(input.element, 'files', { value: [file], configurable: true })
+    await input.trigger('change')
+    await flushPromises()
+    expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(2)
+    await click(body, '返回复测表单')
+    expect(wrapper.findComponent({ name: 'VerificationMaterials' }).exists()).toBe(false)
+    expect(body.text()).toContain('1 个待上传')
+    await click(body, '资料（1）')
+    expect(wrapper.getComponent({ name: 'VerificationMaterials' }).props('files')[0].file).toBe(file)
+    await click(body, '返回复测表单')
+    await click(body, '取消')
+    await click(body, '继续编辑')
+    expect(wrapper.emitted('close')).toBeUndefined()
+    expect(body.text()).toContain('1 个待上传')
+    await click(body, '取消')
+    await click(body, '放弃并离开')
+    expect(wrapper.emitted('close')).toHaveLength(1)
     expect(mocks.createRequest).not.toHaveBeenCalled()
   })
 
@@ -899,10 +964,9 @@ describe('复测收尾交互边界', () => {
     expect(wrapper.text()).not.toContain('修改未受理的输入')
     expect(wrapper.get('fieldset').attributes('disabled')).toBeDefined()
     expect(mocks.createRequest).toHaveBeenCalledOnce()
-    const confirm = vi.spyOn(window, 'confirm')
     await click(wrapper, '取消')
     expect(wrapper.emitted('close')).toHaveLength(1)
-    expect(confirm).not.toHaveBeenCalled()
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull()
     expect(mocks.createRequest).toHaveBeenCalledOnce()
   })
 
@@ -932,10 +996,9 @@ describe('复测收尾交互边界', () => {
     expect(wrapper.text()).not.toContain('请求可能已受理')
     expect(wrapper.text()).not.toContain('用原请求重试')
     expect(wrapper.text()).not.toContain('修改未受理的输入')
-    const confirm = vi.spyOn(window, 'confirm')
     await click(wrapper, '取消')
     expect(wrapper.emitted('close')).toHaveLength(1)
-    expect(confirm).not.toHaveBeenCalled()
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull()
     expect(mocks.cancelBatch).not.toHaveBeenCalled()
     expect(mocks.createRequest).toHaveBeenCalledOnce()
   })

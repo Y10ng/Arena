@@ -3,12 +3,16 @@ from __future__ import annotations
 import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from cairn.dispatcher.runtime.browser_sessions import BrowserSessions
+from cairn.dispatcher.runtime.cancellation import TaskCancellation
 from cairn.dispatcher.runtime.process import ManagedProcess, ProcessResult
+from cairn.dispatcher.runtime.traffic_execution import TaskTrafficExecution
 from cairn.dispatcher.tasks.process_runner import run_worker_process
+from cairn.dispatcher.workers.base import DriverResult
 
 
 class DockerAPI:
@@ -104,6 +108,47 @@ def run_phase(manager, phase, *, worker=None, payload_recorder_enabled=False):
         project_id="project-1", task_run_id="run-1",
         payload_recorder_enabled=payload_recorder_enabled,
     )
+
+
+@pytest.mark.parametrize("mismatch", (None, "scope", "cancellation"))
+def test_worker_process_checks_real_traffic_execution_binding_before_start(mismatch):
+    manager = ProcessManager()
+    cancellation = TaskCancellation()
+    stop_scope = Mock(return_value={"termination_confirmed": True})
+    traffic = TaskTrafficExecution(SimpleNamespace(stop_scope=stop_scope), "scope-1", cancellation)
+    cancellation.register_resource(traffic)
+    lookup = Mock(return_value=traffic)
+    manager.traffic_execution = SimpleNamespace(task=lookup)
+    invocation = DriverResult(
+        argv=["worker", "bootstrap"],
+        task_execution_scope_id="scope-other" if mismatch == "scope" else traffic.scope_id,
+    )
+
+    def run():
+        return run_worker_process(
+            manager, "worker", SimpleNamespace(name="mock", type="mock", env={}),
+            invocation, phase="bootstrap", timeout_seconds=30,
+            cancellation=TaskCancellation() if mismatch == "cancellation" else cancellation,
+            project_id="project-1", task_run_id="run-1",
+        )
+
+    if mismatch is not None:
+        with pytest.raises(RuntimeError, match="^traffic_execution_binding_mismatch$"):
+            run()
+        assert traffic.process is None
+        assert manager.api.created == manager.api.controls == []
+        stop_scope.assert_not_called()
+    else:
+        # 复用已有 Docker API 桩，真实绑定必须越过校验并进入 ManagedProcess.start。
+        with run() as result:
+            assert result.returncode == 0 and not result.cancelled
+            assert result.read_stdout() == "worker output"
+        assert traffic.process.execution_started is True
+        assert traffic.process.execution_identity == ("container-1", "exec-1")
+        assert traffic.execution_completed is True
+        stop_scope.assert_called_once_with("scope-1", "control_finished")
+    lookup.assert_called_once_with("project-1", "run-1")
+    assert manager.prepared == []
 
 
 def test_browser_prepare_keeps_payload_path_and_worker_env_across_phases():

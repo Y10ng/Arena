@@ -38,6 +38,10 @@ def register_container_activation(
         project = _locked_project(conn, project_id)
         if project["status"] != "active" or project["execution_generation"] != generation or project["coverage_stop_reason"] == "user_stopped":
             raise HTTPException(409, "stale_execution_generation")
+        from .project_execution_control import execution_dispatch_blocked
+
+        if execution_dispatch_blocked(project):
+            raise HTTPException(409, "execution_control_pending")
         if not docker_daemon_id:
             raise HTTPException(409, "docker_daemon_identity_missing")
         # 旧项目的来源未查明前，不允许其他 owner 在新 daemon 启动容器来覆盖现场。
@@ -70,8 +74,10 @@ def register_container_activation(
 
 
 def finish_container_activation(
-    project_id: str, dispatcher_id: str, token: str, container_id: str | None,
+    project_id: str, dispatcher_id: str, token: str, container_id: str,
 ) -> dict:
+    if not container_id:
+        raise HTTPException(422, "container_identity_missing")
     with get_conn() as conn:
         _locked_project(conn, project_id)
         row = _activation(conn, project_id, dispatcher_id)
@@ -86,6 +92,40 @@ def finish_container_activation(
         return {"state": "running"}
 
 
+def abort_container_activation(
+    project_id: str, dispatcher_id: str, token: str, docker_daemon_id: str,
+) -> dict:
+    """原 owner 在同名创建锁内确认原 daemon 无容器后，结算本次未完成激活。"""
+    with get_conn() as conn:
+        _locked_project(conn, project_id)
+        row = _activation(conn, project_id, dispatcher_id)
+        if (
+            row is None
+            or row["activation_token"] != token
+            or row["state"] not in {"activating", "stopped"}
+            or row["container_id"] is not None
+        ):
+            raise HTTPException(409, "container_activation_stale")
+        if not docker_daemon_id or row["docker_daemon_id"] != docker_daemon_id:
+            raise HTTPException(409, "docker_daemon_changed")
+        if row["state"] == "activating":
+            # 项目可能已被结束并升代；只结算原 token，不放宽其他未知库存的停止证明。
+            conn.execute(
+                """UPDATE project_container_activations SET state = 'stopped', updated_at = ?
+                   WHERE project_id = ? AND dispatcher_id = ?""",
+                (utcnow(), project_id, dispatcher_id),
+            )
+        return {"state": "stopped"}
+
+
+def _require_legacy_pause(project) -> None:
+    from .project_execution_control import execution_control
+
+    # stop 型旧接口不能对新热暂停请求降级执行，避免旧 Dispatcher 销毁内存现场。
+    if execution_control(project).get("action"):
+        raise HTTPException(409, "project_hot_control_required")
+
+
 def adopt_container_pause(
     project_id: str, dispatcher_id: str, generation: int,
     container_id: str | None, docker_daemon_id: str,
@@ -93,6 +133,7 @@ def adopt_container_pause(
     """只收口已有可信 daemon 身份的旧 owner；未知来源不能以当前盘点代证。"""
     with get_conn() as conn:
         project = _locked_project(conn, project_id)
+        _require_legacy_pause(project)
         if project["status"] != "paused" or project["execution_generation"] != generation:
             raise HTTPException(409, "project_pause_stale")
         if not docker_daemon_id:
@@ -128,6 +169,7 @@ def claim_container_pause(
 ) -> dict:
     with get_conn() as conn:
         project = _locked_project(conn, project_id)
+        _require_legacy_pause(project)
         row = _activation(conn, project_id, dispatcher_id)
         if project["status"] != "paused" or project["execution_generation"] != generation or row is None:
             raise HTTPException(409, "project_pause_stale")
@@ -153,6 +195,7 @@ def confirm_container_pause(
 ) -> dict:
     with get_conn() as conn:
         project = _locked_project(conn, project_id)
+        _require_legacy_pause(project)
         row = _activation(conn, project_id, dispatcher_id)
         if (
             project["status"] != "paused"

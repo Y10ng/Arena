@@ -39,7 +39,7 @@ beforeEach(() => {
   vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (
     this: HTMLElement,
   ) {
-    return Number.parseFloat(this.style.height) || 0
+    return Number.parseFloat(this.style.height || this.style.minHeight) || 0
   })
 })
 

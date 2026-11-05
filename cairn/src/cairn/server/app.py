@@ -1,6 +1,7 @@
 """FastAPI 应用装配入口，连接数据库、业务路由和前端静态资源。"""
 
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 import os
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from cairn.server.routers import (
     audit,
     auth,
     candidates,
+    consumption,
     coverage_slots,
     execution_events,
     export,
@@ -33,6 +35,7 @@ from cairn.server.routers import (
     project_resources,
     project_schedules,
     project_runtime,
+    project_workspace,
     projects,
     prompt_groups,
     report_templates,
@@ -55,7 +58,15 @@ async def lifespan(app: FastAPI):
     from cairn.server.services.project_resources import cleanup_expired_project_resource_batches
 
     cleanup_expired_project_resource_batches()
-    yield
+    from cairn.server.services.direct_consumption import replay_direct_consumption_periodically
+
+    replay = asyncio.create_task(replay_direct_consumption_periodically())
+    try:
+        yield
+    finally:
+        replay.cancel()
+        with suppress(asyncio.CancelledError):
+            await replay
 
 
 app = FastAPI(
@@ -80,6 +91,7 @@ app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(agent_conversations.router)
 app.include_router(candidates.router)
+app.include_router(consumption.router)
 app.include_router(execution_events.router)
 app.include_router(admin.router)
 app.include_router(settings.router)
@@ -93,6 +105,7 @@ app.include_router(reports.router)
 app.include_router(knowledge.router)
 app.include_router(prompt_groups.router)
 app.include_router(project_runtime.router)
+app.include_router(project_workspace.router)
 app.include_router(projects.router)
 app.include_router(project_schedules.router)
 app.include_router(verification_requests.router)

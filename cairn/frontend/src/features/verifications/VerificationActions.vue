@@ -1,10 +1,9 @@
 <template>
   <div class="verification-record-actions">
     <div class="verification-record-actions__buttons">
-      <Button size="sm" variant="ghost" :disabled="!request.can_delete" :loading="deleting" :aria-describedby="request.delete_block_reason ? reasonId : undefined" @click="requestDelete"><template #icon><Trash2 :size="16" /></template>{{ purging ? '重试清理' : '删除复测记录' }}</Button>
       <DropdownMenu :items="items" @select="select">
         <template #trigger><IconButton :label="`复测操作：${request.title}`" :data-verification-actions="request.id" :loading="exporting || deleting"><MoreHorizontal :size="18" /></IconButton></template>
-        <template #icon="{ item }"><RotateCcw v-if="item.value === 'rerun'" :size="16" /><Download v-else :size="16" /></template>
+        <template #icon="{ item }"><Trash2 v-if="item.value === 'delete'" :size="16" /><RotateCcw v-else-if="item.value === 'rerun'" :size="16" /><Download v-else :size="16" /></template>
       </DropdownMenu>
     </div>
     <p v-if="request.delete_block_reason" :id="reasonId" class="verification-record-actions__reason">{{ request.delete_block_reason }}</p>
@@ -21,7 +20,7 @@ import { ApiError, fetchBlob } from '@/api/client'
 import { deleteVerificationRequest, getVerificationRequest, verificationArtifactUrl, verificationReportUrl, type VerificationSummary } from '@/api/verificationRequests'
 import { createReportExport, downloadReportBlob, fetchReportMarkdown } from '@/features/reports/reportExport'
 import { loadReportImages, type ReportImageData } from '@/features/reports/reportImages'
-import { Alert, Button, DropdownMenu, IconButton } from '@/components/ui'
+import { Alert, DropdownMenu, IconButton } from '@/components/ui'
 import type { DropdownMenuOption } from '@/components/ui/DropdownMenu.vue'
 import { ConfirmAction } from '@/components/patterns'
 import { errorMessage } from './verificationPresentation'
@@ -38,9 +37,11 @@ const items = computed<DropdownMenuOption[]>(() => [
   ...(props.context === 'list' ? [{ value: 'rerun', label: '再次复测', disabled: purging.value, description: purging.value ? '此轮清理未完成，请从原漏洞新建复测' : undefined }] : []),
   { value: 'export', label: '导出报告（.md）', disabled: purging.value || !props.request.result, description: purging.value ? '此轮清理未完成，不能导出' : !props.request.result ? '尚无结果' : undefined },
   { value: 'export-package', label: 'Markdown 证据包（.tar）', disabled: purging.value || !props.request.result },
+  { value: 'delete', label: purging.value ? '重试清理' : '删除复测记录', tone: 'danger', separatorBefore: true, disabled: !props.request.can_delete || deleting.value, description: props.request.delete_block_reason || undefined },
 ])
 function select(value: string) {
-  if (value === 'rerun' && !purging.value) emit('rerun')
+  if (value === 'delete') requestDelete()
+  else if (value === 'rerun' && !purging.value) emit('rerun')
   else if (value === 'export' || value === 'export-package') void exportReport(value === 'export-package' ? 'tar' : 'md')
 }
 function requestDelete() {

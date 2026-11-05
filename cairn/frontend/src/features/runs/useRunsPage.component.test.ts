@@ -1,13 +1,14 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { computed, defineComponent, h, reactive, ref, unref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { ArtifactPreview } from '@/api/client'
+import { ApiError, type ArtifactPreview } from '@/api/client'
 import type { ProjectDetail } from '@/api/types'
 import type { RunArtifact, TaskRun, TaskRunCommandEvent, TaskRunEventGroup } from './runTypes'
 import { useRunsPage } from './useRunsPage'
 
 const mocks = vi.hoisted(() => ({
   api: vi.fn(),
+  loadProject: vi.fn(),
   refetchRuns: vi.fn(),
   router: { push: vi.fn(), replace: vi.fn() },
   routeStore: null as unknown as { query: Record<string, unknown> },
@@ -21,12 +22,22 @@ const mocks = vi.hoisted(() => ({
 const runsData = ref<TaskRun[]>([])
 const runsStatus = ref<'pending' | 'success' | 'error'>('success')
 
-vi.mock('@/api/client', () => ({
+vi.mock('@/api/client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/client')>()),
   api: mocks.api,
 }))
 
 vi.mock('@/stores/workspace', () => ({
-  useWorkspaceStore: () => mocks.workspaceStore,
+  useWorkspaceStore: () => ({
+    ...mocks.workspaceStore,
+    get currentProjectId() {
+      return mocks.workspaceStore.currentProjectId
+    },
+    get projectDetail() {
+      return mocks.workspaceStore.projectDetail
+    },
+    loadProject: mocks.loadProject,
+  }),
 }))
 
 vi.mock('@/stores/ui', () => ({
@@ -157,9 +168,10 @@ const commandGroups = (
 ]
 
 const emptyDetailResponse = (path: string, artifacts: RunArtifact[] = []) => {
-  if (path.includes('/command-events')) {
+  if (path.includes('/command-events') || path.includes('/hook-events')) {
     return [{ task_run_id: runIdFromPath(path), events: [] }]
   }
+  if (path.startsWith('/reports?')) return { items: [], total: 0, page: 1, page_size: 100 }
   if (path.includes('/artifacts?')) return artifacts
   throw new Error(`未处理的 API 路径：${path}`)
 }
@@ -211,14 +223,20 @@ describe('useRunsPage chat exclusion', () => {
       { ...run('verification'), task_type: 'external_verify' },
       run('exploration'),
     ]
-    mocks.router.replace.mockImplementation(({ query }) => { routeState.query = query })
+    mocks.router.replace.mockImplementation(({ query }) => {
+      routeState.query = query
+    })
     mocks.api.mockImplementation((_method: string, path: string) =>
       Promise.resolve(emptyDetailResponse(path)),
     )
     mountComposable()
     await flushPromises()
 
-    expect(page.filteredRuns.value.map((item) => item.id)).toEqual(['report', 'verification', 'exploration'])
+    expect(page.filteredRuns.value.map((item) => item.id)).toEqual([
+      'report',
+      'verification',
+      'exploration',
+    ])
     expect(page.selectedRun.value).toBeNull()
     page.searchQuery.value = 'agent_chat'
     expect(page.filteredRuns.value).toEqual([])
@@ -227,13 +245,20 @@ describe('useRunsPage chat exclusion', () => {
     expect(page.filteredRuns.value).toHaveLength(3)
     page.selectRun('chat')
     expect(page.selectedRunId.value).toBeNull()
-    expect(mocks.api).not.toHaveBeenCalled()
+    expect(
+      mocks.api.mock.calls.every(
+        ([, path]) => path.includes('/hook-events') || path.startsWith('/reports?'),
+      ),
+    ).toBe(true)
 
     for (const id of ['report', 'verification']) {
       page.selectRun(id)
       await flushPromises()
       expect(page.selectedRun.value?.id).toBe(id)
-      expect(mocks.api).toHaveBeenCalledWith('GET', `/projects/project-a/artifacts?task_run_id=${id}`)
+      expect(mocks.api).toHaveBeenCalledWith(
+        'GET',
+        `/projects/project-a/artifacts?task_run_id=${id}`,
+      )
     }
     mocks.refetchRuns.mockImplementation(() => {
       runsData.value = [...runsData.value, { ...run('new-chat'), task_type: 'agent_chat' }]
@@ -242,16 +267,24 @@ describe('useRunsPage chat exclusion', () => {
     uiState.globalRefreshKey += 1
     await flushPromises()
     expect(page.selectedRun.value?.id).toBe('verification')
-    expect(page.filteredRuns.value.map((item) => item.id)).toEqual(['report', 'verification', 'exploration'])
+    expect(page.filteredRuns.value.map((item) => item.id)).toEqual([
+      'report',
+      'verification',
+      'exploration',
+    ])
     expect(runsData.value.filter((item) => item.task_type === 'agent_chat')).toHaveLength(2)
-    expect(mocks.api.mock.calls.every(([, path]) => !String(path).includes('task_run_id=chat'))).toBe(true)
+    expect(
+      mocks.api.mock.calls.every(([, path]) => !String(path).includes('task_run_id=chat')),
+    ).toBe(true)
   })
 
   it('clears an old chat link only after successful type confirmation and never substitutes another run', async () => {
     routeState.query = { runId: 'chat', keep: 'value' }
     runsData.value = []
     runsStatus.value = 'pending'
-    mocks.router.replace.mockImplementation(({ query }) => { routeState.query = query })
+    mocks.router.replace.mockImplementation(({ query }) => {
+      routeState.query = query
+    })
     mountComposable()
     await flushPromises()
     expect(page.selectedRun.value).toBeNull()
@@ -273,13 +306,20 @@ describe('useRunsPage chat exclusion', () => {
     expect(page.chatRunNotice.value).toBe(true)
     expect(page.selectedRunId.value).toBeNull()
     expect(page.selectedRun.value).toBeNull()
-    expect(mocks.api).not.toHaveBeenCalled()
+    expect(
+      mocks.api.mock.calls.every(
+        ([, path]) => path.includes('/hook-events') || path.startsWith('/reports?'),
+      ),
+    ).toBe(true)
     uiState.globalRefreshKey += 1
     await flushPromises()
     expect(page.selectedRun.value).toBeNull()
     expect(page.chatRunNotice.value).toBe(true)
     page.openProjectAgent()
-    expect(mocks.router.push).toHaveBeenCalledWith('/projects/project-a/agent')
+    expect(mocks.router.push).toHaveBeenCalledWith({
+      path: '/agent',
+      query: { project: 'project-a' },
+    })
 
     routeState.query.runId = 'unknown'
     await flushPromises()
@@ -301,7 +341,9 @@ describe('useRunsPage request ownership', () => {
       '/projects/project-a/task-runs/command-events?task_run_id=run-a',
       '/projects/project-a/artifacts?task_run_id=run-a',
     ]
-    expect(mocks.api.mock.calls.map(([, path]) => path)).toEqual(detailPaths)
+    expect(
+      mocks.api.mock.calls.map(([, path]) => path).filter((path) => !path.includes('/hook-events')),
+    ).toEqual(detailPaths)
     expect(page.activeDetailTab.value).toBe('terminal')
     expect(page.detailTabs.map((tab) => tab.value)).toEqual(['terminal', 'commands', 'artifacts'])
 
@@ -310,7 +352,9 @@ describe('useRunsPage request ownership', () => {
     await flushPromises()
 
     expect(mocks.refetchRuns).toHaveBeenCalledOnce()
-    expect(mocks.api.mock.calls.map(([, path]) => path)).toEqual([...detailPaths, ...detailPaths])
+    expect(
+      mocks.api.mock.calls.map(([, path]) => path).filter((path) => !path.includes('/hook-events')),
+    ).toEqual([...detailPaths, ...detailPaths])
     expect(page.selectedRunId.value).toBe('run-a')
     expect(page.activeDetailTab.value).toBe('commands')
   })
@@ -408,25 +452,135 @@ describe('useRunsPage request ownership', () => {
     expect(page.commandEvents.value).toEqual([])
   })
 
-  it('surfaces detail failures and retries through the guarded loader', async () => {
-    let shouldFail = true
+  it('R1 commits assets and logs before commands settle, and retries only failed commands', async () => {
+    vi.useFakeTimers()
+    const pendingCommands = deferred<TaskRunEventGroup<TaskRunCommandEvent>[]>()
     mocks.api.mockImplementation((_method: string, path: string) => {
-      if (path.includes('/command-events')) {
-        if (shouldFail) return Promise.reject(new Error('network unavailable'))
-        return Promise.resolve(commandGroups('retried-event'))
-      }
-      return Promise.resolve(emptyDetailResponse(path))
+      if (path.includes('/command-events')) return pendingCommands.promise
+      if (path.includes('/preview-tail'))
+        return Promise.resolve(preview('output-a', 'readable log'))
+      return Promise.resolve(emptyDetailResponse(path, [artifact('output-a')]))
     })
-
     mountComposable()
     await flushPromises()
-    expect(page.runDetailsError.value).toContain('network unavailable')
+    expect(page.isLoadingCommands.value).toBe(true)
+    expect(page.commandsLoaded.value).toBe(false)
+    expect(page.artifactsLoaded.value).toBe(true)
+    expect(page.stdoutContent.value).toBe('readable log')
 
-    shouldFail = false
+    pendingCommands.reject(new ApiError('private server body', 403, {}))
+    await flushPromises()
+    expect(page.commandsError.value).toContain('HTTP 403')
+    expect(page.commandsError.value).not.toContain('private server body')
+    await vi.advanceTimersByTimeAsync(8000)
+    expect(
+      mocks.api.mock.calls.filter(([, path]) => path.includes('/command-events')),
+    ).toHaveLength(1)
+    expect(page.stdoutContent.value).toBe('readable log')
+
+    mocks.api.mockClear().mockResolvedValue(commandGroups('retried-event'))
+    page.refetchCommands()
+    page.refetchCommands()
+    await flushPromises()
+    expect(mocks.api).toHaveBeenCalledExactlyOnceWith(
+      'GET',
+      '/projects/project-a/task-runs/command-events?task_run_id=run-a',
+    )
+    expect(page.commandsError.value).toBe('')
+    expect(page.commandEvents.value.map((event) => event.id)).toEqual(['retried-event'])
+  })
+
+  it('R1 isolates initial and stale asset failures from readable commands', async () => {
+    let assetFailure = true
+    mocks.api.mockImplementation((_method: string, path: string) => {
+      if (path.includes('/command-events')) return Promise.resolve(commandGroups('command-a'))
+      if (path.includes('/preview-tail'))
+        return Promise.resolve(preview('output-a', 'saved output'))
+      if (assetFailure) return Promise.reject(new ApiError('missing', 404, {}))
+      return Promise.resolve([artifact('output-a')])
+    })
+    mountComposable()
+    await flushPromises()
+    expect(page.commandsLoaded.value).toBe(true)
+    expect(page.commandEvents.value).toHaveLength(1)
+    expect(page.artifactsLoaded.value).toBe(false)
+    expect(page.artifactsError.value).toContain('HTTP 404')
+    assetFailure = false
+    page.refetchArtifacts()
+    await flushPromises()
+    expect(page.stdoutContent.value).toBe('saved output')
+    assetFailure = true
+    page.refetchArtifacts()
+    await flushPromises()
+    expect(page.artifactsLoaded.value).toBe(true)
+    expect(page.artifacts.value).toHaveLength(1)
+    expect(page.artifactsError.value).toContain('HTTP 404')
+    expect(page.commandEvents.value).toHaveLength(1)
+    expect(page.stdoutContent.value).toBe('saved output')
+  })
+
+  it('R1 preserves preview failures, deduplicates reads and resumes transient failures on the existing interval', async () => {
+    vi.useFakeTimers()
+    const refresh = deferred<ArtifactPreview>()
+    let previewCalls = 0
+    mocks.api.mockImplementation((_method: string, path: string) => {
+      if (path.includes('/preview-tail')) {
+        previewCalls += 1
+        return previewCalls === 1
+          ? Promise.resolve({ ...preview('output-a', 'saved output'), truncated: true })
+          : refresh.promise
+      }
+      return Promise.resolve(emptyDetailResponse(path, [artifact('output-a')]))
+    })
+    mountComposable()
+    await flushPromises()
+    page.autoScrollTerminal.value = false
+    const screen = document.createElement('div')
+    screen.scrollTop = 120
+    page.terminalScreen.value = screen
+    page.refetchTerminal()
+    page.refetchTerminal()
+    await vi.advanceTimersByTimeAsync(8000)
+    expect(previewCalls).toBe(2)
+    refresh.reject(new ApiError('unavailable', 503, {}))
+    await flushPromises()
+    expect(page.stdoutContent.value).toBe('saved output')
+    expect(page.terminalPreviewLoaded.value).toBe(true)
+    expect(page.terminalPreviewError.value).toContain('HTTP 503')
+    expect(page.previewTruncationMessage.value).not.toBe('')
+    expect(page.stdoutDownloadUrl.value).toContain('/output-a/content')
+    expect(screen.scrollTop).toBe(120)
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(previewCalls).toBe(3)
+    mocks.api.mockImplementation((_method: string, path: string) => {
+      if (path.includes('/preview-tail')) return Promise.resolve(preview('output-a', 'recovered'))
+      return Promise.resolve(emptyDetailResponse(path, [artifact('output-a')]))
+    })
+    await vi.advanceTimersByTimeAsync(4000)
+    expect(page.terminalPreviewError.value).toBe('')
+    expect(page.stdoutContent.value).toBe('recovered')
+
+    mocks.api.mockClear().mockResolvedValue(preview('output-a', ''))
     page.refetchTerminal()
     await flushPromises()
-    expect(page.runDetailsError.value).toBe('')
-    expect(page.commandEvents.value.map((event) => event.id)).toEqual(['retried-event'])
+    expect(mocks.api).toHaveBeenCalledExactlyOnceWith(
+      'GET',
+      '/projects/project-a/artifacts/output-a/preview-tail',
+    )
+    expect(page.terminalPreviewError.value).toBe('')
+    expect(page.terminalPreviewLoaded.value).toBe(true)
+    expect(page.stdoutContent.value).toBe('')
+
+    mocks.api.mockRejectedValue(new ApiError('missing', 404, {}))
+    page.selectTerminalOutput('output-b')
+    await flushPromises()
+    expect(page.terminalPreviewLoaded.value).toBe(false)
+    expect(page.previewTruncationMessage.value).toBe('')
+    expect(page.stdoutDownloadUrl.value).toContain('/output-b/content')
+    expect(page.terminalPreviewError.value).toContain('HTTP 404')
+    mocks.api.mockClear()
+    await vi.advanceTimersByTimeAsync(8000)
+    expect(mocks.api.mock.calls.some(([, path]) => path.includes('/preview-tail'))).toBe(false)
   })
 
   it('discards pending preview responses after unmount', async () => {
@@ -507,8 +661,7 @@ describe('useRunsPage business context', () => {
     expect(page.runRoleLabel(runsData.value[0])).toBe('独立复核')
     expect(page.runPriorityLabel(runsData.value[0])).toBe('优先')
     expect(page.runResultText(runsData.value[0])).toContain('证据已接受')
-    expect(page.runCardDiagnostic(runsData.value[0])).toBe('')
-    expect(page.runCardDiagnostic(runsData.value[1])).toBe('')
+    expect(page.workTimeline.value).toHaveLength(2)
     expect(page.linkedIntentOutcomeText(runsData.value[1])).toBe(
       '工作已停止：authorization_expired',
     )
@@ -517,8 +670,7 @@ describe('useRunsPage business context', () => {
       ...run('run-sibling', 'project-a', 'succeeded'),
       intent_id: 'intent-a',
     }
-    expect(page.runResultText(siblingRun)).toBe('执行成功；已接受结果属于关联运行')
-    expect(page.runCardDiagnostic(siblingRun)).toBe('')
+    expect(page.runResultText(siblingRun)).toBe('执行结束，结果未确认')
 
     const searches: Array<[string, string]> = [
       ['管理端会话', 'run-a'],
@@ -532,43 +684,124 @@ describe('useRunsPage business context', () => {
       page.searchQuery.value = query
       expect(page.filteredRuns.value.map((item) => item.id)).toEqual([expectedRunId])
     }
-    expect(mocks.api).not.toHaveBeenCalled()
+    expect(
+      mocks.api.mock.calls.every(
+        ([, path]) => path.includes('/hook-events') || path.startsWith('/reports?'),
+      ),
+    ).toBe(true)
 
     const intent = workspaceState.projectDetail.intents[0]!
     intent.conclusion = 'failed'
     intent.conclusion_reason = '证据不足'
-    expect(page.runCardDiagnostic(runsData.value[0])).toBe('')
-    expect(page.linkedIntentOutcomeText(runsData.value[0])).toBe('结果未接受：证据不足')
+    expect(page.linkedIntentOutcomeText(runsData.value[0])).toBe('工作未完成：证据不足')
     expect(page.runResultText(runsData.value[0])).toContain('证据已接受')
-
     intent.conclusion = 'abandoned'
-    intent.conclusion_reason = 'authorization_expired'
-    expect(page.runCardDiagnostic(runsData.value[0])).toBe('')
-    expect(page.linkedIntentOutcomeText(runsData.value[0])).toBe(
-      '工作已停止：authorization_expired',
-    )
-
-    intent.conclusion = null
-    intent.conclusion_reason = null
-    expect(page.runCardDiagnostic(runsData.value[0])).toBe('')
-    expect(page.linkedIntentOutcomeText(runsData.value[0])).toBe('')
-
+    expect(page.workTimeline.value.some((work) => work.status === '已停止')).toBe(true)
     intent.conclusion = 'completed'
     intent.to = null
-    expect(page.runCardDiagnostic(runsData.value[0])).toBe('')
-    expect(page.runResultText(runsData.value[0])).toBe('执行成功，未返回可展示的接受结果')
-    expect(page.runCardDiagnostic(run('no-intent', 'project-a', 'succeeded'))).toBe('')
-    expect(page.runResultText(run('no-intent', 'project-a', 'succeeded'))).toBe('执行成功')
-
+    expect(page.runResultText(runsData.value[0])).toBe('执行结束，结果未确认')
+    expect(page.runResultText(run('no-intent', 'project-a', 'succeeded'))).toBe(
+      '执行结束，结果未确认',
+    )
     for (const status of ['failed', 'timed_out', 'cancelled']) {
       expect(
-        page.runCardDiagnostic({
+        page.runResultText({
           ...run('failed-run', 'project-a', status),
           error_message: '原始故障原因',
         }),
-      ).toBe('原始故障原因')
+      ).toBe('本次执行未完成，结果未确认')
     }
-    expect(page.runCardDiagnostic(run('queued-run', 'project-a', 'queued'))).toBe('排队中')
+  })
+})
+
+describe('useRunsPage timeline final reads', () => {
+  it('补读终态撞上在途的工具、命令、资产与日志请求，报告跨页不漏接受结果', async () => {
+    const pendingHooks = deferred<unknown>()
+    const pendingCommands = deferred<unknown>()
+    const pendingAssets = deferred<unknown>()
+    const pendingPreview = deferred<ArtifactPreview>()
+    const pendingReports = deferred<unknown>()
+    runsData.value = [{ ...run('run-a'), task_type: 'report' }]
+    let hooks = 0,
+      commands = 0,
+      assets = 0,
+      previews = 0,
+      reports = 0
+    mocks.loadProject.mockClear().mockResolvedValue(undefined)
+    mocks.api.mockImplementation((_method: string, path: string) => {
+      if (path.includes('/hook-events'))
+        return ++hooks === 1
+          ? pendingHooks.promise
+          : Promise.resolve([{ task_run_id: 'run-a', events: [{ id: 'final-hook' }] }])
+      if (path.includes('/command-events'))
+        return ++commands === 1
+          ? pendingCommands.promise
+          : Promise.resolve(commandGroups('final-command'))
+      if (path.includes('/artifacts?'))
+        return ++assets === 2 ? pendingAssets.promise : Promise.resolve([artifact('output-a')])
+      if (path.includes('/preview-tail'))
+        return ++previews === 1
+          ? pendingPreview.promise
+          : Promise.resolve(preview('output-a', 'final output'))
+      if (path.startsWith('/reports?')) {
+        reports += 1
+        if (reports === 1) return pendingReports.promise
+        return Promise.resolve({
+          items: path.includes('page=2')
+            ? [{ artifact_id: 'accepted-report', task_run_id: 'run-a' }]
+            : [],
+          total: 101,
+          page_size: 100,
+        })
+      }
+      throw new Error(path)
+    })
+    mountComposable()
+    await flushPromises()
+    page.refetchArtifacts()
+    runsData.value = [{ ...runsData.value[0]!, status: 'failed' }]
+    await flushPromises()
+    expect(mocks.loadProject).toHaveBeenCalledWith('project-a')
+    pendingHooks.resolve([{ task_run_id: 'run-a', events: [] }])
+    pendingCommands.resolve(commandGroups('stale-command'))
+    pendingAssets.resolve([])
+    pendingPreview.resolve(preview('output-a', 'stale output'))
+    pendingReports.resolve({ items: [], total: 0, page_size: 100 })
+    await flushPromises()
+    expect(hooks).toBe(2)
+    expect(commands).toBe(2)
+    expect(assets).toBe(3)
+    expect(page.hookReads.value['run-a']?.events[0]?.id).toBe('final-hook')
+    expect(page.commandEvents.value[0]?.id).toBe('final-command')
+    expect(page.stdoutContent.value).toBe('final output')
+    expect(page.workTimeline.value[0]?.results[0]?.artifactId).toBe('accepted-report')
+    expect(page.workTimeline.value[0]?.status).toBe('未完成 · 已有部分产出')
+  })
+
+  it('工具刷新失败保留同身份旧内容，切项目隔离迟到响应', async () => {
+    routeState.query = {}
+    runsData.value = [run('run-a')]
+    let response: Promise<unknown> = Promise.resolve([
+      { task_run_id: 'run-a', events: [{ id: 'saved' }] },
+    ])
+    mocks.api.mockImplementation(() => response)
+    mountComposable()
+    await flushPromises()
+    response = Promise.reject(new ApiError('private body', 503, {}))
+    page.refetchHooks('run-a')
+    await flushPromises()
+    expect(page.hookReadError('run-a')).toContain('刷新失败，显示上次观测')
+    expect(page.hookReads.value['run-a']?.events[0]?.id).toBe('saved')
+    const late = deferred<unknown>()
+    response = late.promise
+    page.refetchHooks('run-a')
+    workspaceState.currentProjectId = 'project-b'
+    response = Promise.resolve([{ task_run_id: 'run-a', events: [{ id: 'new-project' }] }])
+    runsData.value = [run('run-a', 'project-b')]
+    await flushPromises()
+    late.resolve([{ task_run_id: 'run-a', events: [{ id: 'old-project' }] }])
+    await flushPromises()
+    expect(page.hookReads.value['run-a']?.events[0]?.id).toBe('new-project')
   })
 })
 
@@ -604,7 +837,7 @@ describe('useRunsPage polling selection', () => {
     await vi.advanceTimersByTimeAsync(4000)
     expect(detailVersion).toBe(2)
     expect(page.isLoadingRunDetails.value).toBe(false)
-    expect(page.stdoutContent.value).toBe('output-1')
+    expect(page.stdoutContent.value).toBe('output-2')
     firstPoll.resolve(commandGroups('command-2'))
     await flushPromises()
     expect(page.stdoutContent.value).toBe('output-2')
@@ -619,20 +852,20 @@ describe('useRunsPage polling selection', () => {
     expect(page.isLoadingRunDetails.value).toBe(false)
 
     shouldFail = true
-    page.refetchTerminal()
-    expect(page.isLoadingRunDetails.value).toBe(true)
+    page.refetchCommands()
+    expect(page.isLoadingCommands.value).toBe(true)
     expect(page.stdoutContent.value).toBe('output-3')
     await flushPromises()
-    expect(page.runDetailsError.value).toContain('network unavailable')
+    expect(page.commandsError.value).toContain('网络或响应读取异常')
     await vi.advanceTimersByTimeAsync(4000)
     await flushPromises()
-    expect(page.runDetailsError.value).toContain('network unavailable')
+    expect(page.commandsError.value).toContain('网络或响应读取异常')
     expect(page.isLoadingRunDetails.value).toBe(false)
 
     shouldFail = false
-    page.refetchTerminal()
+    await vi.advanceTimersByTimeAsync(4000)
     await flushPromises()
-    expect(page.runDetailsError.value).toBe('')
+    expect(page.commandsError.value).toBe('')
     expect(page.stdoutContent.value).toBe(`output-${detailVersion}`)
   })
 

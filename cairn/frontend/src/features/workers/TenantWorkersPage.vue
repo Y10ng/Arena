@@ -1,9 +1,6 @@
 <template>
   <article class="console-page configuration-page tenant-workers-page">
-    <div class="section-header">
-      <h2>Worker 配置</h2>
-      <Button v-if="activeTab === 'workers'" @click="modelsPanel?.startCreate()">新增模型</Button>
-    </div>
+    <h1 class="sr-only">模型与 Worker</h1>
     <component
       :is="authStore.isSuperAdmin ? Tabs : 'div'"
       v-bind="
@@ -18,7 +15,9 @@
           v-if="!authStore.isSuperAdmin || panel.option.value === 'workers'"
           class="worker-model-content"
         >
-          <h3>普通 Worker</h3>
+          <div class="resource-section-heading">
+            <h2>Worker 分配</h2>
+          </div>
           <ErrorState
             v-if="workersLoadError"
             title="Worker 加载失败"
@@ -51,8 +50,10 @@
               <tbody>
                 <tr v-for="worker in workers" :key="worker.id">
                   <th scope="row">
-                    {{ roleLabels[worker.task_types[0]!]
-                    }}<span class="worker-role-id">{{ worker.task_types[0] }}</span>
+                    <span class="worker-role-label">
+                      <span>{{ roleLabels[worker.task_types[0]!] }}</span>
+                      <span class="worker-role-id">{{ worker.task_types[0] }}</span>
+                    </span>
                   </th>
                   <td>
                     <Select
@@ -213,8 +214,8 @@ const runtimeVisited = ref(false)
 // 普通用户直接展示同一份内容，不创建管理员页签或挂载运行设置。
 const panelSlot = computed(() => (authStore.isSuperAdmin ? 'panel' : 'default'))
 const tabs = [
-  { value: 'workers', label: 'Worker 与模型' },
-  { value: 'runtime', label: '运行设置' },
+  { value: 'workers', label: '个人资源配置' },
+  { value: 'runtime', label: '管理员运行设置' },
 ]
 const modelsPanel = ref<InstanceType<typeof TenantModelsPanel> | null>(null)
 const runtimePanel = ref<InstanceType<typeof RuntimeSettingsPanel> | null>(null)
@@ -297,9 +298,9 @@ async function changeTab(tab: string) {
   activeTab.value = tab
 }
 watch(
-  () => route.query.section,
-  async (section) => {
-    if (section !== 'models') return
+  () => [route.query.section, route.hash],
+  async ([section, hash]) => {
+    if (section !== 'models' && hash !== '#models') return
     await changeTab('workers')
     await nextTick()
     modelsSection.value?.scrollIntoView({ block: 'start' })

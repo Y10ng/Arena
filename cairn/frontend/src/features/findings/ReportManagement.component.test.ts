@@ -408,11 +408,11 @@ describe('ReportManagement', () => {
     },
   )
 
-  it('shows a visible heading and semantic columns with independent report read actions', () => {
+  it('keeps a semantic heading and columns with independent report read actions', () => {
     const wrapper = mountPage()
     const item = wrapper.get('.report-directory-item')
 
-    expect(wrapper.get('.report-page-header h1').text()).toBe('报告')
+    expect(wrapper.get('h1.sr-only').text()).toBe('报告')
     expect(wrapper.findAll('th').map((cell) => cell.text())).toEqual([
       '报告名称',
       '所属项目',

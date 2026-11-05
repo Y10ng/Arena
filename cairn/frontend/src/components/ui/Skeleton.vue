@@ -40,7 +40,7 @@ defineOptions({ name: 'UiSkeleton', inheritAttrs: false })
 .ui-skeleton::after {
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, transparent, var(--accent-dim), transparent);
+  background: linear-gradient(90deg, transparent, var(--surface-hover), transparent);
   content: '';
   transform: translateX(-100%);
   animation: ui-skeleton-shimmer calc(var(--dur-slow) * 7) var(--ease) infinite;

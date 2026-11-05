@@ -102,8 +102,8 @@ describe('选定交付正文三格式导出', () => {
     const signal = new AbortController().signal
     expect(await fetchReportMarkdown('/projects/p/artifacts/a/content', signal)).toBe(sample)
     expect(fetchText).toHaveBeenCalledWith('/projects/p/artifacts/a/content', signal, 'no-store')
-    expect(vulnerabilityReportUrl('项目 /一', 'v/1', '模板 &', 'obs/2')).toBe(
-      '/projects/%E9%A1%B9%E7%9B%AE%20%2F%E4%B8%80/vulnerabilities/v%2F1/report?template_key=%E6%A8%A1%E6%9D%BF+%26&observation_id=obs%2F2',
+    expect(vulnerabilityReportUrl('项目 /一', 'v/1', 'obs/2')).toBe(
+      '/projects/%E9%A1%B9%E7%9B%AE%20%2F%E4%B8%80/vulnerabilities/v%2F1/report?observation_id=obs%2F2',
     )
   })
 

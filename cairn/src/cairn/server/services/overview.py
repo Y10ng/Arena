@@ -3,6 +3,7 @@
 from cairn.server.auth import RequestPrincipal
 from cairn.server.schemas.overview import OverviewResponse
 
+from .consumption import overview_consumption, project_consumption
 from .time_utils import utcnow
 from .vulnerabilities import vulnerability_counts, vulnerability_read_scope
 
@@ -23,7 +24,7 @@ def get_overview(conn, principal: RequestPrincipal) -> OverviewResponse:
     }
     projects = conn.execute(
         f"""
-        SELECT p.id, p.title, p.status, p.created_at FROM projects p
+        SELECT p.id, p.title, p.status, p.created_at, p.tenant_id FROM projects p
         WHERE {project_scope}
         ORDER BY CASE p.status WHEN 'active' THEN 0 WHEN 'pending' THEN 1
                  WHEN 'paused' THEN 2 ELSE 3 END, p.created_at DESC, p.id DESC
@@ -44,10 +45,12 @@ def get_overview(conn, principal: RequestPrincipal) -> OverviewResponse:
         """,
         params,
     ).fetchall()
+    consumption = project_consumption(conn, {row["id"]: row["tenant_id"] for row in projects})
     return OverviewResponse(
         generated_at=utcnow(),
+        consumption=overview_consumption(conn, principal),
         projects={"total": sum(by_status.values()), "by_status": by_status},
         vulnerabilities=counts,
-        project_previews=[dict(row) for row in projects],
+        project_previews=[{**dict(row), "consumption": consumption[row["id"]]} for row in projects],
         vulnerability_previews=[dict(row) for row in vulnerabilities],
     )

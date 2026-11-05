@@ -35,13 +35,16 @@ from .assessment_policy import (
     scenario_snapshot,
 )
 from .common import *
+from .consumption import project_consumption
 from .ids import get_project_or_404, next_hint_id, next_project_id, next_target_id
 from .libraries import (
     bind_library_revision,
     get_library,
     get_library_version,
+    get_bound_library_revision,
     list_library_bindings,
-    resolve_current_library_revisions,
+    list_library_revision_files,
+    resolve_library_selections,
 )
 from .projects import (
     build_intents,
@@ -131,8 +134,10 @@ def list_project_summaries(tenant_id: str | None = None, *, include_verification
             {tenant_clause}
             ORDER BY p.created_at
         """, params).fetchall()
+        consumption = project_consumption(conn, {row["id"]: row["tenant_id"] for row in rows})
         return [
             ProjectSummary(
+                consumption=consumption[row["id"]],
                 id=row["id"],
                 title=row["title"],
                 status=row["status"],
@@ -150,11 +155,12 @@ def list_project_summaries(tenant_id: str | None = None, *, include_verification
                 assessment_protocol=str(row_value(row, "assessment_protocol") or ""),
                 assessment_progress=parse_scenario_snapshot(row_value(row, "assessment_progress_json")) or None,
                 assessment_execution=(meta := project_meta_from_row(conn, row)).assessment_execution,
+                execution_control=meta.execution_control,
                 test_egress=meta.test_egress,
                 schedule_id=meta.schedule_id,
                 verification_request_id=meta.verification_request_id,
                 verification_attempts_started=int(row_value(row, "verification_attempts_started") or 0),
-                explore_deadline=row_value(row, "explore_deadline"),
+                explore_deadline=meta.explore_deadline,
                 authorization_expires_at=row_value(
                     row, "authorization_expires_at"
                 ),
@@ -219,7 +225,7 @@ def create_verification_project_record(
     test_egress: TestEgressInput | None = None,
 ) -> ProjectDetail:
     body = _VerificationProjectRequest(
-        test_egress=test_egress or TestEgressInput(),
+        library_selections=[], test_egress=test_egress or TestEgressInput(),
         title=title, origin=origin, tenant_worker_ids=[tenant_worker_id],
         explore_deadline=execution_deadline, authorization_expires_at=authorization_expires_at,
     )
@@ -227,7 +233,7 @@ def create_verification_project_record(
         raise ValueError("tenant_id is required")
     return _create_project_record(
         conn, body, tenant_id=tenant_id, creator=creator, initial_status="pending",
-        library_revisions=None, actor_type=actor_type,
+        library_revisions=None, library_selection_explicit=True, actor_type=actor_type,
     )
 
 
@@ -239,6 +245,7 @@ def create_project_record(
     creator: str = "system",
     initial_status: str = "active",
     library_revisions: list | None = None,
+    library_selection_explicit: bool = True,
     actor_type: str = "user",
 ) -> ProjectDetail:
     """普通项目与计划使用同租户的普通用途 Worker。"""
@@ -247,9 +254,9 @@ def create_project_record(
     if initial_status not in {"active", "pending", "paused"}:
         raise ValueError("invalid initial project status")
     if conn is not None:
-        return _create_project_record(conn, body, tenant_id=tenant_id, creator=creator, initial_status=initial_status, library_revisions=library_revisions, actor_type=actor_type)
+        return _create_project_record(conn, body, tenant_id=tenant_id, creator=creator, initial_status=initial_status, library_revisions=library_revisions, library_selection_explicit=library_selection_explicit, actor_type=actor_type)
     with get_conn() as owned_conn:
-        return _create_project_record(owned_conn, body, tenant_id=tenant_id, creator=creator, initial_status=initial_status, library_revisions=library_revisions, actor_type=actor_type)
+        return _create_project_record(owned_conn, body, tenant_id=tenant_id, creator=creator, initial_status=initial_status, library_revisions=library_revisions, library_selection_explicit=library_selection_explicit, actor_type=actor_type)
 
 
 def _create_project_record(
@@ -260,6 +267,7 @@ def _create_project_record(
     creator: str,
     initial_status: str,
     library_revisions: list | None,
+    library_selection_explicit: bool,
     actor_type: str,
 ) -> ProjectDetail:
     now = utcnow()
@@ -286,10 +294,10 @@ def _create_project_record(
         )
     else:
         selected_workers = resolve_general_workers(conn, tenant_id=tenant_id)
-    for library_key in body.library_keys:
-        get_library(conn, library_key)
     if library_revisions is None:
-        library_revisions = resolve_current_library_revisions(conn, body.library_keys)
+        library_revisions = resolve_library_selections(
+            conn, body.library_selections, tenant_id=tenant_id, user_id=creator,
+        )
     pid = next_project_id(conn)
 
     conn.execute(
@@ -298,8 +306,8 @@ def _create_project_record(
             id, title, status, created_at, scenario_key,
             scenario_snapshot_json, assessment_protocol,
             vulnerability_fingerprint_version, explore_deadline,
-            authorization_expires_at, preferred_workers_json, tenant_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            authorization_expires_at, preferred_workers_json, tenant_id, library_selection_explicit
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             pid,
@@ -314,6 +322,7 @@ def _create_project_record(
             body.authorization_expires_at,
             "[]",
             tenant_id,
+            int(library_selection_explicit),
         ),
     )
     from .test_egress import save_project_egress
@@ -375,7 +384,13 @@ def _create_project_record(
             body.resources or [],
             created_by=creator,
         )
+    if initial_status == "paused" and not isinstance(body, _VerificationProjectRequest):
+        from .project_execution_control import request_execution_control
+
+        # 初始暂停与人工暂停共用时钟；没有执行现场时不会创建或启动容器。
+        request_execution_control(conn, get_project_or_404(conn, pid), "pause", now=now)
     return ProjectDetail(
+        consumption=project_consumption(conn, {pid: tenant_id})[pid],
         project=ProjectMeta.model_validate({
             **project_meta_from_row(
                 conn,
@@ -392,6 +407,7 @@ def _create_project_record(
         targets=targets,
         resources=resources,
         library_bindings=_project_library_bindings(conn, pid),
+        library_selection_explicit=library_selection_explicit,
     )
 
 
@@ -411,6 +427,7 @@ def get_project_detail(project_id: str, *, tenant_id: str | None = None) -> Proj
 
         quality_snapshot = build_assessment_quality_snapshot(conn, project_id)
         return ProjectDetail(
+            consumption=project_consumption(conn, {project_id: row["tenant_id"]})[project_id],
             project=ProjectMeta.model_validate({
                 **project_meta_from_row(conn, row).model_dump(),
                 "tenant_workers": project_worker_bindings(conn, project_id),
@@ -424,6 +441,7 @@ def get_project_detail(project_id: str, *, tenant_id: str | None = None) -> Proj
             targets=build_targets(conn, project_id),
             resources=list_project_resource_records(project_id, conn=conn),
             library_bindings=_project_library_bindings(conn, project_id),
+            library_selection_explicit=bool(row["library_selection_explicit"]),
         )
 
 
@@ -434,14 +452,17 @@ def _project_library_bindings(
     result: list[ProjectLibraryBinding] = []
     for binding in list_library_bindings(conn, project_id):
         library = get_library(conn, binding.library_key, include_archived=True)
-        revision = get_library_version(conn, binding.library_key, binding.version)
+        revision = get_bound_library_revision(conn, project_id, binding.library_key, binding.version)
+        files = list_library_revision_files(conn, revision)
         result.append(
             ProjectLibraryBinding(
                 library_key=library.key,
                 library_name=library.name,
                 version=revision.version,
                 digest_sha256=revision.digest_sha256,
-                file_count=revision.file_count,
+                file_count=len(files),
+                paths=revision.paths,
+                selection_sha256=revision.selection_sha256,
             )
         )
     return result
@@ -501,50 +522,34 @@ def update_project_title_record(project_id: str, body: UpdateProjectTitleRequest
 
 
 def project_pause_unconfirmed(conn, project_id: str) -> bool:
-    """结束评估也不能绕过已要求暂停的进程和资源终止确认。"""
-    for run in conn.execute("SELECT * FROM task_runs WHERE project_id = ? AND pause_requested = 1", (project_id,)):
-        lifecycle = parse_scenario_snapshot(run["runtime_context_json"]).get("execution_lifecycle", {})
-        if run["status"] in {"queued", "running"} or not isinstance(lifecycle, dict) or not (
-            type(lifecycle.get("generation")) is int
-            and lifecycle["generation"] == run["execution_generation"]
-            and lifecycle.get("termination_confirmed") is True
-            and lifecycle.get("cleanup_confirmed") is True
-        ):
-            return True
-    return False
+    from .project_execution_control import execution_control
+
+    control = execution_control(get_project_or_404(conn, project_id))
+    return control.get("action") == "pause" and control.get("state") != "paused"
 
 
 def project_pause_draining(conn, project) -> bool:
-    """仅使用持久化确认；租约过期和 TaskRun 终态均不证明进程已退出。"""
-    # 历史快照可能缺少 pause_requested；物理归属未退出就仍需等待收尾。
-    from .project_container_pause import project_container_pause_draining
+    """旧 stop 留下的文件不构成可热恢复现场；只接受本代物理暂停回执。"""
+    from .project_execution_control import execution_control
 
-    owners, unknown = project_execution_owners(conn, project)
-    if owners or unknown or project_container_pause_draining(conn, project):
-        return True
-    return bool(project["reason_worker"] or conn.execute(
-        "SELECT 1 FROM intents WHERE project_id = ? AND concluded_at IS NULL AND worker IS NOT NULL LIMIT 1",
-        (project["id"],),
-    ).fetchone())
+    if project["status"] not in {"paused", "stopped"}:
+        return False
+    control = execution_control(project)
+    if not control.get("action") and project["status"] == "paused":
+        # 从未受理执行的新项目可以只恢复派发；历史 Run 的保留文件不能代替热现场。
+        return conn.execute(
+            "SELECT 1 FROM task_runs WHERE project_id = ? AND task_type IN ('bootstrap', 'reason', 'explore') "
+            "UNION ALL SELECT 1 FROM project_container_activations WHERE project_id = ? LIMIT 1",
+            (project["id"], project["id"]),
+        ).fetchone() is not None
+    action, state = ("finish", "stopped") if project["status"] == "stopped" else ("pause", "paused")
+    return control.get("action") != action or control.get("state") != state
 
 
 def project_execution_owners(conn, project) -> tuple[set[str], bool]:
-    """诊断与恢复共同使用实际 TaskRun owner；不以全局最新心跳推定归属。"""
-    owners: set[str] = set()
-    unknown = False
-    for run in conn.execute("SELECT * FROM task_runs WHERE project_id = ?", (project["id"],)):
-        context = parse_scenario_snapshot(run["runtime_context_json"])
-        lifecycle = context.get("execution_lifecycle", {})
-        confirmed = isinstance(lifecycle, dict) and type(lifecycle.get("generation")) is int and lifecycle["generation"] == run["execution_generation"] and lifecycle.get("termination_confirmed") is True and lifecycle.get("cleanup_confirmed") is True
-        # 同代双确认且已终态即退出物理归属，不要求暂停前历史 owner 永久在线。
-        if confirmed and run["status"] not in {"queued", "running"}:
-            continue
-        owner = context.get("dispatcher_id")
-        if isinstance(owner, str) and owner:
-            owners.add(owner)
-        else:
-            unknown = True
-    return owners, unknown
+    from .project_execution_control import research_execution_owners
+
+    return research_execution_owners(conn, project)
 
 
 def _project_pause_capability_reason(conn, project) -> str | None:
@@ -561,7 +566,7 @@ def _project_pause_capability_reason(conn, project) -> str | None:
         if observed is None or not 0 <= (now - observed).total_seconds() <= DISPATCHER_HEARTBEAT_STALE_SECONDS:
             return "project_dispatcher_unavailable"
         capabilities = parse_scenario_snapshot(row["runtime_json"]).get("runtime_capabilities", [])
-        if not isinstance(capabilities, list) or "project_pause_v1" not in capabilities:
+        if not isinstance(capabilities, list) or "project_hot_pause_v1" not in capabilities:
             return "project_pause_unsupported"
     return None
 
@@ -580,7 +585,7 @@ def project_ready_dispatcher(conn, *, now: str | None = None):
         if not 0 <= (current - observed).total_seconds() <= DISPATCHER_HEARTBEAT_STALE_SECONDS:
             continue
         capabilities = parse_scenario_snapshot(row["runtime_json"]).get("runtime_capabilities", [])
-        if isinstance(capabilities, list) and "project_pause_v1" in capabilities:
+        if isinstance(capabilities, list) and "project_hot_pause_v1" in capabilities:
             return row, None
         reason = "project_pause_unsupported"
     return None, reason
@@ -629,11 +634,8 @@ def project_lifecycle_actions(conn, project) -> dict[str, dict]:
         contract_reason = str(exc.detail)
     policy = policy_from_project_row(project)
     progress = parse_scenario_snapshot(row_value(project, "assessment_progress_json"))
-    frozen = conn.execute("SELECT status FROM assessment_report_finalizations WHERE project_id = ? AND scope_key = ''", (project["id"],)).fetchone()
     finalizing = progress.get("phase") == "finalizing"
     terminal_reason = contract_reason or ("assessment_new_project_required" if status == "stopped" or progress.get("phase") == "completed" else None)
-    if frozen and (not finalizing or frozen["status"] == "ready") and terminal_reason is None:
-        terminal_reason = "assessment_report_finalization_in_progress"
     # 暂停只收紧执行权限，不依赖心跳、诊断或已损坏的执行契约。
     actions["pause"] = {"allowed": status in {"active", "paused"}, "reason": None if status in {"active", "paused"} else "project_status_invalid"}
     reauthorization_reason = terminal_reason or project_reauthorization_reason(
@@ -644,16 +646,30 @@ def project_lifecycle_actions(conn, project) -> dict[str, dict]:
         "allowed": reauthorization_reason is None,
         "reason": reauthorization_reason,
     }
+    from .project_execution_control import execution_control, is_resume_retry
+
+    control = execution_control(project)
+    retry_resume = is_resume_retry(project)
     for action, expected, noop in (("resume", "paused", "active"),):
         reason = terminal_reason
-        if reason is None and status == noop:
+        if reason is None and control.get("state") == "requested":
+            reason = "project_pause_draining" if control.get("action") == "pause" else "execution_control_pending"
+        if reason is None and status == noop and not retry_resume:
             actions[action] = {"allowed": True, "reason": None}
             continue
-        if reason is None and status != expected:
+        if reason is None and status != expected and not retry_resume:
             reason = "project_status_invalid"
         if reason is None and action == "resume":
-            if project_pause_draining(conn, project):
-                reason = "project_pause_draining"
+            if control.get("state") in {"lost", "failed"} and not retry_resume:
+                reason = "execution_scene_lost" if control["state"] == "lost" else "execution_control_failed"
+            elif project_pause_draining(conn, project):
+                reason = "project_pause_draining" if control.get("action") else "execution_scene_unavailable"
+            elif conn.execute(
+                "SELECT 1 FROM task_runs WHERE project_id = ? AND task_type IN ('bootstrap', 'reason', 'explore') "
+                "AND status IN ('queued', 'running') AND (execution_generation != ? OR pause_requested = 1) LIMIT 1",
+                (project["id"], project["execution_generation"]),
+            ).fetchone() is not None:
+                reason = "execution_scene_generation_mismatch"
             elif (
                 (policy.phased or policy.goal_driven)
                 and not finalizing
@@ -668,102 +684,102 @@ def project_lifecycle_actions(conn, project) -> dict[str, dict]:
     return actions
 
 
+PAUSE_TIMEOUT_SECONDS = 43_200
+
+
+def _finish_project(conn, project, *, reason: str, now: str) -> None:
+    from .project_execution_control import request_execution_control
+
+    project_id = project["id"]
+    # 统一关闭 admission、撤销原代次，再由原 owner 确认 stop-retain；独立报告不在本域。
+    conn.execute(
+        "UPDATE projects SET status = 'stopped', execution_generation = execution_generation + 1, "
+        "coverage_stop_reason = ? WHERE id = ?",
+        (reason, project_id),
+    )
+    conn.execute(
+        "UPDATE task_runs SET pause_requested = 1 "
+        "WHERE project_id = ? AND task_type IN ('bootstrap', 'reason', 'explore') "
+        "AND status IN ('queued', 'running')",
+        (project_id,),
+    )
+    conn.execute(
+        "UPDATE intents SET concluded_at = ?, conclusion = 'abandoned', conclusion_reason = ? "
+        "WHERE project_id = ? AND concluded_at IS NULL AND worker IS NULL",
+        (now, reason, project_id),
+    )
+    request_execution_control(conn, project, "finish", now=now)
+
+
+def _finish_expired_pause(project_id: str, paused_at: str, *, now: str) -> bool:
+    from .project_execution_control import execution_control
+
+    with get_conn() as conn:
+        # 扫描之后可能已经恢复或重新暂停；锁内重读窗口和托管归属，不消费旧快照。
+        conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
+        project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if project is None or project["status"] != "paused":
+            return False
+        if conn.execute("SELECT 1 FROM verification_requests WHERE project_id = ?", (project_id,)).fetchone():
+            return False
+        current_pause = execution_control(project).get("paused_at")
+        start, end = parse_utc_timestamp(current_pause), parse_utc_timestamp(now)
+        if current_pause != paused_at or start is None or end is None or (end - start).total_seconds() < PAUSE_TIMEOUT_SECONDS:
+            return False
+        _finish_project(conn, project, reason="pause_timeout", now=now)
+        return True
+
+
+def expire_paused_projects(*, now: str | None = None) -> dict[str, int]:
+    from .project_execution_control import execution_control
+
+    now = now or utcnow()
+    end = parse_utc_timestamp(now)
+    if end is None:
+        raise ValueError("invalid pause expiry clock")
+    with get_conn() as conn:
+        candidates = conn.execute(
+            "SELECT id, execution_control_json FROM projects p WHERE status = 'paused' "
+            "AND NOT EXISTS (SELECT 1 FROM verification_requests v WHERE v.project_id = p.id) ORDER BY id"
+        ).fetchall()
+    finished = 0
+    for project in candidates:
+        paused_at = execution_control(project).get("paused_at")
+        start = parse_utc_timestamp(paused_at)
+        if start is not None and (end - start).total_seconds() >= PAUSE_TIMEOUT_SECONDS:
+            finished += _finish_expired_pause(project["id"], paused_at, now=now)
+    return {"finished": finished}
+
+
 def project_lifecycle_action(project_id: str, action: str, *, legacy: bool = False) -> ProjectMeta:
     with get_conn() as conn:
         # 与领取、结果接受及报告冻结共用项目写锁。
         conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
         row = get_project_or_404(conn, project_id)
         require_unmanaged_project(conn, project_id)
-        if legacy and action == "resume" and row["status"] == "active":
+        from .project_execution_control import execution_control, request_execution_control, is_resume_retry
+
+        control = execution_control(row)
+        if action == "resume" and row["status"] == "active" and (
+            legacy or (control.get("action") == "resume" and control.get("state") == "requested")
+        ):
+            # 重复读取已受理请求，不重新执行资格检查或创建第二次物理控制。
             return project_meta_from_row(conn, row)
         eligibility = project_lifecycle_actions(conn, row)[action]
         if not eligibility["allowed"]:
             raise HTTPException(409, eligibility["reason"])
         target_status = {"pause": "paused", "resume": "active", "finish": "stopped"}[action]
-        if row["status"] == target_status:
+        if row["status"] == target_status and (
+            action == "resume" or control.get("action") == action
+        ) and not (action == "resume" and is_resume_retry(row)):
             return project_meta_from_row(conn, row)
-        if action == "pause":
-            conn.execute("UPDATE projects SET status = 'paused', execution_generation = execution_generation + 1 WHERE id = ?", (project_id,))
-            # 已终态但未确认清理的执行仍可能保有浏览器/容器，必须纳入 drain。
-            draining_intents = set()
-            draining_reason = False
-            for run in conn.execute("SELECT * FROM task_runs WHERE project_id = ?", (project_id,)).fetchall():
-                context = parse_scenario_snapshot(run["runtime_context_json"])
-                if run["task_type"] == "report" and context.get("report_claim", {}).get("scope_key"):
-                    continue
-                lifecycle = context.get("execution_lifecycle", {})
-                confirmed = isinstance(lifecycle, dict) and type(lifecycle.get("generation")) is int and lifecycle["generation"] == run["execution_generation"] and lifecycle.get("termination_confirmed") is True and lifecycle.get("cleanup_confirmed") is True
-                if run["status"] in {"queued", "running"} or not confirmed:
-                    conn.execute("UPDATE task_runs SET pause_requested = 1, pause_interrupted = CASE WHEN status IN ('queued', 'running') THEN 1 ELSE pause_interrupted END WHERE project_id = ? AND id = ?", (project_id, run["id"]))
-                    draining_intents.add(run["intent_id"])
-                    draining_reason = draining_reason or run["task_type"] == "reason"
-            # admission 已被同一项目锁封闭；没有未确认物理执行的领取可安全收口。
-            # 历史执行必须全部真实清理，不能凭时间或 worker 名推断当前 claim 安全。
-            for claim in conn.execute("SELECT id FROM intents WHERE project_id = ? AND concluded_at IS NULL AND worker IS NOT NULL", (project_id,)).fetchall():
-                if claim["id"] not in draining_intents:
-                    clear_open_intent_worker(conn, project_id, claim["id"], "released")
-            if row["reason_worker"] and not draining_reason:
-                clear_project_reason(conn, project_id)
-        elif action == "finish" and policy_from_project_row(row).protocol == GOAL_DRIVEN_PROTOCOL:
-            from .assessment_convergence import advance_goal_driven_convergence
 
-            if row_value(row, "coverage_stop_reason") == "user_stopped":
-                advance_goal_driven_convergence(
-                    conn,
-                    project_id,
-                    reason="user_stopped",
-                )
-                return project_meta_from_row(
-                    conn,
-                    get_project_or_404(conn, project_id),
-                )
-            # paused 已在暂停事务中推进代次；结束时复用该 fence，避免旧运行落后两代而无法结算。
-            conn.execute(
-                """
-                UPDATE projects
-                SET status = 'active',
-                    execution_generation = CASE
-                        WHEN status = 'active' THEN execution_generation + 1
-                        ELSE execution_generation
-                    END,
-                    coverage_stop_reason = 'user_stopped'
-                WHERE id = ? AND status IN ('active', 'paused')
-                """,
-                (project_id,),
-            )
-            draining_intents = set()
-            draining_reason = False
-            for run in conn.execute("SELECT * FROM task_runs WHERE project_id = ?", (project_id,)).fetchall():
-                context = parse_scenario_snapshot(run["runtime_context_json"])
-                if run["task_type"] == "report" and context.get("report_claim", {}).get("scope_key"):
-                    continue
-                lifecycle = context.get("execution_lifecycle", {})
-                confirmed = isinstance(lifecycle, dict) and type(lifecycle.get("generation")) is int and lifecycle["generation"] == run["execution_generation"] and lifecycle.get("termination_confirmed") is True and lifecycle.get("cleanup_confirmed") is True
-                if run["status"] in {"queued", "running"} or not confirmed:
-                    conn.execute("UPDATE task_runs SET pause_requested = 1, pause_interrupted = CASE WHEN status IN ('queued', 'running') THEN 1 ELSE pause_interrupted END WHERE project_id = ? AND id = ?", (project_id, run["id"]))
-                    draining_intents.add(run["intent_id"])
-                    draining_reason = draining_reason or run["task_type"] == "reason"
-            for claim in conn.execute("SELECT id FROM intents WHERE project_id = ? AND concluded_at IS NULL AND worker IS NOT NULL", (project_id,)).fetchall():
-                if claim["id"] not in draining_intents:
-                    clear_open_intent_worker(conn, project_id, claim["id"], "user_stopped")
-            if row["reason_worker"] and not draining_reason:
-                clear_project_reason(conn, project_id)
-            # 先冻结新 admission 并请求物理停止；在途结果、候选收据与清理证明仍可结算。
-            advance_goal_driven_convergence(
-                conn,
-                project_id,
-                reason="user_stopped",
-            )
+        if action == "finish":
+            _finish_project(conn, row, reason="user_stopped", now=utcnow())
         else:
+            # 热暂停保留 TaskRun、claim、session、generation；恢复不是 continuation admission。
             conn.execute("UPDATE projects SET status = ? WHERE id = ?", (target_status, project_id))
-            if action == "finish":
-                from .assessment_convergence import stop_assessment
-
-                if policy_from_project_row(row).phased:
-                    stop_assessment(conn, project_id, "user_stopped")
-                else:
-                    clear_open_intent_workers_for_project(conn, project_id, "project_stopped")
-                clear_project_reason(conn, project_id)
+            request_execution_control(conn, row, action)
         return project_meta_from_row(conn, get_project_or_404(conn, project_id))
 
 

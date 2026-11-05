@@ -56,6 +56,13 @@ class StaleReconcileMixin:
                 # 对话由专用持久轮次标记中断；缺失future不构成再次模型执行许可。
                 if item.get("task_type") == "agent_chat":
                     continue
+                control = getattr(summary, "execution_control", {}) or {}
+                if item.get("task_type") in {"bootstrap", "reason", "explore"} and (
+                    summary.status == "paused" or control.get("action") in {"pause", "resume"}
+                    and control.get("state") != "running"
+                ):
+                    # 缺少宿主 future 不是物理退出证明，也不是重新认领或重建现场的许可。
+                    continue
                 if item.get("status") != "running":
                     continue
                 if task_run_id in current_task_run_ids:
@@ -77,6 +84,14 @@ class StaleReconcileMixin:
                 if not isinstance(task_run_id, str):
                     continue
                 finish = self._stale_running_finish(item, command_events.get(task_run_id, []))
+                if (summary.status == "stopped" and summary.coverage_stop_reason == "pause_timeout"
+                    and item.get("task_type") in {"bootstrap", "reason", "explore"}
+                    and item.get("pause_requested") and finish["error_type"] in {"heartbeat_lost", "cancelled"}):
+                    # 重启后没有 Future 的原暂停执行沿同一自动结束原因收口；不伪造物理回执。
+                    finish = {
+                        "status": "cancelled", "error_type": "cancelled", "error_message": "pause_timeout",
+                        "runtime_context": {"reason": "pause_timeout"},
+                    }
                 error_message = finish["error_message"]
                 if finish["error_type"] == "worker_unhealthy" and item.get("error_message"):
                     error_message = str(item.get("error_message"))

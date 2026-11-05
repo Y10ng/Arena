@@ -200,7 +200,11 @@ describe('Monitoring', () => {
     expect(document.body.textContent).toContain('3 项')
     expect(document.body.textContent).toContain('2 KB')
     expect(document.body.textContent).toContain('6')
-    expect(document.body.textContent).toContain('累计标准错误')
+    expect(document.body.textContent).not.toContain('网络流状态诊断')
+    expect(wrapper.get('.monitoring-snapshot time').attributes('datetime')).toBe(
+      '2026-08-20T10:00:00Z',
+    )
+    expect(wrapper.findAll('.monitoring-disclosure')).toHaveLength(5)
 
     const runButtons = wrapper
       .findAll('button')
@@ -244,6 +248,55 @@ describe('Monitoring', () => {
 
     await wrapper.get('input[type="checkbox"]').setValue(true)
     expect(document.body.textContent).toContain('retired-worker')
+
+    await wrapper.get('input[type="checkbox"]').setValue(false)
+    const value = summary()
+    value.workers = value.workers.filter((worker) => !worker.configured)
+    ;(mocks.data as ReturnType<typeof ref<MonitoringSummary | undefined>>).value = value
+    await flushPromises()
+    expect(wrapper.text()).toContain('当前筛选下没有 Worker，可勾选“显示历史”查看已有记录。')
+    await wrapper.get('input[type="checkbox"]').setValue(true)
+    expect(document.body.textContent).toContain('retired-worker')
+  })
+
+  it('keeps full Worker identity and healthcheck metadata in a local disclosure', async () => {
+    const value = summary()
+    const worker = value.workers[0]!
+    worker.worker_name = 'worker-with-a-long-display-name-'.repeat(6)
+    worker.latest_healthcheck_at = '2026-08-20T09:59:00Z'
+    worker.latest_healthcheck_duration_seconds = 0
+    ;(mocks.data as ReturnType<typeof ref<MonitoringSummary | undefined>>).value = value
+    wrapper = mount(Monitoring, { attachTo: document.body })
+    await flushPromises()
+
+    const identity = wrapper.get('.monitoring-worker-identity')
+    expect(identity.attributes('open')).toBeUndefined()
+    expect(identity.get('summary .monitoring-worker-name').attributes('title')).toBe(worker.worker_name)
+    expect(identity.get('.monitoring-worker-details').text()).toContain(worker.worker_name)
+    expect(identity.get('.monitoring-worker-details').text()).toContain('0s')
+    expect(wrapper.get('.monitoring-worker-table tbody tr').text()).toContain('已配置')
+    expect(mocks.api).not.toHaveBeenCalled()
+  })
+
+  it('keeps missing capacity and durations unknown while preserving actual zero values', async () => {
+    const value = summary()
+    value.workers[0]!.max_running = null
+    value.dispatcher.last_loop_duration_ms = null
+    value.running_tasks[0]!.duration_seconds = null
+    ;(mocks.data as ReturnType<typeof ref<MonitoringSummary | undefined>>).value = value
+    wrapper = mount(Monitoring, { attachTo: document.body })
+    await flushPromises()
+    expect(wrapper.get('.monitoring-worker-table tbody tr').text()).toContain('1 / 未知')
+    expect(wrapper.get('.monitoring-metadata').text()).toContain('上次循环耗时未知')
+    expect(wrapper.text()).toContain('运行中 未知')
+    expect(wrapper.text()).not.toContain('所有执行节点均处于活跃状态')
+
+    value.workers[0]!.max_running = 0
+    value.dispatcher.last_loop_duration_ms = 0
+    ;(mocks.data as ReturnType<typeof ref<MonitoringSummary | undefined>>).value = { ...value }
+    await flushPromises()
+    expect(wrapper.get('.monitoring-worker-table tbody tr').text()).toContain('1 / 0')
+    expect(wrapper.get('.monitoring-metadata').text()).toContain('0 ms')
   })
 
   it('shows an initial error and preserves stale data on refresh failure', async () => {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from hashlib import sha256
 import json
 from typing import Literal
@@ -21,9 +22,19 @@ class CustomModelHeader(BaseModel):
     value: str
 
 
+class ModelPricing(BaseModel):
+    currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+    input: Decimal | None = Field(default=None, ge=0, max_digits=24, decimal_places=12, allow_inf_nan=False)
+    output: Decimal | None = Field(default=None, ge=0, max_digits=24, decimal_places=12, allow_inf_nan=False)
+    cache_read: Decimal | None = Field(default=None, ge=0, max_digits=24, decimal_places=12, allow_inf_nan=False)
+    cache_write: Decimal | None = Field(default=None, ge=0, max_digits=24, decimal_places=12, allow_inf_nan=False)
+
+
 class TenantModelExecutionBinding(BaseModel):
     model_id: str
     model_revision: int
+    model_display_name: str = ""
+    pricing: ModelPricing = Field(default_factory=ModelPricing)
     credential_version_id: str
     credential_version: int
     credential_fingerprint: str
@@ -47,6 +58,8 @@ class TenantModelExecutionBinding(BaseModel):
             "model_id": self.model_id,
             "model_name": self.model_name,
             "model_revision": self.model_revision,
+            "display_name": self.model_display_name,
+            "pricing": self.pricing.model_dump(mode="json"),
             "credential_version_id": self.credential_version_id,
             "credential_version": self.credential_version,
             "credential_fingerprint": self.credential_fingerprint,
@@ -68,6 +81,7 @@ class TenantModelConfig(BaseModel):
     inference_endpoint: str | None = None
     model_name: str = ""
     enabled: bool = True
+    pricing: ModelPricing = Field(default_factory=ModelPricing)
 
     @field_validator("display_name", "base_url", "model_name")
     @classmethod

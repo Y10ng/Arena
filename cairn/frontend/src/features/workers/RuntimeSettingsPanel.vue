@@ -13,7 +13,12 @@
           <h3>并发容量</h3>
           <div class="runtime-fields">
             <label v-for="field in capacityFields" :key="field.key" class="form-group">
-              <span class="form-label">{{ field.label }}</span>
+              <span class="form-label"
+                >{{ field.label
+                }}<small class="runtime-unit">{{
+                  field.key === 'max_running_projects' ? '个项目' : '个 Worker'
+                }}</small></span
+              >
               <Input
                 :model-value="draft.runtime[field.key]"
                 type="number"
@@ -262,15 +267,25 @@ function changedFields(): RuntimeSettingsPatch {
 const reviewedChanges = computed(() => {
   if (!reviewed.value) return []
   const patch = changedFields()
+  const runtimeLabels: Record<string, string> = {
+    interval: '调度间隔（秒）',
+    healthcheck_timeout: '健康检查时限（秒）',
+  }
+  const roleLabels: Record<string, string> = {
+    bootstrap: '初始化',
+    reason: '决策',
+    explore: '探索',
+    report: '报告',
+  }
   return [
     ...Object.entries(patch.runtime || {}).map(([key, value]) => ({
-      label: `runtime.${key}`,
+      label: capacityFields.find((field) => field.key === key)?.label || runtimeLabels[key] || key,
       current: reviewed.value!.runtime[key as keyof RuntimeSettingsValues['runtime']],
       draft: value,
     })),
     ...Object.entries(patch.tasks || {}).flatMap(([role, fields]) =>
       Object.entries(fields).map(([key, value]) => ({
-        label: `${role}.${key}`,
+        label: `${roleLabels[role] ?? role}${key === 'conclude_timeout' ? '收尾时限' : '执行时限'}（秒）`,
         current: (
           reviewed.value!.tasks[role as keyof RuntimeSettingsValues['tasks']] as Record<
             string,

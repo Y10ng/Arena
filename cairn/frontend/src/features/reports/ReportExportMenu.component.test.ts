@@ -27,29 +27,6 @@ vi.mock('./reportExport', async (original) => ({
   downloadReportBlob: mocks.download,
 }))
 const wrappers: VueWrapper[] = []
-const catalog = [
-  {
-    key: 'a-custom',
-    name: '自定义模板',
-    is_default: false,
-    supports_single_vulnerability: true,
-    validation_error: null,
-  },
-  {
-    key: 'z-default',
-    name: '三段式模板',
-    is_default: true,
-    supports_single_vulnerability: true,
-    validation_error: null,
-  },
-  {
-    key: 'overall-only',
-    name: '仅整体报告',
-    is_default: false,
-    supports_single_vulnerability: false,
-    validation_error: null,
-  },
-]
 function deferred<T>() {
   let resolve!: (value: T) => void
   const promise = new Promise<T>((done) => {
@@ -63,6 +40,7 @@ async function chooseFormat(wrapper: VueWrapper, label = 'Markdown（.md）') {
   const items = [...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')]
   expect(items.map((item) => item.textContent?.trim())).toEqual([
     'Markdown（.md）',
+    'Markdown 证据包（.tar）',
     'Word（.docx）',
     'HTML（.html）',
   ])
@@ -76,7 +54,7 @@ function confirmButton() {
 }
 beforeEach(() => {
   vi.clearAllMocks()
-  mocks.catalog.mockResolvedValue(catalog)
+  mocks.catalog.mockResolvedValue([])
   mocks.fetchText.mockResolvedValue('# 完整正文\n\n末尾\n')
   mocks.finalization.mockResolvedValue(null)
   mocks.vulnerability.mockResolvedValue({ project_id: 'p', id: 'v', observation_id: 'obs-latest' })
@@ -92,7 +70,7 @@ afterEach(() => {
 })
 
 describe('共享报告导出菜单', () => {
-  it('单漏洞固定Observation，选择明确默认模板而非目录首项，并支持显式自定义', async () => {
+  it('单漏洞固定Observation且不选择模板，目录和原文可读，刷新后导出当前预览', async () => {
     const wrapper = mount(VulnerabilityReportExport, {
       attachTo: document.body,
       props: {
@@ -104,47 +82,68 @@ describe('共享报告导出菜单', () => {
     })
     wrappers.push(wrapper)
     await chooseFormat(wrapper)
-    expect(wrapper.getComponent(Select).props('modelValue')).toBe('z-default')
-    expect(wrapper.getComponent(Select).props('options')).toEqual([
-      { value: 'a-custom', label: '自定义模板' },
-      { value: 'z-default', label: '三段式模板（系统默认）' },
-    ])
-    wrapper.getComponent(Select).vm.$emit('update:modelValue', 'a-custom')
+    expect(mocks.catalog).not.toHaveBeenCalled()
+    expect(mocks.create).not.toHaveBeenCalled()
+    expect(wrapper.findAllComponents(Select)).toHaveLength(1)
+    expect(wrapper.getComponent(Select).props('modelValue')).toBe('md')
+    expect(document.body.textContent).not.toContain('报告模板')
+    expect(document.querySelector('[aria-label="当前报告章节目录"]')).toBeNull()
+    const directoryToggle = document.querySelector<HTMLButtonElement>('.report-reader-directory-toggle')!
+    directoryToggle.click()
     await flushPromises()
+    expect(directoryToggle.getAttribute('aria-expanded')).toBe('true')
+    const directory = document.querySelector<HTMLElement>('[aria-label="当前报告章节目录"]')
+    expect(directory?.textContent).toContain('完整正文')
+    const hash = window.location.hash
+    directory?.querySelector('button')?.click()
+    await flushPromises()
+    expect(window.location.hash).toBe(hash)
+    expect(document.querySelector('[aria-label="当前报告章节目录"]')).toBeNull()
+    expect(directoryToggle.getAttribute('aria-expanded')).toBe('false')
+    const raw = [...document.querySelectorAll<HTMLButtonElement>('.report-reader-actions button')].find((button) => button.textContent?.trim() === '原文')!
+    raw.click()
+    await flushPromises()
+    expect(document.querySelector('.report-reader-raw')?.textContent).toBe('# 完整正文\n\n末尾\n')
+    expect(mocks.fetchText).toHaveBeenCalledTimes(1)
+    mocks.fetchText.mockResolvedValueOnce('# 刷新后的完整正文\n\n新末尾\n')
+    const refresh = [...document.querySelectorAll<HTMLButtonElement>('.report-reader-actions button')].find((button) => button.textContent?.trim() === '刷新预览')!
+    refresh.click()
+    await flushPromises()
+    expect(document.querySelector('.report-reader-raw')?.textContent).toBe('# 刷新后的完整正文\n\n新末尾\n')
     confirmButton().click()
     await flushPromises()
-    expect(mocks.fetchText).toHaveBeenCalledWith(
-      '/projects/project-a/vulnerabilities/vuln-a/report?template_key=a-custom&observation_id=obs-selected',
+    expect(mocks.fetchText).toHaveBeenCalledTimes(2)
+    expect(mocks.fetchText).toHaveBeenLastCalledWith(
+      '/projects/project-a/vulnerabilities/vuln-a/report?observation_id=obs-selected',
       expect.any(AbortSignal),
       'no-store',
     )
-    expect(mocks.create).toHaveBeenCalledWith('# 完整正文\n\n末尾\n', 'md', '受控漏洞')
+    expect(mocks.create).toHaveBeenCalledWith('# 刷新后的完整正文\n\n新末尾\n', 'md', '受控漏洞', [])
     expect(mocks.download).toHaveBeenCalledWith(expect.any(Blob), '受控漏洞', 'md')
     expect(document.body.textContent).toContain('已开始下载')
   })
 
-  it('单漏洞优先专用逐步骤模板，已显式选择的自定义模板不被重置', async () => {
-    mocks.catalog.mockResolvedValue([...catalog, {
-      key: 'single-vulnerability-report', name: '单漏洞逐步骤报告', is_default: false,
-      supports_single_vulnerability: true, validation_error: null,
-    }])
-    const wrapper = mount(VulnerabilityReportExport, {
+  it.each(['md', 'html', 'docx'] as const)('%s 导出复用当前预览正文，切换格式不重新读取或生成报告', async (format) => {
+    const markdown = '\n# 同一份正文\n\n原始证据与末尾\n'
+    const loadMarkdown = vi.fn().mockResolvedValue(markdown)
+    const wrapper = mount(ReportExportMenu, {
       attachTo: document.body,
-      props: { projectId: 'p', vulnerabilityId: 'v', title: '受控漏洞', observationId: 'obs' },
+      props: { identity: 'report-a', filename: '受控报告', preview: true, loadMarkdown },
     })
     wrappers.push(wrapper)
     await chooseFormat(wrapper)
-    expect(wrapper.getComponent(Select).props('modelValue')).toBe('single-vulnerability-report')
-    expect(mocks.fetchText).toHaveBeenLastCalledWith(
-      '/projects/p/vulnerabilities/v/report?template_key=single-vulnerability-report&observation_id=obs',
-      expect.any(AbortSignal), 'no-store',
-    )
-    wrapper.getComponent(Select).vm.$emit('update:modelValue', 'a-custom')
+    expect(mocks.create).not.toHaveBeenCalled()
+    expect(mocks.download).not.toHaveBeenCalled()
+    expect(wrapper.findAllComponents(Select)).toHaveLength(1)
+    wrapper.getComponent(Select).vm.$emit('update:modelValue', format)
     await flushPromises()
     confirmButton().click()
     await flushPromises()
-    await chooseFormat(wrapper, 'HTML（.html）')
-    expect(wrapper.getComponent(Select).props('modelValue')).toBe('a-custom')
+    expect(loadMarkdown).toHaveBeenCalledExactlyOnceWith(expect.any(AbortSignal))
+    expect(mocks.create).toHaveBeenCalledExactlyOnceWith(markdown, format, '受控报告', [])
+    expect(mocks.download).toHaveBeenCalledExactlyOnceWith(expect.any(Blob), '受控报告', format)
+    expect(mocks.catalog).not.toHaveBeenCalled()
+    expect(mocks.request).not.toHaveBeenCalled()
   })
 
   it('整体历史成品直接读取全文，不读取当前模板；键盘可打开菜单', async () => {
@@ -165,8 +164,9 @@ describe('共享报告导出菜单', () => {
     item.click()
     await flushPromises()
     expect(mocks.catalog).not.toHaveBeenCalled()
-    expect(loadMarkdown).toHaveBeenCalledWith(expect.any(AbortSignal), undefined)
-    expect(mocks.create).toHaveBeenCalledWith(markdown, 'docx', '历史成品')
+    expect(document.body.querySelector('.report-export-dialog')).toBeNull()
+    expect(loadMarkdown).toHaveBeenCalledExactlyOnceWith(expect.any(AbortSignal))
+    expect(mocks.create).toHaveBeenCalledWith(markdown, 'docx', '历史成品', [])
     expect(mocks.download).toHaveBeenCalledWith(expect.any(Blob), '历史成品', 'docx')
   })
 
@@ -188,53 +188,54 @@ describe('共享报告导出菜单', () => {
     expect(mocks.create).not.toHaveBeenCalled()
     mocks.create.mockReturnValueOnce(converting.promise)
     await chooseFormat(wrapper, 'HTML（.html）')
-    expect(mocks.create).toHaveBeenCalledWith('# B正文', 'html', 'B')
+    expect(mocks.create).toHaveBeenCalledWith('# B正文', 'html', 'B', [])
     await wrapper.setProps({ identity: 'A', filename: 'A' })
     converting.resolve(new Blob(['B的迟到转换']))
     await flushPromises()
     expect(mocks.download).not.toHaveBeenCalled()
   })
 
-  it('切换Observation或取消弹窗会中止单漏洞读取，失败保留明确错误且不假报下载', async () => {
+  it('切换Observation中止预览，取消转换拒绝迟到下载，失败保留明确错误', async () => {
     const reading = deferred<string>()
-    mocks.fetchText.mockResolvedValueOnce('# 预览').mockReturnValueOnce(reading.promise)
+    mocks.fetchText.mockReturnValueOnce(reading.promise)
     const wrapper = mount(VulnerabilityReportExport, {
       attachTo: document.body,
       props: { projectId: 'p', vulnerabilityId: 'v', title: '受控漏洞', observationId: 'obs-a' },
     })
     wrappers.push(wrapper)
     await chooseFormat(wrapper)
-    confirmButton().click()
-    await flushPromises()
+    expect(confirmButton().disabled).toBe(true)
     const signal = mocks.fetchText.mock.calls.at(-1)![1] as AbortSignal
     await wrapper.setProps({ observationId: 'obs-b' })
     expect(signal.aborted).toBe(true)
     reading.resolve('obs-a的迟到正文')
     await flushPromises()
+    expect(mocks.create).not.toHaveBeenCalled()
     expect(mocks.download).not.toHaveBeenCalled()
-    const canceled = deferred<string>()
-    mocks.fetchText.mockResolvedValueOnce('# 新发现预览').mockReturnValueOnce(canceled.promise)
+    const canceled = deferred<Blob>()
+    mocks.fetchText.mockResolvedValueOnce('# 新发现预览')
+    mocks.create.mockReturnValueOnce(canceled.promise)
     await chooseFormat(wrapper)
+    const canceledSignal = mocks.fetchText.mock.calls.at(-1)![1] as AbortSignal
     confirmButton().click()
     await flushPromises()
-    const canceledSignal = mocks.fetchText.mock.calls.at(-1)![1] as AbortSignal
+    expect(mocks.create).toHaveBeenCalledWith('# 新发现预览', 'md', '受控漏洞', [])
     const cancelPending = [
       ...document.body.querySelectorAll<HTMLButtonElement>('[role="dialog"] button'),
     ].find((button) => button.textContent === '取消导出')!
     cancelPending.click()
     await flushPromises()
     expect(canceledSignal.aborted).toBe(true)
-    canceled.resolve('已取消的完整正文')
+    canceled.resolve(new Blob(['已取消的转换结果']))
     await flushPromises()
     expect(mocks.download).not.toHaveBeenCalled()
-    mocks.fetchText
-      .mockResolvedValueOnce('# 原文预览')
-      .mockRejectedValueOnce(new Error('所选发现记录不属于该漏洞'))
+    mocks.fetchText.mockResolvedValueOnce('# 原文预览')
+    mocks.create.mockRejectedValueOnce(new Error('报告转换失败：受控错误'))
     await chooseFormat(wrapper)
     confirmButton().click()
     await flushPromises()
     expect(document.body.querySelector('[role="alert"]')?.textContent).toContain(
-      '所选发现记录不属于该漏洞',
+      '报告转换失败：受控错误',
     )
     expect(document.body.textContent).not.toContain('已开始下载')
     expect(mocks.download).not.toHaveBeenCalled()
@@ -246,11 +247,11 @@ describe('共享报告导出菜单', () => {
     expect(document.body.querySelector('.ui-dialog__content')).toBeNull()
     expect(document.activeElement).toBe(wrapper.get('button').element)
     expect(document.body.querySelector('.report-export__feedback')?.textContent).toContain(
-      '所选发现记录不属于该漏洞',
+      '报告转换失败：受控错误',
     )
   })
 
-  it('列表入口先固定发现，预览、切模板、切格式和下载都不隐式整理', async () => {
+  it('列表入口先固定发现，预览、切格式和下载都不隐式整理或读取模板', async () => {
     const wrapper = mount(VulnerabilityReportExport, {
       attachTo: document.body,
       props: { projectId: 'p', vulnerabilityId: 'v', title: '非敏感合成漏洞' },
@@ -262,21 +263,23 @@ describe('共享报告导出菜单', () => {
     for (const label of ['整理报告', '重新整理', '取消整理', '刷新状态', '产生费用']) {
       expect(document.body.textContent).not.toContain(label)
     }
-    const selects = wrapper.findAllComponents(Select)
-    selects[0]!.vm.$emit('update:modelValue', 'a-custom')
-    selects[1]!.vm.$emit('update:modelValue', 'html')
+    expect(wrapper.findAllComponents(Select)).toHaveLength(1)
+    wrapper.getComponent(Select).vm.$emit('update:modelValue', 'html')
     await flushPromises()
     confirmButton().click()
     await flushPromises()
-    expect(mocks.create).toHaveBeenLastCalledWith('# 完整正文\n\n末尾\n', 'html', '非敏感合成漏洞')
-    expect(
-      mocks.fetchText.mock.calls.every(([url]) =>
-        String(url).includes('observation_id=obs-latest'),
-      ),
-    ).toBe(true)
+    expect(mocks.create).toHaveBeenLastCalledWith('# 完整正文\n\n末尾\n', 'html', '非敏感合成漏洞', [])
+    expect(mocks.fetchText).toHaveBeenCalledExactlyOnceWith(
+      '/projects/p/vulnerabilities/v/report?observation_id=obs-latest',
+      expect.any(AbortSignal),
+      'no-store',
+    )
+    expect(mocks.download).toHaveBeenCalledWith(expect.any(Blob), '非敏感合成漏洞', 'html')
+    expect(mocks.catalog).not.toHaveBeenCalled()
     expect(mocks.request).not.toHaveBeenCalled()
     expect(mocks.finalization).not.toHaveBeenCalled()
-    expect(mocks.vulnerability).toHaveBeenCalledTimes(1)
+    expect(mocks.vulnerability).toHaveBeenCalledTimes(2)
+    expect(mocks.vulnerability).toHaveBeenLastCalledWith('p', 'v', expect.any(AbortSignal), 'obs-latest', true)
   })
 
   it('列表定位拒绝另一漏洞身份，预览失败仍保留已保存发现且不启动整理', async () => {
@@ -288,7 +291,9 @@ describe('共享报告导出菜单', () => {
     wrappers.push(wrapper)
     await chooseFormat(wrapper)
     expect(document.body.textContent).toContain('发现记录与当前漏洞身份不匹配')
+    expect(confirmButton().disabled).toBe(true)
     expect(mocks.fetchText).not.toHaveBeenCalled()
+    expect(mocks.create).not.toHaveBeenCalled()
     expect(mocks.download).not.toHaveBeenCalled()
     expect(mocks.request).not.toHaveBeenCalled()
     expect(mocks.finalization).not.toHaveBeenCalled()
@@ -301,7 +306,7 @@ describe('共享报告导出菜单', () => {
       props: {
         identity: 'single-vulnerability',
         filename: '合成报告',
-        templateMode: 'single-vulnerability',
+        preview: true,
         loadMarkdown,
       },
     })

@@ -1,23 +1,22 @@
 <template>
-  <div class="status-page">
-    <Card class="status-card" padding="lg">
-      <EmptyState title="页面不存在" description="该地址不存在、已移动或不再可用。">
-        <template #icon>
-          <FileQuestionMark :size="36" :stroke-width="1.6" />
-        </template>
-        <div class="status-code" aria-hidden="true">404</div>
-        <template #actions>
-          <Button @click="returnToOverview">返回仪表盘</Button>
-        </template>
-      </EmptyState>
-    </Card>
-  </div>
+  <section class="status-page" aria-labelledby="not-found-title">
+    <div class="status-content">
+      <div class="status-heading">
+        <FileQuestionMark :size="22" aria-hidden="true" /><span>404</span>
+      </div>
+      <h2 id="not-found-title">页面不存在</h2>
+      <p>该地址不存在、已移动或不再可用。</p>
+      <div class="status-actions">
+        <Button @click="returnToOverview"><ArrowLeft :size="16" />返回工作台</Button>
+      </div>
+    </div>
+  </section>
 </template>
 
 <script setup lang="ts">
-import { FileQuestionMark } from '@lucide/vue'
+import { ArrowLeft, FileQuestionMark } from '@lucide/vue'
 import { useRouter } from 'vue-router'
-import { Button, Card, EmptyState } from '@/components/ui'
+import { Button } from '@/components/ui'
 
 const router = useRouter()
 
@@ -30,18 +29,44 @@ function returnToOverview() {
 .status-page {
   min-height: 100%;
   display: grid;
-  place-items: center;
-  padding: var(--space-6) var(--space-4);
+  align-items: center;
+  padding: var(--space-8) var(--space-7);
+  background: var(--color-canvas);
 }
-
-.status-card {
-  width: min(100%, 680px);
+.status-content {
+  width: min(100%, 560px);
+  margin: 0 auto;
 }
-
-.status-code {
-  color: var(--text-faint);
-  font-size: var(--text-2xl);
+.status-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--text-md);
+  font-variant-numeric: tabular-nums;
+}
+h2 {
+  margin: var(--space-5) 0 var(--space-3);
+  color: var(--text);
+  font-size: var(--text-object);
+  line-height: 1.4;
   font-weight: var(--font-semibold);
-  letter-spacing: 0.08em;
+}
+p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-md);
+  line-height: 1.8;
+}
+.status-actions {
+  display: flex;
+  margin-top: var(--space-6);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border);
+}
+@media (max-width: 520px) {
+  .status-page {
+    padding-inline: var(--space-5);
+  }
 }
 </style>

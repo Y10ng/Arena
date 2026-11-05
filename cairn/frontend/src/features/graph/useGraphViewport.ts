@@ -1,5 +1,6 @@
 import { computed, reactive, ref, type ComputedRef } from 'vue'
 import type { GraphBounds, GraphNode } from './graphTypes'
+import { toLogicalPixels } from '@/lib/uiScale'
 
 const FIT_VIEWPORT_PADDING = 96
 const MIN_ZOOM = 0.035
@@ -63,8 +64,8 @@ export function useGraphViewport({
 
   const onPan = (event: PointerEvent) => {
     if (!isPanning.value || event.pointerId !== panStart.pointerId) return
-    pan.x = panStart.panX + event.clientX - panStart.clientX
-    pan.y = panStart.panY + event.clientY - panStart.clientY
+    pan.x = panStart.panX + toLogicalPixels(event.clientX - panStart.clientX)
+    pan.y = panStart.panY + toLogicalPixels(event.clientY - panStart.clientY)
   }
 
   const endPan = (event?: PointerEvent) => {
@@ -177,8 +178,8 @@ export function useGraphViewport({
     if (!viewport) return
 
     const rect = viewport.getBoundingClientRect()
-    const pointerX = queuedEvent.clientX - rect.left
-    const pointerY = queuedEvent.clientY - rect.top
+    const pointerX = toLogicalPixels(queuedEvent.clientX - rect.left)
+    const pointerY = toLogicalPixels(queuedEvent.clientY - rect.top)
     const currentZoom = zoom.value
     const wheelSteps = clampNumber(-queuedEvent.deltaY / 90, -8, 8)
     const nextZoom = clampNumber(

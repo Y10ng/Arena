@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .libraries import LibrarySelection
 from .projects import CreateProjectRequest
 from .test_egress import TestEgressInput
 
@@ -96,13 +97,25 @@ class CreateScheduleRequest(ScheduleTiming):
         return self
 
 
+class UpdateScheduledProjectRequest(CreateProjectRequest):
+    # 仅计划编辑允许省略；缺省表示保留存量冻结绑定，创建仍必须显式提交。
+    library_selections: list[LibrarySelection] = Field(default_factory=list)
+
+
 class UpdateScheduleRequest(ScheduleTiming):
     version: int = Field(ge=1)
-    project: CreateProjectRequest | None = None
+    project: UpdateScheduledProjectRequest | None = None
     resource_ids: list[str] | None = None
-    refresh_library_keys: list[str] = Field(default_factory=list)
+    library_selection_explicit: Literal[True] | None = None
     explore_deadline: str | None = None
     test_egress: TestEgressInput | None = None
+
+    @field_validator("project", mode="before")
+    @classmethod
+    def convert_create_project(cls, value):
+        if isinstance(value, CreateProjectRequest) and not isinstance(value, UpdateScheduledProjectRequest):
+            return {key: getattr(value, key) for key in value.model_fields_set}
+        return value
 
     @field_validator("explore_deadline")
     @classmethod
@@ -112,7 +125,7 @@ class UpdateScheduleRequest(ScheduleTiming):
     @model_validator(mode="after")
     def validate_future_input(self):
         if self.mode == "once":
-            if self.project is not None or self.resource_ids is not None or self.refresh_library_keys:
+            if self.project is not None or self.resource_ids is not None or self.library_selection_explicit is not None:
                 raise ValueError("单次计划输入归属于已创建项目，改期不重复提交输入")
         elif "explore_deadline" in self.model_fields_set or "test_egress" in self.model_fields_set:
             raise ValueError("周期执行停止边界和测试出口应在未来项目配置中显式更新")
@@ -120,6 +133,8 @@ class UpdateScheduleRequest(ScheduleTiming):
             raise ValueError("周期编辑必须提供完整未来输入")
         elif self.project.request_id is not None or self.project.resources:
             raise ValueError("周期资料使用批次，请求身份不属于未来项目配置")
+        elif self.library_selection_explicit and "library_selections" not in self.project.model_fields_set:
+            raise ValueError("显式选择资料库时必须提交 library_selections")
         return self
 
 

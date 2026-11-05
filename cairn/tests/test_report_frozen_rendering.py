@@ -166,12 +166,12 @@ def _packet(*, empty: bool = False) -> dict:
                 "id": "v1", "title": "同名漏洞", "severity": "high", "status": "open",
                 "target": "/one", "source_fact_id": "f1",
                 "repro_steps": "原始步骤一：读取对象\n原始步骤二：比较身份",
-                "record_evidence_items": [],
+                "record_evidence_items": [], "dispositions": [],
             },
             {
                 "id": "v2", "title": "同名漏洞", "severity": "medium", "status": "open",
                 "target": "/two", "source_fact_id": "f2", "repro_steps": "第二漏洞的原始条件",
-                "record_evidence_items": [],
+                "record_evidence_items": [], "dispositions": [],
             },
         ],
         "facts": [

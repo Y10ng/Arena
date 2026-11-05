@@ -279,7 +279,6 @@ test('renders shared Select portals with opaque light and dark surfaces', async 
 
   await page.goto('/#/projects')
   await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
-  await page.locator('#np-proxy-trigger').click()
   await page.getByLabel('连接方式', { exact: true }).click()
 
   const content = page.locator('.ui-select__content')
@@ -293,10 +292,9 @@ test('renders shared Select portals with opaque light and dark surfaces', async 
     .click()
   await page.getByRole('button', { name: '切换到深色主题' }).click()
   await page.getByRole('button', { name: '新建项目', exact: true }).first().click()
-  await page.locator('#np-proxy-trigger').click()
   await page.getByLabel('连接方式', { exact: true }).click()
   await expect(content).toBeVisible()
-  await expect(content).toHaveCSS('background-color', 'rgb(23, 25, 30)')
+  await expect(content).toHaveCSS('background-color', 'rgb(35, 41, 57)')
 })
 
 test('keeps the mobile sidebar operable at Pixel 7 width', async ({ page }, testInfo) => {

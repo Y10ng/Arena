@@ -67,6 +67,9 @@ def test_target_binding_reaches_execution_and_report_without_rewriting_sources(e
     saved = json.loads(service.verification_material(detail["id"], snapshot["id"], user).content)
     assert saved["project_context"]["origin"]["description"] == origin
     assert saved["vulnerability"]["target"] == OLD
+    assert saved["number"] == vuln.number == f"{source_id}/{vuln.id}"
+    matches = service.list_verification_requests(user, limit=20, offset=0, source_number=vuln.number)
+    assert [item["id"] for item in matches["items"]] == [detail["id"]]
     copied_evidence = next(item for item in detail["materials"] if item["path"].endswith("historical.http"))
     assert service.verification_material(detail["id"], copied_evidence["id"], user).content == original_bytes
     claim = service.claim_verification_request(detail["id"], VerificationClaimRequest(task_run=CreateTaskRunRequest(
