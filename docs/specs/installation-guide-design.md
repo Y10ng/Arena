@@ -614,9 +614,13 @@ GitHub Release／ZIP 对外上传需用户单独确认，不从 main push 授权
 未覆盖升级场景及剩余项；没有真实结果的部分保持未知。完成后结束本轮，交回分析复核。
 ```
 
+### 13.7 本分析轮实际操作
+
+仅更新本方案；只读核对本地 Git、远端 main、相关源码／文档及 Arena／PostgreSQL 镜像元信息，审阅方案差异并执行本文件的 `git diff --check`，无空白错误。未读取或使用用户凭据，未运行自动化测试、打包、构建、Docker 登录／拉取／上传、服务启停、数据库迁移或项目操作；未 commit／push。其他已有工作区改动全部保留。本次完成的是发布范围与升级缺口分析，不是发布或升级验收。
+
 ### 13.8 2026-11-05：发布实施记录
 
-**范围与授权：** 本轮从 `feat/global-ui-prototype` 创建 `release/2026-11-05`；编辑前执行 status／branch，远端 main 实时查询及 fetch 均为 `90b1fe9`。用户授权整理提交并正常推送 main，另明确同意创建公开 GitHub Release、上传配套 ZIP，并经再次确认选择两个公开 Hub 仓库 `yong29/arena-worker`、`yong29/arena-traffic-gateway`；本机登录状态尚待交互确认，确认前暂停上传，不从 GitHub 账号推测。没有读取聊天密码、Docker 凭据文件或平台管理员凭据。
+**范围与授权：** 本轮从 `feat/global-ui-prototype` 创建 `release/2026-11-05`；编辑前执行 status／branch，远端 main 实时查询及 fetch 均为 `90b1fe9`。用户授权整理提交并正常推送 main，另明确同意创建公开 GitHub Release、上传配套 ZIP，并经再次确认选择两个公开 Hub 仓库 `yong29/arena-worker`、`yong29/arena-traffic-gateway`；用户随后明确选择“暂缓镜像上传”，因此本轮不执行 Hub push，也不继续等待登录；确认的仓库仅为后续目标，不代表已经发布。不从 GitHub 账号推测 Hub 登录或权限；没有读取聊天密码、Docker 凭据文件或平台管理员凭据。
 
 **本轮局部修正：**
 
@@ -634,8 +638,22 @@ GitHub Release／ZIP 对外上传需用户单独确认，不从 main push 授权
 - 打包 allowlist 首次复验发现 runner 检测常量自匹配，按上述方式修复后 1 passed。暂存树独立快照的 allowlist、秘密扫描与所有静态引用闭包通过（511 个打包文件、110 个静态文件）；209 个变更 Python 文件语法解析通过。暂存敏感模式检查仅命中明确的私钥拒绝测试样本，`git diff --cached --check` 无空白错误；不是全仓秘密不存在的形式证明。
 - 本轮未运行全套测试、真实模型、研究任务、当前实例部署或其他机器升级。发现 ChatBot 附件限额展示与实际独立上传约束不一致，已在 CHANGELOG 列为已知问题，不扩大为业务改造或宣称其支持项目资源的 500MB 上限。
 
-**发布状态：** 本节当前记录提交准备与已完成隔离验证，实际 Git SHA／远端、镜像构建与 registry digest、ZIP／Release 结果在后续收尾记录中按真实结果补充。首次临时 GitHub CLI 官方下载连接重置，限次重试也超时；没有通过读取凭据或绕过登录来创建 Release。未上传 Hub、未启停现用服务、未迁移业务库、未操作项目／旧容器。发布与部署保持分开。
+**源码发布：** 已创建提交 `a0f22cec57b3f53f5981966db03b1b223a89bd94`（`Release independent conversations, execution controls and paired images`），整理累计 628 个文件变更。推送前重新 fetch、审阅 outgoing commit 与 CHANGELOG，确认可以快进，执行正常 `git push origin HEAD:main`；随后 `ls-remote` 核实 `Y10ng/Arena` 的 main 已指向该完整 SHA。未强推、rebase、amend 或创建 Git tag。收尾文档另作普通提交，不改写该发布源码提交；下面两镜像和 ZIP 均固定来自该源码 revision，而非后续文档提交。历史静态 hash 和私有报告仍保留于本机，未混入提交或发布包。
 
-### 13.7 本分析轮实际操作
+**镜像构建与上传状态：** 从上述提交的 `git archive` 干净源码构建，两个版本标签均通过现有 `verify_deployment.py` 离线自检；实测架构仅为 `linux/amd64`。自检使用 `--rm --network none` 的隔离容器，不挂业务材料。研究镜像版本为 `cairn-agent 1.0.0 (pi-coding-agent 0.73.0)`，executor 导入与证书工具检查通过；网关入口、依赖和采集脚本检查通过。
 
-仅更新本方案；只读核对本地 Git、远端 main、相关源码／文档及 Arena／PostgreSQL 镜像元信息，审阅方案差异并执行本文件的 `git diff --check`，无空白错误。未读取或使用用户凭据，未运行自动化测试、打包、构建、Docker 登录／拉取／上传、服务启停、数据库迁移或项目操作；未 commit／push。其他已有工作区改动全部保留。本次完成的是发布范围与升级缺口分析，不是发布或升级验收。
+| 本地镜像标签（尚未上传） | 本地 Image ID（不是 registry digest） |
+| --- | --- |
+| `yong29/arena-worker:git-a0f22cec57b3` | `sha256:6c1fdf1ffe5df86d43efe50430c17a9c737df4eac3fb5ab6ca15a107dc62235d` |
+| `yong29/arena-traffic-gateway:git-a0f22cec57b3` | `sha256:6e86587af1ff8ea5e0a7048ce70bd334cdeb32b6e103111b381dff626974908a` |
+
+- 两镜像 revision label 均为完整发布 SHA，`RepoDigests` 均为空；**未上传 Hub，没有远端 digest，不能据此承诺可 pull**。版本字符串是镜像 tag，不是已创建的 Git tag。
+- 日志确认 Worker 的主要系统工具、Playwright CLI、Katana／Nuclei／Dalfox、ripgrep／fd 层以及网关的系统依赖、mitmproxy／pproxy 层命中缓存；runner 及受输入变化影响的后续层实际重建，不能声称全部工具层零下载。没有清除 Docker 缓存、升级 lock／工具版本、改写默认 local tag 或处理旧候选镜像。
+
+**本地 code-only ZIP：** 沿同一提交中的 `deploy/package_release.py` 生成，外部文件名追加源码 revision；包内顶层仍为 `arena-0.2.1-linux-code-only/`，不是 GitHub 自动 Source code ZIP。
+
+- 本机临时产物：`/tmp/arena-release-20261105.wbdWIS/artifacts/arena-0.2.1-git-a0f22cec57b3-linux-code-only.zip`；旁附同名 `.zip.sha256`。这是本机路径，不是公共下载地址，也不承诺临时目录长期保存。
+- 大小：19,112,982 bytes；SHA256：`818af4c553a8483fd6fd9c295546e4f03b1519ef55ea52a9372e1f8f70adc2c8`。
+- 包含 511 个 allowlist 文件及 `RELEASE-MANIFEST.json`，其中正式静态资源 110 个；秘密扫描、静态引用检查通过。在新空目录解压后，使用 `python -I` 执行包内 `verify_deployment.py --manifest-only`，结果为“验收通过”。该验证不等于业务数据库或完整旧机升级验收。
+
+**未完成项与部署边界：** 公开 GitHub Release／ZIP 上传已获授权，但本机缺少可用 `gh`；官方 CLI 下载先连接重置，限次重试及官方资产 API 获取随后均超时，未取得并验证工具，Release API 认证也尚未核实。本轮停止重复下载，未创建 Release、未上传资产，没有可交付的公共下载 URL。Hub 上传按用户决定暂缓。未启停现用服务、未迁移业务库、未操作项目／旧容器、未调用模型或升级其他机器。历史会话运维迁移入口、上述 v82 路径要求和 ChatBot 附件限额已知问题仍按原边界保留；发布与部署分别报告，交回分析会话复核。
