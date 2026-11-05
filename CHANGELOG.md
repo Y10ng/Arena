@@ -8,6 +8,7 @@
 - 已上传两个公开 `linux/amd64` 镜像：`yong29/arena-worker:git-a0f22cec57b3` 与 `yong29/arena-traffic-gateway:git-a0f22cec57b3`。远端 digest、config 与 RootFS 身份通过匿名读取核验；完整 digest 和精确拉取命令见 Release 说明。未设置 `latest` 镜像标签，不承诺 `arm64`。
 - Release 附带 `arena-0.2.1-git-a0f22cec57b3-linux-code-only.zip` 和同名 `.sha256`。ZIP 为 19,112,982 bytes，SHA256 为 `818af4c553a8483fd6fd9c295546e4f03b1519ef55ea52a9372e1f8f70adc2c8`；全部 511 个清单文件校验及发布后的匿名下载校验通过，不用 GitHub 自动 Source code ZIP 代替部署包。
 - 更新 README、Linux 安装指南及容器说明：推荐配套部署包和预构建镜像，提供下载校验、固定 digest 拉取、实际 YAML 配置及旧安装切换顺序；说明默认 `:local` 仍触发构建、Docker daemon 与终端代理的区别。源码安装示例固定为 `v0.2.1`，不覆盖已发布 ZIP 或改变校验值。
+- README 重排为安装、更新、配置模型和创建任务的快速上手步骤，补充可复制命令、模型目录入口及三个固定 Worker 的模型分配；减少重复解释，详细配置与排障保留在完整指南。仅更新文档，不改变产品行为或已发布产物。
 - 未新增远程自动更新器，也未变更默认镜像引用、现有容器、数据库或已安装实例。下述历史会话迁移、v82 原资料路径和 ChatBot 附件限额限制继续适用；发布成功不等于任意旧安装无损升级或真实任务端到端验收。实际记录见安装方案第 13.9 节。
 
 ## 发布整理 · 独立会话、执行控制、资料与用量（2026-11-05）

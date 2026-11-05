@@ -1,52 +1,114 @@
 # Arena
 
-Arena 是面向本地和内部使用的自主安全探索平台。通过 **Origin** 描述背景与已知资料，通过 **Goal** 表达目标，平台使用 pi Agent、共享事实和证据，在明确授权范围内安排探索、验证线索并交付成果。
+Arena 是面向本地和内部使用的自主安全探索平台：用 **Origin** 描述背景、目标系统和授权范围，用 **Goal** 说明要完成的研究目标，查看执行过程、漏洞证据并按需生成报告。
 
-当前唯一内置场景为 **`goal-driven-v1`（目标驱动探索）**，也是新建项目的默认场景。支持按需编辑或复制提示词、配置模型与 Worker，不要求使用固定的漏洞流程或先填写复杂清单。
+应用运行在 Linux 宿主机，研究与流量采集使用 Docker，数据存入 PostgreSQL；不是全栈 Docker Compose 部署。
 
-## 系统组成
+## 安装
 
-- **Server / UI**：Python 服务端提供 API 和构建后的 Vue 界面。
-- **Dispatcher**：原生 Linux 进程，负责调度、容器执行和结果回收。
-- **Worker 与执行环境**：Worker 与任务 executor 共用研究镜像 `arena-worker:local`，内含 pi runner、执行服务、浏览器及常用 Web 测试工具；网关、collector 和网络 helper 共用独立的 `arena-traffic-gateway:local`。镜像合并不合并运行容器、凭据或任务生命周期，也可配置配套的自定义镜像。
-- **PostgreSQL**：保存账号、配置、项目与执行记录；可使用项目自带的数据库 Compose，也可连接已有 PostgreSQL。
+推荐使用 [v0.2.1 部署包与预构建镜像](https://github.com/Y10ng/Arena/releases/tag/v0.2.1)，无需本机构建前端或工具层。当前发布镜像仅支持 **Linux x86_64（amd64）**。
 
-Compose 只负责数据库，不是全栈容器部署。内部 Python 包、CLI 与部分协议标识沿用 `cairn`，不影响产品名称 Arena。
+先安装 **Python 3.11+、[uv](https://docs.astral.sh/uv/getting-started/installation/)、[Docker 与 Compose v2](https://docs.docker.com/engine/install/)**，并确保 `curl`、`unzip`、`sha256sum`、`flock` 可用。默认 PostgreSQL 由启动脚本准备。
 
-## 安装与配置
+### 1. 下载并安装应用
 
-完整步骤统一见 **[Linux 安装、配置与更新指南](docs/deployment-linux-zh.md)**：
+以下命令在新目录下载、校验、解压；任一步失败就停止后续步骤。使用 Release 附件中的部署 ZIP，不是 GitHub 自动生成的 Source code ZIP。
 
-- **部署包与预构建镜像（推荐）**：下载 [v0.2.1 Release](https://github.com/Y10ng/Arena/releases/tag/v0.2.1) 的 code-only ZIP 和 `.sha256`，校验后拉取研究环境与流量网关两个公开镜像，在宿主机安装并启动应用；省去本机构建前端和工具层，仍需要 Python、uv 和 Docker。
-- **从源码完整安装**：获取指定版本源码、安装 Python 依赖、构建正式前端与上述两个镜像，再启动完整系统。
+```bash
+RELEASE_URL='https://github.com/Y10ng/Arena/releases/download/v0.2.1'
+ASSET='arena-0.2.1-git-a0f22cec57b3-linux-code-only.zip'
+DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-download.XXXXXX")" &&
+  curl -fL "$RELEASE_URL/$ASSET" -o "$DOWNLOAD_DIR/$ASSET" &&
+  curl -fL "$RELEASE_URL/$ASSET.sha256" -o "$DOWNLOAD_DIR/$ASSET.sha256" &&
+  (cd "$DOWNLOAD_DIR" && sha256sum -c "$ASSET.sha256") &&
+  UNPACK_DIR="$(mktemp -d "$HOME/arena-install.XXXXXX")" &&
+  unzip "$DOWNLOAD_DIR/$ASSET" -d "$UNPACK_DIR" &&
+  cd "$UNPACK_DIR/arena-0.2.1-linux-code-only" &&
+  ./deploy/install.sh
+```
 
-当前已发布 `yong29/arena-worker:git-a0f22cec57b3` 与 `yong29/arena-traffic-gateway:git-a0f22cec57b3`，仅支持 `linux/amd64`，均对应 `v0.2.1` 源码 `a0f22cec57b3`；未设置 `latest` 镜像标签。部署包地址、校验、按 digest 拉取及 `runtime/dispatch.yaml` 配置统一见指南的[预构建镜像安装路径](docs/deployment-linux-zh.md#路径-a使用已有-worker-镜像)。两条路径共用登录、配置和维护说明，不是全栈 Docker 部署。
+后续命令在解压后的应用目录执行。`install.sh` 安装 Python 依赖并生成缺失配置，不启动服务。
 
-默认本机地址为 `http://127.0.0.1:8000`；端口、监听地址、镜像、数据库和存储位置可按需选择。临时参数、持久配置、局域网访问与重启方法见 **[修改端口和常用配置](docs/deployment-linux-zh.md#修改端口和常用配置)**。
+### 2. 拉取并配置镜像
 
-## 使用流程
+```bash
+docker pull yong29/arena-worker:git-a0f22cec57b3 &&
+  docker pull yong29/arena-traffic-gateway:git-a0f22cec57b3
+```
 
-1. 登录后在 Worker 配置中设置模型与三类普通 Worker，项目 Agent 使用独立模型配置；无需再把模型凭据复制到 YAML。
-2. 创建项目，用 Origin、Goal 描述背景、目标与实际授权范围；普通 Worker 自动关联，资料库、上传资料和代理设置按需使用。
-3. 查看运行状态、事实与证据、漏洞及验证结果，按需要生成报告。
+编辑 `runtime/dispatch.yaml`，只修改 `container` 下的两个字段，保留其他配置：
 
-**创建项目可能立即执行并产生模型费用，模型连通性测试也可能调用付费 API。** 服务能启动不等于模型、真实任务或漏洞发现效果已经验证。
+```yaml
+container:
+  image: "yong29/arena-worker:git-a0f22cec57b3"
+  traffic_gateway_image: "yong29/arena-traffic-gateway:git-a0f22cec57b3"
+```
 
-日常启停、日志、源码与部署包更新、数据保留及排障均见主指南。**推送 GitHub 代码不等于发布镜像或自动更新已安装实例。** 当前源码更新需要按指南执行；本地启动会准备缺失的默认研究镜像和网关镜像，部署包更新器会缓存构建并检查两者，自定义镜像需自行配套准备。两个配套镜像已手动发布到 Docker Hub，但尚无自动发布流水线或远程一键获取更新器；拉取新镜像不会自动修改安装配置或升级已有容器。Docker 复用相同镜像层，不是按文件对整套环境打补丁；具体缓存条件见主指南。私有配置、密钥和运行资料不应进入 Git 或发布包。
+两个公开镜像无需登录即可拉取。不要保留默认 `:local` 引用，否则仍可能触发本地构建。需要不可变 digest 或遇到 Docker Hub 连接问题，见[完整安装指南](docs/deployment-linux-zh.md#路径-a使用已有-worker-镜像)和[代理排障](docs/deployment-linux-zh.md#排障)。
 
-Worker 专属环境见 [容器说明](container/README.md)，pi 模型协议限制见 [runner 说明](container/pi-agent/README.md)。
+### 3. 启动并登录
+
+需要从其他电脑访问时，首次启动前在 `runtime/arena.env` 设置 `CAIRN_TRUSTED_ORIGINS=http://实际主机地址:8000`。改端口、HTTPS 或外部数据库见[配置说明](docs/deployment-linux-zh.md#修改端口和常用配置)。
+
+```bash
+./deploy/start.sh && ./deploy/status.sh
+```
+
+- 本机打开 **http://127.0.0.1:8000**，远程使用已配置的主机地址；管理员账号为 **`admin`**。
+- 首次随机密码在终端显示；非交互启动时保存在 `runtime/secrets/initial-admin-password`。登录后修改密码，不分享该文件。
+
+需要修改源码时使用[源码安装方式](docs/deployment-linux-zh.md#路径-b从源码完整安装)，不要将任意新源码与本次发布镜像混用。
+
+## 更新
+
+### 部署包安装的更新
+
+1. 从 [Releases](https://github.com/Y10ng/Arena/releases) 下载目标版本的部署 ZIP 和校验文件，校验后解压到**旧安装之外的新目录**。先拉取该版本的两个配套镜像，不在新目录另行安装或启动实例。
+2. 在界面暂停或结束任务并确认执行已退出，备份数据库、`runtime`、资料与外置存储。跨版本更新先查看[迁移限制](docs/deployment-linux-zh.md#本次跨版本升级注意)：有历史会话待迁移的安装不能直接套用更新器。
+3. 停止旧应用：
+
+   ```bash
+   OLD_APP='/原安装绝对路径'
+   "$OLD_APP/deploy/stop.sh"
+   ```
+
+4. 编辑 **旧安装**的 `runtime/dispatch.yaml`，将研究与网关镜像改为目标版本；有自定义镜像映射时同步实际引用。不要在旧任务仍运行时切换镜像。
+5. 用**新包中的更新器**更新旧目录：
+
+   ```bash
+   NEW_APP='/新包解压后的应用绝对路径'
+   "$NEW_APP/deploy/update.sh" --target "$OLD_APP"
+   ```
+
+更新器会替换程序、同步依赖、检查镜像并启动服务。远端镜像需提前拉取；它不会自动获取最新版，也不会替换已有任务容器。失败时按错误处理后重跑完整更新命令，不删除业务数据绕过迁移。
+
+### Git 源码安装的更新
+
+不要用部署 ZIP 覆盖 Git 工作区。先保留本地修改，再按[源码更新步骤](docs/deployment-linux-zh.md#源码更新)取得目标代码、安装依赖、构建正式前端和配套镜像，最后启动。
+
+## 使用
+
+### 1. 配置模型
+
+1. 进入 **系统管理 → 模型与 Worker**，在 **模型目录**点击 **新增模型**。
+2. 填写名称、Base URL、模型 ID，选择服务支持的协议格式，在 **认证与自定义 Headers** 中填写 API Key，然后点击 **保存模型**。Base URL 填服务基础地址，默认接口路径由协议补齐；特殊路径使用 **自定义 endpoint**。
+3. 在同页的 **Worker 分配**中，为 **初始化（bootstrap）、决策（reason）、探索（explore）**分别选择模型，保持模型和 Worker 启用，并逐行点击 **保存**。三个 Worker 可以使用同一个模型，不需要手动创建 Worker。
+
+可在模型编辑窗口的 **连接测试（可选）**中发送测试；新增模型不会自动分配给 Worker。
+
+### 2. 创建任务
+
+1. 进入 **项目**，点击 **新建项目**。
+2. 填写 **项目名称**，选择探索场景，并填写：
+   - **Origin（已知信息）**：目标系统、已有资料、授权范围和排除项。
+   - **Goal（目标）**：本次希望完成的研究目标。
+3. 按需上传资料、选择资料库或设置代理。普通项目会自动关联已配置的三个 Worker，无需再次选择。
+4. 启动方式选 **立即**，点击 **创建并启动**；需要预约或周期执行时，选择 **定时、每日或每周**并保存计划。
+
+创建后在项目内查看执行进展、漏洞和证据，按需生成报告。**仅对已获授权的目标开展研究；模型测试和任务执行可能产生 API 费用。**
+
+详细配置、日常启停与排障见[完整安装指南](docs/deployment-linux-zh.md)，执行环境见[容器说明](container/README.md)。不要将私有配置、密钥或研究材料提交到 Git。
 
 ## 开发与来源
 
-开发遵循 [CLAUDE.md](CLAUDE.md) 与 [AGENT.md](AGENT.md)。本项目整理自原 CairnY / cairn 工作区，保留现有实现和必要来源说明；新仓库不包含此前的运行数据或 Git 历史。Cairn 相关设计思想的参考来源见 `AGENT.md`。
-
-按改动选择必要验证，而不是每次运行全套测试。例如：
-
-```bash
-uv run --project cairn pytest cairn/tests/test_scenarios.py
-npm --prefix cairn/frontend run test:component -- src/features/projects/NewProject.component.test.ts
-```
-
-前端正式构建已经包含类型检查。真实模型、Docker 集成和外部目标测试按各自条件显式执行，不默认发起。
-
-项目级开源许可证尚未确定，不据此声称采用 MIT 或 Apache 许可；第三方依赖和镜像工具继续受各自许可证约束。
+项目源自 CairnY / cairn，部分内部标识沿用 `cairn`。开发遵循 [CLAUDE.md](CLAUDE.md) 与 [AGENT.md](AGENT.md)。项目级开源许可证尚未确定，第三方依赖和工具遵循各自许可证。
