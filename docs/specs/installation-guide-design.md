@@ -657,3 +657,28 @@ GitHub Release／ZIP 对外上传需用户单独确认，不从 main push 授权
 - 包含 511 个 allowlist 文件及 `RELEASE-MANIFEST.json`，其中正式静态资源 110 个；秘密扫描、静态引用检查通过。在新空目录解压后，使用 `python -I` 执行包内 `verify_deployment.py --manifest-only`，结果为“验收通过”。该验证不等于业务数据库或完整旧机升级验收。
 
 **未完成项与部署边界：** 公开 GitHub Release／ZIP 上传已获授权，但本机缺少可用 `gh`；官方 CLI 下载先连接重置，限次重试及官方资产 API 获取随后均超时，未取得并验证工具，Release API 认证也尚未核实。本轮停止重复下载，未创建 Release、未上传资产，没有可交付的公共下载 URL。Hub 上传按用户决定暂缓。未启停现用服务、未迁移业务库、未操作项目／旧容器、未调用模型或升级其他机器。历史会话运维迁移入口、上述 v82 路径要求和 ChatBot 附件限额已知问题仍按原边界保留；发布与部署分别报告，交回分析会话复核。
+
+### 13.9 2026-11-05：恢复上传并完成公开发布
+
+用户在后续会话明确要求完成两镜像与 Release 上传，并提供 Docker Hub 登录及代理授权。本轮继续在 `release/2026-11-05`，复用第 13.8 节的两个镜像和 ZIP，不重新构建、下载工具层或变更产物源码；核实远端 main 已为收尾文档提交 `59dc42b968c51c297dc4d28332fd583265a89e39`，发行源码仍固定为 `a0f22cec57b3f53f5981966db03b1b223a89bd94`。
+
+**网络与认证：** Docker Hub 直连超时，用户指定代理能访问 registry；普通 `docker login` 因 daemon 未使用代理而失败，不将该连接错误解释为密码错误。为避免重启现有 Docker 容器，临时使用校验过官方 Release SHA256 的 `crane 0.22.1`，通过标准输入登录并经进程级代理上传；没有修改 Docker daemon／系统代理。官方 `gh 2.103.3` 同样经摘要校验，GitHub 设备授权完成后核实登录账号为 `Y10ng` 且具有发布权限。凭据仅由标准客户端保存在本机认证配置（权限 600），未写入源码、发布说明或产物。代理出口的 GitHub 匿名 API 额度耗尽，GitHub API／发布操作改用可用的直连。
+
+**已发布镜像：** 两个仓库均公开；仅发行 `linux/amd64`，未设置 `latest`，未上传旧 executor、候选或其他镜像。
+
+| 镜像版本 | 远端 manifest digest |
+| --- | --- |
+| `yong29/arena-worker:git-a0f22cec57b3` | `sha256:b4babe19a719acf73733b3d6e093c490a2a741b95562682fd16b5c227df57d06` |
+| `yong29/arena-traffic-gateway:git-a0f22cec57b3` | `sha256:a2734dde304c5bdc7a3c22e867e21bbe22a4860fc112c54f0feab128b202da8a` |
+
+上传后用空 Docker 认证目录匿名读取两个镜像，远端 digest 与上传结果相符；config digest 等于第 13.8 节本地 Image ID，架构、完整源码 revision 与 RootFS diff IDs 均与本地镜像一致。该检查没有重新下载全部镜像层，也不是其他机器的 Docker pull 或部署验收。普通本机 Docker 命令仍受 daemon 网络配置影响，本次成功不意味着已全局修复 Docker Hub 直连。
+
+**已发布 GitHub Release：** 先创建草稿并上传 ZIP／校验文件，两个镜像匿名核验通过后才公开为正式 Release `v0.2.1`（非 prerelease，设为 latest）。发布说明记录完整镜像 digest、源码 revision、部署包校验值及旧安装迁移限制。
+
+- Release：<https://github.com/Y10ng/Arena/releases/tag/v0.2.1>。
+- 部署 ZIP：<https://github.com/Y10ng/Arena/releases/download/v0.2.1/arena-0.2.1-git-a0f22cec57b3-linux-code-only.zip>。
+- 校验文件：<https://github.com/Y10ng/Arena/releases/download/v0.2.1/arena-0.2.1-git-a0f22cec57b3-linux-code-only.zip.sha256>。
+- GitHub API 确认 `draft=false`、`prerelease=false`，两附件为 `uploaded`；ZIP 大小仍为 19,112,982 bytes，远端资产 SHA256 与第 13.8 节一致。本轮重新核对本地 ZIP 的全部 511 个清单文件大小／摘要及文件集合，无额外条目。
+- 发布后匿名查询确认 Git 标签 `v0.2.1` 精确指向发行源码 `a0f22cec57b3f53f5981966db03b1b223a89bd94`；通过公开附件地址实际下载 ZIP 与 `.sha256`，大小及 SHA256 全部一致，临时下载副本随后清理。
+
+**改动与边界：** 只补充本方案及 CHANGELOG 的实际发布结果；未创建新 commit、未执行 Git push，Release 对应标签通过 GitHub 发布创建。未运行自动化测试套件或重新构建，未重启 Docker／现用服务、替换 local tag、迁移数据库、操作旧容器、调用模型或升级其他机器；原有未跟踪文件全部保留。历史会话迁移、v82 原资料路径及 ChatBot 附件限额问题不因发布完成而消失。

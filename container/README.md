@@ -2,7 +2,9 @@
 
 统一执行入口为 `cairn-agent --request FILE`，使用独立的 [pi SDK 子项目](pi-agent/README.md)。旧 Claude Code、Codex、全局 pi CLI 不再安装或注入专属配置。默认镜像聚焦 Web 发现、深测与取证，保留 Playwright CLI/Chromium；Playwright MCP 和 Chrome DevTools MCP 预装备选但不默认启动，不安装 Kali 全套工具元包。
 
-Worker 与 executor 共用研究镜像 `arena-worker:local`，从仓库根目录构建，context 为 `container/`。主 Worker 仍以 `sleep infinity` 维持项目容器；每个 TaskRun 的 executor 显式以 `python3 -u /opt/cairn/task-executor/server.py` 启动，不给整个镜像设置执行服务入口。网关、collector 与网络 helper 使用独立的 `arena-traffic-gateway:local`，不运行 Worker 命令。两个镜像的构建命令：
+安装已发布版本无需自行构建：[v0.2.1 Release](https://github.com/Y10ng/Arena/releases/tag/v0.2.1) 已提供两个公开 `linux/amd64` 镜像 `yong29/arena-worker:git-a0f22cec57b3`、`yong29/arena-traffic-gateway:git-a0f22cec57b3`，配套源码为 `a0f22cec57b3`。按 digest 拉取及配置步骤统一见[预构建镜像安装路径](../docs/deployment-linux-zh.md#路径-a使用已有-worker-镜像)；未发布 `arm64` 或 `latest` 镜像，不与任意新源码混用。
+
+需要自行构建时，Worker 与 executor 共用研究镜像 `arena-worker:local`，从仓库根目录构建，context 为 `container/`。主 Worker 仍以 `sleep infinity` 维持项目容器；每个 TaskRun 的 executor 显式以 `python3 -u /opt/cairn/task-executor/server.py` 启动，不给整个镜像设置执行服务入口。网关、collector 与网络 helper 使用独立的 `arena-traffic-gateway:local`，不运行 Worker 命令。两个镜像的构建命令：
 
 ```bash
 docker build -t arena-worker:local container &&

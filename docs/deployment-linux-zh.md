@@ -4,48 +4,68 @@
 
 | 安装路径 | 适合情况 | 需要准备 |
 | --- | --- | --- |
-| [使用已有 Worker 镜像](#路径-a使用已有-worker-镜像) | 已有配套应用部署包和 Worker 镜像，省去本机构建 | 应用 ZIP、可拉取的镜像引用或镜像 tar |
-| [从源码完整安装](#路径-b从源码完整安装) | 没有配套发布资产，或需要自行修改、构建 | Git、Node.js/npm，以及构建时的网络和资源 |
+| [部署包与预构建镜像（推荐）](#路径-a使用已有-worker-镜像) | 安装已发布版本，省去本机构建前端和执行镜像 | 配套应用 ZIP、两个公开镜像；仍需安装宿主 Python 依赖 |
+| [从源码完整安装](#路径-b从源码完整安装) | 需要自行修改、构建，或没有适配主机架构的发布镜像 | Git、Node.js/npm，以及构建时的网络和资源 |
 
-当前是**宿主机 Server / Dispatcher + Docker Worker**，Server 同时提供 API 和正式前端；Compose 只负责 PostgreSQL，不是全栈 Docker 部署。目前没有已核实的镜像或部署包下载地址，路径 A 的资产须从可信分发方取得，否则选择路径 B。
+当前是**宿主机 Server / Dispatcher + Docker Worker**，Server 同时提供 API 和正式前端；Compose 只负责 PostgreSQL，不是全栈 Docker 部署。新安装推荐下面的 `v0.2.1` 配套部署包与两个预构建镜像，无需在本机构建工具层。
 
 默认端口、镜像名、数据库和安装位置只是起点，可按需要选择；常见调整见 [修改端口和常用配置](#修改端口和常用配置)。
+
+## 已发布版本与下载
+
+[GitHub Release v0.2.1](https://github.com/Y10ng/Arena/releases/tag/v0.2.1) 对应源码 `a0f22cec57b3f53f5981966db03b1b223a89bd94`。下列资产已公开，ZIP 经匿名下载校验，镜像经匿名 manifest/config 及本地身份比对；这不是任意旧安装升级或跨机器运行验收。
+
+| 资产 | 下载或版本引用 |
+| --- | --- |
+| 应用部署包 | [arena-0.2.1-git-a0f22cec57b3-linux-code-only.zip](https://github.com/Y10ng/Arena/releases/download/v0.2.1/arena-0.2.1-git-a0f22cec57b3-linux-code-only.zip) |
+| ZIP 校验文件 | [同名 .zip.sha256](https://github.com/Y10ng/Arena/releases/download/v0.2.1/arena-0.2.1-git-a0f22cec57b3-linux-code-only.zip.sha256) |
+| 研究镜像 | [yong29/arena-worker](https://hub.docker.com/r/yong29/arena-worker)：`git-a0f22cec57b3` |
+| 流量采集镜像 | [yong29/arena-traffic-gateway](https://hub.docker.com/r/yong29/arena-traffic-gateway)：`git-a0f22cec57b3` |
+
+ZIP 大小为 19,112,982 bytes，SHA256 为 `818af4c553a8483fd6fd9c295546e4f03b1519ef55ea52a9372e1f8f70adc2c8`。两个镜像**仅发布 `linux/amd64`**，未设置 `latest` 镜像标签；公开拉取不要求 Docker Hub 登录。不要将这两个镜像与任意更新后的 `main` 混用，具体拉取和配置使用路径 A 中的不可变 digest。
+
+已发布 ZIP 内的文档保留打包时内容，下载地址与镜像引用以本指南和 Release 说明为准；不会为了补充文档覆盖同版本 ZIP 或改变其校验值。
 
 ## 前置条件
 
 两条路径都需要 Linux、Python 3.11+、[uv](https://docs.astral.sh/uv/getting-started/installation/)、可用的 [Docker daemon](https://docs.docker.com/engine/install/)，以及 `bash`、`curl`、`flock`（通常由 util-linux 提供）。默认使用脚本管理的 PostgreSQL，需要 [Docker Compose v2](https://docs.docker.com/compose/install/)；也可以连接已有 PostgreSQL。
 
-- 路径 A 解压 ZIP 需要 `unzip`；已有正式前端和 Worker 镜像时，宿主机不需要 Node/npm。
+- 路径 A 解压 ZIP 需要 `unzip`，校验使用 `sha256sum`（通常由 coreutils 提供）；已有正式前端和配套镜像时，宿主机不需要 Node/npm。
 - 路径 B 需要 Git、npm，建议 [Node.js 24 LTS](https://nodejs.org/en/download) **24.15.0 或更新的 24.x**；若选 Node 22，需 22.22.2+，以满足当前 `npm ci` 的完整依赖要求。
 - Python 软件源须可访问；默认数据库首次使用还会下载 PostgreSQL 镜像。从源码构建另需访问 npm、容器仓库、Kali 软件源及 GitHub 工具下载地址，并预留构建时间和磁盘空间。资源有限时串行构建。
 
-已有 Worker 镜像应与应用版本及主机架构匹配。Dockerfile 有 amd64 / arm64 分支，跨架构构建需相应 builder，不代表所有平台已经验证。导入镜像 tar 也不等于整个安装已离线。
+已有镜像应与应用版本及主机架构匹配；本次预构建镜像用于 x86_64 / `linux/amd64` 主机。Dockerfile 有 amd64 / arm64 分支，跨架构构建需相应 builder，不代表已发布或验证 `arm64`。导入镜像 tar 也不等于整个安装已离线。
 
 ## 安装：选择一条路径
 
 ### 路径 A：使用已有 Worker 镜像
 
-**1. 解压应用部署包并安装 Python 依赖。** 使用 `arena-<version>-linux-code-only.zip`，不是 GitHub 自动生成的 Source code ZIP。它包含服务端、正式前端静态资源、部署脚本及 Worker 构建输入，不含已安装依赖、完整前端源码、运行数据或 Worker 镜像。
+**1. 下载、校验并解压应用部署包，安装 Python 依赖。** 使用 Release 附件中的 code-only ZIP，不是 GitHub 自动生成的 Source code ZIP。它包含服务端、正式前端静态资源、部署脚本及镜像构建输入，不含已安装依赖、完整前端源码、运行数据或 Docker 镜像。
 
-将下例 `APP_ZIP` 换为实际包的绝对路径。解压到新空目录，不覆盖已有安装；ZIP 自带一层 `arena-<version>-linux-code-only/` 目录：
+以下命令下载 `v0.2.1`，校验成功后才解压到新空目录并安装；任一步失败即停止后续步骤。ZIP 文件名带源码 revision，但包内顶层仍是 `arena-0.2.1-linux-code-only/`：
 
 ```bash
-APP_ZIP='/绝对路径/arena-实际版本-linux-code-only.zip'
-UNPACK_DIR="$(mktemp -d "$HOME/arena-install.XXXXXX")"
-unzip "$APP_ZIP" -d "$UNPACK_DIR"
-cd "$UNPACK_DIR"/arena-*-linux-code-only
-./deploy/install.sh
+RELEASE_URL='https://github.com/Y10ng/Arena/releases/download/v0.2.1'
+ASSET='arena-0.2.1-git-a0f22cec57b3-linux-code-only.zip'
+DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-download.XXXXXX")" &&
+  curl -fL "$RELEASE_URL/$ASSET" -o "$DOWNLOAD_DIR/$ASSET" &&
+  curl -fL "$RELEASE_URL/$ASSET.sha256" -o "$DOWNLOAD_DIR/$ASSET.sha256" &&
+  (cd "$DOWNLOAD_DIR" && sha256sum -c "$ASSET.sha256") &&
+  UNPACK_DIR="$(mktemp -d "$HOME/arena-install.XXXXXX")" &&
+  unzip "$DOWNLOAD_DIR/$ASSET" -d "$UNPACK_DIR" &&
+  cd "$UNPACK_DIR/arena-0.2.1-linux-code-only" &&
+  ./deploy/install.sh
 ```
 
-后续 `./deploy/...` 命令均在这个应用根目录执行。安装位置可自行选择，不必使用示例目录。
+后续 `./deploy/...` 命令均在这个应用根目录执行。安装位置可自行选择，不必使用示例目录。已有下载文件时，先在同目录执行 `sha256sum -c`，再解压到新空目录。旧安装不要执行这里的新安装流程覆盖原目录，请转到[部署包更新](#部署包更新)。
 
-**2. 准备两个配套镜像，以下二选一。** Worker 和 executor 共用研究镜像；网关、collector 和网络 helper 使用独立采集镜像。运行容器、挂载和任务停止边界不合并。镜像引用和 tar 路径都是待替换参数，不是已发布地址。
+**2. 准备两个配套镜像，以下二选一。** Worker 和 executor 共用研究镜像；网关、collector 和网络 helper 使用独立采集镜像。运行容器、挂载和任务停止边界不合并。
 
-从实际仓库拉取，任一步失败时先处理，不继续启动：
+推荐按本次 Release 的不可变 digest 拉取，无需本机构建工具层；任一步失败时先处理，不继续启动：
 
 ```bash
-WORKER_IMAGE='替换为实际仓库/worker:配套版本'
-GATEWAY_IMAGE='替换为实际仓库/traffic-gateway:配套版本'
+WORKER_IMAGE='yong29/arena-worker@sha256:b4babe19a719acf73733b3d6e093c490a2a741b95562682fd16b5c227df57d06'
+GATEWAY_IMAGE='yong29/arena-traffic-gateway@sha256:a2734dde304c5bdc7a3c22e867e21bbe22a4860fc112c54f0feab128b202da8a'
 docker pull "$WORKER_IMAGE" &&
   docker pull "$GATEWAY_IMAGE"
 ```
@@ -61,20 +81,20 @@ docker load --input "$IMAGE_TAR"
 
 ```yaml
 container:
-  image: "替换为实际Worker镜像名:版本"
-  traffic_gateway_image: "替换为实际网关镜像名:版本"
+  image: "yong29/arena-worker@sha256:b4babe19a719acf73733b3d6e093c490a2a741b95562682fd16b5c227df57d06"
+  traffic_gateway_image: "yong29/arena-traffic-gateway@sha256:a2734dde304c5bdc7a3c22e867e21bbe22a4860fc112c54f0feab128b202da8a"
 ```
 
-也可在新安装中将镜像标为默认名以省去 YAML 修改：`docker tag "$WORKER_IMAGE" arena-worker:local`；导入 tar 后先将 `WORKER_IMAGE` 设为其实际镜像名。改名不是必需步骤，已有默认 tag 时不要无意覆盖。已有显式镜像注册的配置见后面的按需说明。
+上面的 YAML 对应按 digest 拉取的镜像。使用 `docker load` 时，改填导入后实际存在的两个 tag；不要假定 tar 自动保留了 registry digest 引用。不要只拉镜像而保留默认 `:local` 配置，也不建议为了省去配置而重打 `:local`：启动时缺少默认引用会触发构建，包更新器遇到默认引用即使镜像已存在也会带缓存重新构建。采用上述 registry 引用时，启动／更新仅检查已准备镜像，不自动 pull 或切换新版；已有显式 `images`／profiles／允许镜像列表也需对应实际选图，见后面的按需说明。
 
 完成后进入 [修改端口和常用配置](#修改端口和常用配置)，默认值合适时直接 [启动并登录](#启动并登录)。如果只有源码而没有部署包，按路径 B 准备应用与前端，Worker 构建这一步可改用上面的已有镜像。
 
 ### 路径 B：从源码完整安装
 
-在准备存放源码的位置执行；`git clone` 使用新目录，不覆盖已有工作区：
+在准备存放源码的位置执行；`git clone` 使用新目录，不覆盖已有工作区。下面固定到已发布的 `v0.2.1`；按 tag 检出时处于 detached HEAD 是正常现象。开发者可另选分支并构建其配套镜像，不把新源码直接配到本次旧镜像：
 
 ```bash
-git clone https://github.com/Y10ng/Arena.git
+git clone --branch v0.2.1 --single-branch https://github.com/Y10ng/Arena.git
 cd Arena
 ./deploy/install.sh
 npm --prefix cairn/frontend ci
@@ -273,7 +293,7 @@ cairn/.venv/bin/cairn materials save --project '实际项目ID' --container '完
 
 ### 源码更新
 
-当前没有从 GitHub 获取代码并完成整套升级的源码一键更新器。先在原应用根目录执行 `git status --short` 和 `git branch --show-current`，保留并处理本地修改；不要用 `reset --hard` 或清理工作区代替处理。以下示例适用于**当前已在 `main`、工作区无待保护改动，且 `origin` 指向预期仓库**的安装；开发分支按自己的目标更新，不直接套用。
+当前没有从 GitHub 获取代码并完成整套升级的源码一键更新器。先在原应用根目录执行 `git status --short` 和 `git branch --show-current`，保留并处理本地修改；不要用 `reset --hard` 或清理工作区代替处理。以下示例适用于**当前已在 `main`、工作区无待保护改动，且 `origin` 指向预期仓库**的安装；按 Release tag 安装的 detached HEAD 和开发分支不适用，不自动切换到 main。更新到其他源码 revision 时应使用该版本配套镜像或重新构建，不能把 `v0.2.1` 镜像视为任意 main 的最新版。
 
 先阅读下方[本次跨版本升级注意](#本次跨版本升级注意)，确认迁移条件、原件目录与一致备份齐备，相关任务已退出且处于获准维护窗口。**存在待迁移历史会话的安装不在本轮完整升级支持范围内**，不要直接套用。先 fetch 并确认可以快进，再停服务；任一步失败即停止，不继续启动半套环境：
 
@@ -303,13 +323,13 @@ cairn/.venv/bin/cairn materials save --project '实际项目ID' --container '完
 
 取得配套新包，像路径 A 一样解压到**原安装目录之外的新空目录**。先核对[跨版本升级条件](#本次跨版本升级注意)；有待迁移历史会话时，不要把包更新器当作文件／session 迁移入口。本地更新器会统一准备研究镜像与独立网关镜像，但不负责从远端获取新应用或发布镜像。新更新器在暂存和停服务前拒绝目标中的 `.git` 目录或 worktree 文件，请对 Git 安装使用源码路径。
 
-- 使用预构建／自定义镜像：按路径 A 拉取或导入两个配套镜像，确认原安装配置的引用对应本次版本。新 tag 需要显式更新引用；仅发布或拉取新 tag 不会自动修改配置。
+- 使用预构建／自定义镜像：升级到 `v0.2.1` 时使用[上述配套部署包](#已发布版本与下载)及路径 A 中的两个精确镜像引用；下载、校验、解压即可，不在新包目录另行 install/start 新实例。先拉取或导入两个镜像，再在确认旧任务退出的维护窗口停止原安装应用，修改**原安装**的 `runtime/dispatch.yaml`：更新 `container.image`、`container.traffic_gateway_image` 及实际使用的显式映射／允许列表，再运行新包更新器。配置可能被运行中的 Dispatcher 重载，不要提前把仍工作的旧应用切到新执行镜像。仅发布或拉取新 tag 不会自动修改配置；从默认 `:local` 切换也须显式修改这两个字段。
 - 使用默认本地镜像：确认旧任务已退出后直接执行下方新包更新器，无需提前手工构建。更新器使用新版源码缓存构建两镜像，研究镜像检查 pi runner、执行服务与证书工具，网关单独检查采集依赖和入口；准备失败不启动新应用。
 
 准备完成后运行**新包中的**更新器，替换下例两个绝对路径：
 
 ```bash
-/新包解压目录/arena-实际版本-linux-code-only/deploy/update.sh --target /现有应用根目录
+/新包解压目录/arena-0.2.1-linux-code-only/deploy/update.sh --target /现有应用根目录
 ```
 
 一条入口依次完成：**停止宿主应用 → 替换受管程序和静态资源 → install 同步依赖 → 准备研究与网关镜像 → start（沿用现有 PostgreSQL 自动迁移）→ 检查服务状态**。两镜像准备使用原安装目录中的新版代码、Python 环境和运行配置；准备失败即中断，不继续 start 或迁移。无需另跑数据库迁移命令，也不升级 PostgreSQL 大版本。
@@ -353,6 +373,7 @@ cairn/.venv/bin/cairn materials save --project '实际项目ID' --container '完
 | 现象 | 处理方向 |
 | --- | --- |
 | Python / npm / Docker 构建下载失败 | 按失败地址检查网络、代理和对应软件源；源码 `npm ci` 注意前面的 Node 版本要求 |
+| `curl` 经代理可连 Docker Hub，但 `docker login/pull` 仍超时 | 拉取由 Docker daemon 发起，仅在终端设置 `HTTP_PROXY`／`HTTPS_PROXY` 不保证生效。按 [Docker daemon 代理文档](https://docs.docker.com/engine/daemon/proxy/) 配置实际 daemon（远程 context 配远端）；需要重启时先安排维护窗口，可能影响运行容器。不要关闭 TLS 校验或把代理密码写进仓库；公开镜像无需为拉取额外提供发布者凭据 |
 | 构建 exit 137 / OOM | 串行构建，按本机需要增加内存或 swap，不跳过正式前端类型检查 |
 | Docker 或 Compose 不可用 | 按报错检查 daemon、当前用户权限或 Compose v2；可用 `docker info` 定位，不需要每次启动前再查一遍 |
 | 数据库失败 / 端口占用 | 区分自带与外部库，查看对应日志；自带端口改 `runtime/postgres.env`，不要临时切到空库 |
