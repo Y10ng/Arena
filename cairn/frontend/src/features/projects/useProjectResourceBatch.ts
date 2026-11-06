@@ -126,7 +126,7 @@ export const useProjectResourceBatch = (
   const addUpload = (file: File, mode: 'file' | 'zip') => {
     const item: PendingResourceUpload = {
       id: ++nextUploadId,
-      uploadId: `prm_${crypto.randomUUID().replaceAll('-', '')}`,
+      uploadId: `prm_${Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('')}`,
       file,
       path: projectResourceFilePath(file),
       mode,

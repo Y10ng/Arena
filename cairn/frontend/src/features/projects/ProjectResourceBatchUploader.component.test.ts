@@ -70,6 +70,8 @@ const emptyBatch = {
 }
 
 beforeEach(() => {
+  // 模拟 randomUUID 不可用的入口，仍使用真实的 getRandomValues。
+  vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) })
   mocks.getConfig.mockReset().mockResolvedValue(config)
   mocks.createBatch.mockReset().mockResolvedValue(emptyBatch)
   mocks.getBatch.mockReset().mockResolvedValue(emptyBatch)
@@ -81,7 +83,10 @@ beforeEach(() => {
   mocks.showToast.mockReset()
 })
 
-afterEach(() => { vi.restoreAllMocks() })
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
 
 // 这里只验证浏览器预检，不把 size fixture 当成真实 500 MB 传输验收。
 function sizedFile(name: string, size: number) {
@@ -170,6 +175,9 @@ describe('ProjectResourceBatchUploader', () => {
     expect(wrapper.text()).toContain('first.txt')
     expect(wrapper.text()).toContain('上传失败')
     expect(wrapper.emitted('pending')?.at(-1)).toEqual([true])
+    const rejectedUploadId = mocks.uploadFile.mock.calls[1]![5]
+    expect(rejectedUploadId).toMatch(/^prm_[a-f0-9]{32}$/)
+    expect(rejectedUploadId).not.toBe(mocks.uploadFile.mock.calls[0]![5])
     const retry = wrapper.findAll('button').find((button) => button.text() === '补传')!
     await retry.trigger('click')
     await flushPromises()
@@ -179,7 +187,9 @@ describe('ProjectResourceBatchUploader', () => {
       'second.txt',
       'second.txt',
     ])
+    expect(mocks.uploadFile.mock.calls[2]![5]).toBe(rejectedUploadId)
     expect(wrapper.emitted('pending')?.at(-1)).toEqual([false])
+    expect(wrapper.emitted('busy')?.at(-1)).toEqual([false])
     const latest = wrapper.emitted('update:modelValue')?.at(-1)?.[0] as { members: unknown[] }
     expect(latest.members).toHaveLength(2)
     wrapper.unmount()
@@ -271,7 +281,8 @@ describe('ProjectResourceBatchUploader', () => {
     wrapper.unmount()
   })
 
-  it('uploads arbitrary bytes as a raw File without client UTF-8 decoding', async () => {
+  it.each(['选择', '拖放'])('randomUUID 不可用时，%s 普通文件仍原样上传并恢复 pending/busy', async (mode) => {
+    expect(crypto.randomUUID).toBeUndefined()
     const member = {
       id: 'member-1',
       kind: 'file',
@@ -290,13 +301,17 @@ describe('ProjectResourceBatchUploader', () => {
     const file = new File([new Uint8Array([0xff, 0x00, 0x80, 0x01])], 'image.png', {
       type: 'image/png',
     })
-    const input = document.body.querySelectorAll<HTMLInputElement>('input[type="file"]')[0]
-    Object.defineProperty(input, 'files', { configurable: true, value: [file] })
-    input.dispatchEvent(new Event('change', { bubbles: true }))
-    await flushPromises()
+    if (mode === '选择') await selectFiles(wrapper, [file])
+    else { await wrapper.trigger('drop', { dataTransfer: { files: [file] } }); await flushPromises() }
 
     expect(mocks.createBatch).toHaveBeenCalledOnce()
+    expect(mocks.uploadFile).toHaveBeenCalledOnce()
     expect(mocks.uploadFile).toHaveBeenCalledWith('batch-1', file, 'image.png', undefined, undefined, expect.stringMatching(/^prm_[a-f0-9]{32}$/))
+    expect(mocks.importZip).not.toHaveBeenCalled()
+    expect(wrapper.emitted('pending')?.at(-1)).toEqual([false])
+    expect(wrapper.emitted('busy')?.slice(-2)).toEqual([[true], [false]])
+    expect(wrapper.find('.resource-pending-list').exists()).toBe(false)
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
     expect(arrayBuffer).not.toHaveBeenCalled()
     expect(
       document.body.querySelector<HTMLInputElement>('[aria-label="资源相对路径"]')?.value,
@@ -305,7 +320,7 @@ describe('ProjectResourceBatchUploader', () => {
     wrapper.unmount()
   })
 
-  it('accepts dropped files on the compact uploader without implicitly expanding ZIP', async () => {
+  it.each(['选择', '拖放'])('%s ZIP 仍原样上传，不隐式展开', async (mode) => {
     const file = new File(['zip-bytes'], 'raw.zip')
     mocks.uploadFile.mockResolvedValue({
       id: 'raw-zip', kind: 'file', path: 'raw.zip', size_bytes: file.size,
@@ -313,19 +328,25 @@ describe('ProjectResourceBatchUploader', () => {
     })
     const wrapper = mount(ProjectResourceBatchUploader, { props: { modelValue: null } })
     await flushPromises()
-    await wrapper.trigger('dragover')
-    expect(wrapper.classes()).toContain('is-dragging')
-    await wrapper.trigger('drop', { dataTransfer: { files: [file] } })
-    await flushPromises()
+    if (mode === '选择') await selectFiles(wrapper, [file])
+    else {
+      await wrapper.trigger('dragover')
+      expect(wrapper.classes()).toContain('is-dragging')
+      await wrapper.trigger('drop', { dataTransfer: { files: [file] } })
+      await flushPromises()
+    }
     expect(mocks.uploadFile).toHaveBeenCalledWith('batch-1', file, 'raw.zip', undefined, undefined, expect.stringMatching(/^prm_[a-f0-9]{32}$/))
     expect(mocks.importZip).not.toHaveBeenCalled()
+    expect(wrapper.emitted('pending')?.at(-1)).toEqual([false])
+    expect(wrapper.emitted('busy')?.at(-1)).toEqual([false])
     expect(wrapper.classes()).not.toContain('is-dragging')
     expect(wrapper.find('.resource-member-details > summary').text()).toBe('raw.zip')
     expect(wrapper.find('.resource-member-details').attributes('open')).toBeUndefined()
     wrapper.unmount()
   })
 
-  it('uses explicit server ZIP import and supports member patch and delete', async () => {
+  it('randomUUID 不可用时，独立 ZIP 导入仍成功并支持成员编辑和删除', async () => {
+    expect(crypto.randomUUID).toBeUndefined()
     const zipMember = {
       id: 'member-zip',
       kind: 'note',
@@ -353,7 +374,14 @@ describe('ProjectResourceBatchUploader', () => {
     input.dispatchEvent(new Event('change', { bubbles: true }))
     await flushPromises()
 
+    expect(mocks.createBatch).toHaveBeenCalledOnce()
+    expect(mocks.importZip).toHaveBeenCalledOnce()
     expect(mocks.importZip).toHaveBeenCalledWith('batch-1', zip)
+    expect(mocks.uploadFile).not.toHaveBeenCalled()
+    expect(wrapper.emitted('pending')?.at(-1)).toEqual([false])
+    expect(wrapper.emitted('busy')?.slice(-2)).toEqual([[true], [false]])
+    expect(wrapper.find('.resource-pending-list').exists()).toBe(false)
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
     expect(document.body.textContent).toContain('ZIP 成员')
 
     const pathInput = document.body.querySelector<HTMLInputElement>('[aria-label="资源相对路径"]')!
