@@ -6,7 +6,7 @@ Arena 是面向本地和内部使用的自主安全探索平台：用 **Origin**
 
 ## 安装
 
-推荐使用 [v0.2.1 部署包与预构建镜像](https://github.com/Y10ng/Arena/releases/tag/v0.2.1)，无需本机构建前端或工具层。当前发布镜像仅支持 **Linux x86_64（amd64）**。
+推荐使用 [v0.2.2 修复部署包](https://github.com/Y10ng/Arena/releases/tag/v0.2.2)，继续搭配 v0.2.1 的两个预构建镜像，无需本机构建前端或工具层。当前发布镜像仅支持 **Linux x86_64（amd64）**。
 
 先安装 **Python 3.11+、[uv](https://docs.astral.sh/uv/getting-started/installation/)、[Docker 与 Compose v2](https://docs.docker.com/engine/install/)**，并确保 `curl`、`unzip`、`sha256sum`、`flock` 可用。默认 PostgreSQL 由启动脚本准备。
 
@@ -15,15 +15,15 @@ Arena 是面向本地和内部使用的自主安全探索平台：用 **Origin**
 以下命令在新目录下载、校验、解压；任一步失败就停止后续步骤。使用 Release 附件中的部署 ZIP，不是 GitHub 自动生成的 Source code ZIP。
 
 ```bash
-RELEASE_URL='https://github.com/Y10ng/Arena/releases/download/v0.2.1'
-ASSET='arena-0.2.1-git-a0f22cec57b3-linux-code-only.zip'
+RELEASE_URL='https://github.com/Y10ng/Arena/releases/download/v0.2.2'
+ASSET='arena-0.2.2-linux-code-only.zip'
 DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-download.XXXXXX")" &&
   curl -fL "$RELEASE_URL/$ASSET" -o "$DOWNLOAD_DIR/$ASSET" &&
   curl -fL "$RELEASE_URL/$ASSET.sha256" -o "$DOWNLOAD_DIR/$ASSET.sha256" &&
   (cd "$DOWNLOAD_DIR" && sha256sum -c "$ASSET.sha256") &&
   UNPACK_DIR="$(mktemp -d "$HOME/arena-install.XXXXXX")" &&
   unzip "$DOWNLOAD_DIR/$ASSET" -d "$UNPACK_DIR" &&
-  cd "$UNPACK_DIR/arena-0.2.1-linux-code-only" &&
+  cd "$UNPACK_DIR/arena-0.2.2-linux-code-only" &&
   ./deploy/install.sh
 ```
 
@@ -63,7 +63,9 @@ container:
 
 ### 部署包安装的更新
 
-1. 从 [Releases](https://github.com/Y10ng/Arena/releases) 下载目标版本的部署 ZIP 和校验文件，校验后解压到**旧安装之外的新目录**。先拉取该版本的两个配套镜像，不在新目录另行安装或启动实例。
+**v0.2.1 → v0.2.2：** 只更新应用包，原来配置并已准备好的 `git-a0f22cec57b3` 两镜像（或对应 digest）保持不变，不必重新拉取或构建；相对 v0.2.1 无新增数据库迁移。按下列维护和备份流程执行，默认 `:local` 配置仍会触发更新器的缓存构建，不要用 `--server-only` 绕过镜像检查。
+
+1. 从 [Releases](https://github.com/Y10ng/Arena/releases) 下载目标版本的部署 ZIP 和校验文件，校验后解压到**旧安装之外的新目录**。如尚未准备，先拉取该版本的两个配套镜像；不在新目录另行安装或启动实例。
 2. 在界面暂停或结束任务并确认执行已退出，备份数据库、`runtime`、资料与外置存储。跨版本更新先查看[迁移限制](docs/deployment-linux-zh.md#本次跨版本升级注意)：有历史会话待迁移的安装不能直接套用更新器。
 3. 停止旧应用：
 
@@ -72,7 +74,7 @@ container:
    "$OLD_APP/deploy/stop.sh"
    ```
 
-4. 编辑 **旧安装**的 `runtime/dispatch.yaml`，将研究与网关镜像改为目标版本；有自定义镜像映射时同步实际引用。不要在旧任务仍运行时切换镜像。
+4. 如目标版本需要更换镜像，编辑 **旧安装**的 `runtime/dispatch.yaml`，同步研究、网关及自定义映射的实际引用；v0.2.1 → v0.2.2 保留原配套镜像。不要在旧任务仍运行时切换镜像。使用自定义 `CAIRN_STATIC_DIR` 时，须在维护窗口同步实际目录，或改为指向旧安装更新后的 `cairn/src/cairn/server/static`；详见[部署包更新](docs/deployment-linux-zh.md#部署包更新)。
 5. 用**新包中的更新器**更新旧目录：
 
    ```bash
@@ -80,7 +82,7 @@ container:
    "$NEW_APP/deploy/update.sh" --target "$OLD_APP"
    ```
 
-更新器会替换程序、同步依赖、检查镜像并启动服务。远端镜像需提前拉取；它不会自动获取最新版，也不会替换已有任务容器。失败时按错误处理后重跑完整更新命令，不删除业务数据绕过迁移。
+更新器会替换程序、同步依赖、检查镜像并启动服务。完成后运行 `"$OLD_APP/deploy/status.sh"`，浏览器强制刷新，再自行验收上传。缺少的远端镜像需提前拉取；它不会自动获取最新版，也不会替换已有任务容器。失败时按错误处理后重跑完整更新命令，不删除业务数据绕过迁移。
 
 ### Git 源码安装的更新
 
