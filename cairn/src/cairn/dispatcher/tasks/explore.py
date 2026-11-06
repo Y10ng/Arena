@@ -337,6 +337,7 @@ def run_explore_task(
                     project=project,
                     knowledge=knowledge,
                     advisory=container_runtime,
+                    workspace_inputs_prepared=True,
                 )
             else:
                 prompt_replacements = explore_prompt_replacements(
@@ -347,6 +348,7 @@ def run_explore_task(
                     phase=execute_phase,
                     knowledge=knowledge,
                     advisory=container_runtime,
+                    workspace_inputs_prepared=True,
                     coverage_cell=coverage_cell,
                     surface_manifest=manifest_enabled,
                     facts=project.facts,

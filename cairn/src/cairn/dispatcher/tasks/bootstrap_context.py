@@ -293,6 +293,7 @@ def bootstrap_prompt_replacements(
     *,
     knowledge: str | None = None,
     advisory: Any | None = None,
+    workspace_inputs_prepared: bool = False,
 ) -> dict[str, str]:
     # 将项目初始上下文规范化为纯字符串替换项，避免 prompt 模板直接依赖 Pydantic 结构。
     facts = {fact.id: fact.description for fact in project.facts}
@@ -334,5 +335,6 @@ def bootstrap_prompt_replacements(
         "knowledge_base": knowledge_base_prompt_context(
             knowledge,
             advisory=advisory,
+            workspace_inputs_prepared=workspace_inputs_prepared,
         ),
     }

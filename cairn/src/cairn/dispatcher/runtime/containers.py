@@ -43,6 +43,7 @@ from cairn.dispatcher.runtime.exec_control import (
 from cairn.dispatcher.runtime.pause_clock import ExecutionSceneLost
 from cairn.dispatcher.runtime.process import ManagedProcess
 from cairn.dispatcher.runtime.temporary_files import runtime_temp_dir
+from cairn.dispatcher.runtime.workspace_inputs import prepare_workspace_inputs
 from cairn.dispatcher.workers.base import REPORT_READONLY_INPUT_ROOT
 
 LOG = logging.getLogger(__name__)
@@ -253,6 +254,19 @@ class ContainerManager:
         clock.wait(lambda: cancellation.is_cancelled or project.id in self._research_stopped)
         if cancellation.is_cancelled or project.id in self._research_stopped:
             raise RuntimeError("research_execution_stopped")
+        if options.advisory_digest is not None:
+            from cairn.dispatcher.prompting import knowledge_base_runtime_context
+
+            # 只有本次研究准备成功后才把实际工作路径写入审计；报告和聊天不经过这里。
+            advisory = knowledge_base_runtime_context(advisory=options, workspace_inputs_prepared=True)
+            result = self.traffic_execution.client.update_task_run(project.id, task_run_id, runtime_context={
+                "knowledge_base": advisory,
+                "project_resources": {key: value for key, value in advisory.items() if key in {
+                    "bundle_digest", "manifest_path", "read_only", "workspace_path", "workspace_manifest_path",
+                }} | {"resources": [item for item in advisory["resources"] if item["source"] == "project_resource"]},
+            })
+            if not result.ok:
+                raise RuntimeError("workspace inputs audit update failed")
         return self.traffic_execution.prepare_task(
             project, task_run_id, cancellation,
             isolated=options.network_mode == "none", image=options.image,
@@ -885,6 +899,7 @@ class ContainerManager:
             container = self._require_container(name, project_id=project_id)
             if container.id != expected_container_id or self._container_runtime_mismatch(container, options):
                 raise ContainerOwnershipError("continuation container identity or runtime mismatch")
+            self._prepare_research_inputs(project_id, options, container)
             state = self._container_state(container)
             if state == "running":
                 if not reuse(daemon_id, expected_container_id):
@@ -922,6 +937,20 @@ class ContainerManager:
                 raise ContainerOwnershipError("continuation container changed after start")
             return name
 
+    def _prepare_research_inputs(self, project_id: str, options: ContainerRuntimeOptions, container=None) -> None:
+        if not options.traffic_execution_enabled or options.advisory_digest is None:
+            return
+        if self.traffic_execution is None or options.advisory_local_path is None or options.advisory_manifest is None:
+            raise RuntimeError("workspace inputs preparation is not configured")
+        workspace = self.traffic_execution.workspace_directory(project_id, isolated=options.network_mode == "none")
+        if container is not None:
+            mounts = [mount for mount in container.attrs.get("Mounts", [])
+                      if mount.get("Destination") == "/home/kali/workspace"]
+            if (len(mounts) != 1 or mounts[0].get("Type") != "bind"
+                    or mounts[0].get("Source") != str(workspace) or not mounts[0].get("RW")):
+                raise RuntimeError("workspace inputs require the confirmed shared workspace bind")
+        prepare_workspace_inputs(workspace, options.advisory_local_path, options.advisory_manifest, options.advisory_digest)
+
     def default_runtime_options(self) -> ContainerRuntimeOptions:
         return ContainerRuntimeOptions.build(
             image=self._config.image,
@@ -947,6 +976,9 @@ class ContainerManager:
             )
 
         research_project = project_id if report_task_run_id is None else None
+        # 已有容器也必须先准备输入，不能让 running/paused 的提前返回跳过副本。
+        if research_project is not None and container is not None:
+            self._prepare_research_inputs(research_project, options, container)
         if container is not None and publish is not None:
             publish(container.id)
         if state == "paused":
@@ -993,6 +1025,7 @@ class ContainerManager:
             volumes.update(self.traffic_execution.control_volumes(
                 project_id, isolated=options.network_mode == "none",
             ))
+            self._prepare_research_inputs(project_id, options)
         try:
             # 研究容器 create 不启动进程；慢 Docker 返回后仍须跨过同一控制门。
             create = self._client.containers.create if research_project is not None else self._client.containers.run
@@ -1043,6 +1076,8 @@ class ContainerManager:
             or self._container_runtime_mismatch(container, options)
         ):
             raise ContainerOwnershipError("conflicting container project or runtime signature does not match")
+        if research_project is not None and container is not None:
+            self._prepare_research_inputs(research_project, options, container)
         if container is not None and publish is not None:
             publish(container.id)
         if state == "paused":

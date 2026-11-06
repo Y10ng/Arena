@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+from pathlib import Path
 
 from cairn.dispatcher.advisory_bundle import ADVISORY_CONTAINER_PATH, AdvisoryBundle
 
@@ -23,6 +24,7 @@ class ContainerRuntimeOptions:
     memswap_limit: int | None
     pids_limit: int | None
     advisory_mount_source: str | None
+    advisory_local_path: Path | None
     advisory_mount_target: str | None
     advisory_digest: str | None
     advisory_format_version: int | None
@@ -88,6 +90,7 @@ class ContainerRuntimeOptions:
             memswap_limit=memswap_limit,
             pids_limit=pids_limit,
             advisory_mount_source=advisory_mount_source,
+            advisory_local_path=advisory_bundle.local_path if advisory_bundle is not None else None,
             advisory_mount_target=advisory_mount_target,
             advisory_digest=advisory_digest,
             advisory_format_version=advisory_format_version,

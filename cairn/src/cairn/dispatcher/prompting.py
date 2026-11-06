@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from cairn.paths import resolve_source_relative_path
+from cairn.advisory_contract import WORKSPACE_INPUTS_PATH
 from cairn.project_authorization_contract import (
     build_scope_descriptor_v4,
     scope_source_from_descriptor,
@@ -33,7 +34,7 @@ KNOWLEDGE_BASE_PROMPT_INSTRUCTIONS = (
     "Operator-provided advisory resources are optional and may be outdated or inapplicable; continue the full assessment when none are available.",
     "Credentials and sensitive values may be present for this authorized assessment; use them only within the approved target scope.",
     "Resources may be text, PDF, images, Office files, archives, or other binary data. Inspect metadata and use a suitable tool only when relevant; never assume UTF-8.",
-    "Never copy full resources into prompts, logs, reports, or final output. /cairn/advisory is read-only; copy only essential material into the workspace.",
+    "Never copy full resources into prompts, logs, reports, or final output. /cairn/advisory contains read-only originals. When workspace_path is provided, file tools and commands can read that prepared input copy directly; write analysis outputs and editable copies outside inputs/.",
     "Inspect scripts and binaries first. Never execute them automatically; run only after confirming scope and applicability.",
     "Validate, adapt, and extend every useful statement against the live target. Distinguish uploaded claims, live observations, and confirmed conclusions.",
     "An uploaded vulnerability claim is not a finding and must not become a Fact, Coverage outcome, Verification, or report finding without current TaskRun evidence.",
@@ -243,6 +244,7 @@ def knowledge_base_runtime_context(
     knowledge: str | None = None,
     *,
     advisory: Any | None = None,
+    workspace_inputs_prepared: bool = False,
 ) -> dict[str, Any]:
     digest = str(getattr(advisory, "advisory_digest", "") or "").strip()
     manifest = getattr(advisory, "advisory_manifest", None)
@@ -310,6 +312,10 @@ def knowledge_base_runtime_context(
                     "sha256": item.get("sha256"),
                 }
             )
+    workspace_ready = enabled and workspace_inputs_prepared and getattr(advisory, "traffic_execution_enabled", False)
+    if workspace_ready:
+        for resource in resources:
+            resource["workspace_path"] = f"{WORKSPACE_INPUTS_PATH}/{resource['container_path'].removeprefix('/cairn/advisory/')}"
     # 以已物化的 manifest 为准，场景中的旧键不代表项目实际挂载了旧资料。
     legacy_key = manifest.get("legacy_key") if enabled else None
     key = legacy_key.strip() if isinstance(legacy_key, str) and legacy_key.strip() else None
@@ -324,6 +330,8 @@ def knowledge_base_runtime_context(
         "mode": "project_advisory_bundle",
         "read_only": True,
         "resources": resources,
+        **({"workspace_path": WORKSPACE_INPUTS_PATH,
+            "workspace_manifest_path": f"{WORKSPACE_INPUTS_PATH}/manifest.json"} if workspace_ready else {}),
     }
 
 
@@ -331,10 +339,13 @@ def knowledge_base_prompt_context(
     knowledge: str | None = None,
     *,
     advisory: Any | None = None,
+    workspace_inputs_prepared: bool = False,
 ) -> str:
     return format_json_block(
         {
-            **knowledge_base_runtime_context(knowledge, advisory=advisory),
+            **knowledge_base_runtime_context(
+                knowledge, advisory=advisory, workspace_inputs_prepared=workspace_inputs_prepared,
+            ),
             "instructions": list(KNOWLEDGE_BASE_PROMPT_INSTRUCTIONS),
         }
     )

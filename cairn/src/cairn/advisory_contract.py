@@ -6,6 +6,8 @@ from hashlib import sha256
 import json
 from typing import Iterable, Mapping
 
+WORKSPACE_INPUTS_PATH = "/home/kali/workspace/inputs"
+
 
 def selection_sha256(
     library_key: str,

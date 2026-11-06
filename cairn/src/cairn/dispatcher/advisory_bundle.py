@@ -31,6 +31,7 @@ class AdvisoryBundle:
     """已完成校验且可只读挂载的 advisory bundle。"""
 
     source_path: str
+    local_path: Path
     digest: str
     legacy_key: str | None
     resource_count: int
@@ -134,13 +135,12 @@ def stage_advisory_bundle(
             project_root,
             final_path,
         )
-    _verify_materialized_bundle(
-        final_path, library_revisions, legacy_files, resource_files, manifest_bytes,
-    )
+    _verify_materialized_bundle(final_path, manifest, manifest_bytes)
 
     source_path = _docker_source_path(local_root, final_path)
     return AdvisoryBundle(
         source_path=str(source_path),
+        local_path=final_path,
         digest=digest,
         legacy_key=normalized_legacy_key,
         resource_count=(
@@ -255,41 +255,44 @@ def _materialize_bundle(
             shutil.rmtree(temporary)
 
 
+def _bundle_expected_files(
+    manifest: dict[str, object], manifest_bytes: bytes,
+) -> dict[Path, tuple[int, str]]:
+    """原件缓存与工作副本共用同一份来源清单和路径校验。"""
+    expected = {Path(MANIFEST_NAME): (len(manifest_bytes), sha256(manifest_bytes).hexdigest())}
+
+    def add(path: str, metadata: dict) -> None:
+        relative = _safe_relative_path(path, source="advisory bundle")
+        if relative in expected:
+            raise RuntimeError(f"duplicate advisory bundle path: {relative}")
+        expected[relative] = (metadata["size_bytes"], metadata["sha256"])
+
+    for library in manifest["libraries"]:
+        for item in library["files"]:
+            add(item["bundle_path"], item)
+    for item in manifest["legacy_files"]:
+        add(item["bundle_path"], item)
+    for item in manifest["project_resources"]:
+        add(f"project/{item['path']}", item)
+    return expected
+
+
 def _verify_materialized_bundle(
-    root: Path,
-    library_revisions: list[_LibraryRevisionFiles],
-    legacy_files: list[tuple[bytes, dict[str, object]]],
-    resource_files: list[ProjectResource],
-    manifest_bytes: bytes,
+    root: Path, manifest: dict[str, object], manifest_bytes: bytes,
 ) -> None:
-    # 缓存可能已被修改，不能只校验本次下载的数据后就挂载旧目录。
-    expected: dict[Path, tuple[int, str]] = {
-        Path(MANIFEST_NAME): (len(manifest_bytes), sha256(manifest_bytes).hexdigest())
-    }
-
-    def add(path: Path, size: int, digest: str) -> None:
-        if path in expected:
-            raise RuntimeError(f"duplicate advisory bundle path: {path}")
-        expected[path] = (size, digest)
-
-    for revision in library_revisions:
-        key = _normalized_library_key(revision.binding.library_key)
-        for metadata, content in revision.files:
-            add(Path("library") / key / _safe_relative_path(metadata.path, source="library file"), metadata.size_bytes, metadata.sha256)
-    for content, metadata in legacy_files:
-        add(_safe_relative_path(str(metadata["bundle_path"]), source="legacy bundle file"), len(content), sha256(content).hexdigest())
-    for resource in resource_files:
-        add(Path("project") / _safe_relative_path(resource.path, source="project resource"), resource.size_bytes, resource.sha256)
-
+    # 缓存和工作副本都可能已被修改；复用前核对完整集合与原始字节，不覆盖修复。
+    expected = _bundle_expected_files(manifest, manifest_bytes)
     directories = {parent for path in expected for parent in path.parents}
     seen_files: set[Path] = set()
     seen_directories: set[Path] = set()
+    device = root.lstat().st_dev
     pending = [Path(".")]
     while pending:
         relative = pending.pop()
         directory = root / relative
-        mode = directory.lstat().st_mode
-        if not stat.S_ISDIR(mode) or mode & 0o222:
+        directory_stat = directory.lstat()
+        mode = directory_stat.st_mode
+        if not stat.S_ISDIR(mode) or mode & 0o222 or directory_stat.st_dev != device:
             raise RuntimeError(f"invalid advisory bundle directory: {relative}")
         seen_directories.add(relative)
         with os.scandir(directory) as entries:
@@ -308,7 +311,8 @@ def _verify_materialized_bundle(
                     fd = os.open(directory / entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
                     with os.fdopen(fd, "rb") as source:
                         opened_stat = os.fstat(source.fileno())
-                        if not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_mode & 0o222:
+                        if (not stat.S_ISREG(opened_stat.st_mode) or opened_stat.st_mode & 0o222
+                                or opened_stat.st_nlink != 1 or opened_stat.st_dev != device):
                             raise RuntimeError(f"invalid advisory bundle file: {child}")
                         if opened_stat.st_size != size:
                             raise RuntimeError(f"advisory bundle file size mismatch: {child}")

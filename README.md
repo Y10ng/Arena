@@ -6,7 +6,7 @@ Arena 是面向本地和内部使用的自主安全探索平台：用 **Origin**
 
 ## 安装
 
-推荐使用 [v0.2.2 修复部署包](https://github.com/Y10ng/Arena/releases/tag/v0.2.2)，继续搭配 v0.2.1 的两个预构建镜像，无需本机构建前端或工具层。当前发布镜像仅支持 **Linux x86_64（amd64）**。
+推荐使用 [v0.2.3 部署包](https://github.com/Y10ng/Arena/releases/tag/v0.2.3) 和同页的 **Worker 最小应用层包**，在 v0.2.1 公开研究镜像上离线构建小应用层，网关镜像保持不变；无需本机构建前端、安装 npm 或重新安装工具层。当前配套镜像仅支持 **Linux x86_64（amd64）**。
 
 先安装 **Python 3.11+、[uv](https://docs.astral.sh/uv/getting-started/installation/)、[Docker 与 Compose v2](https://docs.docker.com/engine/install/)**，并确保 `curl`、`unzip`、`sha256sum`、`flock` 可用。默认 PostgreSQL 由启动脚本准备。
 
@@ -15,36 +15,46 @@ Arena 是面向本地和内部使用的自主安全探索平台：用 **Origin**
 以下命令在新目录下载、校验、解压；任一步失败就停止后续步骤。使用 Release 附件中的部署 ZIP，不是 GitHub 自动生成的 Source code ZIP。
 
 ```bash
-RELEASE_URL='https://github.com/Y10ng/Arena/releases/download/v0.2.2'
-ASSET='arena-0.2.2-linux-code-only.zip'
+RELEASE_URL='https://github.com/Y10ng/Arena/releases/download/v0.2.3'
+ASSET='arena-0.2.3-linux-code-only.zip'
 DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-download.XXXXXX")" &&
   curl -fL "$RELEASE_URL/$ASSET" -o "$DOWNLOAD_DIR/$ASSET" &&
   curl -fL "$RELEASE_URL/$ASSET.sha256" -o "$DOWNLOAD_DIR/$ASSET.sha256" &&
   (cd "$DOWNLOAD_DIR" && sha256sum -c "$ASSET.sha256") &&
   UNPACK_DIR="$(mktemp -d "$HOME/arena-install.XXXXXX")" &&
   unzip "$DOWNLOAD_DIR/$ASSET" -d "$UNPACK_DIR" &&
-  cd "$UNPACK_DIR/arena-0.2.2-linux-code-only" &&
+  cd "$UNPACK_DIR/arena-0.2.3-linux-code-only" &&
   ./deploy/install.sh
 ```
 
 后续命令在解压后的应用目录执行。`install.sh` 安装 Python 依赖并生成缺失配置，不启动服务。
 
-### 2. 拉取并配置镜像
+### 2. 准备并配置配套镜像
+
+下载同一 Release 的 Worker 应用层包，校验后在固定公开基础上离线构建；不能只拉旧 Worker 就启动新应用。以下命令沿用上一步的 `RELEASE_URL`：
 
 ```bash
-docker pull yong29/arena-worker:git-a0f22cec57b3 &&
-  docker pull yong29/arena-traffic-gateway:git-a0f22cec57b3
+WORKER_ASSET='arena-0.2.3-worker-application.zip'
+WORKER_DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-worker-download.XXXXXX")" &&
+  curl -fL "$RELEASE_URL/$WORKER_ASSET" -o "$WORKER_DOWNLOAD_DIR/$WORKER_ASSET" &&
+  curl -fL "$RELEASE_URL/$WORKER_ASSET.sha256" -o "$WORKER_DOWNLOAD_DIR/$WORKER_ASSET.sha256" &&
+  (cd "$WORKER_DOWNLOAD_DIR" && sha256sum -c "$WORKER_ASSET.sha256") &&
+  WORKER_UNPACK_DIR="$(mktemp -d "$HOME/arena-worker-app.XXXXXX")" &&
+  unzip "$WORKER_DOWNLOAD_DIR/$WORKER_ASSET" -d "$WORKER_UNPACK_DIR" &&
+  docker pull 'yong29/arena-worker@sha256:b4babe19a719acf73733b3d6e093c490a2a741b95562682fd16b5c227df57d06' &&
+  docker build --pull=false --network=none -t arena-worker:0.2.3 "$WORKER_UNPACK_DIR/arena-0.2.3-worker-application" &&
+  docker pull 'yong29/arena-traffic-gateway@sha256:a2734dde304c5bdc7a3c22e867e21bbe22a4860fc112c54f0feab128b202da8a'
 ```
 
 编辑 `runtime/dispatch.yaml`，只修改 `container` 下的两个字段，保留其他配置：
 
 ```yaml
 container:
-  image: "yong29/arena-worker:git-a0f22cec57b3"
-  traffic_gateway_image: "yong29/arena-traffic-gateway:git-a0f22cec57b3"
+  image: "arena-worker:0.2.3"
+  traffic_gateway_image: "yong29/arena-traffic-gateway@sha256:a2734dde304c5bdc7a3c22e867e21bbe22a4860fc112c54f0feab128b202da8a"
 ```
 
-两个公开镜像无需登录即可拉取。不要保留默认 `:local` 引用，否则仍可能触发本地构建。需要不可变 digest 或遇到 Docker Hub 连接问题，见[完整安装指南](docs/deployment-linux-zh.md#路径-a使用已有-worker-镜像)和[代理排障](docs/deployment-linux-zh.md#排障)。
+公开基础镜像无需登录，Docker 复用已存在的相同层；小应用层构建不下载工具或 npm 依赖。不要保留默认 `:local` 引用，否则更新器仍可能触发完整配方的缓存构建。已有显式镜像映射也须更新实际引用；详见[完整安装指南](docs/deployment-linux-zh.md#路径-a使用已有-worker-镜像)和[代理排障](docs/deployment-linux-zh.md#排障)。
 
 ### 3. 启动并登录
 
@@ -63,9 +73,9 @@ container:
 
 ### 部署包安装的更新
 
-**v0.2.1 → v0.2.2：** 只更新应用包，原来配置并已准备好的 `git-a0f22cec57b3` 两镜像（或对应 digest）保持不变，不必重新拉取或构建；相对 v0.2.1 无新增数据库迁移。按下列维护和备份流程执行，默认 `:local` 配置仍会触发更新器的缓存构建，不要用 `--server-only` 绕过镜像检查。
+**v0.2.1／v0.2.2 → v0.2.3：** 同时更新应用包和 Worker 应用层，网关可保持原固定镜像；无新增数据库迁移。在旧任务退出后，按上方步骤准备新研究镜像，并在维护窗口更新旧安装的配置。不要直接沿用未经更新的旧 Worker；默认 `:local` 配置仍会触发完整配方的缓存构建，不用 `--server-only` 绕过准备。存量容器不自动升级或全量补材料，已有工作区冲突和材料变化导致的签名不匹配会保留现场报错，不删容器或业务材料绕过。
 
-1. 从 [Releases](https://github.com/Y10ng/Arena/releases) 下载目标版本的部署 ZIP 和校验文件，校验后解压到**旧安装之外的新目录**。如尚未准备，先拉取该版本的两个配套镜像；不在新目录另行安装或启动实例。
+1. 从 [Releases](https://github.com/Y10ng/Arena/releases) 下载目标版本的应用 ZIP、Worker 应用层 ZIP 和各自校验文件，校验后解压到**旧安装之外的新目录**。按上方步骤准备新 Worker 与配套网关；不在新目录另行安装或启动实例。
 2. 在界面暂停或结束任务并确认执行已退出，备份数据库、`runtime`、资料与外置存储。跨版本更新先查看[迁移限制](docs/deployment-linux-zh.md#本次跨版本升级注意)：有历史会话待迁移的安装不能直接套用更新器。
 3. 停止旧应用：
 
@@ -74,7 +84,7 @@ container:
    "$OLD_APP/deploy/stop.sh"
    ```
 
-4. 如目标版本需要更换镜像，编辑 **旧安装**的 `runtime/dispatch.yaml`，同步研究、网关及自定义映射的实际引用；v0.2.1 → v0.2.2 保留原配套镜像。不要在旧任务仍运行时切换镜像。使用自定义 `CAIRN_STATIC_DIR` 时，须在维护窗口同步实际目录，或改为指向旧安装更新后的 `cairn/src/cairn/server/static`；详见[部署包更新](docs/deployment-linux-zh.md#部署包更新)。
+4. 如目标版本需要更换镜像，编辑 **旧安装**的 `runtime/dispatch.yaml`，同步研究、网关及自定义映射的实际引用；本版研究镜像使用上方准备的 `arena-worker:0.2.3`，网关保留固定 digest。不要在旧任务仍运行时切换镜像。使用自定义 `CAIRN_STATIC_DIR` 时，须在维护窗口同步实际目录，或改为指向旧安装更新后的 `cairn/src/cairn/server/static`；详见[部署包更新](docs/deployment-linux-zh.md#部署包更新)。
 5. 用**新包中的更新器**更新旧目录：
 
    ```bash

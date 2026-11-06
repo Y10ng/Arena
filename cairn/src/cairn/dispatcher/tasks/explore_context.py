@@ -148,6 +148,7 @@ def verifier_prompt_replacements(
     project: ProjectDetail,
     knowledge: str | None = None,
     advisory: Any | None = None,
+    workspace_inputs_prepared: bool = False,
 ) -> dict[str, str]:
     """只给复核会话中性复现输入，不泄露发现者的定级和完整论证。"""
     projection = target.neutral_projection
@@ -176,6 +177,7 @@ def verifier_prompt_replacements(
         "knowledge_base": knowledge_base_prompt_context(
             knowledge,
             advisory=advisory,
+            workspace_inputs_prepared=workspace_inputs_prepared,
         ),
     }
 
@@ -221,6 +223,7 @@ def explore_prompt_replacements(
     phase: str,
     knowledge: str | None = None,
     advisory: Any | None = None,
+    workspace_inputs_prepared: bool = False,
     coverage_cell: BoundCoverageCell | None = None,
     surface_manifest: bool = False,
     facts: list[Fact] | None = None,
@@ -255,6 +258,7 @@ def explore_prompt_replacements(
         "knowledge_base": knowledge_base_prompt_context(
             knowledge,
             advisory=advisory,
+            workspace_inputs_prepared=workspace_inputs_prepared,
         ),
     }
     if coverage_cell is not None:

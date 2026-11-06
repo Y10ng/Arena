@@ -1,5 +1,9 @@
 # 新建项目与资料库：弹窗、资料、场景与计划启动
 
+> **2026-11-06 工作区输入材料只读复核完成：**第 16 节的真实 `inputs/` 工作副本、研究路径投影及输入分类已落地，本轮未发现阻断新项目主链的具体缺陷；独立复核及证据边界见 16.7。16.6 的测试结果仍属于实施会话记录，正式上传→新建项目→模型分析尚未验收，不承诺存量资料增补热更新；以下分析交接按原时点保留。
+
+> **2026-11-06 本轮分析交接：上传附件与所选资料进入真实共享工作区，待实施。** 当前材料在执行准备时只读挂载到研究控制容器 `/cairn/advisory`，不自动进入 `/home/kali/workspace`；文件页看不到，独立 task executor 也未挂载 advisory。第 16 节是本轮唯一实施范围：保留原件与现有只读挂载，在真实共享 workspace 准备可追溯输入工作副本，贯通文件浏览、模型文件读取和执行命令消费。不是“所有模型工具都读不到”，也不是仅调整 UI；未作正式运行验证，不继承历史轮次操作授权。
+
 > **2026-11-06 上传 ID 兼容性修复实施交回，待分析复核及用户真实上传验收。** 本轮唯一范围见第 15 节：上传标识已改用 `crypto.getRandomValues`，组件定向验证 13 项通过，正式构建与实际入口加载完成；保留第 14 节的大小、未知回执及资料保护合同。正式实例未上传文件、创建批次／项目或启动计划，未重启服务；源码、替身验证、实际加载与尚待用户验收的边界分列于 15.4，不将其冒充真实局域网上传端到端通过。
 
 > **2026-11-05 实施交回：新建项目单文件 500 MB、超限才弹窗，待分析复核及用户认可。** 本次上传合同见第 14 节，整轮入口见全站 UI 原方案第 27 节；第 13 节历史记录保留。源码、隔离验证及实际加载已完成，证据与剩余项见 14.6，待分析复核及用户认可。
@@ -2081,3 +2085,136 @@ Goal（目标）                             │ [认证按需展开]
 - **正常系统与只读页面观察：**复用现有服务，发布前后 `./deploy/status.sh` 均为 running，Server／Dispatcher 正常、HTTP API ready、心跳 idle；`/health` 返回 200，现有 PostgreSQL 容器 healthy，未启停或替换服务／容器。浏览器正常登录后打开新建项目空弹窗，实际加载 `/static/assets/index-r6q4xpHm.js`（网络 200），两个文件输入均可用且选中文件为 0，上传区没有错误；随后取消关闭。仅做入口观察，不作布局验收，实际 CSS 视口为 932×710、DPR 1。未登录时 `/auth/session` 的 401 属于正常会话检查，登录后有关只读 GET 为 200；除正常 `/auth/login` 外未发出业务写请求，没有文件上传、批次／项目创建、计划启动、模型调用或被测目标访问，未读取浏览器存储或资料正文。
 - **尚待用户上传验收：**本次观察 Origin 为 `http://127.0.0.1:8001`，`isSecureContext=true`，`randomUUID` 与 `getRandomValues` 均为 function；这不是用户当次未知的局域网 HTTP 入口，也没有复现其现场 TypeError。API 替身只证明前端在 `randomUUID` 缺失时可到达正确调用并保持状态语义，不能冒充真实浏览器上行／代理／后端端到端上传成功。用户仍需在实际使用入口刷新后验收选择、拖放与独立 ZIP；未重跑第 14 节大文件实验，既有未覆盖范围不变。
 - **交付边界：**分支仍为 `release/2026-11-05`；源码／测试只改上述两个文件，文档仅增量更新本方案，另有正式 static／runtime static 的入口与新 hash 产物。无 commit、无 push；保护原有文档改动与未跟踪资源，完成后停止并交回分析会话复核，不接续历史任务。
+
+## 16. 2026-11-06：上传附件与所选资料进入真实共享工作区（分析交接，待实施）
+
+> **实施状态更新：**本节设计已完成代码实施、隔离定向验证及本地部署加载，待分析会话复核；实施记录见 16.6。16.1–16.5 和原分析交付按交接时点保留，不代表正式用户流程或模型分析已验收。
+
+### 16.1 用户目标与结论更正
+
+用户问新建项目上传的文件是否进入执行容器、能否在“文件”中看到，明确要求上传附件与资料库选择的材料能够在工作区读取并用于分析。正确的完整路径是：上传并绑定项目 → 执行准备时确定性准备输入 → 文件页可见、模型可读取、执行命令可处理 → 分析结果留在工作区；不能以“总览里能下载”或“Prompt 已列出路径”代替后半条链路。
+
+**当前只完成其中一部分。** 材料会在执行准备时进入研究控制容器的只读 advisory 挂载；普通模型文件工具能在该容器读取，不能说所有模型都拿不到文件。但它们不自动出现在真实共享 workspace，实际运行 `bash` 的 task executor 没有这份挂载。上传成功、创建成功、材料挂载完成、模型实际读过以及分析完成是不同事实。
+
+本节替代本方案旧轮“保留只读资料包即可满足完整消费”及[项目工作区方案 9.2](project-workspace-ui-design.md#92-当前事实不是所有东西都在-workspace)“不承诺树包含上传资料”的产品范围；保留既有原件、冻结库选择、大小／摘要校验和实际目录浏览边界。当前源码与部署现场分开：本轮没有登录、检查具体项目挂载或读取用户附件正文，不能证明某个现存项目是否曾由模型手动复制过文件。
+
+### 16.2 已查证的当前源码链路
+
+以下行号是本次定位依据，实施前核对最新源码；不是历史文档完成声明。
+
+| 环节 | 事实及源码依据 |
+| --- | --- |
+| 上传与创建 | `frontend/src/features/projects/useProjectResourceBatch.ts:178–190` 先上传 batch；`NewProject.vue:1240–1251,1297–1299` 提交 batch 与库选择。`server/services/project_records.py:345–386` 保存绑定并消费批次；`services/project_resources.py:1180–1228` 保存项目原件／批次暂存，不在上传请求内写容器。上述前后端路径分别在 `cairn/frontend/src/` 和 `cairn/src/cairn/` 下 |
+| 执行物化 | `cairn/src/cairn/dispatcher/scheduler/worker_runtime.py:90–108` 调用 `stage_advisory_bundle`；`dispatcher/advisory_bundle.py:46–72,105–151,220–243` 读取绑定快照及活动资源，按 manifest 摘要缓存，库写 `library/<key>/<path>`，上传写 `project/<path>`，校验后只读原子发布 |
+| 研究控制容器 | `dispatcher/runtime/containers.py:972,1819–1832` 单独只读挂载 bundle；`dispatcher/advisory_bundle.py:22` 目标为 `/cairn/advisory`。`dispatcher/prompting.py:242–327` 提供这些路径与来源索引，不自动全文读取 |
+| 文件工具与命令工具分离 | `container/pi-agent/src/runner.ts:178–183,295–302,407–420,478–487` 的普通文件工具／read_evidence 在控制容器读取，bash 转发；`src/task-execution.ts:12–55` 经 socket 执行。`cairn/src/cairn/dispatcher/runtime/traffic.py:342–350` 的 executor 仅挂 workspace、socket、CA，没有 advisory。不能假设 `bash cp /cairn/advisory/...` 可以搬运输入 |
+| 共享工作目录 | `dispatcher/runtime/traffic_execution.py:98–112,190–199` 与 `runtime/traffic.py:62–74,342–350` 给控制容器和 executor 同一项目 workspace；不是分别在容器 writable layer 拷贝一份 |
+| 文件页 | `cairn/frontend/src/features/artifacts/ArtifactsPage.vue:565–611` 只调用 workspace 列表；`api/workspace.ts:14–20,40–83` 定义真实工作根与浏览接口。`cairn/src/cairn/server/services/project_workspace.py:150–205` 从已登记研究容器的 `/home/kali/workspace` bind 解析宿主根，不合并资源表或 advisory 清单 |
+| 不可用的捷径 | 上述 reader 的 `120–147` 拒绝 symlink／多硬链接／跨设备对象，`184–194` 屏蔽嵌套 mount，并拒绝 workspace 源与其他 mount 源重叠。只加软链接、只改 bind 目标，或把 bundle 搬进 workspace 后仍将同一子目录挂为 advisory，会看不到文件，甚至导致整个根被判私有 |
+| 输入来源边界 | `container/pi-agent/src/artifacts.ts:7,19–37,95–121` 允许已授权工作区读取，现有 advisory/project 等输入不能直接登记为新 Artifact。`cairn/src/cairn/server/services/runtime_context.py:392–444` 严格投影 `/cairn/advisory`；不能只改 Prompt 路径，让审计仍记录旧意义或丢弃字段 |
+| 总览与存量变化 | `WorkspaceOverview.vue:17–38` 已有原件下载，不替代工作区。`dispatcher/runtime/container_options.py:57–79` 将 bundle digest 纳入运行签名，`runtime/containers.py:938–947` 对已有容器签名变化明确阻断并保留现场；暂停后增补资料不等于自动更新在用容器 |
+
+### 16.3 推荐设计：权威原件保留，工作副本进入同一真实 workspace
+
+**选择一次性的工作副本准备，不重设计上传／资料库，也不改成任意容器文件浏览。** Server 原件与冻结选择仍是权威；现有 `/cairn/advisory` 仍是校验后的只读输入包。在 Dispatcher 已确认的项目共享 workspace 下准备普通目录 `inputs/`，保留现有 `project/`、`library/<key>/` 和 manifest 的来源结构。两者不是互相同步的双权威：工作副本服务读取与处理，不能回写资源原件／资料库，也不能据它改写历史输入摘要。
+
+例如上传 `sample.csv`、选择库中的 `guide.md` 后，执行准备完成应真实存在：
+
+```text
+/home/kali/workspace/inputs/
+  manifest.json
+  project/sample.csv
+  library/<library_key>/guide.md
+```
+
+1. **唯一准备者是 Dispatcher，不是模型。** 从已校验 bundle 有界复制到实际 workspace 的临时目录，核对所选集合、大小及摘要，完成后原子发布 `inputs`。复用当前 manifest、传输和路径校验，不再从上传接口另走下载或自造资料同步服务；未选库文件不进入副本。普通 ZIP 保留原文件，独立 ZIP 导入才沿已有展开结果，不在执行阶段悄悄解包或执行附件。
+2. **在 Worker／命令消费者开始之前完成。** 沿现有研究工作区公共准备入口落地，使用本次执行确认的共享根，不手拼旧 instance 路径、不靠文件页 GET 创建目录。`containers.py:952–962` 对已有容器提前返回，`990–995` 的 `control_volumes()` 仅在新建分支，因此不能只在新建分支复制而漏掉复用路径，也不分别给 Bootstrap／Reason／Explore 写一套。复制读取 Dispatcher 已校验的本地 `final_path`；`advisory_bundle.py:123–151,438–445` 会将它转换成 Docker source，现有 `AdvisoryBundle.source_path` 不保证就是 Dispatcher 可读路径，不能反向猜测映射。缺失原件、校验／复制失败或冲突时明确失败，不向模型交付不存在或半成品的路径。相同项目、相同输入集合复用一次已完成准备，不按每个 Worker／Run 再下载、复制或持有整份大文件 bytes。
+3. **原件与工作文件互不覆盖。** `inputs` 作为平台准备的输入子树，来源清单由现有 manifest 派生；初始文件字节必须与原件相同，可沿已有只读文件权限减少误写，但不谎称普通文件权限与 Docker `ro` mount 等价。分析输出及需要修改的副本写到工作区其他路径。重复准备不得覆盖已有工作文件；同名既有用户目录、已改变的受管输入或来源不一致，应报告明确冲突，不删目录“自愈”。用已有来源身份判断复用，不新增文件索引数据库／后台同步状态机。
+4. **不要把副本改为 symlink／hardlink／新增嵌套 mount。** 采用普通文件，使已有文件树、搜索、预览、下载和 executor 共享自然生效，保留 reader 的私有目录及归属边界。原 advisory 缓存仍在 workspace 外，不形成 reader 的宿主源重叠；不修改 advisory 挂载目标／摘要签名来实现这个需求，不强制重建已有容器。
+5. **模型获得可执行的实际路径，而不是更长的规则。** 本次研究执行的资料索引提供已准备好的 `inputs/...` 路径，让本地文件工具与 executor 中的解析程序读取同一份文件；原件路径、源 ID、库选择及原始摘要仍保留原义。路径派生只有一个实现，必要的 Prompt／runtime context 审计投影同步，不能把工作副本变动后的内容仍声称为原件 hash。只在此执行确实准备了副本后提供该路径，不新增“已被模型读取”的推断状态。
+6. **输入不是发现。** 不自动注册 Artifact，不把上传文件当作系统指令或授权。必要时定向扩展 `pi-agent/src/artifacts.ts` 对 `inputs` 的输入分类，保留可读取、不能直接冒充新产出登记的既有语义；分析产生的新文件仍走正常成果路径，不按文件扩展名封禁研究方法，不新增全文秘密扫描或内容改写。
+7. **只调整必要消费者。** 研究控制容器、实际 task executor 和文件页是本轮闭环。报告有独立 workspace，ChatBot 会话附件也有独立生命周期；不得把共享的上下文函数一改，就向这些没有副本的执行者发布假路径。保留它们现有原件消费，若共同准备／上下文入口确需改参数则显式传本执行已准备的目录，不借机重做报告、聊天附件或复测。库选择、创建／计划批次、500 MB 合同和原件下载不重做。
+
+**取舍：**额外工作副本会增加每个项目的磁盘占用，不是零成本；一次准备、全 Worker 共用，并保持分块复制，避免重复下载和每 Run 复制。这个成本换来真实共享文件及现有浏览能力的直接复用，比引入多根文件浏览、特殊嵌套挂载解析或让模型搬运更局部。实施时检查实际所需空间与配置，不新增统一配额产品；空间不足准确报错，不将半成品发布为成功。无需为本轮重新执行上一轮完整 500 MB 上传实验。
+
+### 16.4 生效边界与不改范围
+
+- 本轮必须完成**新建项目携带材料，在首次研究执行准备后进入工作区并可处理**的闭环。仅选择／上传到未提交 batch 不创建项目 workspace；尚未启动的计划亦不为文件浏览提前启动容器。项目有无实际 workspace 继续按真实状态呈现，总览保留已绑定原件的访问。
+- 同一输入集合的正常后续执行不得反复覆盖工作文件。已有项目如在获准的正常准备过程中补入工作副本，只能依据已核实的当前共享根及同一 bundle，不能上线时遍历／修改全部历史项目，不能为验收自动恢复／重跑。
+- **本轮不承诺暂停后增补资料热更新。** 当前资源集合变化会引发已有 runtime signature 不匹配，属于已查证的另一条生命周期缺口；不通过取消签名检查、强删容器或热覆盖在用输入绕过。若实施中因此无法满足新建项目闭环，应说明具体冲突，不能以这一存量限制宣称全部上传不可用，也不能对已有增补宣称已自动同步。
+- 不搬移／删除权威原件，不修改上传大小、库 current／冻结子集、计划授权、模型选择、费用策略、网络执行边界或旧已接受成果；不恢复 SQLite，不新增依赖、通用同步平台、额外的 UI 资料分类或新导航。
+- UI 继续左树右预览，以真实 `inputs` 目录表达位置；不加“附件如何进入容器”的常驻说明、帮助卡片、badge 或多余确认。已有搜索、刷新、必要错误及总览原件入口保留；若既有页面不需改代码就能展示，不为形式完整改前端。
+
+### 16.5 最小直接验证与新会话交付
+
+以下由新的实施会话执行；本分析会话没有执行测试、构建、业务或容器操作。
+
+1. 使用少量无敏感合成材料（如 CSV／文本、一个小二进制和所选库文件），复用既有 `cairn/tests/test_advisory_bundle.py`、`test_project_workspace.py`、`test_traffic_execution_integration.py` 中实际适用的 fixture／入口。验证准备后真实共享根存在普通文件，来源及初始字节正确，未选库文件不存在；真实 workspace reader 的列表／搜索／预览／下载可读取，不用前端假树或只有路径字符串断言代替。
+2. 用隔离、无模型／无目标网络请求的受控执行路径，证明控制端文件读取和 task executor 从同一 `inputs` 路径取得同一文件；以小 CSV 的本地行数／列数或摘要处理证明命令可消费，并将结果写入普通工作区。不执行上传脚本，不从不可信材料目录启动解释器；只读命令成功不能冒称模型已完成分析。若实际容器验证条件不足，明确仅验证到哪里，不以替身结果冒称 Docker 链已通过。
+3. 只补本次特有的少量检查：同一 bundle 多次准备不覆盖、目标目录冲突保留原内容、复制失败不发布、大小／摘要不符拒绝、输入不能直接登记为新 Artifact。大文件路径保持流式；若改到原有流式实现再选必要用例，不自动叠加全套单测、lint、浏览器矩阵或新的边界吞吐实验。
+4. 验证与业务操作分开：使用隔离临时目录／已有镜像的受控测试容器，不向正式实例上传样例、创建批次／项目、启动计划、操作已有项目生命周期或调用模型。正式浏览只读检查；无已准备材料的真实项目时，不能宣称正式用户流程已验收。实施可用最直接的有界验证替代多套检查，真实未覆盖项明确保留。
+5. 按当前部署方式构建并加载确需变更的运行部分，确保完整系统可用；重载前核对在途工作，不能为交付强停真实任务。若只改 Dispatcher 不重建 Worker；若确实更新容器内输入分类，仅更新必要应用层并复用未变工具层，不重新下载工具。新镜像对后续执行是否实际使用须核实，不替换正在运行的正式容器。不清空静态目录、不删已有 hash，不 commit／push。
+6. 回写本节实施记录，分开说明代码已实现、定向验证、实际加载、正式业务尚未验收及存量资料增补限制。交回文件和真实证据后停止，下一轮重新开会话；不能用另一 AI 的完成声明替代复核。
+
+**本轮分析交付：**分支 `release/2026-11-05`；只更新本方案并在项目工作区原方案增加指向。未改业务代码、测试、配置或全局规范；未登录、读取实际项目材料、测试、构建、启停服务、操作项目／容器、调用模型或访问被测目标，无 commit／push。已有未跟踪静态产物保持原样；账号凭据不写入方案及实施提示词。正式实例挂载、具体用户附件是否已读取、尚未开始执行时的实际页面表现仍未验证。
+
+### 16.6 2026-11-06 实施记录（待分析复核）
+
+#### 16.6.1 代码落地
+
+- `AdvisoryBundle.local_path` 明确保存 Dispatcher 可读的已校验本地目录，与 Docker `source_path` 分开；不反向猜测宿主映射。原件缓存与工作副本复用同一 manifest 文件集合、路径、大小及摘要校验。
+- 新增 `dispatcher/runtime/workspace_inputs.py`：从已校验 bundle 按不超过 1 MiB 的块复制普通文件，保留 `manifest.json`、`project/`、`library/<key>/` 及原始字节。临时目录位于 workspace bind 外的同级私有目录，校验完成后以 Linux `renameat2(RENAME_NOREPLACE)` 原子发布，复制期间出现的同名空目录也不会被替换。失败只清理本次临时副本，不覆盖／删除既有 `inputs` 或其他工作文件。
+- 在 `ContainerManager` 现有研究准备锁内统一准备，覆盖新建、已有容器提前返回、名称冲突回查及 continuation 激活；已有容器必须确认为当前实际共享 workspace bind。相同输入集合只做完整校验后复用，不重新复制；字节、清单、文件类型或目录冲突明确失败。只读普通文件权限不等于 Docker `ro` mount。
+- Bootstrap／Reason／Explore（含研究复核）仅在准备成功后显式启用工作路径投影；`prompting.py`、必要的 TaskRun runtime context 及 Server sanitizer 保留实际工作路径，同时保留原件路径、源 ID、库选择与原始摘要语义。默认调用不发布工作路径，报告／聊天独立 workspace 不被宣称已有副本。
+- `pi-agent/src/artifacts.ts` 将实际 `workspace/inputs` 识别为输入：可由文件工具读取，不可将其中原文件直接登记成新 Artifact；分析输出和可编辑副本写到 `inputs` 外。没有自动注册材料，没有改写原件／库版本。
+- 未改前端页面，复用真实 workspace 的文件树、搜索、预览和下载。未修改上传额度、创建／计划、报告、网络执行、研究策略或资料热更新；未新增依赖。
+
+#### 16.6.2 定向验证及失败记录
+
+所有材料均为隔离合成 CSV／文本、小二进制和一个选中的库文件；未选库文件不进入副本。没有模型调用、目标网络请求或正式业务材料。
+
+| 层次 | 已执行与结果 | 证明范围 |
+| --- | --- | --- |
+| Python 定向组合 | `test_workspace_inputs.py` 与 `test_advisory_bundle.py` 的相关筛选早期组合为 **27 passed，11 deselected**；补齐 continuation 后，新文件非 Docker 部分 **12 passed** | 普通文件、初始字节／来源、所选范围、真实 reader 列表／搜索／预览／下载、同输入复用及输出保留、目录／字节／清单／链接冲突、复制／大小／摘要失败与发布竞态、研究路径投影、已有容器与 continuation 准备；Docker 归属与 API 部分为替身 |
+| Node 定向输入分类 | 仅运行新增 `prepared workspace inputs are readable but only analysis output can be registered`，**1 passed** | 直接调用真实 `evidencePath`／`readEvidence`／`ArtifactRegistry`；输入可读、不能注册，外部分析输出可注册；不调用模型 |
+| 实际 Docker | 候选镜像用例 **1 passed（16.96s）**；切换实际配置的 `arena-worker:local` 后，最终同一用例 **1 passed（12.48s）** | 真实控制容器、executor、scope、Unix socket、文件工具及执行命令；两容器核对同一 workspace bind 和实际镜像 ID，executor 无 advisory 挂载。CSV 读取字节／摘要一致，命令计算 `rows=2,sum=5` 并写出普通工作区 `analysis.json`；小二进制、所选库文件及 manifest 字节一致，真实 Docker inspect 下 reader 可读，原 bundle 不变 |
+| 构建 | `npm --prefix container/pi-agent run build` 通过；基于现有 Worker 的离线单文件应用层构建及 `cairn-agent --self-check` 通过 | 仅更新编译后的 `artifacts.js`；工具层、浏览器与依赖全部复用，未重新下载 |
+
+实际 Docker 用例仍使用隔离 API 回执和容器登记替身，不连接正式项目 API，不运行上传／状态发布线程；保留真实健康线程持续刷新执行许可，测试结束仅清理本次实验容器、网络及临时目录。它不是模型分析或正式用户流程验收。
+
+过程中出现的失败及处理也保留：
+
+- 初次 pytest 收集因 venv 缺少 `httpx` 失败；未安装依赖，改用同一 venv 并在测试入口追加系统已有 `/usr/lib/python3/dist-packages`。既有测试 fixture 调用了已不存在的 `_verify_resource`，定向改为当前 `_verify_file`。
+- 常规 Dockerfile 在 `--network=none` 下因 apt 基础层未命中缓存而失败，未放开网络重装；改为从现有 `arena-worker:local` 仅叠加必要应用文件，离线构建成功。
+- 首次 Docker 用例因 fixture 的 `ContainerConfig` 缺少必填 `network_mode`／`completed_action` 失败，补齐后通过。实际标签复跑一度报 `execution_unavailable`：跳过 `_start_sync` 的夹具也跳过了健康线程，执行许可可能过期；修正为只跳过上传／状态发布、保留真实 `_watch`，最终通过。未修改生产网络执行逻辑，也未把早期通过冒称为每次复跑都成功。
+
+没有运行默认全套测试、无关 500 MB 上传实验或新增依赖。可显式运行单个实际 Docker 用例：
+
+```bash
+CAIRN_WORKSPACE_INPUTS_DOCKER=1 cairn/.venv/bin/python -I -c "import sys; sys.path.append('/usr/lib/python3/dist-packages'); import pytest; raise SystemExit(pytest.main(['-q','-s','cairn/tests/test_workspace_inputs.py::test_real_control_and_task_executor_share_prepared_inputs']))"
+```
+
+#### 16.6.3 实际加载与完整系统状态
+
+- 重载前以 PostgreSQL `BEGIN READ ONLY` 复查：queued／running TaskRun 为 0，无活动项目，现有项目为 completed／stopped，计划均 completed，未认领聊天为 0。核对 PID 身份及 Dispatcher 生命周期锁后，只向 Dispatcher 主进程发 SIGINT、Server 主进程发 TERM，均正常退出；未强杀、操作项目生命周期或替换存量研究／会话容器。
+- Worker 的实际配置仍为 `arena-worker:local`，已切换到仅更新应用层的镜像 `sha256:5cb102ab395603e2fbfac544020a674292b88f349f5687ecc34485dd5c60d7e8`；最终隔离用例已核对新控制容器与 executor 均使用该镜像。没有重建 Gateway 或重装工具。
+- 按现有 `deploy/start.sh` 启动完整系统，Server 与 Dispatcher 均为新进程且 Dispatcher 持有原配置的锁；沿用 PostgreSQL、端口 `8001`、Dispatcher 身份和 `runtime/static`，未清理／重建前端静态资源。`GET /health` 返回 `{"status":"ok"}`，依赖容器健康；启动日志无 Traceback／ERROR。
+- 实际浏览器在全新隔离上下文打开 UI，登录页正常呈现，JS／CSS／favicon 返回 200；未登录时 `/auth/session` 返回预期 401。没有登录、上传、创建批次／项目、启动计划、恢复／重跑、调用模型或访问被测目标。重载后只读复查仍无在途任务或待执行工作；没有使用会触发租约过期处理的 monitoring summary 作为只读验收。
+
+#### 16.6.4 未验收项、存量限制与交回
+
+- **正式新建项目携带材料到模型分析的用户流程未验收。** 受本轮操作边界限制，没有正式业务样例，也没有模型分析；隔离 Docker 的合成 CSV 分析结果不能替代它们。仍需下一会话独立复核代码与证据，由用户决定正式业务验收。
+- 不承诺暂停后增补资料热更新：材料集变更仍可能触发现有 runtime signature 不匹配，不取消检查、不覆盖在用输入、不删容器绕过。上线未遍历或补写历史项目；同一材料集的存量项目只在下一次获准的正常准备中按已确认共享根处理。
+- 镜像标签更新只影响新容器，存量容器未升级其 Artifact 输入分类代码；未为本轮验收恢复、重跑或替换它们。工作副本增加项目磁盘占用；复制分块不消除这份存储成本。原件及工作副本不做双向同步。
+- 当前分支 `feat/workspace-input-copies`；已审阅受影响的 git diff 与新增文件，保留会话开始前两份方案内容和全部未跟踪静态 hash，未改运行配置或全局规范。已清理本轮临时应用构建目录；无 commit／push。到此停止，交回分析会话复核，不继续历史任务。
+
+### 16.7 2026-11-06 独立只读复核结论
+
+**结论：本轮“新建项目材料进入共享工作区、可在文件页及执行命令中读取”的实现缺口已补齐；未发现需要另开修复轮次的已确认阻断缺陷。此结论不等于正式用户流程或模型分析已验收。**
+
+- **源码与调用链：**工作副本是独立普通文件，不是软链接、硬链接或嵌套挂载；复制完成并验证后才以不覆盖目标的方式发布。同一材料集复用，冲突明确失败，不静默改写输入或分析输出。研究新建、已有容器及 continuation 路径均接入准备；新建路径先由 `control_volumes()` 调用 runtime 准备并创建实际 workspace，再复制输入。文件页读取的真实 bind 与 executor 的共享 workspace 一致，未以虚拟材料树替代。
+- **路径与审计：**原件 `container_path` 与摘要语义保留，准备成功后才投影 `workspace_path`；报告／聊天不被宣称已有研究输入副本。核对真实 `audit_task_runs.update_task_run_record()`：新增审计字段经过清洗后增量合并，不整体覆盖原 runtime context；并非只依赖 Docker 用例中返回成功的 API 替身。输入可读取但不能直接作为新产物登记，输出写在 `inputs` 外。
+- **隔离验证的证据身份：**已阅读新增 Python／Node 用例和实际 Docker 用例源码。Docker 用例确实涉及控制容器、executor、Unix socket、普通文件分析及真实 workspace reader，不是仅检查提示词字符串；API 和登记仍为隔离替身。16.6 的 passed 数量与构建结果保留为实施会话记录，本分析会话没有复跑，也没有把它们改称独立测试通过。
+- **独立运行元数据：**只读 inspect 确认 `arena-worker:local` 当前镜像 ID 与 16.6.3 相同；Server／Dispatcher PID 对应进程存在，工作目录为本仓库，启动时间晚于本轮相关 Python 文件修改。这支持本地重载记录，但不证明所有存量容器已升级，也不代替业务执行证据；本轮未重新调用健康接口、读取正式项目内容或调用模型。
+- **剩余边界：**材料在正常执行准备时进入 workspace，不是上传完成即创建容器／填充文件页。没有补写历史项目，已有容器的镜像代码不会随标签自动升级；材料变更的 runtime signature 限制继续保留。正式页面上传→新建项目→模型读取与分析仍未验收。复制循环每块最多 1 MiB 且有预期总长度限制，但共享整树验证使用读到 EOF 的摘要计算；现有小样本未覆盖跨块及复制期间源变化，不将其描述成这些情况已测试通过，也不据此推断已存在正常路径故障。
+- **本轮处理：**仅更新本原方案的状态与复核结论，不修改业务代码、不运行测试／构建、不登录、不启停服务或操作项目；无 commit／push。现阶段不生成重复实施提示词，下一步为独立的用户流程验收，而不是无证据追加改造。

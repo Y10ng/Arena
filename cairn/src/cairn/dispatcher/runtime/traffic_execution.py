@@ -187,6 +187,9 @@ class TrafficExecutionBridge:
                     self._threads.append(thread)
                     thread.start()
 
+    def workspace_directory(self, project_id: str, *, isolated: bool) -> Path:
+        return self._runtime(project_id, isolated=isolated).workspace
+
     def control_volumes(self, project_id: str, *, isolated: bool) -> dict:
         runtime = self._runtime(project_id, isolated=isolated)
         runtime.prepare(upstream_ca=self.upstream_ca)

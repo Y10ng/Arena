@@ -141,6 +141,7 @@ def run_bootstrap_task(
                 project,
                 knowledge=knowledge,
                 advisory=container_runtime,
+                workspace_inputs_prepared=True,
             )
             prompt = render_prompt(
                 load_prompt(effective_prompt_group, "bootstrap.md"),

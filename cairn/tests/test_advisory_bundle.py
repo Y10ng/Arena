@@ -73,7 +73,9 @@ class ResourceClient:
 
     def download_project_resource(self, project_id: str, resource: ProjectResource, output) -> None:
         content = self.contents[resource.id]
-        advisory_bundle._verify_resource(resource, content)
+        advisory_bundle._verify_file(
+            source=resource.path, size_bytes=resource.size_bytes, digest=resource.sha256, content=content,
+        )
         output.write(content)
 
 

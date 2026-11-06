@@ -4,7 +4,7 @@ import { lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { AgentFailure, CANDIDATE_SPOOL_HARD_LIMITS, object, type JsonObject } from "./protocol.js";
 
-const READONLY_INPUT_ROOTS = ["/opt/cairn/readonly-inputs", "/cairn/advisory/project"];
+const READONLY_INPUT_ROOTS = ["/opt/cairn/readonly-inputs", "/cairn/advisory/project", "/home/kali/workspace/inputs"];
 
 export const ARTIFACT_KINDS = ["log", "file", "report", "screenshot", "patch", "raw_output"] as const;
 export interface Artifact { handle: string; kind: string; path: string; source_path: string; sha256: string; size_bytes: number }
@@ -93,7 +93,7 @@ function within(root: string, path: string): boolean {
   return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 async function readonlyInputsRoots(cwd: string, managedRoots = READONLY_INPUT_ROOTS): Promise<string[]> {
-  const candidates = [...new Set([resolve(await realpath(cwd), ".cairn", "readonly-inputs"), ...managedRoots])];
+  const candidates = [...new Set([resolve(await realpath(cwd), ".cairn", "readonly-inputs"), resolve(await realpath(cwd), "inputs"), ...managedRoots])];
   return Promise.all(candidates.map(async (root) => {
     try { return await realpath(root); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return root; throw error; }

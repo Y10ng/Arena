@@ -106,6 +106,7 @@ def build_reason_prompt_context(
     *,
     knowledge: str | None = None,
     advisory: Any | None = None,
+    workspace_inputs_prepared: bool = False,
     client: CairnClient | None = None,
     admission_context: dict[str, object] | None = None,
 ) -> ReasonPromptContext:
@@ -289,6 +290,7 @@ def build_reason_prompt_context(
         "knowledge_base": knowledge_base_prompt_context(
             knowledge,
             advisory=advisory,
+            workspace_inputs_prepared=workspace_inputs_prepared,
         ),
     }
     return ReasonPromptContext(

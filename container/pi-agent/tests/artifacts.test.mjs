@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile, readFile, truncate, symlink, chmod } fro
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runRequest } from '../dist/runner.js';
-import { ArtifactRegistry, evidencePath } from '../dist/artifacts.js';
+import { ArtifactRegistry, evidencePath, readEvidence } from '../dist/artifacts.js';
 import { fixture, ok } from './fixtures.mjs';
 
 function schema(properties) {
@@ -125,6 +125,21 @@ test('readonly inputs remain readable but cannot be registered as artifacts', as
   assert.equal(JSON.parse(toolMessage.content).text, 'readonly request body');
   const registry = new ArtifactRegistry(cwd, request.session_root);
   await assert.rejects(registry.register('.cairn/readonly-inputs/request.txt', 'file'), { code: 'artifact_invalid' });
+});
+
+test('prepared workspace inputs are readable but only analysis output can be registered', async (t) => {
+  const cwd = await mkdtemp(join(tmpdir(), 'cairn-workspace-input-'));
+  t.after(() => rm(cwd, { recursive: true, force: true }));
+  const sessionRoot = join(cwd, '.cairn', 'pi');
+  await mkdir(join(cwd, 'inputs', 'project'), { recursive: true });
+  await writeFile(join(cwd, 'inputs', 'project', 'sample.csv'), 'name,value\na,2\nb,3\n');
+  const input = await evidencePath(cwd, 'inputs/project/sample.csv', sessionRoot);
+  assert.equal((await readEvidence(input, {})).text, 'name,value\na,2\nb,3\n');
+  const registry = new ArtifactRegistry(cwd, sessionRoot);
+  await assert.rejects(registry.register('inputs/project/sample.csv', 'file'), { code: 'artifact_invalid' });
+  await writeFile(join(cwd, 'analysis.txt'), 'rows=2,sum=5');
+  const output = await registry.register('analysis.txt', 'file');
+  assert.equal(await readFile(output.path, 'utf8'), 'rows=2,sum=5');
 });
 
 test('report read_evidence preserves byte offsets, UTF-8 chunks and relevant tail selection', async (t) => {

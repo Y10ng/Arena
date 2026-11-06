@@ -7,6 +7,8 @@ from .common import *
 from pathlib import PurePosixPath
 from re import fullmatch
 
+from cairn.advisory_contract import WORKSPACE_INPUTS_PATH
+
 from .payload_values import (
     _drop_empty_payload_values,
     duration_payload_value,
@@ -415,6 +417,8 @@ def _runtime_knowledge_base(value: object) -> dict[str, object] | None:
             "injected": enabled and value.get("injected") is True,
             "path": path if enabled else None,
             "manifest_path": manifest_path if enabled else None,
+            "workspace_path": _runtime_exact_path(value.get("workspace_path"), WORKSPACE_INPUTS_PATH) if enabled else None,
+            "workspace_manifest_path": _runtime_exact_path(value.get("workspace_manifest_path"), f"{WORKSPACE_INPUTS_PATH}/manifest.json") if enabled else None,
             "bundle_digest": digest if enabled else None,
             "mode": ADVISORY_MODE,
             "read_only": value.get("read_only") is True,
@@ -438,6 +442,8 @@ def _runtime_project_resources(value: object) -> dict[str, object] | None:
         {
             "bundle_digest": digest,
             "manifest_path": manifest_path if digest is not None else None,
+            "workspace_path": _runtime_exact_path(value.get("workspace_path"), WORKSPACE_INPUTS_PATH) if digest is not None else None,
+            "workspace_manifest_path": _runtime_exact_path(value.get("workspace_manifest_path"), f"{WORKSPACE_INPUTS_PATH}/manifest.json") if digest is not None else None,
             "read_only": value.get("read_only") is True,
         }
     )
@@ -506,6 +512,10 @@ def _runtime_advisory_resource(value: object) -> dict[str, object] | None:
             ),
             "path": path,
             "container_path": container_path,
+            "workspace_path": _runtime_exact_path(
+                value.get("workspace_path"),
+                f"{WORKSPACE_INPUTS_PATH}/{container_path.removeprefix(ADVISORY_CONTAINER_PATH + '/')}",
+            ),
             "size_bytes": size_bytes,
             "sha256": digest,
         }

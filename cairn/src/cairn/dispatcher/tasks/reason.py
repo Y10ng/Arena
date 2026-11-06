@@ -127,6 +127,7 @@ def run_reason_task(
             reason_context = build_reason_prompt_context(
                 config, container_manager, container_name, project, export_yaml,
                 knowledge=knowledge, advisory=container_runtime, client=client,
+                workspace_inputs_prepared=True,
                 admission_context=admission_context,
             )
 
