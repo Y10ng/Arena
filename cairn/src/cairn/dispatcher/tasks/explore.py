@@ -670,7 +670,7 @@ def run_explore_task(
                         declared_artifacts,
                         slot_key=getattr(intent, "slot_key", None),
                         require_current_run_reproduction=(
-                            structured_assessment and outcome_version >= 2
+                            cell_assessment and outcome_version >= 2
                         ),
                     )
                 except CoverageEvidenceInsufficientError as exc:

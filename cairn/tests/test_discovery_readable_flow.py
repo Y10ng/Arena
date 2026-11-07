@@ -17,6 +17,7 @@ from cairn.dispatcher.tasks.common_base import ProcessArtifactRecord
 from cairn.dispatcher.tasks.conclude_writer import build_vulnerability_for_conclude
 from cairn.dispatcher.worker_protocol.envelope import canonical_result_example
 from cairn.dispatcher.worker_protocol.submission import Finding
+from cairn.evidence_contracts import EvidenceItem
 from cairn.report_readable import readable_markdown
 from cairn.server.artifact_paths import resolve_artifact_path
 from cairn.server.models import ConcludeRequest, CreateArtifactRequest, EvidenceRef
@@ -133,7 +134,50 @@ def discovery_state(defaults_v60_conn, monkeypatch, tmp_path):
     return {"conn": conn, "root": root, "originals": {}, "binding": binding}
 
 
-def _submit_finding(state, name, *, exchanges, steps, description, remediation, identity_enabled):
+@pytest.fixture
+def goal_driven_manual_state(defaults_v60_conn, monkeypatch, tmp_path):
+    from cairn.server import db
+
+    conn = defaults_v60_conn
+    # 空 schema 先迁移，避免把报告历史夹具的合成用户带入固定 Worker 数据迁移。
+    db.run_migrations(conn, "postgresql")
+    conn.execute(
+        """INSERT INTO scenarios (key, label, profile_id, prompt_group, knowledge, features_json)
+        VALUES ('controlled-manual', '受控人工证据', 'default', 'goal-driven-v1', '', '{}')"""
+    )
+    conn.execute(
+        """INSERT INTO projects (id, title, status, created_at, scenario_key, scenario_snapshot_json)
+        VALUES (?, '受控人工证据', 'active', 'synthetic', 'controlled-manual', ?)""",
+        (PROJECT, json.dumps({"features": {
+            "execution_contract_version": 1, "execution_engine": "pi",
+        }})),
+    )
+    conn.execute(
+        "INSERT INTO facts (id, project_id, description) VALUES ('historic-fact', ?, '合成来源')",
+        (PROJECT,),
+    )
+    conn.commit()
+    root = tmp_path / "manual-artifacts"
+
+    @contextmanager
+    def get_conn():
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    for module in (intents_router, audit_artifacts):
+        monkeypatch.setattr(module, "get_conn", get_conn)
+    monkeypatch.setattr(audit_artifacts, "artifact_root", lambda: root)
+    return {"conn": conn, "root": root, "originals": {}, "binding": {}}
+
+
+def _submit_finding(
+    state, name, *, exchanges, steps, description, remediation, identity_enabled,
+    source="capture", require_current_run_reproduction=True, assessment_record=None,
+):
     conn = state["conn"]
     intent_id, run_id = f"intent-{name}", f"run-{name}"
     conn.execute(
@@ -153,7 +197,7 @@ def _submit_finding(state, name, *, exchanges, steps, description, remediation, 
     )
     handles, items, declarations = {}, [], []
     for item_id, sides in exchanges:
-        item = {"id": item_id, "kind": "http", "source": "capture", "title": item_id}
+        item = {"id": item_id, "kind": "http", "source": source, "title": item_id}
         for side, text in sides.items():
             raw = text.encode("utf-8")
             handle = f"{name}-{item_id}-{side}"
@@ -187,12 +231,16 @@ def _submit_finding(state, name, *, exchanges, steps, description, remediation, 
     declared = ProcessArtifactRecord(
         refs=[EvidenceRef(artifact_id=value) for value in handles.values()], artifact_ids_by_handle=handles,
     )
-    wire = build_vulnerability_for_conclude(payload, declared, require_current_run_reproduction=True)
+    wire = build_vulnerability_for_conclude(
+        payload, declared,
+        require_current_run_reproduction=require_current_run_reproduction,
+    )
     assert wire["reproduction_steps"] == steps
     assert all(ref["artifact_id"] in handles.values() for item in wire["evidence_items"]
                for side in ("request", "response") if (ref := item.get(side)) is not None)
     result = intents_router.conclude(PROJECT, intent_id, ConcludeRequest(
         worker="fixture-worker", description=description, task_run_id=run_id, vulnerability=wire,
+        assessment_record=assessment_record,
     ))
     observation = conn.execute(
         "SELECT * FROM vulnerability_observations WHERE project_id = ? AND source_fact_id = ?",
@@ -203,6 +251,88 @@ def _submit_finding(state, name, *, exchanges, steps, description, remediation, 
     assert observation["remediation"] == remediation
     assert json.loads(observation["evidence_items_json"]) == wire["evidence_items"]
     return observation
+
+
+def test_goal_driven_manual_evidence_uses_server_ownership_validation(goal_driven_manual_state):
+    state, conn = goal_driven_manual_state, goal_driven_manual_state["conn"]
+    snapshot = json.loads(conn.execute(
+        "SELECT scenario_snapshot_json FROM projects WHERE id = ?", (PROJECT,),
+    ).fetchone()["scenario_snapshot_json"])
+    snapshot["features"].update({
+        "assessment_protocol": "goal-driven-v1", "assessment_contract_version": 2,
+        "outcome_contract_version": 2, "verifier_contract_version": 1,
+    })
+    conn.execute(
+        "UPDATE projects SET assessment_protocol = 'goal-driven-v1', "
+        "scenario_snapshot_json = ?, vulnerability_fingerprint_version = 1 WHERE id = ?",
+        (json.dumps(snapshot), PROJECT),
+    )
+    conn.commit()
+    observation = _submit_finding(
+        state, "manual",
+        exchanges=[("manual-current", {
+            "request": "GET /manual-fixture HTTP/1.1\r\nHost: fixture.invalid\r\n\r\n",
+            "response": "HTTP/1.1 200 OK\r\n\r\n合成人工证据",
+        })],
+        steps=[{"action": "在当前 Run 登记合成人工原件。",
+                "observation": "Server 按项目和 Run 归属接受。",
+                "evidence_item_ids": ["manual-current"]}],
+        description="goal-driven 当前 Run 的 manual Artifact",
+        remediation="仅用于合成回归。", identity_enabled=True, source="manual",
+        require_current_run_reproduction=False,
+        assessment_record={"version": 1, "kind": "experiment",
+                           "hypothesis": "当前人工原件可证明合成发现",
+                           "outcome": "finding", "observations": ["人工原件属于当前 Run"]},
+    )
+    items = json.loads(observation["evidence_items_json"])
+    assert [item["source"] for item in items] == ["manual"]
+    canonical = conn.execute(
+        "SELECT status FROM vulnerabilities WHERE id = ?", (observation["vulnerability_id"],),
+    ).fetchone()
+    assert canonical["status"] == "new"
+
+    current_items = [EvidenceItem.model_validate(item) for item in items]
+    with pytest.raises(HTTPException, match="discovery_evidence_current_run_required"):
+        vulnerabilities._validate_evidence_items(
+            conn, PROJECT, current_items, discovery=True, task_run_id="another-run",
+        )
+
+    conn.execute(
+        "INSERT INTO projects (id, title, status, created_at) "
+        "VALUES ('other-project', '其他合成项目', 'active', 'synthetic')"
+    )
+    conn.execute(
+        """INSERT INTO task_runs
+        (id, project_id, task_type, worker_name, worker_type, status, started_at)
+        VALUES ('other-run', 'other-project', 'explore', 'fixture-worker', 'pi', 'running', 'synthetic')"""
+    )
+    other = [
+        audit_router.create_artifact("other-project", CreateArtifactRequest(
+            task_run_id="other-run", kind="file", category="evidence",
+            filename=f"other-{index}.txt", content="其他项目合成原件",
+        ))
+        for index in range(3)
+    ][-1]
+    assert other.id not in {
+        ref["artifact_id"] for item in items for side in ("request", "response")
+        if (ref := item.get(side)) is not None
+    }
+    cross_project = [EvidenceItem.model_validate({
+        "id": "cross-project", "kind": "artifact", "source": "manual",
+        "artifact": {"artifact_id": other.id},
+    })]
+    with pytest.raises(HTTPException):
+        vulnerabilities._validate_evidence_items(
+            conn, PROJECT, cross_project, discovery=True, task_run_id="run-manual",
+        )
+    invalid_flow = [EvidenceItem.model_validate({
+        "id": "invalid-flow", "kind": "http", "source": "capture",
+        "flow_id": "missing-flow",
+    })]
+    with pytest.raises(HTTPException):
+        vulnerabilities._validate_evidence_items(
+            conn, PROJECT, invalid_flow, discovery=True, task_run_id="run-manual",
+        )
 
 
 @pytest.mark.parametrize("identity_enabled", [False, True], ids=["create", "register"])

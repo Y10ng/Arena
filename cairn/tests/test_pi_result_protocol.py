@@ -854,6 +854,42 @@ def test_worker_evidence_items_resolve_uploaded_versions_and_preserve_missing_si
         build_vulnerability_for_conclude(payload, ProcessArtifactRecord(refs=[]))
 
 
+def test_manual_finding_skips_only_legacy_capture_gate():
+    from cairn.dispatcher.tasks.common_base import ProcessArtifactRecord
+    from cairn.dispatcher.tasks.conclude_writer import (
+        CoverageEvidenceInsufficientError, build_vulnerability_for_conclude,
+    )
+
+    item = {
+        "id": "manual-current", "kind": "artifact", "source": "manual",
+        "artifact": {"artifact_handle": "registered-manual"},
+    }
+    payload = {"accepted": True, "data": {"fact": {
+        "description": "当前执行上传的合成人工证据",
+        "vulnerability": {
+            "schema_version": 2, "title": "Synthetic manual finding", "severity": "high",
+            "identity": {"vulnerability_class": "broken_access_control",
+                         "asset": {"host": "fixture.invalid", "port": 443},
+                         "entrypoint": {"route": "/fixture"}},
+            "evidence_items": [item],
+        },
+    }}}
+    declared = ProcessArtifactRecord(
+        refs=[], artifact_ids_by_handle={"registered-manual": "manual-a1"},
+    )
+    finding = build_vulnerability_for_conclude(
+        payload, declared, require_current_run_reproduction=False,
+    )
+    assert finding["evidence_items"][0]["source"] == "manual"
+    assert finding["evidence_items"][0]["artifact"]["artifact_id"] == "manual-a1"
+    with pytest.raises(CoverageEvidenceInsufficientError):
+        build_vulnerability_for_conclude(
+            payload, declared, require_current_run_reproduction=True,
+        )
+    with pytest.raises(CoverageEvidenceInsufficientError):
+        build_vulnerability_for_conclude(payload, ProcessArtifactRecord(refs=[]))
+
+
 def test_depth_review_standalone_and_zero_selection():
     data = {"depth_review": {"input_digest": "a" * 64, "description": "No supported hypothesis",
                              "evidence_refs": [{"artifact_id": "a1"}], "selected": []}}

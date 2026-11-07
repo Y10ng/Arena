@@ -1,5 +1,201 @@
 # Dispatcher
 
+## 2026-11-07：本轮执行稳定性交接（已实施，本机已加载）
+
+本节是当前轮次的范围入口，替代下方“仅移除 capture 标签门槛”及“失败运行成果只读页面”作为本轮完整交接的旧范围；历史证据仍保留。`proj_005` 的采集取消链及对应设计见[项目 HTTP 流量方案第 27 节](project-http-traffic-design.md#27-proj_005-采集停滞取消与重复执行)。
+
+### 两个 capture 问题必须分开
+
+- `proj_072` 的 `evidence_insufficient` 是**发现提交的来源标签拒绝**。既有固定快照中的 `tr007/i004`、`tr021/i005` 均正常结束模型执行并提交本地有效候选，Artifact 也已登记到当次 Run；Dispatcher 随后以 `finding requires evidence from the current execution` 拒绝。直接条件是 `dispatcher/tasks/conclude_writer.py` 调用 `has_evidence(items,current=True)`，而 `cairn/evidence_contracts.py` 将该条件实现为至少一项 `source=capture`；实际条目为 `source=manual`。这不是“没有执行”“没有材料”或 provider 网络错误。
+- `proj_005` 的 `traffic_capture_stalled` 是**流量采集健康看门狗取消执行**。它与上述 finding evidence item 的 `source` 取值不是同一协议，不能用放宽 finding 标签校验来解释或修复采集停滞。
+
+### 本轮推荐：收敛重复归属裁决，不放宽结果真实性
+
+当前 Server 的 goal-driven finding 接受链已经按 Artifact 的真实项目／`task_run_id` 判断本次执行归属；`manual` 不会仅因来源标签被排除。Dispatcher 的 capture-only 前置检查因此与权威消费者冲突，而且把本可由 Server 具体裁决的提交提前变成整次 `evidence_insufficient`。
+
+本轮只删除普通 goal-driven Artifact 提交在 Dispatcher 的这项重复 capture-only 门槛，继续由 Server 核验引用可解析、原件有效、项目与执行归属、派生图片／摘录及 HTTP flow 的真实采集绑定。当前 `build_vulnerability_for_conclude` 仅由 Explore 调用，但 `explore.py` 传入的是同时包含旧 coverage-cell 与 goal-driven 的 `structured_assessment`；实施应把这项 Dispatcher 前置要求限定回已有的 `cell_assessment`，不能全局删除参数后误改旧 coverage-cell。不得改写历史 `source`、把 manual 自动改名为 capture、删除其他证据校验或把候选自动标成确认漏洞。独立复测及 HTTP flow 专用规则不随本案批量放宽。
+
+`proj_072` 的两份历史候选只能证明命中过该标签拒绝；去掉门槛后是否满足全部业务接受条件、原漏洞主张是否成立，仍未核验。本轮不重验、不修改历史候选或 TaskRun 终态。
+
+### 多 Agent 稳定性的本轮边界
+
+已有记录支持“共同模型通信故障是多数失败首因，三个并行 Explore 与按逻辑 attempt 的持久重试放大失败数量”，不支持用一个协议补丁消除网络中断。本轮不重写 Bootstrap／Reason／Explore，不新增总指挥、消息总线、全局熔断或另一套重试状态，也不以调大超时、增加重试次数、关闭看门狗冒充稳定性修复。
+
+稳定性改动只处理已有证据确定的行为：消除上下游来源规则冲突；让采集基础设施取消沿既有逻辑 attempt 形成有界结果，保留已登记材料和真实取消诊断，未确认旧执行物理停止前不得重复派发。模型出口、本机网卡、上游服务和另一台机器的采集器底层停滞原因仍需各自证据，不在本轮猜修。
+
+### 实际实施记录（2026-11-07）
+
+本轮按上述边界完成源码与隔离测试，未部署或操作真实项目：
+
+- `explore.py` 只把 `require_current_run_reproduction` 的调用条件从 `structured_assessment` 收窄为 `cell_assessment`，仍要求 `outcome_version >= 2`。共享 `conclude_writer.py`、`has_evidence` 和 Server 的 `vulnerabilities.py` 未改；goal-driven 的当前 Run manual Artifact 改由 Server 按真实项目、Run、Artifact 与 HTTP flow 归属裁决，不改写 `source`，也不自动确认漏洞。
+- `process_runner.py` 在取消时把实际 `cancel_reason` 保留为 Worker failure 的诊断 code；`assessment_attempts.py` 只让 `origin=dispatcher_process`、`code=traffic_capture_stalled` 且无暂停标记的明确采集取消进入现有默认失败预算。普通取消、暂停及其他 origin 不进入该预算，终态仍为 `cancelled/cancelled`。`worker_result_gateway.py` 的既有映射已满足要求，未修改。
+- 定向命令使用既有 `cairn/.venv` 和私有 PostgreSQL，共 **16 passed**。覆盖两种协议的实际 Explore 门槛参数、manual 的真实 Server 接受及跨 Run／跨项目／非法 flow 拒绝、具体取消诊断、5／10 秒退避、第三次失败耗尽、Dispatcher 重建后仍不创建 TaskRun，以及既有 drain／termination proof 隔离用例。
+- 另一次包含整份 `test_discovery_readable_flow.py` 的合并运行结果为 **17 passed, 2 failed**。两条既有报告用例均因其 `discovery_state` 只迁移至 v63、当前 `expire_workers` 查询缺少 `p.execution_control_json` 而失败；本轮未修改该报告夹具或扩展生产迁移范围，不能将这次运行记为全绿。
+- 验证全部使用合成数据与局部 mock，没有访问真实目标或模型，没有操作 `proj_005/proj_072`，没有 commit／push。底层采集停滞根因和真实系统加载后的行为仍未验收，详见[项目 HTTP 流量方案第 27.5 节](project-http-traffic-design.md#275-实际实施记录2026-11-07)。
+
+### 分析复核（2026-11-07）
+
+只读审阅实际生产 diff 后，三处生产改动符合本轮范围，未发现擅自放宽 Server 校验、修改人工取消终态或绕过 recovery fence 的改动。两项报告夹具失败的查询与固定 v63 夹具均早于本轮，不能归因于本次修复，也不能记为合并回归全绿。
+
+补测前，新增持久预算链路只实际构造 Explore；原事故的 Bootstrap 虽在源码中共用同一 Server 路由裁决，仍缺直接任务类型覆盖。下节最小补测已以 Bootstrap／Explore 参数化用例补齐，最终只读复核确认生产 diff 未再变化，本轮隔离验证闭环。真实部署与项目验收不在本轮范围；本分析未重跑测试、未部署或操作项目。
+
+### 最小补测实际记录（2026-11-07）
+
+现有持久预算用例已最小参数化为 `task_type=bootstrap`／`explore`，未新建测试文件或扩展调度集成套餐。两种类型均通过 5／10 秒退避、第三次 `execution_retry_exhausted`、两次重建 Dispatcher 并读取真实 TaskRun 投影后不调用 `_create_task_run`，以及三条合成 Run 保持 `cancelled/cancelled` 的断言；既有人工取消、暂停标记、错误 origin 和具体诊断负例未改。
+
+仅执行 `CAIRN_TEST_LOCAL_PG=1 cairn/.venv/bin/python -m pytest -q cairn/tests/test_traffic_capture_retry.py`，原始结果为 `......... [100%]`、**9 passed in 9.58s**。本轮未改生产代码，未运行整份 `test_discovery_readable_flow.py`，未访问真实目标／模型或操作 `proj_005/proj_072`，未部署、重载、重启、commit 或 push。本轮隔离验证已闭环，真实系统加载与真实项目处置仍待独立授权。
+
+### 本机部署记录（2026-11-07）
+
+获准部署后，先核对实际 PostgreSQL：仅有 completed／stopped 项目，无 active 项目及 queued／running TaskRun；Docker 快照没有项目研究容器。随后通过既有 `deploy/stop.sh`／`deploy/start.sh` 重载宿主 Server／Dispatcher，未停止 PostgreSQL、会话容器或重建 Worker／gateway。新进程的 HTTP ready、Dispatcher ownership 与 heartbeat 均正常，启动日志无本轮错误，重载后仍无 active 项目或在途 TaskRun。
+
+本机加载不等于真实项目验收：没有创建、恢复或重跑 `proj_005/proj_072`，没有调用模型或访问目标，底层 heartbeat stalled 根因仍未解决。发布兼容性、隔离测试及两项既有 v63 报告夹具失败继续按 `CHANGELOG.md` 的 0.2.4 记录交付。
+
+## 2026-11-06：proj_072 大量执行失败的只读归因（未修复）
+
+### 范围、实例与固定快照
+
+用户本轮只要求解释原因，明确暂不修复。本节是实际 PostgreSQL、登记候选、原始 session、事件文件和系统日志的只读调查，不是实施报告或恢复授权。下方旧轮次“当前交付”等表述保留其历史时间范围，不自动接续。
+
+- 实际 Server／Dispatcher 的 PID 文件与 `/proc` start time 匹配，cwd 均为本仓库；数据库为实际 Server 进程所用的 `127.0.0.1:55433/cairn_isolated`。查询使用 `default_transaction_read_only=on` 与显式 `BEGIN READ ONLY`，没有导入应用或调用可能维护租约的项目 GET。
+- **固定快照：2026-11-06 15:26:48 UTC。** `proj_072` 为 active，共 34 条 TaskRun：8 succeeded，24 failed/provider_error，2 failed/evidence_insufficient。此时无 running TaskRun，但 i008／i009／i010 的逻辑 attempt 仍 active；项目可能随后自行重试，不能把快照写成最终结果。
+- **后续只读日志核对（2026-11-07 04:33 UTC 后）：** 当前 `runtime/logs/dispatcher.log` 中匹配该项目 `task finished` 的记录包含 33 条 `provider_error` 和 2 条 `evidence_insufficient`；最后一条 provider 结束记录的日志时间为 2026-11-06 11:00:43（日志行未标明时区）。这是日志行计数，不是最新数据库快照，也不与上述较早的 24 条相加；本次未查询当前项目状态或确认日志覆盖全部历史。
+- 所有运行的冻结 execution_binding 均指向同一 `wangsu-ds-flash-latest` 模型、`anthropic-messages` 协议和同一推理端点。协议名称不代表实际调用的是 Anthropic 官方模型；未输出凭据、请求正文或私密目标信息。
+
+### 首要原因：模型调用链反复中断，而非 24 个独立业务错误
+
+逐条关联 `task_runs.session_id` 与现存原始 `control/pi/<session>/session.jsonl`，24 条 provider 失败均有 assistant `stopReason=error`：
+
+| 原始 errorMessage | 次数 | 已确认范围 |
+| --- | ---: | --- |
+| `terminated` | 15 | 模型响应流异常终止；不是模型自然完成，也不能仅凭此词断言是谁主动断开 |
+| `Connection error.` | 6 | 模型 SDK 报连接失败；现存会话没有保存更深层 socket／DNS／TLS cause |
+| `Request timed out.` | 3 | 模型请求层超时；不是 TaskRun 的 `deadline_exceeded` |
+
+跨任务同时失败的直接例子（均为 UTC）：`tr012/tr013/tr014` 在 **14:24:08.225–.238** 报 terminated；`tr026/tr027/tr028` 在 **15:12:41.694–.727** 报 terminated；`tr029/tr030/tr031` 在 **15:14:33.093–.098** 报连接错误。三组分别是不同 intent，支持共用模型通信路径受扰动的判断，不支持将其解释为各自漏洞研究逻辑同时出错。它们没有被记录为 401／403、429、提交 Schema 错误或本轮执行时限耗尽；不能据此排除所有未记录的上游原因。
+
+**本机网络确有异常，不应只归咎服务商。** 只读系统 journal 的 kernel 原文记录 `e1000: eth0 NIC Link is Down` 于 **14:29:18**、**14:29:37**，分别于 **14:29:24**、**14:29:41** Link is Up；NetworkManager 同时有 carrier-changed、DHCP 及默认路由重新激活。`tr015/tr016/tr017` 的请求超时在 **14:29:30.163–.175**，紧随第一次断链。断链与该组超时有直接时间关联，但没有端到端网络记录证明唯一因果；两次断链不能解释此前及此后全部 terminated／连接错误，也不能据现存日志确定断链操作者、虚拟化宿主原因或网关责任。
+
+源码对应：`container/pi-agent/src/runner.ts:97–100,668,723–740` 把除认证／限流外的 provider 错误归为通用 `provider_error`；外层 TaskRun 因而只显示“Pi 执行失败：provider_error”。已安装的 Pi provider 在 `container/pi-agent/node_modules/@mariozechner/pi-ai/dist/providers/anthropic.js:509–517` 只保存异常 message，SDK 在 `@anthropic-ai/sdk/client.mjs:231–264` 将连接／超时转换为上述简短消息。依赖源码只说明当前实现，原始 session 才是当次错误依据。不能用通用标签推导模型能力差、鉴权失效、目标不可达或已证明模型服务端宕机。
+
+### 数量放大因素：三个并行 Explore 与按任务重新执行的扩展重试
+
+实际 Explore Worker 选择快照的并发为 3。每个 intent 失败后可产生新 TaskRun，不是 UI 把一条错误重复显示；并行任务遇到共同通信故障，便同时留下多条失败，再分别重试。
+
+- `assessment_attempts.py:16–18,918–924,1019–1072` 对连续 provider 类失败使用最多 **10 次重试**，即首次加重试理论最多 11 条物理运行；还受期限、状态与已接受结果等门禁约束，不是每个项目总共只重试两次。持久退避从 5／10／20 秒增长，最高 300 秒。
+- `explore_attempts.py:299–337` 复用 active 逻辑 attempt、递增 execution_count，同时创建新 TaskRun。实际 `aa004/i005`、`aa005/i006`、`aa006/i007` 均保存 max_runtime_retries=10、execution_count=4，对应 `tr012–tr023` 的四轮：前三轮共 9 条 provider 失败，第四轮 2 条 succeeded、1 条 evidence_insufficient。
+- `aa001/i002` 运行 3 次后成功；Reason 的 `tr008/tr010` 失败后 `tr011` 成功，`tr024` 失败后 `tr025` 成功。说明重试有恢复实例，不能宣称每次都是无效重放，也不能因此证明当前重试成本合理。
+- Worker 另有按 `(worker_name,error_type)` 的内存冷却（`scheduler/worker_runtime.py:741–770`）；它与持久重试资格共同影响实际间隔，不把两层等待简单相加，不把 Worker 冷却清零当作持久额度清零。
+- 本轮核对的失败及重试 audit 为 `resume=false`，不是在同一个原模型 session 中从失败点继续。项目事实与共享文件仍可存在；这里只确认新物理执行／新会话，不声称所有研究都从零重做。
+
+上述 Python 路径以 `cairn/src/cairn/server/services/` 或明确标注的 Dispatcher 目录为根。重试本身不是首个连接故障的原因，但会放大 TaskRun 数量、等待与重复生成成本。24 条失败不等于 24 个不同根因，也不等于 24 次模型 HTTP 请求。
+
+**2026-11-07 对“停住”的补充只读核对：** `runtime/logs/dispatcher.log:559–583` 的历史记录显示，11:00:43（日志未标明时区）三个 Explore 连续以 provider_error 结束，所属 Worker 进入冷却；11:03:26–11:04:01 对 i008 的调度记录显示因冷却无可用 Worker、running=0。这证明当时确有一段没有继续派发的等待，并非仅凭终端无输出猜测。此前同一日志有冷却后再次派发，不能由这段等待断言永久停滞。11:00:44 的 candidate recovery unresolved 是独立的当轮跳过记录；当前 `dispatcher/scheduler/dispatch_cycle.py:339–349` 对此会跳过该项目当轮派发，但不能据此推断持续死锁或各进程实际加载的版本。日志止于 11:04:01；本次尚未据此确认当前项目状态、进程是否停止，或用户看到的具体终端为何不更新。
+
+**对后续执行的补充核对：** 固定快照之后的 `tr035–tr043` 各有独立 audit，结束时间分别落在 2026-11-06 15:38、15:54、16:00 UTC 三组；九次均记录 `session_start.resume=false`、`provider_error` 及 session failed。它们证明此前快照之后又有新的失败执行，且不是在原模型 session 中续跑；但不能仅凭 `resume=false` 断言此前事实、共享文件完全未被利用，也不能把九条 audit 文件数当作当前数据库权威总数。
+
+**终端显示与调度须分别判断：** 当前源码 `cairn/frontend/src/features/runs/useRunsPage.ts:411–418,488–528,677–705,752–764` 的运行详情终端读取选中 TaskRun 的日志 Artifact，定时刷新详情仅针对选中的 active Run；新 TaskRun 出现本身不等于旧 Run 的终端会接续显示新输出。这是当前源码行为，不证明用户指的是该页面，也未验证实际部署版本或其当时是否发生刷新故障。
+
+### 独立的两次拒绝：材料已登记，但证据 source 未满足后置验收
+
+**2026-11-07 用户本轮限定：** 本轮聚焦非网络原因中的证据协议拒绝，以 `tr007`、`tr021` 的已有记录为案例；网络、工具环境、调度和终端展示不作为本轮修正范围。本次只读复核代码与既有记录，未修改业务代码、重新验收候选或确认两份材料的内容充分性。
+
+`tr007/i004` 与 `tr021/i005` 的 Worker 实际正常结束，分别提交 1 个本地校验成功候选、repair_rounds=0；后续 Dispatcher `validation_result` 的精确拒绝均为 **`finding requires evidence from the current execution`**（事件 `ev553`、`ev1768`）。不是 provider 故障，也不是模型根本没提交。
+
+- `tr007` 候选 `cnd_8950de6bb1314f16bdd310825c31e20c` 的两个 evidence_items 均为 `kind=artifact, source=manual`，handle 分别对应本次执行已登记的 `a022/a023`。
+- `tr021` 候选 `cnd_78ddd63bfe024e659dcfb52b9ba50ac0` 的一个 evidence_item 同样为 `kind=artifact, source=manual`，对应本次执行已登记的 `a053`。
+- `dispatcher/tasks/artifact_records.py:74–104` 先核对引用能映射到本轮已上传 Artifact；本案已通过。`dispatcher/tasks/conclude_writer.py:89–99` 随后要求 `has_evidence(items,current=True)`，而 `cairn/evidence_contracts.py:225–230` 将其定义为至少一项 **source=capture** 且有引用。两次均为 manual，故命中拒绝。
+- `WorkerEvidenceItem` 允许 manual 条目；当前本地结构有效不等于后置发现验收有效。这是来源字段语义与验收位置造成的实际提交摩擦，不能笼统写成“没有当前执行的文件”。反过来，文件已登记也不证明其内容是实测原件、漏洞成立或应自动升级为 capture；本轮不评估漏洞技术真实性。
+- 两次 candidate／Artifact 仍留存，但查询未见由这两个 Run 接受的 Fact。`evidence_insufficient` 不在普通 Explore 自动重试类别，两条逻辑 attempt 已以该 outcome 失败结束，影响是该次提交未进入正式事实／发现，而非整个项目立刻停止。
+
+对应原始 audit：`runtime/data/artifacts/projects/proj_072/runs/tr007/a018-explore_execute-pi-events.jsonl:99–103`、`tr021/a048-explore_execute-pi-events.jsonl:115–119`。候选原文及证据映射以数据库登记记录为准，不在方案复制正文。
+
+### 补充设计纠偏：不应把 capture 标签作为当前 Artifact 的额外准入（2026-11-06，未实施）
+
+**概念与体验澄清：** `source` 是证据条目的必填字段，`capture` 是该字段的一个取值；“不把 capture 作为唯一可接受取值”与“删除或不填写 source”不是同一改动。来源信息帮助区分自动记录、人工材料和历史材料，但标签、文件登记及执行归属都不能单独证明内容真实或结论成立。应分别表达执行结束、候选已留存和业务结果已接受，避免把已完成的工作误解成没有执行，也不能把未接受的候选显示为已确认结果。此处仅确认本案因来源标签触发拒绝；两份材料是否足以支持其具体结论、去掉该拒绝后是否满足其他条件，仍未核验。
+
+用户追问为何强制 capture、是否能放宽。继续核对实际 goal-driven Server 接受链后，发现前述“后置验收要求 capture”应精确限定为 **Dispatcher 的这道检查**，不能写成整个后端一致且不可替代的必要合同。
+
+- 初始设计意图是区分实际采集、人工材料与历史输入，防止把说明或旧结果包装成本次实验。`vulnerability-evidence-retest-redesign.md:133–167` 同时明确支持非 HTTP 原件、Shell／脚本／浏览器等留证，不要求统一工具或固定证据数量。该目标不等于每个 Artifact 必须由模型填 capture。
+- **当前生产者与权威消费者存在规则分歧。** Dispatcher `conclude_writer.py:96` 用 `has_evidence(current=True)` 检查 source=capture；Server `services/vulnerabilities.py:452–462` 的 `has_current_evidence` 对非 historical 的 Artifact 按数据库真实 task_run_id 判断，**manual Artifact 不会仅因标签被排除**。`services/coverage_slots.py:659–665,709–721` 的 goal-driven finding 接受实际调用后者；`services/vulnerabilities.py:465–506` 再检查引用、项目／本次归属、派生图片与摘录。不是只有 capture 标签才能保障真实归属。
+- **推荐放宽的是来源标签门槛，而不是证据真实性。** 普通 goal-driven 发现不应仅因当前已登记 Artifact 标为 manual 就在 Dispatcher 整次失败。收敛至 Server 已有的实际归属裁决，保留引用解析、有效原件、项目／执行归属、流量真实绑定和现有确认机制；不自动改成 capture、不把材料被接受等同漏洞已确认，也不增加来源模型或“宽松模式”开关。
+- 本案具体两份候选仅能确认可消除已知标签拒绝，不能保证之后一定满足全部接受条件或漏洞成立。仅有文字主张、空引用、跨项目／跨执行材料等不因放宽标签而自动成为合格新实验。历史材料的可复用范围是另一项设计问题，本轮不顺带改动。
+- 不直接修改共享 `has_evidence`：该函数还被独立复测的 Python Schema／结果路径调用，HTTP flow 也有 source 与真实采集归属约束。当前明确范围是本案普通 goal-driven Artifact 提交的重复门槛；实施前应核对 `build_vulnerability_for_conclude` 的调用范围，避免只为删参数而无意放宽其他阶段。复测中可疑的同类分歧只记为待查，不据此批量取消校验。
+
+**获准后给新实施会话的限定交接（不是本轮执行授权）：** 阅读本节、CLAUDE.md 和 AGENT.md，核对最新实现；让普通 goal-driven 发现的当前 manual Artifact 不再被 Dispatcher 的 capture 标签要求拦截，以现有 Server 权威归属与结果接受逻辑为准，删除该范围内重复且冲突的判断，不改写 source、不更改历史候选／失败、不放宽引用及流量归属、不修改重试／网络／UI／独立复测。使用合成非敏感当前 manual Artifact 的一个直接隔离链路验证本地候选到 Server 接受，并在同一局部用例检查非法归属仍被拒绝；不调用真实模型或目标、不操作 proj_072。测试和部署仅在用户后续明确授权的范围内执行；当前 active 项目下重载可能触发任务，不能未经核对自行重启。没有验证前不得承诺原两份候选可完整接受；不 commit、不 push。
+
+### 当前判断与后续边界
+
+本轮结论是 **模型通信路径反复失败为主因，三路并发与扩展重试放大记录数量，另有两次独立的证据来源语义拒绝**。已确认本机网卡确实断链；其余同时终止究竟出在本机出口、代理／网关还是上游服务，现存材料不足以唯一定位。不得直接设计“增加超时／重试”“降低并发就一定解决”“删证据校验”或把所有 manual 自动改为 capture。
+
+用户尚未要求执行修复，因此上面的限定交接仅为后续实施准备，不是已获授权的业务实施轮。若后续继续调查网络，新会话应先读本节并核对最新运行状态，只读关联已有网关／代理／宿主网络日志与上述 UTC 时间；缺少授权或日志即明确未知，不发起探测、模型调用或重跑。证据侧推荐按补充设计纠偏收敛重复规则，不是删除所有证据校验，也不能仅改提示文案或伪造历史来源。
+
+**本轮工作声明：** 分支 `feat/workspace-input-copies`；仅更新本原方案，未改业务代码／配置／历史记录，未登录、运行测试、构建、启停、容器 exec、暂停／恢复项目、访问目标或模型，未创建提交。只读检查不代表修复或真实业务验收，项目继续自主运行期间的后续记录不属于上述固定快照。
+
+### 2026-11-07：三条后续 Run 与通用多 Agent 机制比较（只读分析）
+
+用户进一步要求判断现有机制是否已经优秀，并与成熟多 Agent 工作机制比较。架构具有事实／任务分离、角色分工、并发和已有的多种恢复路径，但这些是设计与实现要素，不足以证明实际连续性、任务质量和成本表现优秀；亦无同任务、同环境的横向实测，不能给出行业排名或证明必须换框架。
+
+**用户补充澄清：** 本次诉求是让现有系统稳定运行，减少此前的通信中断、协议拒绝、重复执行和停滞，不是要求扩展攻防能力。分析须落到各类实际故障的成因与可验证改善，不能把改进呈现或比较框架当作已解决运行稳定性，也不能因用户目标是稳定就假定所有故障均有同一原因。
+
+- `tr041/tr042/tr043` 的 audit 均以新模型会话启动，最后分别于 2026-11-06 16:00:36.532、16:00:36.531、16:00:37.103 UTC 记录 provider_error；三者都没有提交候选。只读提取对应原始 session 的 assistant 错误消息，前两条为 `terminated`，后一条为 `Connection error.`；近乎同时失败与共同依赖故障相符，但不证明唯一根因或相同底层异常，也不能由这三次得出当前项目状态。
+- 三条审计都在最终失败之前记录了带错误的 bash 工具结果，但之后仍有工具调用。对原始工具结果仅做允许列表匹配：`tr041`、`tr042` 均有结果包含 `no such file or directory`，`tr041` 另有结果包含 `command not found`；`tr043` 的错误未命中这组分类。文字命中不确定完整错误成因，不能据此声称工具报错导致 provider_error，也没有输出命令、目标或原始内容。
+- `tr042` 在失败前记录一次 `artifact_registered`／`sdk_bash_overflow`。当前 `container/pi-agent/src/runner.ts:544–565` 和 `artifacts.ts:118–165` 对应本地溢出文件的登记；该事件不证明提交候选或 Server 接受，亦未核验文件此刻是否仍可读。事件中的 `output_bytes` 是工具结果对象 JSON 序列化后的字节数（`runner.ts:593–606`），不能直接当作模型上下文长度或拿来判断失败原因；`size_bytes` 与其计数对象不同。
+- 对照资料：Microsoft Agent Framework 文档区分串行、并发等不同协作模式；LangGraph 文档描述状态快照及恢复边界；Anthropic 的公开研究系统文章讨论主从分工、并行收益与成本。这些公开方案提供的是设计参照，不代表本项目采用它们就更好，也不保证外部副作用只发生一次。本次网页正文抓取受限，仅参考公开搜索结果摘要，未做产品横向实测。资料链接：[Microsoft](https://learn.microsoft.com/en-us/agent-framework/workflows/orchestrations/)、[LangGraph](https://docs.langchain.com/oss/javascript/langgraph/thinking-in-langgraph)、[Anthropic](https://www.anthropic.com/engineering/multi-agent-research-system)。
+- 后续判断优先看故障能否定位、已有成果能否被真实审阅、协议语义是否一致以及任务质量／重复劳动／成本，而非 Agent 数量、框架名称或成功率单项指标。证据留存和正式接受仍须区分；不得以放宽标签为由伪造来源或将未确认主张变成已确认事实。上述是高层评估方向，不是已实施方案，也没有证明任何调整必然解决本次故障。
+
+## 2026-11-06：成果留存、部分交付与提交诊断方案（设计，未实施）
+
+**2026-11-07 用户最新纠偏：** 用户关心的不只是查看候选或状态呈现，而是理解现有多 Agent 的分工、交接和运行机制，分析协议失败、重复执行与停滞如何影响整体稳定性。下述只读成果查看方案只是独立的被动交付切片，不能冒充已经解决协议一致性、执行连续性或重复执行，也不再作为对本次反馈的完整答复。原因、当前运行状态与机制仍需以实际记录和源码分别查证，不预设统一根因或未经验证的修复效果。
+
+**当前多 Agent 机制的只读理解：** Server 维护项目事实、任务和执行归属，Dispatcher 按状态派发；Bootstrap 建立初始工作，Reason 基于项目状态提出后续安排，Explore 按 Intent 执行，服务端再裁决写回。当前生产 Worker 注册表只有 Pi driver，多 Worker 不等于多个不同引擎；Reason 有项目级租约，多个可运行 Intent 可以并发，不能由此推断所有角色严格串行。图谱作为派发时快照提供，适用配置下项目工作区可共享；快照不是实时共享对话，文件存在也不自动成为已接受事实。参考 `dispatcher/scheduler/dispatch_cycle.py:339–484`、`server/services/project_reason.py:36–165`、`dispatcher/tasks/reason_context.py:124–142`、`dispatcher/tasks/explore_context.py:217–266` 与 `dispatcher/workers/registry.py:1–12`，路径以 `cairn/src/cairn/` 为根。
+
+系统代码已有新执行、交付续作、会话续作和本地结果修正等不同路径，不能概括为完全没有恢复能力；上节 `tr035–tr043` 只能证明那九次是新会话，不证明所有失败都如此，也不证明它们完全没有复用既有材料。本地校验、候选留存和 Server 接受仍是不同环节；本次仅依据源码及历史记录判断，尚未验证这些路径在当前部署或用户所见终端中的实际效果。
+
+### 最新目标与本次边界
+
+用户在讨论后明确要求“下一步改进的方案和提示词”。目标不是让所有提交强行通过，而是让已经完成的工作不因材料不全、格式问题或某项主张未被接受而不可用。此前“仅移除普通 Artifact 的 capture 标签门槛”的交接不作为本轮完整实施方案；其源码归因保留，不据此直接执行删校验。
+
+下面区分总体目标与本轮可实施范围：总体讨论结果保存、可审阅的部分交付和确定性格式处理；**本轮实施交接只覆盖被动成果管理与提交诊断，不修改自主探索、攻击执行、自动调度、重试或漏洞接受／确认路径，不把未接受候选自动送入事实图驱动后续执行。** 不将此切片宣称为自动研究连续性已经解决。分析会话仍仅更新本文件，不执行业务改动。
+
+### 本轮新增源码依据
+
+- `server/services/candidate_store.py:249–435` 已按执行身份保存原始候选字节、摘要、父候选、Schema／交付绑定等；同一生产者键且内容一致时返回原收据，内容冲突返回 409。不是缺少候选存储，应复用而非另建成果仓库。
+- 同文件 `:611–670` 已有候选元数据列表和原文字节读取；`server/routers/candidates.py:167–206` 暴露具备项目权限检查的列表／原文接口，设置私有响应头。原文读取不代表业务接受。
+- `server/schemas/candidates.py:337–360` 的读模型已经包含父候选、收到时间、generation、最新局部 outcome 及字段诊断、材料和绑定状态；**这些字段不包含完整业务接受证明，不能拿本地校验结果替代 Server 接受。**
+- `dispatcher/worker_protocol/submission.py:78–94,197–213` 已允许没有 vulnerability 的 Fact，但 Explore 仍要求 fact；这不等于可把任意失败候选拆成可信事实。不得通过删掉 vulnerability 字段，把原漏洞主张原样包装为普通事实。
+- 定向搜索 `cairn/frontend/src` 未见 TaskRun 候选列表／原文接口的消费者；命中的 duplicate-candidates 属于漏洞去重，不是同一对象。`frontend/src/features/runs/useRunsPage.ts:570–645` 已将命令、资产、终端独立加载，可复用此行为，不重新引入共同成功屏障。
+- 本次没有查询新的运行快照。上节两个历史案例仍只证明后置来源规则拒绝，不证明 JSON 格式损坏，也不证明候选内容足以支持原主张。
+
+### 总体目标：允许交付已知内容，不伪造未知内容
+
+1. **保存合同与结论合同分开。** 有合法归属、可保存的原始提交和材料即可作为待审阅内容留存；正式接受与结论确认另有依据。缺少某项证明不能让已留存文件消失，也不能把留存收据叫作研究成功。存储本身失败、归属非法或权限不足仍须如实报错，不能承诺所有输入都能保存。
+2. **部分交付是范围明确，不是吞掉坏字段。** 材料、观察、主张及缺口应按原始结构可查；暂不能支持的主张保留为未接受内容。独立材料可查看，但主张和支持它的引用不得任意拆散。整份提交未通过时，不自动提取其中的句子写成已接受 Fact，也不把未知改成 tested_no_finding。
+3. **格式处理只改变表示，不替用户判断事实。** 已合法 JSON 可作只读排版；合同已定义的可选字段缺省按合同解释，不另设 fallback。缺标点、重复键、类型冲突、未知枚举或含义不明的缺项应给出字段诊断，不能猜测修复。确有重复发生的无歧义格式问题时，再为那个具体输入定义单一转换及可审阅差异；本案没有这类证据，不预先建设通用清洗器。
+4. **平台事实由平台提供，原件不改写。** 查看时从权威记录展示执行归属、Artifact 身份和已有映射，不要求用户手抄，不从描述猜关联。读取派生视图不修改 raw、source、摘要或历史收据。需要新修订时必须具有真实的产生者和来源关系，不能借用活跃执行的 manifest 假造候选修正链。
+5. **反馈说明失败在哪一步。** 执行失败、原件留存、本地格式检查和正式接受分别依据真实记录显示。缺少接受关联时显示“接受情况未取得”，不是推断接受或拒绝；没有读取到材料不是“没有材料”。只展示与当前候选能可靠关联的诊断，不能把同 Run 最后一条错误套给全部候选。
+6. **修正文档与重新执行分开。** 复用现有原件可以支持审阅和后续明确安排的修订，但不能由一个格式修正按钮启动目标访问、自动重跑或升级结论。本轮不设计自动续跑、不调整执行状态及费用、不清零失败记录。
+
+上述是结果数据管理的目标，不代表现有事务已支持任意部分接受。正式业务接受的事务粒度、幂等、引用依赖与下游消费尚未完整查证，不能先改成逐字段提交再补一致性。
+
+### 本轮最小完整切片：失败运行的已有成果可直接审阅
+
+- 在现有运行详情中接入候选元数据及按需原文读取，配合已有资产入口，形成“选择运行 → 查看提交及其已有修订关系 → 查看原文／字段诊断 → 查看已登记材料”的真实只读路径。不另建全局导航、审阅平台、复制表或持久化状态。
+- 默认只取元数据；用户打开具体候选时才读原文。原文按不可信文本展示，不执行其中指令、不自动打开外链，不用 HTML 注入渲染。完整原件通过现有鉴权下载路径可取，预览不能偷偷覆盖原字节或把展示格式化结果称为原件。
+- 已保存的候选即使不能按当前业务 Schema 解码仍能读取原文；解析失败只影响该候选的结构化视图。历史候选不得用当前 Schema 重新验收并回写“修复成功”。本轮不新增自动修复、重新提交或正式接受按钮。
+- 诊断复用已有 outcome／运行诊断；仅在能依据记录证明关联时并列展示。若需要补只读投影，先定位权威来源与现有读取服务，不新增写入状态、不触发租约维护、不复制校验规则。当前读模型没有完整业务接受结果，实施前只核对这一直接消费者缺口；缺少来源时明确未知，不靠推测凑齐状态。
+- 候选、材料和命令独立加载；一个读取失败不清空其余已读内容。复用既有请求归属保护，切换运行不串数据；列表按真实分页读取，不用首批列表长度冒称总数。界面只留短状态、正文和必要动作，详细字段错误按需查看，不加常驻教学文案或成功率看板。
+
+这不是“做了页面就解决协议问题”：本轮补的是已有成果到人工读取的实际消费路径。更广泛的部分业务接受、修改正式提交协议、后置失败的修订闭环均未实施；capture 规则分歧仍待解决，不在这个提示词中通过放宽自动接受来绕过。
+
+### 定向验证、操作边界与交付
+
+实施会话优先使用既有测试方式和合成非敏感夹具，验证一条最短读取链：运行有失败记录且候选／材料存在时两者可读、格式异常仍有原文、本地有效不显示正式接受、一个读取失败不吞掉另一个结果，切换运行不串数据。权限沿用原接口；若修改后端读取，定向验证越权仍被拒绝且读取没有业务写入。不得为了测试引入 SQLite；数据库相关验证只针对当前 PostgreSQL 路径，也不以扩大测试套餐代替验收。
+
+本轮实施边界是源码与隔离验证；不调用真实模型、不访问目标、不恢复／重跑 proj_072，不修改历史候选、已接受事实、TaskRun 终态或费用，不新增依赖，不 commit、不 push。**不对当前正式系统自动构建部署或重启**：前序快照有 active 项目，重载可能引起任务动作，且本轮没有取得新的运行授权；这项具体边界优先于通用自动构建启动要求。需要视觉验证时使用不会连接真实执行入口的隔离方式；条件不具备就明确未验收。测试、隔离构建与页面验证由用户将提示词交给新实施会话后在该范围执行，不由本分析会话执行。
+
+交付应更新本节实施记录，列出实际 diff、验证结果、未覆盖行为及未部署状态；不要以源代码修改、局部测试通过或候选可读宣称 proj_072 已恢复，也不要自动展开下一轮。
+
 > **当前交付（2026-10-27，已实施及加载，待用户验收）：**见下节“配置入口收敛与保存纠偏”及其实施记录。Worker／模型／执行时限集中到 Worker 配置，独立 Dispatcher 与生命周期超时页面已退场，真实租约机制保留。UI 详见项目创建方案 11.14，验证及完整加载见重设方案 15.26.6。下方源码／现场证据中的“本轮未测试”等表述属于前序分析会话，不代表后续实施状态。
 
 ## 2026-10-27 配置入口收敛与保存纠偏（已实施及加载，待用户验收）

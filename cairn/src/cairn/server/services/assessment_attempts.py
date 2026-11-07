@@ -948,6 +948,20 @@ def attempt_has_accepted_result(conn, project_id: str, attempt_id: str) -> bool:
     return False
 
 
+def _traffic_capture_stalled_cancellation(run, context: dict) -> bool:
+    """只识别 Dispatcher 明确记录的采集停滞，人工暂停和通用取消不得获得重试预算。"""
+    failure = context.get("worker_failure")
+    return bool(
+        run["status"] == "cancelled"
+        and run["error_type"] == "cancelled"
+        and not row_value(run, "pause_requested")
+        and not row_value(run, "pause_interrupted")
+        and isinstance(failure, dict)
+        and failure.get("origin") == "dispatcher_process"
+        and failure.get("code") == "traffic_capture_stalled"
+    )
+
+
 def execution_retry_eligibility(
     conn, project, task_type: str, *, intent_id: str | None = None,
     report_generation_token: str | None = None, now: str | None = None, executions=None,
@@ -1020,9 +1034,13 @@ def execution_retry_eligibility(
     extended_only = task_type != "report"
     delivery_chain = False
     for run in runs:
-        if run["status"] not in {"failed", "timed_out"} or run["error_type"] == "cancelled":
-            continue
         context = parse_scenario_snapshot(run["runtime_context_json"])
+        capture_stalled = _traffic_capture_stalled_cancellation(run, context)
+        if (
+            (run["status"] not in {"failed", "timed_out"} and not capture_stalled)
+            or (run["error_type"] == "cancelled" and not capture_stalled)
+        ):
+            continue
         if any(context.get(key) for key in ACCEPTED_RESULT_CONTEXT_FIELDS):
             return {"allowed": False, "reason": "execution_retry_blocked", "retry_at": None}
         delivery_error = run["error_type"] in DELIVERY_RETRY_ERROR_TYPES
@@ -1047,9 +1065,15 @@ def execution_retry_eligibility(
             if not isinstance(context.get("execution_delivery"), dict):
                 return {"allowed": False, "reason": "execution_delivery_unavailable", "retry_at": None}
             extended_only = False
-        elif run["error_type"] not in retryable and _reason_output_failure(run) is None:
+        elif (
+            run["error_type"] not in retryable
+            and not capture_stalled
+            and _reason_output_failure(run) is None
+        ):
             return {"allowed": False, "reason": "execution_retry_blocked", "retry_at": None}
-        extended_only = extended_only and run["error_type"] in extended
+        extended_only = (
+            extended_only and run["error_type"] in extended and not capture_stalled
+        )
         failures.append(run)
     limit = EXTENDED_MAX_RUNTIME_RETRIES if extended_only else DEFAULT_MAX_RUNTIME_RETRIES
     if max_runtime_retries is not None:

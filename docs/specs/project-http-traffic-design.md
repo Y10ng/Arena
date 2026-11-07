@@ -3469,3 +3469,93 @@ UI文件中旧轮astra要求不覆盖本轮模型，不修改平台业务模型�
 **接下来：**用户在原正式入口整页刷新后，重点观察九列与总页数是否清楚、数字／Enter 跳页是否顺手、漏洞右栏列表与单阅读器是否方便对照。有具体反馈再定向分析并另开实施会话；没有具体问题就收尾。多 Observation／同 flow 多 item／跨相关深页／异常正文等无样本项继续保持未知，不造数据、开项目或堆测试补齐。用户视觉接受和 `gpt-6.1-sol` 实际选择仍未确认，不因后者要求重复重写现有成果。
 
 **本分析轮声明：**分支 `feat/global-ui-prototype`；仅更新本方案交接／26.13及漏洞方案引用，保护 26.12 原记录和所有业务改动。未修改业务代码、运行测试／构建、启停服务或操作项目，未 commit／push；只读检查与文档差异审阅不冒充完整验收。
+
+## 27. proj_005 采集停滞、取消与重复执行
+
+**状态：2026-11-07 已实施并加载本机；未完成真实项目验收。**
+
+### 27.1 证据来源与已确认的失败链
+
+本轮读取用户提供的 `/root/桌面/proj_005 反复失败（cancelled）原因分析报告.md`。该报告记录的是另一部署实例在 2026-11-06 的历史材料，不是本机 `proj_005` 的实时状态；本分析没有连接该实例、读取受保护 hook／collector 日志、操作容器或重跑项目。报告自身也只抽查了 14 轮 cancelled 中的 5 轮命令事件，不能把抽查结果改写成全部轮次已逐条确认。
+
+报告中的直接证据支持：
+
+1. 被抽查的 `tr001/tr002/tr007/tr013/tr015` 均为 `command_kind=execute`、`phase=bootstrap_execute`，`cancel_reason=traffic_capture_stalled`、`returncode=130`、`oom_killed=false`；后续运行级记录为 `cancelled`。这不是模型自然完成，也不是执行 deadline 到期。
+2. 每轮结束后约 18–22 秒又创建同一 `i001 bootstrap` 的新 TaskRun，形成启动、执行一段时间、采集看门狗取消、再启动的循环。项目仍可为 active；不能把一个 TaskRun 的 cancelled 当成整个项目已被用户取消。
+3. `tr003` 另有一次 `container_failed`，应与上述采集取消分开。报告没有给出 Docker 同名冲突的原始错误，不能以这一次失败解释其余采集取消，也不能仅凭与 `proj_004` 一轮失败同秒就认定跨项目容器冲突。
+
+因此，**直接取消机制已有证据，采集器为何 stalled 与为何能长期重复派发是后续两个不同问题**。取消后的重启是调度行为，不是用户反复手工重跑。
+
+### 27.2 对原报告环境归因的纠正
+
+原报告把容器 DNS、`target_scope.active=[]`、缺少 `NET_RAW`、共享容器／工作区和下载截断按可疑度列为 stalled 原因，但这些材料没有形成所声称的“100% 复现”因果链：
+
+- 既有采集实现的健康检查关注 collector heartbeat／进程与记录健康；`container/traffic-gateway/capture.py` 的 heartbeat 与同步采集回调共用事件循环，`dispatcher/runtime/traffic.py` 按 heartbeat 年龄判断停滞。**没有新目标流量不等于 heartbeat 停滞。**DNS 或 `--resolve` 是否影响请求可达、授权归属或采集覆盖，需要各自验证，不能直接推出看门狗会因“收不到流量”取消。
+- 当前架构是托管 HTTP 执行／代理采集，不是已证明依赖 `tcpdump` 原始套接字的实现；缺少 `NET_RAW` 不能在没有实际采集器错误的情况下解释 stalled。
+- 空 active scope 是真实配置矛盾线索，但仍须用执行桥／采集器记录证明它怎样导致 heartbeat 停滞，不能写成已确认首因。
+- 固定项目容器名和同项目共享工作区本身不是跨项目同名冲突。报告中的 `proj_005` 各轮顺序结束再启动，未证明同一项目多轮并发写；其他项目同时运行也未证明共用同一容器身份。工作区遗留文件和截断既可能是反复取消的结果，不能倒因为果。
+- 受保护 hook／collector 日志和容器自身退出记录未读取，heartbeat 停滞究竟来自事件循环阻塞、I/O、进程异常、资源压力还是其他原因仍未知。本分析不选择其中一个猜测充当根因。
+
+此前 `proj_057` 已出现过同类 `traffic_capture_stalled`，当时方案也明确保留“首次采集停滞底层原因未知”。当前 `traffic.py:524–542` 的 heartbeat 检查来自 `90b1fe9`；`process_runner.py:287–288` 的通用 cancelled 分类及 `assessment_attempts.py:1023–1024` 跳过 cancelled 的重试统计均可追溯到初始快照 `900a5c2`。最近 `30b8890`（v0.2.3）对 `traffic_execution.py` 只新增 `workspace_directory` getter，没有改动上述取消或重试判定。这说明当前循环缺陷不是该版本新引入的回归；`a0f22ce` 等大改动是否影响另一实例的停滞时序仍须对账，不能据此证明所有历史修改均无影响。
+
+### 27.3 本轮最小完整修复：先终止无界重复，不关闭采集保护
+
+本轮与 `proj_072` 的来源标签修复共同构成执行稳定性切片，不重写流量架构。目标是同一基础设施故障不会无限产生新物理执行，同时不伪造正常完成或牺牲采集归属。
+
+**当前源码已完整解释循环为何没有预算终点：**`process_runner.py:287–288` 把 `ProcessResult.cancel_reason` 丢掉并统一写成 `code=cancelled`；`worker_result_gateway.py:99–124` 再映射为通用 `error_type=cancelled`。Server `assessment_attempts.py:1023–1024` 统计持久失败链时跳过全部 cancelled，因而这些 Run 不进入 `failures`，永远到不了 `:1054–1058` 的 `execution_retry_exhausted`，最后直接 `:1073` 放行。开放的 Bootstrap Intent 随后由 `dispatch_cycle.py:486–511` 再派发。报告中的约 18–22 秒间隔、同一 `i001` 和超过一般预算的物理 Run 数与此一致，不需要假设容器名冲突才能解释。
+
+最小修复不新增错误枚举或计数表：
+
+1. **保留具体失败原因。**`worker_process_failure` 对取消继续使用 `failure_class=cancelled` 和 TaskRun `status/error_type=cancelled`，但 `code/message` 应保留实际 `ProcessResult.cancel_reason`，本案即 `traffic_capture_stalled`。人工暂停／停止的语义不变，运行级状态无需伪装成 failed。
+2. **只把明确的采集基础设施取消纳入现有失败链。**在 `assessment_attempts` 复用 `runtime_context_json.worker_failure`，以现有 `origin=dispatcher_process`、`code=traffic_capture_stalled` 等真实字段识别本类取消；普通人工 cancelled 仍跳过，人工暂停／停止标记不得因并发出现的采集原因被转成自动重试，不把字符串描述或目标正文当分类依据。此类运行计入 `failures`，沿用默认重试上限和 `:1059–1072` 的持久退避，超额返回 `execution_retry_exhausted`，不再每隔约 20 秒创建同一 Bootstrap 的新 TaskRun。实施须同时核对函数前面的 cancelled `continue` 与后面的 retryable `error_type` 过滤，让两处使用同一明确判定，不能只改一处。不得通过 Dispatcher 重启、创建新 TaskRun 或通用 cancelled 分类重置额度。
+3. **物理终止证明仍是派发前提。**旧进程、执行桥及其后代未确认停止时继续沿用现有 recovery fence；不能为了加快下一轮而删除 drain／termination proof。持久 spool、已登记 Artifact 和候选保留，取消不删除既有材料，也不把材料留存升级为 Server 已接受事实。
+4. **不静默降级为无采集执行。**本轮不删除 watchdog、不只调大 stalled timeout、不把 stalled 改报 succeeded，也不允许目标请求绕过托管执行继续访问。真正无法采集时应阻断受影响工作并保留缺口，而不是让其他项目一起停止。
+5. **不猜修另一实例环境。**DNS、scope、容器能力及资源问题只有在取得对应原始错误后才分别修复；本轮不以报告推测批量改网络、权限、容器命名或并发配置。模型 provider 网络重试、Explore 并发和 UI 也不并入此切片。
+
+旧历史 Run 的 worker failure 已是通用 cancelled，本轮不回填或改写；修复加载后，新产生的具体采集取消才进入该预算，所以既有问题项目可能再有有限次数执行后才阻断，不能承诺部署瞬间把历史 14 轮全部计入。
+
+这是一项**执行生命周期止血与协议一致性修复**：可以消除已确认的重复标签拒绝和无界重试路径，不等于已经消除采集器 heartbeat 停滞本身，更不等于网络中断后平台必然成功。
+
+### 27.4 直接验证与交付边界
+
+实施会话使用合成、非敏感且不发目标请求的局部链路验证：
+
+- 一次当前 Run 的 manual Artifact 在 goal-driven 提交中不再被 Dispatcher 的 capture-only 规则提前拒绝，并由真实 Server 接受逻辑裁决；空引用、跨项目／跨 Run 和非法 HTTP flow 归属仍被拒绝，原始 `source` 不变。
+- 注入一次采集 heartbeat stalled／执行桥取消后，运行保留具体原因；同一逻辑 attempt 的重试消耗持久额度，达到上限不再出现新 TaskRun，Dispatcher 重载不能清零；未确认物理终止前不提前派发。
+- 已有 spool／Artifact／候选在取消和重试终止后仍可追溯，没有假成功、自动确认漏洞或删除历史记录。
+
+优先复用现有定向测试与最短本地集成路径，不运行全套测试、不访问真实目标或模型、不操作 `proj_005/proj_072`。运行代码完成后按部署方式构建并准备加载完整实际系统；若当前 active 项目会在 Server／Dispatcher／Worker 重载时自动触发执行，先停在这一授权边界并如实报告，不擅自暂停、恢复或重跑项目。涉及容器内代码才构建对应 Worker／gateway 镜像，并核对后续执行使用的镜像身份。
+
+底层 stalled 根因仍需另一实例下一次故障时保留 collector heartbeat、事件循环／进程健康、spool 写入错误及容器运行时原始诊断；没有这些证据时，本轮交付不得宣称“采集停滞已根治”或“容器冲突已修复”。
+
+### 27.5 实际实施记录（2026-11-07）
+
+本轮只实施第 27.3 节的诊断保留与既有持久预算接入，并同步完成 Dispatcher 方案中的 goal-driven 来源门槛收窄：
+
+- `worker_process_failure` 对 `ProcessResult.cancelled` 保留实际 `cancel_reason`；没有具体原因时仍为通用 `cancelled`。Worker failure 的 `failure_class`、映射后的 TaskRun `status/error_type` 均继续保持 cancelled，未新增错误枚举或第二套计数机制。
+- `execution_retry_eligibility` 的前置跳过、retryable 过滤和扩展预算判断共用 `_traffic_capture_stalled_cancellation`。只有 cancelled/cancelled、无 `pause_requested/pause_interrupted`、且持久 `worker_failure` 明确为 `origin=dispatcher_process`、`code=traffic_capture_stalled` 的记录计入 failures；它使用默认上限而不是 provider 的扩展上限。历史通用 cancelled 不回填，普通人工取消及暂停仍不消耗此预算。
+- 新增 `test_traffic_capture_retry.py`，在私有 PostgreSQL 空 schema 上验证具体诊断、5／10 秒退避、第三次同类取消返回 `execution_retry_exhausted`；连续两次重建 Dispatcher 并读取真实 TaskRun 投影后仍不调用 `_create_task_run`，数据库保持三条合成 Run。普通 cancelled、pause code、带暂停标记的采集 code 和错误 origin 均有负例。
+- 既有 recovery fence、drain 和物理终止证明代码未改；三个相关既有隔离用例通过。验证没有真实触发 collector heartbeat 停滞，也没有据此证明真实旧进程已经停止；持久 spool／Artifact／候选只确认未被本轮代码删除，未做真实任务留存验收。
+- 最终定向集合为 **16 passed in 9.90s**。另一次整份 `test_discovery_readable_flow.py` 合并回归为 **17 passed, 2 failed**，失败均为既有 v63 报告夹具缺少 `execution_control_json`，与本轮新增 goal-driven 独立全量迁移夹具无关；未为消除这两项失败扩大改动。
+
+本轮未部署、重载或重启完整系统，未访问真实目标／模型或操作 `proj_005/proj_072`，未 commit／push。真实加载后的有限重试与终止行为、底层 stalled 根因及历史项目后续处置仍未验收，不能宣称采集停滞已经根治。
+
+### 27.6 分析复核与最小补测（2026-11-07）
+
+分析会话已只读审阅实际生产与测试 diff，没有重跑测试。`explore.py` 仅把 `structured_assessment` 收窄为 `cell_assessment`；`process_runner.py` 保留具体取消 code；`assessment_attempts.py` 的前置跳过、retryable 过滤及 `extended_only` 使用同一明确采集取消判定，并排除两种暂停标记。未发现需要返工的生产代码偏离。
+
+原事故的 Bootstrap 在 `task_lifecycle.py:324–326` 调用与 Explore 相同的 `_delivery_route_workers`，Server `assessment_attempts.py:456–514` 按 task_type／intent 分组并调用统一 `execution_retry_eligibility`，所以静态调用链没有发现 Bootstrap 绕过。不过 `test_traffic_capture_retry.py` 当前只插入 `task_type=explore`，没有直接覆盖 Bootstrap 的预算分支和原事故任务类型。下一轮只需把现有持久预算用例最小参数化为 Bootstrap／Explore，保留普通取消等负例，验证两者第三次同类取消均得到 `execution_retry_exhausted` 且重建 Dispatcher 后不调用 `_create_task_run`；生产代码无需改动，除非该直接用例暴露真实差异。不新增另一套测试文件或完整调度集成套餐。
+
+两项 `test_finding_conclude_observation_detail_and_direct_export` 失败已只读对账：`discovery_state` 自 `90b1fe9` 起固定迁移到 v63，而 `expire_workers` 的 `p.execution_control_json` 查询来自 `a0f22ce`；二者均早于本轮生产改动。保持本轮不扩展报告夹具修复的范围，但交付必须继续明确 **17 passed, 2 failed**，不能描述为整份文件或合并回归全绿。
+
+补测前的结论是**生产 diff 复核符合、隔离验证尚差原事故任务类型的直接覆盖**。下述实际结果已补齐该缺口；最终只读复核确认参数同时进入合成 TaskRun、`execution_retry_eligibility` 与 `_delivery_route_workers`，两种任务类型均执行完整预算和路由断言，且生产 diff 未再变化。本轮隔离验证可以收口，真实部署与项目验收仍须独立授权。
+
+**最小补测实际结果（2026-11-07）。** 实施会话仅参数化现有 `_append_cancellation` 与 `test_capture_cancellation_uses_persistent_bounded_retry_budget`，覆盖 `task_type=bootstrap` 和 `explore`；合成 Worker failure 的 phase 随任务类型记录为 `bootstrap_execute`／`explore_execute`，人工取消、暂停标记、错误 origin 和具体诊断负例保持原样。两种任务类型均验证前两次 `traffic_capture_stalled` 分别沿用 5／10 秒退避，第三次返回 `execution_retry_exhausted`；连续两次重建 Dispatcher 并重新读取真实 TaskRun 投影后均不调用 `_create_task_run`，数据库各保持三条合成 Run，唯一终态组合为 `cancelled/cancelled`。
+
+定向命令为 `CAIRN_TEST_LOCAL_PG=1 cairn/.venv/bin/python -m pytest -q cairn/tests/test_traffic_capture_retry.py`，使用既有 `cairn/.venv` 和私有 PostgreSQL，原始结果为 `......... [100%]`、**9 passed in 9.58s**。本轮未修改生产代码，未运行整份 `test_discovery_readable_flow.py`，未修复或重跑上述两项既有 v63 报告夹具失败；未访问真实目标／模型，未操作 `proj_005/proj_072`，未部署、重载、重启、commit 或 push。至此本轮隔离验证闭环；真实系统加载、底层 stalled 根因及真实项目处置仍须独立授权和验证。
+
+### 27.7 本机部署与仍未解决的问题（2026-11-07）
+
+部署前的实际数据库检查确认没有 active 项目，也没有 queued／running TaskRun；现有项目均为 completed／stopped，Docker 快照没有项目研究容器。维护窗口内使用项目既有停止／启动脚本完整重载宿主 Server 与 Dispatcher，新进程通过 HTTP ready、ownership、heartbeat 和启动日志检查。PostgreSQL、既有会话容器、v0.2.3 Worker 应用层及固定 gateway 均未重建或替换，重载后仍无项目执行被触发。
+
+这次加载只证明修复代码已由本机宿主进程加载，不证明另一实例的 collector heartbeat stalled 已根治，也不构成 `proj_005/proj_072` 的真实业务验收。没有暂停、恢复、重跑或修改任何真实项目及历史 Run；后续仍需在独立授权和真实故障证据下验证底层采集停滞、有限重试的实际表现与旧项目处置。

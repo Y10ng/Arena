@@ -285,7 +285,8 @@ def worker_process_failure(
         )
 
     if cancelled or result.cancelled:
-        return process_failure("cancelled", "cancelled")
+        # 保留基础设施取消的具体原因；人工取消没有 cancel_reason 时仍为通用 cancelled。
+        return process_failure("cancelled", result.cancel_reason or "cancelled")
     if did_oom(result):
         return process_failure("oom", "process_oom")
     if did_timeout(result):

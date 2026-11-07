@@ -2,6 +2,14 @@
 
 记录源码的主要用户可见变化；“未发布”不表示已推送或发布 Release。Arena 从当前工作区建立全新历史，不将原项目的测试次数、候选镜像或发布记录冒充为本项目验收。
 
+## 0.2.4 · 证据接受与采集取消稳定性修复（2026-11-07）
+
+- 普通 goal-driven 探索不再因当前 Run 的合法 `source=manual` Artifact 被 Dispatcher 的 legacy capture-only 门槛提前判为 `evidence_insufficient`；Server 继续核验 Artifact、项目、TaskRun 和 HTTP flow 的真实归属，不改写来源或自动确认漏洞。legacy coverage-cell、独立复测及既有证据协议保持不变。
+- 取消结果保留具体 `traffic_capture_stalled` 诊断，TaskRun 终态仍为 `cancelled/cancelled`。只有 Dispatcher 明确记录且无暂停标记的该类采集取消进入既有持久重试预算，Bootstrap／Explore 均按 5／10 秒退避并在第三次同类失败后以 `execution_retry_exhausted` 停止；Dispatcher 重建不会清零预算，人工取消、暂停和其他取消来源不获得新增重试。
+- 相对 0.2.3 无新增数据库迁移、API／Schema、权限或前端变化。只更新宿主 Server／Dispatcher，继续复用 v0.2.3 Worker 最小应用层及 `arena-worker:0.2.3`、v0.2.1 固定网关镜像；本版提供 code-only ZIP 与 SHA256，不重新构建或发布未变化的 Worker／gateway。
+- 隔离定向集合 16 项通过，Bootstrap／Explore 持久重试文件补测 9 项通过；覆盖真实 Server manual Artifact 接受与非法归属拒绝、有界重试和取消负例。另一次整份 readable-flow 合并运行仍为 17 passed、2 failed，两项是既有 v63 报告夹具缺少后续 `execution_control_json` 查询字段，未在本修复版扩大处理。
+- 本机已在无 active 项目、无 queued／running TaskRun 的维护窗口重载 Server／Dispatcher，HTTP、ownership、heartbeat 和启动日志检查通过；未创建、恢复或重跑真实项目，未调用模型或访问目标。底层 collector heartbeat stalled 根因、真实项目效果及其他机器升级仍未验收。
+
 ## 0.2.3 · 项目材料进入真实共享工作区（2026-11-06）
 
 - 研究执行准备时，将项目附件和冻结选择的资料库文件校验后发布为 `/home/kali/workspace/inputs/` 下的普通文件。现有项目“文件”列表、搜索、预览、下载，以及控制端文件工具和独立 task executor 命令读取同一份工作副本；未选择的库文件不进入副本。

@@ -1578,6 +1578,96 @@ def test_task_consumers_preserve_startup_request_contract_failure(monkeypatch, t
     assert releases
 
 
+@pytest.mark.parametrize("protocol, expected", [
+    ("goal-driven-v1", False),
+    ("default-copy-v1", True),
+])
+def test_explore_applies_capture_reproduction_gate_only_to_cells(
+    monkeypatch, protocol, expected,
+):
+    from cairn.dispatcher.tasks import explore
+    from cairn.dispatcher.workers.base import DriverResult
+
+    class BuilderReached(BaseException):
+        pass
+
+    session = PiDriver().prepare_session()
+    lease = SimpleNamespace(failure=None, start=lambda: None, stop=lambda: None)
+    monkeypatch.setattr(explore.HeartbeatLease, "for_intent", lambda *a: lease)
+    monkeypatch.setattr(explore, "surface_manifest_enabled", lambda project: False)
+    monkeypatch.setattr(explore, "blocker_cooldown_enabled", lambda project: False)
+    monkeypatch.setattr(explore, "outcome_contract_version", lambda project: 2)
+    monkeypatch.setattr(explore, "resolve_admitted_coverage_cell", lambda *a: None)
+    monkeypatch.setattr(explore, "register_delivery", lambda *a, **k: {"deadline_at": "2099-01-01T00:00:00Z"})
+    monkeypatch.setattr(explore, "remaining_delivery_seconds", lambda *a, **k: 5)
+    monkeypatch.setattr(explore, "ResearchDeliveryBudget", lambda clock: SimpleNamespace())
+    monkeypatch.setattr(explore, "load_prompt", lambda *a: "fixture")
+    monkeypatch.setattr(explore, "render_prompt", lambda *a: "fixture")
+    monkeypatch.setattr(explore, "explore_prompt_replacements", lambda *a, **k: {})
+    monkeypatch.setattr(explore, "record_prompt_rendered", lambda *a, **k: None)
+    monkeypatch.setattr(explore, "update_task_run_session", lambda *a, **k: None)
+    monkeypatch.setattr(explore, "record_process_artifacts", lambda *a, **k: SimpleNamespace(refs=[]))
+    monkeypatch.setattr(explore, "record_declared_artifacts", lambda *a, **k: SimpleNamespace(
+        refs=[], artifact_ids_by_handle={}, write_failed=False, collect_failed=False,
+    ))
+    monkeypatch.setattr(explore, "resolve_declared_artifact_evidence_refs", lambda *a: [])
+    monkeypatch.setattr(explore, "extract_evidence_refs", lambda *a, **k: [])
+    monkeypatch.setattr(explore, "build_assessment_record_for_conclude", lambda *a: (None, []))
+    monkeypatch.setattr(explore, "build_coverage_result_for_conclude", lambda *a, **k: (None, []))
+    monkeypatch.setattr(
+        explore, "run_worker_process", lambda *a, **k: ProcessResult(0, "unused", ""),
+    )
+    monkeypatch.setattr(explore, "decode_pi_result", lambda *a, **k: SimpleNamespace(
+        failure=None, kind="fact", description="synthetic",
+        payload={"accepted": True, "data": {"fact": {
+            "description": "synthetic", "vulnerability": {"evidence_items": []},
+        }}},
+    ))
+    observed = []
+
+    def capture_gate(*args, **kwargs):
+        observed.append(kwargs["require_current_run_reproduction"])
+        raise BuilderReached
+
+    monkeypatch.setattr(explore, "build_vulnerability_for_conclude", capture_gate)
+
+    class FakeDriver:
+        def prepare_session(self):
+            return session
+
+        def build_execute(self, *args, **kwargs):
+            return DriverResult(["fixture-execute"], session=session)
+
+    monkeypatch.setattr(explore, "get_driver", lambda name: FakeDriver())
+    manager = SimpleNamespace(
+        research_clock=lambda project_id: SimpleNamespace(detached=False),
+        ensure_running=lambda *a: "fixture-container",
+        prepare_task_execution=lambda *a: None,
+        stop_task_execution=lambda *a: None,
+    )
+    config = SimpleNamespace(
+        runtime=SimpleNamespace(interval=1, prompt_group="default"),
+        tasks=SimpleNamespace(explore=SimpleNamespace(timeout=5, conclude_timeout=2)),
+    )
+    project = SimpleNamespace(
+        project=SimpleNamespace(
+            id="p", assessment_protocol=protocol, vulnerability_fingerprint_version=None,
+            assessment_execution={"enabled": True}, scenario_snapshot={},
+        ),
+        facts=[],
+    )
+    intent = SimpleNamespace(
+        id="i", assessment_role="discovery", slot_key=None, strategy_key=None,
+        depth_review_fact_id=None,
+    )
+    with pytest.raises(BuilderReached):
+        explore.run_explore_task(
+            config, SimpleNamespace(), manager, project, "facts: []", intent,
+            worker(), TaskCancellation(), "t",
+        )
+    assert observed == [expected]
+
+
 @pytest.mark.parametrize("task_name", ["bootstrap", "reason", "explore"])
 @pytest.mark.parametrize("failure", ["timeout", "cancelled", "exit_nonzero", "transport_error", "provider_auth", "provider_rate_limit", "session_corrupt"])
 def test_tasks_never_start_conclude_or_accept_success_payload_after_process_failure(monkeypatch, task_name, failure):
