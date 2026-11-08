@@ -2,7 +2,7 @@
 
 统一执行入口为 `cairn-agent --request FILE`，使用独立的 [pi SDK 子项目](pi-agent/README.md)。旧 Claude Code、Codex、全局 pi CLI 不再安装或注入专属配置。默认镜像聚焦 Web 发现、深测与取证，保留 Playwright CLI/Chromium；Playwright MCP 和 Chrome DevTools MCP 预装备选但不默认启动，不安装 Kali 全套工具元包。
 
-[v0.2.3 部署包](https://github.com/Y10ng/Arena/releases/tag/v0.2.3) 将研究输入落入共享工作区，并修改 Worker 的输入 Artifact 分类，**不能直接复用未经更新的 v0.2.1 研究镜像**。该 Release 提供 `arena-0.2.3-worker-application.zip` 和 SHA256：Dockerfile 基于 v0.2.1 公开研究镜像的固定 digest，仅复制由本版源码编译的 `artifacts.js` 并离线自检，生成 `arena-worker:0.2.3`，无需 npm 或重新安装工具。v0.2.4 只修复宿主 Server／Dispatcher，继续配套这一 Worker 应用层；网关复用 v0.2.1 公开镜像，两个版本均不重新发布未变化的镜像。下载、校验、构建与配置步骤统一见[预构建镜像安装路径](../docs/deployment-linux-zh.md#路径-a使用已有-worker-镜像)；仅支持已发布基础的 `linux/amd64`，未发布 `arm64` 或 `latest`，不与任意新源码混用。
+[v0.2.3 部署包](https://github.com/Y10ng/Arena/releases/tag/v0.2.3) 将研究输入落入共享工作区，并修改 Worker 的输入 Artifact 分类，**不能直接复用未经更新的 v0.2.1 研究镜像**。该 Release 提供 `arena-0.2.3-worker-application.zip` 和 SHA256：Dockerfile 基于 v0.2.1 公开研究镜像的固定 digest，仅复制由本版源码编译的 `artifacts.js` 并离线自检，生成 `arena-worker:0.2.3`，无需 npm 或重新安装工具。v0.2.5 修复宿主事件循环饿死并改版运行日志页，继续配套这一 Worker 应用层；但 **gateway 镜像有实质修复**，须改用 `v0.2.5` 配套的 `yong29/arena-traffic-gateway:git-f6df095fb4f8`，旧 `git-a0f22cec57b3` 网关在批量大文件任务会复现 `traffic_capture_stalled` 误取消。下载、校验、构建与配置步骤统一见[预构建镜像安装路径](../docs/deployment-linux-zh.md#路径-a使用已有-worker-镜像)；仅支持已发布基础的 `linux/amd64`，未发布 `arm64` 或 `latest`，不与任意新源码混用。
 
 需要自行构建时，Worker 与 executor 共用研究镜像 `arena-worker:local`，从仓库根目录构建，context 为 `container/`。主 Worker 仍以 `sleep infinity` 维持项目容器；每个 TaskRun 的 executor 显式以 `python3 -u /opt/cairn/task-executor/server.py` 启动，不给整个镜像设置执行服务入口。网关、collector 与网络 helper 使用独立的 `arena-traffic-gateway:local`，不运行 Worker 命令。两个镜像的构建命令：
 

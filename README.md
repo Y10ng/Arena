@@ -6,7 +6,7 @@ Arena 是面向本地和内部使用的自主安全探索平台：用 **Origin**
 
 ## 安装
 
-推荐使用 [v0.2.4 部署包](https://github.com/Y10ng/Arena/releases/tag/v0.2.4) 和 [v0.2.3 Worker 最小应用层包](https://github.com/Y10ng/Arena/releases/tag/v0.2.3)，在 v0.2.1 公开研究镜像上离线构建小应用层，网关镜像保持不变；无需本机构建前端、安装 npm 或重新安装工具层。当前配套镜像仅支持 **Linux x86_64（amd64）**。
+推荐使用 [v0.2.5 部署包](https://github.com/Y10ng/Arena/releases/tag/v0.2.5) 和 [v0.2.3 Worker 最小应用层包](https://github.com/Y10ng/Arena/releases/tag/v0.2.3)，在 v0.2.1 公开研究镜像上离线构建小应用层，并使用 v0.2.5 配套网关镜像（修复大文件采集误取消）；无需本机构建前端、安装 npm 或重新安装工具层。当前配套镜像仅支持 **Linux x86_64（amd64）**。
 
 先安装 **Python 3.11+、[uv](https://docs.astral.sh/uv/getting-started/installation/)、[Docker 与 Compose v2](https://docs.docker.com/engine/install/)**，并确保 `curl`、`unzip`、`sha256sum`、`flock` 可用。默认 PostgreSQL 由启动脚本准备。
 
@@ -15,15 +15,15 @@ Arena 是面向本地和内部使用的自主安全探索平台：用 **Origin**
 以下命令在新目录下载、校验、解压；任一步失败就停止后续步骤。使用 Release 附件中的部署 ZIP，不是 GitHub 自动生成的 Source code ZIP。
 
 ```bash
-RELEASE_URL='https://github.com/Y10ng/Arena/releases/download/v0.2.4'
-ASSET='arena-0.2.4-linux-code-only.zip'
+RELEASE_URL='https://github.com/Y10ng/Arena/releases/download/v0.2.5'
+ASSET='arena-0.2.5-linux-code-only.zip'
 DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-download.XXXXXX")" &&
   curl -fL "$RELEASE_URL/$ASSET" -o "$DOWNLOAD_DIR/$ASSET" &&
   curl -fL "$RELEASE_URL/$ASSET.sha256" -o "$DOWNLOAD_DIR/$ASSET.sha256" &&
   (cd "$DOWNLOAD_DIR" && sha256sum -c "$ASSET.sha256") &&
   UNPACK_DIR="$(mktemp -d "$HOME/arena-install.XXXXXX")" &&
   unzip "$DOWNLOAD_DIR/$ASSET" -d "$UNPACK_DIR" &&
-  cd "$UNPACK_DIR/arena-0.2.4-linux-code-only" &&
+  cd "$UNPACK_DIR/arena-0.2.5-linux-code-only" &&
   ./deploy/install.sh
 ```
 
@@ -31,7 +31,7 @@ DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-download.XXXXXX")" &&
 
 ### 2. 准备并配置配套镜像
 
-下载 v0.2.3 Release 的 Worker 应用层包，校验后在固定公开基础上离线构建；v0.2.4 未修改 Worker，继续使用这一配套应用层。以下命令使用独立的 Worker 下载地址：
+下载 v0.2.3 Release 的 Worker 应用层包，校验后在固定公开基础上离线构建；v0.2.5 未修改 Worker，继续使用这一配套应用层。以下命令使用独立的 Worker 下载地址：
 
 ```bash
 WORKER_RELEASE_URL='https://github.com/Y10ng/Arena/releases/download/v0.2.3'
@@ -44,7 +44,7 @@ WORKER_DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-worker-download.XXXXXX")" &&
   unzip "$WORKER_DOWNLOAD_DIR/$WORKER_ASSET" -d "$WORKER_UNPACK_DIR" &&
   docker pull 'yong29/arena-worker@sha256:b4babe19a719acf73733b3d6e093c490a2a741b95562682fd16b5c227df57d06' &&
   docker build --pull=false --network=none -t arena-worker:0.2.3 "$WORKER_UNPACK_DIR/arena-0.2.3-worker-application" &&
-  docker pull 'yong29/arena-traffic-gateway@sha256:a2734dde304c5bdc7a3c22e867e21bbe22a4860fc112c54f0feab128b202da8a'
+  docker pull 'yong29/arena-traffic-gateway@sha256:GATEWAY_DIGEST_PLACEHOLDER'
 ```
 
 编辑 `runtime/dispatch.yaml`，只修改 `container` 下的两个字段，保留其他配置：
@@ -52,7 +52,7 @@ WORKER_DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-worker-download.XXXXXX")" &&
 ```yaml
 container:
   image: "arena-worker:0.2.3"
-  traffic_gateway_image: "yong29/arena-traffic-gateway@sha256:a2734dde304c5bdc7a3c22e867e21bbe22a4860fc112c54f0feab128b202da8a"
+  traffic_gateway_image: "yong29/arena-traffic-gateway@sha256:GATEWAY_DIGEST_PLACEHOLDER"
 ```
 
 公开基础镜像无需登录，Docker 复用已存在的相同层；小应用层构建不下载工具或 npm 依赖。不要保留默认 `:local` 引用，否则更新器仍可能触发完整配方的缓存构建。已有显式镜像映射也须更新实际引用；详见[完整安装指南](docs/deployment-linux-zh.md#路径-a使用已有-worker-镜像)和[代理排障](docs/deployment-linux-zh.md#排障)。
@@ -74,9 +74,9 @@ container:
 
 ### 部署包安装的更新
 
-**v0.2.3 → v0.2.4：** 只更新宿主应用；无新增数据库迁移，继续复用 `arena-worker:0.2.3` 和原固定网关，无需重建 Worker。**v0.2.1／v0.2.2 → v0.2.4：** 同时更新应用包和 v0.2.3 Worker 应用层，不能直接沿用未经更新的旧 Worker。默认 `:local` 配置仍会触发完整配方的缓存构建，不用 `--server-only` 绕过准备。所有更新都须在旧任务退出后的维护窗口进行；存量容器不自动升级，已有工作区冲突和材料签名不匹配须保留现场处理。
+**v0.2.4 → v0.2.5：** 更新宿主应用并更换网关镜像（`git-f6df095fb4f8`，修复大文件采集误取消）；无新增数据库迁移，`arena-worker:0.2.3` 可保留。**v0.2.1／v0.2.2／v0.2.3 → v0.2.5：** 同时更新应用包、v0.2.3 Worker 应用层与新网关，不能直接沿用未经更新的旧 Worker 或旧网关。默认 `:local` 配置仍会触发完整配方的缓存构建，不用 `--server-only` 绕过准备。所有更新都须在旧任务退出后的维护窗口进行；存量容器不自动升级，已有工作区冲突和材料签名不匹配须保留现场处理。
 
-1. 从 [v0.2.4 Release](https://github.com/Y10ng/Arena/releases/tag/v0.2.4) 下载应用 ZIP 及校验文件；需要更新 Worker 时再从 v0.2.3 Release 下载对应应用层 ZIP 和校验文件。校验后解压到**旧安装之外的新目录**，按上方步骤准备配套镜像；不在新目录另行安装或启动实例。
+1. 从 [v0.2.5 Release](https://github.com/Y10ng/Arena/releases/tag/v0.2.5) 下载应用 ZIP 及校验文件；需要更新 Worker 时再从 v0.2.3 Release 下载对应应用层 ZIP 和校验文件。校验后解压到**旧安装之外的新目录**，按上方步骤准备配套镜像；不在新目录另行安装或启动实例。
 2. 在界面暂停或结束任务并确认执行已退出，备份数据库、`runtime`、资料与外置存储。跨版本更新先查看[迁移限制](docs/deployment-linux-zh.md#本次跨版本升级注意)：有历史会话待迁移的安装不能直接套用更新器。
 3. 停止旧应用：
 
@@ -85,7 +85,7 @@ container:
    "$OLD_APP/deploy/stop.sh"
    ```
 
-4. 从 v0.2.3 更新时保留现有配套镜像配置；从更早版本更新时，按上方说明准备 `arena-worker:0.2.3`，并编辑 **旧安装**的 `runtime/dispatch.yaml`，同步研究、网关及自定义映射的实际引用。不要在旧任务仍运行时切换镜像。使用自定义 `CAIRN_STATIC_DIR` 时，须在维护窗口同步实际目录，或改为指向旧安装更新后的 `cairn/src/cairn/server/static`；详见[部署包更新](docs/deployment-linux-zh.md#部署包更新)。
+4. 从 v0.2.4 更新时准备新网关镜像并保留 `arena-worker:0.2.3`；从更早版本更新时，按上方说明准备 `arena-worker:0.2.3` 与新网关，并编辑 **旧安装**的 `runtime/dispatch.yaml`，同步研究、网关及自定义映射的实际引用。不要在旧任务仍运行时切换镜像。使用自定义 `CAIRN_STATIC_DIR` 时，须在维护窗口同步实际目录，或改为指向旧安装更新后的 `cairn/src/cairn/server/static`；详见[部署包更新](docs/deployment-linux-zh.md#部署包更新)。
 5. 用**新包中的更新器**更新旧目录：
 
    ```bash
