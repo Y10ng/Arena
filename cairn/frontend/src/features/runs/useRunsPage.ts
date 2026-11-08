@@ -30,9 +30,10 @@ import type {
 } from './runTypes'
 
 const detailTabs = [
-  { label: '终端视图', value: 'terminal' },
-  { label: 'Shell命令', value: 'commands' },
-  { label: '产物证据', value: 'artifacts' },
+  { label: '输出', value: 'terminal' },
+  { label: '工具', value: 'tools' },
+  { label: '命令', value: 'commands' },
+  { label: '文件', value: 'artifacts' },
 ]
 
 // 读取反馈只展示稳定状态，不把服务端异常正文或运行材料带入提示。
@@ -60,6 +61,7 @@ export const useRunsPage = () => {
 
   const searchQuery = ref('')
   const statusFilter = ref('all')
+  const activeWorkView = ref('execution')
   const activeDetailTab = ref('terminal')
   const autoScrollTerminal = ref(true)
   const selectedRunId = ref<string | null>(null)
@@ -139,7 +141,6 @@ export const useRunsPage = () => {
     readAgain: boolean
   }
   const hookReads = ref<Record<string, HookRead>>({})
-  const expandedTools = ref(new Set<string>())
   let timelineGeneration = 0
 
   const {
@@ -288,15 +289,6 @@ export const useRunsPage = () => {
   )
   const workTitle = (work: WorkNode) => work.intent?.description || runBusinessTitle(work.runs[0]!)
   const toolCalls = (run: TaskRun) => pairToolCalls(run, hookReads.value[run.id]?.events || [])
-  const workActivity = (work: WorkNode) => {
-    const calls = work.runs.filter(isActiveRun).flatMap(toolCalls)
-    const active = calls.filter((call) => call.active)
-    if (active.length) return active
-    const latest = calls
-      .filter((call) => call.endedAt)
-      .sort((a, b) => Date.parse(b.endedAt!) - Date.parse(a.endedAt!))[0]
-    return latest ? [latest] : []
-  }
   const hookReadError = (runId: string) => {
     const read = hookReads.value[runId]
     return read?.failure
@@ -346,13 +338,6 @@ export const useRunsPage = () => {
           void loadHooks(runId, true)
         }
       }
-    }
-  }
-  const toggleTools = (work: WorkNode) => {
-    if (expandedTools.value.has(work.key)) expandedTools.value.delete(work.key)
-    else {
-      expandedTools.value.add(work.key)
-      for (const run of work.runs) void loadHooks(run.id)
     }
   }
   const refetchHooks = (runId: string) => {
@@ -412,6 +397,11 @@ export const useRunsPage = () => {
     if (!selectedRunId.value) return null
     return runs.value.find((run) => run.id === selectedRunId.value) || null
   })
+  const selectedWork = computed(() => {
+    const runId = selectedRun.value?.id
+    if (!runId) return null
+    return workTimeline.value.find((work) => work.runs.some((run) => run.id === runId)) || null
+  })
   const selectedTerminalOutput = computed(() => {
     return terminalOutputs.value.find((output) => output.id === stdoutArtifactId.value) || null
   })
@@ -446,7 +436,14 @@ export const useRunsPage = () => {
     if (!runs.value.some((run) => run.id === id)) return
     chatRunNotice.value = false
     selectedRunId.value = id
+    activeWorkView.value = 'execution'
+    activeDetailTab.value = 'terminal'
     void router.replace({ query: { ...route.query, runId: id } })
+  }
+
+  const selectWork = (work: WorkNode) => {
+    const run = work.matchedRuns[0] || work.runs[0]
+    if (run) selectRun(run.id)
   }
 
   const openProjectAgent = () => {
@@ -640,6 +637,7 @@ export const useRunsPage = () => {
 
   const loadRunDetails = (runId: string, background = false) => {
     // 各来源独立提交、独立去重；瞬时故障沿用刷新节奏，明确拒绝留给手动重读。
+    void loadHooks(runId, background)
     void loadCommands(runId, background)
     void loadArtifacts(runId, background)
     if (stdoutArtifactId.value) void loadTerminalOutput(stdoutArtifactId.value, { background })
@@ -674,23 +672,66 @@ export const useRunsPage = () => {
     })
   }
 
+  let selectionInitialized = false
   watch(
-    [currentProjectId, () => route.query.runId, runsData, isRunsSuccess],
-    ([projectId, newId, data, success], previous) => {
-      if (projectId !== previous?.[0] || newId) chatRunNotice.value = false
-      selectedRunId.value = typeof newId === 'string' && newId ? newId : null
+    [currentProjectId, () => route.query.runId],
+    ([projectId, newId], previous) => {
+      const projectChanged = projectId !== previous?.[0]
+      const routeId = typeof newId === 'string' && newId ? newId : null
+      if (projectChanged) selectionInitialized = false
+      if (!projectChanged && newId === previous?.[1]) return
+      if (projectChanged || routeId) chatRunNotice.value = false
+      selectedRunId.value = routeId
+      if (routeId) {
+        activeWorkView.value = 'execution'
+        activeDetailTab.value = 'terminal'
+        selectionInitialized = true
+      } else if (!projectChanged) {
+        // 显式删除深链后保持空选择，不让下一次轮询重新替用户选择。
+        selectionInitialized = true
+      }
+    },
+    { immediate: true },
+  )
+
+  watch(
+    [runsData, isRunsSuccess],
+    ([data, success]) => {
+      const runId = route.query.runId
       // 只根据成功加载的实际类型处理旧聊天链接，失败或查无记录不猜测归属。
-      if (!success || !data?.some((run) => run.id === newId && run.task_type === 'agent_chat')) {
+      if (!success || !data?.some((run) => run.id === runId && run.task_type === 'agent_chat')) {
         return
       }
       selectedRunId.value = null
       chatRunNotice.value = true
+      selectionInitialized = true
       const query = { ...route.query }
       delete query.runId
       void router.replace({ query })
     },
     { immediate: true },
   )
+
+  watch(
+    [currentProjectId, isRunsSuccess, workTimeline],
+    ([projectId, success]) => {
+      if (!projectId || !success || selectionInitialized || route.query.runId) return
+      const run = workTimeline.value[0]?.matchedRuns[0]
+      if (!run) return
+      selectionInitialized = true
+      selectRun(run.id)
+    },
+    { immediate: true },
+  )
+
+  watch([statusFilter, searchQuery], () => {
+    const runId = selectedRunId.value
+    if (!runId) return
+    const currentWork = workTimeline.value.find((work) => work.runs.some((run) => run.id === runId))
+    if (currentWork?.matchedRuns.some((run) => run.id === runId)) return
+    const nextRun = currentWork?.matchedRuns[0] || workTimeline.value[0]?.matchedRuns[0]
+    if (nextRun && nextRun.id !== runId) selectRun(nextRun.id)
+  })
 
   watch(
     [currentProjectId, () => selectedRun.value?.id || null],
@@ -711,7 +752,6 @@ export const useRunsPage = () => {
     () => {
       timelineGeneration += 1
       hookReads.value = {}
-      expandedTools.value = new Set()
       reportsRequest = null
       reportsReadAgain = false
       reports.value = []
@@ -784,6 +824,7 @@ export const useRunsPage = () => {
   )
 
   return {
+    activeWorkView,
     activeDetailTab,
     artifacts,
     autoScrollTerminal,
@@ -807,13 +848,12 @@ export const useRunsPage = () => {
     runBusinessTitle,
     workTimeline,
     workTitle,
-    workActivity,
+    selectedWork,
+    selectWork,
     toolCalls,
     hookReads,
     hookReadError,
     hookObservationIncomplete,
-    expandedTools,
-    toggleTools,
     refetchHooks,
     refreshTimeline,
     reportsLoaded,

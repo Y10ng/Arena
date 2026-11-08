@@ -52,7 +52,7 @@ describe('工作进展的来源与调用身份', () => {
     expect(work.runs.map((item) => item.id)).toEqual(['new', 'old'])
     expect(work.matchedRuns.map((item) => item.id)).toEqual(['old'])
     expect(work.startedAt).toBe(failed.started_at)
-    expect(work.status).toBe('已有结果')
+    expect(work.status).toBe('failed')
     expect(work.results).toEqual([
       { key: 'fact:f', runId: 'new', label: '已接受事实', text: fact.description },
     ])
@@ -61,7 +61,7 @@ describe('工作进展的来源与调用身份', () => {
     expect(
       buildWorkTimeline(all, [intent], [fact], new Set(all.map((item) => item.id))),
     ).toHaveLength(3)
-    expect(buildWorkTimeline([accepted], [], [], new Set(['new']))[0]!.status).toBe('结果未确认')
+    expect(buildWorkTimeline([accepted], [], [], new Set(['new']))[0]!.status).toBe('succeeded')
     expect(
       buildWorkTimeline(
         [accepted],
@@ -69,7 +69,7 @@ describe('工作进展的来源与调用身份', () => {
         [fact],
         new Set(['new']),
       )[0]!.status,
-    ).toBe('未完成')
+    ).toBe('succeeded')
   })
 
   it('以 Run、phase、session、operation 配对并行同名工具，终态不保留虚假执行中', () => {
@@ -103,6 +103,53 @@ describe('工作进展的来源与调用身份', () => {
     const terminal = pairToolCalls(run('r', { status: 'failed' }), events)
     expect(terminal.some((call) => call.active)).toBe(false)
     expect(terminal.filter((call) => call.status === '结束状态未记录')).toHaveLength(5)
+  })
+
+  it('分别投影开始输入和结束响应，保留权威字段且不制造 pi 空正文', () => {
+    const events = [
+      event('start', 'a', {
+        command: 'npm test',
+        file_path: '/tmp/input',
+        query: '查询原文',
+        url: 'https://example.invalid',
+        tool_input: { command: 'npm test', content: '完整输入' },
+        tool_response: { ignored: '开始事件不是响应来源' },
+      }),
+      event('end', 'a', {
+        hook_event_name: 'tool_execution_end',
+        status: 'succeeded',
+        recorded_at: '2026-01-01T00:00:03Z',
+        duration_ms: 1250,
+        exit_code: 0,
+        summary: '完成摘要',
+        tool_input: { ignored: '开始输入优先' },
+        tool_response: { output: '完整响应' },
+      }),
+    ]
+    const [call] = pairToolCalls(run('r', { status: 'succeeded' }), events)
+    expect(call).toMatchObject({
+      command: 'npm test',
+      filePath: '/tmp/input',
+      query: '查询原文',
+      url: 'https://example.invalid',
+      summary: '完成摘要',
+      exitCode: 0,
+      durationMs: 1250,
+      toolInput: { command: 'npm test', content: '完整输入' },
+      toolResponse: { output: '完整响应' },
+    })
+    expect(call!.toolInput).not.toHaveProperty('ignored')
+    expect(call!.toolInput).not.toHaveProperty('output')
+    expect(call!.toolResponse).not.toHaveProperty('command')
+
+    const piEvents = events.map((item) => ({
+      ...item,
+      tool_input: {},
+      tool_response: {},
+    }))
+    const [piCall] = pairToolCalls(run('r', { status: 'succeeded' }), piEvents)
+    expect(piCall?.toolInput).toBeNull()
+    expect(piCall?.toolResponse).toBeNull()
   })
 
   it('无 Intent 的正式 Fact、创建工作和已接受报告保留各自来源', () => {

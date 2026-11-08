@@ -103,19 +103,8 @@ export const buildWorkTimeline = (
       (a, b) => (Date.parse(firstRunTime(b) || '') || 0) - (Date.parse(firstRunTime(a) || '') || 0),
     )
     work.matchedRuns = work.runs.filter((run) => matchingIds.has(run.id))
-    if (work.runs.some((run) => run.status === 'running')) work.status = '执行中'
-    else if (work.runs.some((run) => run.status === 'queued')) work.status = '等待执行'
-    else if (work.intent?.conclusion === 'abandoned') work.status = '已停止'
-    else if (work.intent?.conclusion === 'failed') work.status = '未完成'
-    else if (
-      work.results.length &&
-      (work.intent?.conclusion === 'completed' ||
-        work.runs.every((run) => run.status === 'succeeded'))
-    )
-      work.status = '已有结果'
-    else if (work.results.length) work.status = '未完成 · 已有部分产出'
-    else if (work.runs.every((run) => run.status === 'succeeded')) work.status = '结果未确认'
-    else work.status = '未完成 · 结果未确认'
+    // 卡片与 selectWork 使用同一个默认 Run，筛选失败时不能被另一次成功覆盖。
+    work.status = (work.matchedRuns[0] || work.runs[0]!).status
   }
   return [...groups.values()]
     .filter((work) => work.matchedRuns.length)
@@ -139,6 +128,14 @@ export interface ToolCall {
   sessionId: string | null
   operationId: string | null
   artifactId: string | null
+  command: string | null
+  filePath: string | null
+  query: string | null
+  url: string | null
+  summary: string | null
+  exitCode: number | null
+  toolInput: Record<string, unknown> | null
+  toolResponse: Record<string, unknown> | null
 }
 
 export const pairToolCalls = (run: TaskRun, events: readonly TaskRunHookEvent[]): ToolCall[] => {
@@ -172,6 +169,18 @@ export const pairToolCalls = (run: TaskRun, events: readonly TaskRunHookEvent[])
       const endedAt = validTime(pair.end?.recorded_at)
       const active = Boolean(pair.start && !pair.end && isActiveRun(run))
       const duration = startedAt && endedAt ? Date.parse(endedAt) - Date.parse(startedAt) : null
+      const recordedDuration = pair.end?.duration_ms ?? pair.start?.duration_ms ?? null
+      // 输入优先取开始事件，响应只取结束事件；空对象不代表来源记录了正文。
+      const startInput = pair.start?.tool_input
+      const endInput = pair.end?.tool_input
+      const endResponse = pair.end?.tool_response
+      const toolInput =
+        startInput && Object.keys(startInput).length
+          ? startInput
+          : endInput && Object.keys(endInput).length
+            ? endInput
+            : null
+      const toolResponse = endResponse && Object.keys(endResponse).length ? endResponse : null
       return {
         key,
         runId: run.id,
@@ -188,12 +197,25 @@ export const pairToolCalls = (run: TaskRun, events: readonly TaskRunHookEvent[])
             ? '执行中'
             : '结束状态未记录',
         active,
-        durationMs: duration !== null && duration >= 0 ? duration : null,
+        durationMs:
+          recordedDuration !== null && recordedDuration >= 0
+            ? recordedDuration
+            : duration !== null && duration >= 0
+              ? duration
+              : null,
         phase: event.phase,
         sessionId: event.session_id,
         operationId: event.operation_id,
         artifactId:
           event.artifact_id || sources.get(JSON.stringify([event.phase, event.session_id])) || null,
+        command: pair.start?.command || pair.end?.command || null,
+        filePath: pair.start?.file_path || pair.end?.file_path || null,
+        query: pair.start?.query || pair.end?.query || null,
+        url: pair.start?.url || pair.end?.url || null,
+        summary: pair.end?.summary || pair.start?.summary || null,
+        exitCode: pair.end?.exit_code ?? pair.start?.exit_code ?? null,
+        toolInput,
+        toolResponse,
       }
     })
     .sort(

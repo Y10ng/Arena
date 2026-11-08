@@ -216,7 +216,7 @@ afterEach(() => {
 
 describe('useRunsPage chat exclusion', () => {
   it('uses the same non-chat collection for filtering, selection and refresh without changing API data', async () => {
-    routeState.query = {}
+    routeState.query = { runId: 'verification' }
     runsData.value = [
       { ...run('chat'), task_type: 'agent_chat' },
       { ...run('report'), task_type: 'report' },
@@ -237,18 +237,16 @@ describe('useRunsPage chat exclusion', () => {
       'verification',
       'exploration',
     ])
-    expect(page.selectedRun.value).toBeNull()
+    expect(page.selectedRun.value?.id).toBe('verification')
     page.searchQuery.value = 'agent_chat'
     expect(page.filteredRuns.value).toEqual([])
     page.searchQuery.value = ''
     page.statusFilter.value = 'running'
     expect(page.filteredRuns.value).toHaveLength(3)
     page.selectRun('chat')
-    expect(page.selectedRunId.value).toBeNull()
+    expect(page.selectedRun.value?.task_type).not.toBe('agent_chat')
     expect(
-      mocks.api.mock.calls.every(
-        ([, path]) => path.includes('/hook-events') || path.startsWith('/reports?'),
-      ),
+      mocks.api.mock.calls.every(([, path]) => !String(path).includes('task_run_id=chat')),
     ).toBe(true)
 
     for (const id of ['report', 'verification']) {
@@ -329,6 +327,80 @@ describe('useRunsPage chat exclusion', () => {
   })
 })
 
+describe('useRunsPage work and run selection', () => {
+  it('defaults to the latest matching run, honors failure filters and keeps polling stable', async () => {
+    routeState.query = {}
+    const oldFailure = {
+      ...run('run-old', 'project-a', 'failed'),
+      intent_id: 'intent-a',
+      started_at: '2026-08-20T09:00:00.000Z',
+      error_type: 'provider_error',
+      error_message: '旧失败原文',
+    }
+    const latestSuccess = {
+      ...run('run-new', 'project-a', 'succeeded'),
+      intent_id: 'intent-a',
+      started_at: '2026-08-20T10:00:00.000Z',
+    }
+    runsData.value = [oldFailure, latestSuccess]
+    mocks.router.replace.mockImplementation(({ query }) => {
+      routeState.query = query
+    })
+    mocks.api.mockImplementation((_method: string, path: string) =>
+      Promise.resolve(emptyDetailResponse(path)),
+    )
+    mountComposable()
+    await flushPromises()
+
+    expect(page.selectedWork.value?.key).toBe('intent:intent-a')
+    expect(page.selectedWork.value?.status).toBe('succeeded')
+    expect(page.selectedWork.value?.runs.map((item) => item.id)).toEqual(['run-new', 'run-old'])
+    expect(page.selectedRunId.value).toBe('run-new')
+    expect(routeState.query.runId).toBe('run-new')
+    expect(page.activeWorkView.value).toBe('execution')
+    expect(page.activeDetailTab.value).toBe('terminal')
+
+    page.activeWorkView.value = 'results'
+    page.activeDetailTab.value = 'commands'
+    runsData.value = runsData.value.map((item) => ({ ...item }))
+    await flushPromises()
+    expect(page.selectedRunId.value).toBe('run-new')
+    expect(page.activeWorkView.value).toBe('results')
+    expect(page.activeDetailTab.value).toBe('commands')
+
+    page.statusFilter.value = 'failed'
+    await flushPromises()
+    expect(page.selectedRunId.value).toBe('run-old')
+    expect(page.selectedWork.value?.status).toBe('failed')
+    expect(page.selectedRun.value?.status).toBe('failed')
+    expect(page.selectedRun.value?.error_message).toBe('旧失败原文')
+    expect(routeState.query.runId).toBe('run-old')
+    expect(page.activeWorkView.value).toBe('execution')
+    expect(page.activeDetailTab.value).toBe('terminal')
+    expect(page.selectedWork.value?.runs.map((item) => item.id)).toEqual(['run-new', 'run-old'])
+
+    page.activeWorkView.value = 'results'
+    page.activeDetailTab.value = 'commands'
+    runsData.value = runsData.value.map((item) => ({ ...item }))
+    await flushPromises()
+    expect(page.selectedRunId.value).toBe('run-old')
+    expect(page.activeWorkView.value).toBe('results')
+    expect(page.activeDetailTab.value).toBe('commands')
+
+    page.selectWork(page.selectedWork.value!)
+    expect(page.selectedRunId.value).toBe('run-old')
+    expect(page.activeWorkView.value).toBe('execution')
+    expect(page.activeDetailTab.value).toBe('terminal')
+
+    routeState.query.runId = 'run-new'
+    await flushPromises()
+    expect(page.selectedRunId.value).toBe('run-new')
+    expect(page.selectedRun.value?.status).toBe('succeeded')
+    expect(page.activeWorkView.value).toBe('execution')
+    expect(page.activeDetailTab.value).toBe('terminal')
+  })
+})
+
 describe('useRunsPage request ownership', () => {
   it('loads only retained detail requests and keeps selection through global refresh', async () => {
     mocks.api.mockImplementation((_method: string, path: string) =>
@@ -345,7 +417,12 @@ describe('useRunsPage request ownership', () => {
       mocks.api.mock.calls.map(([, path]) => path).filter((path) => !path.includes('/hook-events')),
     ).toEqual(detailPaths)
     expect(page.activeDetailTab.value).toBe('terminal')
-    expect(page.detailTabs.map((tab) => tab.value)).toEqual(['terminal', 'commands', 'artifacts'])
+    expect(page.detailTabs.map((tab) => tab.value)).toEqual([
+      'terminal',
+      'tools',
+      'commands',
+      'artifacts',
+    ])
 
     page.activeDetailTab.value = 'commands'
     uiState.globalRefreshKey += 1
@@ -445,6 +522,8 @@ describe('useRunsPage request ownership', () => {
     await flushPromises()
 
     routeState.query.runId = undefined
+    await flushPromises()
+    runsData.value = runsData.value.map((item) => ({ ...item }))
     await flushPromises()
 
     expect(page.selectedRunId.value).toBeNull()
@@ -680,15 +759,12 @@ describe('useRunsPage business context', () => {
       ['authorization_expired', 'run-b'],
       ['发现与验证', 'run-b'],
     ]
+    const initialRequestCount = mocks.api.mock.calls.length
     for (const [query, expectedRunId] of searches) {
       page.searchQuery.value = query
       expect(page.filteredRuns.value.map((item) => item.id)).toEqual([expectedRunId])
     }
-    expect(
-      mocks.api.mock.calls.every(
-        ([, path]) => path.includes('/hook-events') || path.startsWith('/reports?'),
-      ),
-    ).toBe(true)
+    expect(mocks.api.mock.calls).toHaveLength(initialRequestCount)
 
     const intent = workspaceState.projectDetail.intents[0]!
     intent.conclusion = 'failed'
@@ -696,7 +772,9 @@ describe('useRunsPage business context', () => {
     expect(page.linkedIntentOutcomeText(runsData.value[0])).toBe('工作未完成：证据不足')
     expect(page.runResultText(runsData.value[0])).toContain('证据已接受')
     intent.conclusion = 'abandoned'
-    expect(page.workTimeline.value.some((work) => work.status === '已停止')).toBe(true)
+    expect(
+      page.workTimeline.value.find((work) => work.intent?.id === 'intent-b')?.status,
+    ).toBe('succeeded')
     intent.conclusion = 'completed'
     intent.to = null
     expect(page.runResultText(runsData.value[0])).toBe('执行结束，结果未确认')
@@ -775,7 +853,7 @@ describe('useRunsPage timeline final reads', () => {
     expect(page.commandEvents.value[0]?.id).toBe('final-command')
     expect(page.stdoutContent.value).toBe('final output')
     expect(page.workTimeline.value[0]?.results[0]?.artifactId).toBe('accepted-report')
-    expect(page.workTimeline.value[0]?.status).toBe('未完成 · 已有部分产出')
+    expect(page.workTimeline.value[0]?.status).toBe('failed')
   })
 
   it('工具刷新失败保留同身份旧内容，切项目隔离迟到响应', async () => {

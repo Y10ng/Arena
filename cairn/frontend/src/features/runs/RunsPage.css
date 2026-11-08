@@ -9,8 +9,25 @@
   min-width: 0;
   padding: var(--layout-content-padding);
   gap: var(--space-3);
-  overflow: auto;
+  overflow: hidden;
   background: var(--bg-surface);
+}
+
+.runs-toolbar {
+  flex-shrink: 0;
+}
+
+.runs-toolbar :deep(.filter-bar__fields) {
+  flex: 1;
+  min-width: 0;
+}
+
+.runs-search {
+  width: min(420px, 100%);
+}
+
+.runs-toolbar :deep(.ui-select__trigger) {
+  width: 190px;
 }
 
 @container workspace (max-width: 760px) {

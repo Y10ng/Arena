@@ -3559,3 +3559,71 @@ UI文件中旧轮astra要求不覆盖本轮模型，不修改平台业务模型�
 部署前的实际数据库检查确认没有 active 项目，也没有 queued／running TaskRun；现有项目均为 completed／stopped，Docker 快照没有项目研究容器。维护窗口内使用项目既有停止／启动脚本完整重载宿主 Server 与 Dispatcher，新进程通过 HTTP ready、ownership、heartbeat 和启动日志检查。PostgreSQL、既有会话容器、v0.2.3 Worker 应用层及固定 gateway 均未重建或替换，重载后仍无项目执行被触发。
 
 这次加载只证明修复代码已由本机宿主进程加载，不证明另一实例的 collector heartbeat stalled 已根治，也不构成 `proj_005/proj_072` 的真实业务验收。没有暂停、恢复、重跑或修改任何真实项目及历史 Run；后续仍需在独立授权和真实故障证据下验证底层采集停滞、有限重试的实际表现与旧项目处置。
+
+## 28. proj_010 大文件采集停滞：事件循环饿死机制与 collector 侧修复
+
+**状态：2026-11-08 分析完成；实施会话已完成 collector 侧修复（见 28.6），真实环境验证待办。**本节按「分析、设计与实施交接」模式工作：本轮为只读分析会话，业务改动由独立实施会话按 28.4 的实施提示词执行。
+
+### 28.1 证据来源与用户目标
+
+另一部署实例运行 `proj_010` 时，任务下发后连续三轮 cancelled／failed 后项目终态 blocked（`execution_retry_exhausted`）。用户最初怀疑「抓包包过大导致取消后不断重试」。本轮证据：用户提供的 `/root/桌面/error/proj_010 运行报错原始日志整理.md` 与 `proj_010 大文件单引用校验.md`（两文件覆盖同一事故；后者含更长 JSON 原文，`proj_010 最终日志.md` 与整理版内容相同）。分析未连接该实例、未读取受保护 hook／collector 日志、未操作容器或重跑项目。
+
+### 28.2 已确认的失败链（对「包过大」假设的精确化）
+
+用户怀疑的方向正确，但被拒的不是抓包本身，采集端也没有「包过大」的拒绝逻辑。实际机制：
+
+1. **每 chunk 同步落盘阻塞 collector 事件循环。**`container/traffic-gateway/capture.py:132–139` 的 stream 回调对每个响应 chunk 执行 write+flush+fsync，随后 `save(record)`（`:60–73`）把整条 flow 记录 JSON 重序列化、fsync、rename 并对目录 fsync——全部同步执行在 mitmproxy 的事件循环内。大响应体（如批量拉取 JS bundle）意味着每条 flow 数百上千次该流程；HeadlessChrome 并发加载又使多条 flow 同时处于 stream 状态。
+2. **heartbeat 与采集回调同循环。**`capture.py:47–57` 的 heartbeat 协程每 0.25s 写一次 heartbeat 文件，与 stream 回调共享同一 asyncio 事件循环。事件循环被连续同步 I/O 占满时 heartbeat 停跳。
+3. **宿主看门狗按 heartbeat 年龄取消。**`dispatcher/runtime/traffic.py:524–542` 要求 heartbeat 年龄 ≤ `HEALTH_SECONDS = 3`（`:29`）；`traffic_execution.py:282–295` 每 0.5s 轮询 `check_scope`，失败即 `cancellation.cancel("traffic_capture_stalled")`，进程组 SIGTERM/SIGKILL（exit 130）。tr001（63.9s）与 tr002（112.2s）均止于此。
+4. **重试预算耗尽是 v0.2.4 设计行为。**tr001→tr002→tr003 三次尝试把第 27 节实施的有界预算（默认上限 2 次重试、5/10s 退避）用尽，项目转 blocked／`execution_retry_exhausted`。这不是新 bug：无界重启循环已被正确终止。
+5. **tr003 是独立故障。**模型请求挂起 309s 后 `stopReason=error/terminated`，工具参数截断，该轮 0 条 http_flow——模型网关（ai-gateway-inside.haplat.net）侧问题，与采集无关，不得并入采集停滞归因。
+
+流量侧佐证：tr001 的 `bbfc6c02` flow 229376 字节 partial、finished_at=null；tr002 的 `a5e3b17e` partial 且 6 条 `traffic_side_absent`——均发生在批量大文件下载／浏览器并发加载时刻，与 stream 回调阻塞的时机一致。
+
+### 28.3 证据强度与仍缺的现场诊断
+
+「每 chunk fsync+全量 save 阻塞事件循环 → heartbeat >3s → traffic_capture_stalled」在静态代码上完整成立，停滞时机与批量下载吻合，且第 27.2 节当时已记录同一怀疑。但 proj_010 实例的受保护 hook／collector 日志（hook_log a008/a024/a027）未读取，仍缺 collector 现场诊断（heartbeat 实际停跳间隔、事件循环占用、spool 写延迟）。本轮结论按「机制有代码与流量证据支持、现场数值待保留」表述，不写成已 100% 复现；实施后的真实项目验收必须保留这些原始诊断。
+
+### 28.4 本轮专用实施提示词
+
+> 以下提示词供独立实施会话直接使用。实施会话请先阅读 CLAUDE.md、AGENT.md 与本方案第 27–28 节。
+
+**任务：修复 traffic-gateway collector 的事件循环饿死，使大响应体／并发下载不再触发 `traffic_capture_stalled`，同时不削弱看门狗与采集归属。**
+
+背景：`container/traffic-gateway/capture.py` 的 heartbeat 协程与采集回调共用 mitmproxy 事件循环；stream 回调（`capture.py:132–139`）每 chunk 执行 fsync 并调用 `save()`（`:60–73`）做整记录重序列化+fsync+rename+目录 fsync。大文件下载时事件循环被同步 I/O 占满超过 `HEALTH_SECONDS = 3`（`cairn/src/cairn/dispatcher/runtime/traffic.py:29,524–542`），宿主按 heartbeat 停跳取消执行。事故证据见本方案第 28.1–28.2 节。
+
+修复方向（组合使用，以最小改动为准）：
+
+1. **heartbeat 反映采集进展而非空转。**heartbeat 不应是独立 `asyncio.sleep(0.25)` 循环——事件循环被饿死时它必然停跳，而这恰是看门狗要抓的进程级死亡；采集 I/O 慢不该触发同一信号。推荐：heartbeat 时间戳在每次成功写 spool 时同步推进（或改为由 chunk 处理本身刷新），使「heartbeat 过期」只表示 collector 进程死亡或彻底卡死；同时在 chunk 路径嵌入轻量进展标记，供诊断区分「进程卡死」与「I/O 慢」。若保留独立协程，必须把它移出与采集 I/O 竞争的执行路径（如独立线程写 heartbeat），并在诊断中记录两种来源。
+2. **把每 chunk 的阻塞成本移出事件循环。**chunk 落盘（write+flush+fsync）与记录保存（重序列化+fsync+rename+目录 fsync）至少降其一：body 追加可改为无每 chunk fsync 的缓冲写+阶段化 fsync（如每 N 字节或 body 结束时），记录保存改为定期 checkpoint 或把 `save` 移入线程池执行。任何调整不得破坏既有约束：`durable_hook` 的 OSError→`os._exit(74)` 语义保留；body 封存（`body_sealed`/`body_revision`）与上传重试的既有身份协议不变（见 `traffic_sync.py` 消费的记录字段）；partial flow 仍须在 stop_scope 时可封存。
+3. **裕度核对，不简单放宽。**`HEALTH_SECONDS=3`、heartbeat 0.25s、watch 0.5s 的组合在修复后重新核对：heartbeat 刷新来源改变后，确认取值仍能在真实进程死亡时 3 秒内取消，且正常大文件采集不再误报。不删除 watchdog、不把 stalled 改报成功、不静默降级为无采集执行。
+4. **保留诊断。**取消时必须保留具体 `cancel_reason=traffic_capture_stalled` 与既有重试预算行为（第 27 节成果，不重置、不回填）；新增的进展/延迟标记写入 spool 诊断文件，供下次现场取证读取 heartbeat 停跳间隔与 chunk 写延迟分布。
+5. **范围限定。**不改 `traffic_sync.py` 上传协议、不改 `task-executor` 的 traffic-ready 看门狗、不改 Server 端 `assessment_attempts.py` 预算逻辑、不处理 tr003 的模型网关 provider_error（该问题独立立项，本轮只在其现象确认上引用第 28.2 节第 5 点）；不动 UI；不改 DNS／hosts 等环境噪声问题。
+
+验证（合成、非敏感，不发真实目标请求）：
+
+- 构造大响应体（≥50MB 单文件）与并发多资源场景的本地采集测试：采集全程 heartbeat 不停跳、执行不被取消、flow 记录与 body 封存结果与修复前协议一致；对照验证：直接 kill collector 进程时看门狗仍在 3 秒级取消执行。
+- 既有 capture／traffic_sync 消费字段的定向测试不回归；`test_traffic_capture_retry.py` 既有 9 例通过。
+- 交付报告明确区分「代码已实现」与「真实环境已验证」；真实 proj_010 的恢复处置（resume 可用，但同模式大文件任务会复现，须先加载修复）留给用户决定，不在本轮实施范围。
+
+禁止：凭据／令牌／私有租户数据进入代码、日志、测试或交付物；未经批准 commit／push；覆盖工作区既有未提交改动（当前 `feat/workspace-input-copies` 分支有无关的 RunsPage 前端改动，不得触碰）。
+
+### 28.5 本分析轮声明
+
+本轮只读：未修改业务代码、未运行测试、未启停服务、未操作项目或容器。设计文档更新（本节）是本轮唯一写入。第 28.2 节的机制表述以当前源码（`capture.py`、`traffic.py`、`traffic_execution.py`、`assessment_attempts.py`）与 proj_010 日志为依据；第 28.3 节明确了仍缺的现场诊断；第 28.4 节的实施提示词把决策锚点（heartbeat 语义、每 chunk 成本、裕度核对、协议不变式）交实施会话以最小改动落地。
+
+### 28.6 实际实施记录（2026-11-08 实施会话）
+
+实施会话按 28.4 提示词执行，改动仅 `container/traffic-gateway/capture.py`（+82/−18）；宿主侧 `traffic.py`／`traffic_execution.py`、`traffic_sync.py`、task-executor、Server 预算逻辑均未改动。
+
+**heartbeat 语义（28.4-1 的落地取舍）。**最终采用 28.4-1 的备选分支：heartbeat 由独立 OS 线程（`cairn-heartbeat`，daemon）每 0.25s 写入，不再挂在 mitmproxy 事件循环上。原因：若 heartbeat 只由 `save()` 推进，「模型思考／长命令等无 HTTP 流量」超过 3s 的空闲执行会被误判为 collector 死亡——这比原缺陷更严重。独立线程同时满足两个失效语义：事件循环被大文件 I/O 占满不再停跳（线程不受 GIL 内 I/O 阻塞影响）；进程死亡或彻底卡死时线程随之消失，heartbeat 过期仍收敛为看门狗 3 秒级取消。线程内 spool 写失败保留 OSError→`os._exit(74)` 语义。诊断文件 `/capture/capture-diagnostics.json` 记录两种来源：`written_at`（诊断写入时刻）、`last_save_at`（最后一次记录成功落盘）、`slow_writes` 与 `last_write_milliseconds`（chunk 写延迟）——heartbeat 过期 + `last_save_at` 停滞表示进程卡死；heartbeat 正常 + 慢写计数高表示 I/O 慢。
+
+**每 chunk 成本（28.4-2）。**stream 回调改为纯缓冲写+延迟计数；每累计 `BODY_FSYNC_THRESHOLD = 1MB` 执行一次 body flush+fsync 并重存记录（阶段化 checkpoint），flow 侧结束时（`end_body`）照旧 flush+fsync+封存。持久化不变式保持：持久化的 `flow.json` 的 `body_bytes` 永不大于已 fsync 的 body 文件字节数（`save()` 只在 checkpoint／flow 边界的 fsync 之后运行），因此 `traffic_sync` 上传与宿主 `_seal_interrupted` 的读取安全性与修复前一致。`body_sealed`/`body_revision` 封存身份、`durable_hook` 退出语义、partial flow 封存路径均未改动。
+
+**裕度核对（28.4-3）。**`HEALTH_SECONDS=3`、heartbeat 0.25s、watch 0.5s 取值全部未动：真实进程死亡 → 线程消失 → heartbeat 年龄超过 3s → `check_scope` 拒绝 → 0.5s 轮询取消，时序与修复前相同；大文件采集（每 chunk 仅缓冲写）不再阻塞任何心跳来源；空闲执行由线程心跳覆盖。看门狗未被删除，stalled 仍如实上报为取消。
+
+**已实现并验证（合成环境）。**① 合成 harness 8 例通过（宿主 venv，mitmproxy 12.3.0，不访问网络）：64MB 单 flow 流式封存协议一致；6×76.8MB 并发交错封存一致；空闲 1s heartbeat 持续推进；线程停止后 heartbeat 冻结（等价进程死亡前提）；主线程 CPU 占满 1s heartbeat 仍推进（模拟事件循环饿死）；慢写诊断落盘；partial flow 封存协议一致；`running()` 写 ready+heartbeat+diagnostics。② 真实构建镜像（Dockerfile 原样打包新 capture.py）内跑 64MB 流式：`state=complete`、67108864 字节、`body_sealed=true`、`body_revision==revision`、空闲 heartbeat 推进、诊断文件内容正确。③ `test_traffic_capture_retry.py` 既有 9 例通过。
+
+**未验证（待真实环境）。**未在真实部署实例跑过大文件任务：proj_010 同模式的批量 JS bundle 下载 + HeadlessChrome 并发加载场景、kill collector 进程的宿主端 3 秒级取消对照、上传链路（`traffic_sync` 对新 checkpoint 记录的增量上传）端到端行为，均属「代码已实现、真实环境未验证」。合成层已覆盖上传协议的关键不变式（持久化 `body_bytes` ≤ fsynced 文件大小、封存字段协议），但完整链路验收需加载修复后的镜像执行真实项目。proj_010 的恢复处置（resume 可用；同模式大文件任务在修复加载前会复现）留给用户决定。
+
+**测试环境说明。**`tests/test_traffic_sync_handoff.py` 的 `test_scope_failure_survives_normal_close_and_bridge_restart`（`_control_lock` AttributeError）与 `test_traffic_sync.py::test_synthetic_scope_upload_costs`（PostgreSQL fixture `library_selections Field required`）失败均为修复前已存在、与本改动无关（宿主 Python 代码零改动，已用 git 核对）。

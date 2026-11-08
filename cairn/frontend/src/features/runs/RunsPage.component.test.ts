@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import RunsPage from './RunsPage.vue'
 import type { TaskRun, TaskRunCommandEvent } from './runTypes'
-import { buildWorkTimeline } from './runTimelineModel'
+import { buildWorkTimeline, type ToolCall } from './runTimelineModel'
 import type { Fact } from '@/api/types'
 
 const mocks = vi.hoisted(() => ({
@@ -24,12 +24,14 @@ vi.mock('./useRunsPage', () => ({
 }))
 
 const detailTabs = [
-  { label: '运行日志', value: 'terminal' },
-  { label: '命令审计', value: 'commands' },
-  { label: '关联资产', value: 'artifacts' },
+  { label: '输出', value: 'terminal' },
+  { label: '工具', value: 'tools' },
+  { label: '命令', value: 'commands' },
+  { label: '文件', value: 'artifacts' },
 ]
 
 function createRunsPageState() {
+  const activeWorkView = ref('execution')
   const activeDetailTab = ref('terminal')
   const selectedRun = ref({
     id: 'run-a',
@@ -51,29 +53,31 @@ function createRunsPageState() {
       started_at: '2026-08-20T10:00:00.000Z',
     } as TaskRun,
   ])
+  const acceptedResult = ref('未发现跨角色会话复用，证据已接受')
   const workTimeline = computed(() =>
     buildWorkTimeline(
       filteredRuns.value,
       [],
-      [{ id: 'f', task_run_id: 'run-a', description: '未发现跨角色会话复用，证据已接受' } as Fact],
+      [{ id: 'f', task_run_id: 'run-a', description: acceptedResult.value } as Fact],
       new Set(filteredRuns.value.map((run) => run.id)),
     ),
   )
-  const expandedTools = ref(new Set<string>())
+  const selectedWork = computed(
+    () =>
+      workTimeline.value.find((work) =>
+        work.runs.some((run) => run.id === selectedRun.value?.id),
+      ) || null,
+  )
   return {
+    activeWorkView,
     workTimeline,
+    selectedWork,
+    selectWork: vi.fn(),
     workTitle: vi.fn(() => '验证管理端会话隔离'),
-    workActivity: vi.fn(() => []),
-    toolCalls: vi.fn(() => []),
+    toolCalls: vi.fn(() => [] as ToolCall[]),
     hookReads: ref({}),
     hookReadError: vi.fn(() => ''),
     hookObservationIncomplete: vi.fn(() => false),
-    expandedTools,
-    toggleTools: vi.fn((work) => {
-      expandedTools.value.has(work.key)
-        ? expandedTools.value.delete(work.key)
-        : expandedTools.value.add(work.key)
-    }),
     refetchHooks: vi.fn(),
     refreshTimeline: vi.fn(),
     reportsLoaded: ref(false),
@@ -122,6 +126,7 @@ function createRunsPageState() {
     runsInitialError: ref(false),
     runsStaleError: ref(false),
     searchQuery: ref(''),
+    acceptedResult,
     selectedRun,
     selectedRunId: ref('run-a'),
     selectRun: vi.fn(),
@@ -217,13 +222,13 @@ describe('RunsPage details', () => {
     expect(notice.get('button').text()).toBe('打开项目 Agent')
     await notice.get('button').trigger('click')
     expect(state.openProjectAgent).toHaveBeenCalledOnce()
-    expect(wrapper.find('.run-details-panel').exists()).toBe(false)
-    expect(wrapper.findAll('.work-detail')).toHaveLength(1)
+    expect(wrapper.get('.run-details-empty').text()).toContain('选择一项工作')
+    expect(wrapper.findAll('.work-select')).toHaveLength(1)
     expect(mocks.useQuery.mock.calls[0]![0].enabled.value).toBe(false)
     wrapper.unmount()
   })
 
-  it('queries a terminal run beyond the first 100 traffic scopes and polls until synchronization and stopping are confirmed', async () => {
+  it('queries and polls run traffic, hiding only a healthy completed synchronization', async () => {
     const scopes = Array.from({ length: 101 }, (_, index) => ({
       id: `scope-${String(index).padStart(3, '0')}`,
       task_run_id: index === 100 ? 'run-a' : `other-run-${index}`,
@@ -250,7 +255,8 @@ describe('RunsPage details', () => {
       }
     })
     const data = ref<{ items: typeof scopes }>()
-    mocks.useQuery.mockReturnValue({ data, isError: ref(false) })
+    const isError = ref(false)
+    mocks.useQuery.mockReturnValue({ data, isError })
     const wrapper = mount(RunsPage)
     const options = mocks.useQuery.mock.calls[0]![0]
     const signal = new AbortController().signal
@@ -275,8 +281,17 @@ describe('RunsPage details', () => {
     expect(options.refetchInterval(query)).toBe(3000)
     status.upload_complete = true
     await flushPromises()
-    expect(wrapper.get('[aria-label="本次运行流量状态"]').text()).toBe('同步完成')
+    expect(wrapper.find('[aria-label="本次运行流量状态"]').exists()).toBe(false)
+    expect(wrapper.find('.run-context-statuses').exists()).toBe(false)
     expect(options.refetchInterval(query)).toBe(false)
+    isError.value = true
+    await flushPromises()
+    expect(wrapper.get('[aria-label="本次运行流量状态"]').text()).toBe(
+      '同步完成 · 状态刷新失败，显示上次观测重试',
+    )
+    expect(wrapper.get('[aria-label="本次运行流量状态"]').classes()).toContain(
+      'run-inline-state',
+    )
     for (const key of ['control_stopped', 'test_stopped', 'collector_stopped'] as const) {
       status[key] = false
       expect(options.refetchInterval(query)).toBe(3000)
@@ -292,6 +307,8 @@ describe('RunsPage details', () => {
     mocks.useQuery.mockReturnValue({ data, isError, refetch })
     const wrapper = mount(RunsPage)
     const alert = wrapper.get('[aria-label="本次运行流量状态"]')
+    expect(alert.classes()).toContain('run-inline-state')
+    expect(alert.classes()).not.toContain('ui-alert')
     expect(alert.text()).toContain('流量状态查询失败，当前状态未知')
     expect(alert.text()).not.toContain('显示上次观测')
     await alert.get('button').trigger('click')
@@ -307,7 +324,7 @@ describe('RunsPage details', () => {
     wrapper.unmount()
   })
 
-  it('opens linked records in the reader and preserves filters, log position and focus when returning to the index', async () => {
+  it('keeps the work index and reader visible while result sources and detail tabs stay in place', async () => {
     const state = createRunsPageState()
     state.autoScrollTerminal.value = false
     mocks.useRunsPage.mockReturnValue(state)
@@ -315,23 +332,25 @@ describe('RunsPage details', () => {
     await flushPromises()
     const terminal = wrapper.get('.terminal-screen').element
     terminal.scrollTop = 120
-    expect(wrapper.get('.runs-index').isVisible()).toBe(false)
-    expect(wrapper.get('.run-details-panel').isVisible()).toBe(true)
-
-    await wrapper.get('.run-back').trigger('click')
-    await flushPromises()
     expect(wrapper.get('.runs-index').isVisible()).toBe(true)
-    expect(wrapper.get('.run-details-panel').isVisible()).toBe(false)
-    expect(document.activeElement).toBe(wrapper.get('.work-detail').element)
-    await wrapper.get('input[aria-label="搜索运行元数据"]').setValue('metadata query')
-    await wrapper.get('.work-detail').trigger('click')
+    expect(wrapper.get('.run-details-panel').isVisible()).toBe(true)
+    expect(wrapper.find('.run-back').exists()).toBe(false)
+
+    await wrapper.get('input[aria-label="搜索工作元数据或结果"]').setValue('metadata query')
+    await wrapper.get('.work-select').trigger('click')
+    expect(state.selectWork).toHaveBeenCalledWith(expect.objectContaining({ key: 'run:run-a' }))
+    expect(state.searchQuery.value).toBe('metadata query')
+
+    selectTab('结果')
     await flushPromises()
+    expect(wrapper.get('.results-view').isVisible()).toBe(true)
+    expect(wrapper.get('.execution-view').isVisible()).toBe(false)
+    await wrapper.get('.work-result-source button').trigger('click')
     expect(state.selectRun).toHaveBeenCalledWith('run-a')
-    expect(document.activeElement).toBe(wrapper.get('.detail-header h2').element)
+    selectTab('执行记录')
+    await flushPromises()
     expect(wrapper.get('.terminal-screen').element).toBe(terminal)
     expect(terminal.scrollTop).toBe(120)
-    expect(state.autoScrollTerminal.value).toBe(false)
-    expect(state.searchQuery.value).toBe('metadata query')
     expect(wrapper.find('.runs-detail-tabs .ui-tabs__actions a[download]').exists()).toBe(true)
 
     state.activeDetailTab.value = 'commands'
@@ -342,35 +361,16 @@ describe('RunsPage details', () => {
     await flushPromises()
     expect(wrapper.get('.terminal-screen').element).toBe(terminal)
     expect(terminal.scrollTop).toBe(120)
-
-    await wrapper.get('.run-back').trigger('click')
-    state.autoScrollTerminal.value = true
-    Object.defineProperty(terminal, 'scrollHeight', { configurable: true, value: 800 })
-    await wrapper.get('.work-detail').trigger('click')
-    await flushPromises()
-    expect(terminal.scrollTop).toBe(800)
-
-    await wrapper.get('.run-back').trigger('click')
-    state.selectedRunId.value = 'linked-run'
-    state.selectedRun.value = { ...state.selectedRun.value, id: 'linked-run' }
-    await flushPromises()
-    expect(wrapper.get('.run-details-panel').isVisible()).toBe(true)
-    expect(wrapper.get('.run-reader-id').text()).toContain('linked-run')
-
-    state.selectedRun.value = null as never
-    await flushPromises()
-    expect(wrapper.get('.runs-index').isVisible()).toBe(true)
+    expect(state.autoScrollTerminal.value).toBe(false)
     wrapper.unmount()
   })
 
-  it('相同轮询不报新进展，新增节点不抢滚动，详情返回保留展开与位置', async () => {
+  it('相同轮询不报新进展，新增节点不抢工作索引滚动', async () => {
     const state = createRunsPageState()
     mocks.useRunsPage.mockReturnValue(state)
     const wrapper = mount(RunsPage, { attachTo: document.body })
-    await wrapper.get('.run-back').trigger('click')
     const viewport = wrapper.get('.runs-timeline-scroll').element
     viewport.scrollTop = 120
-    await wrapper.get('.work-node button[aria-expanded]').trigger('click')
     state.filteredRuns.value = state.filteredRuns.value.map((run) => ({ ...run }))
     await flushPromises()
     expect(wrapper.text()).not.toContain('有新进展')
@@ -391,19 +391,19 @@ describe('RunsPage details', () => {
     expect(wrapper.text()).toContain('有新进展')
     // 90% 下新增节点移动 90 个视觉像素，滚动补偿应为 100 个布局像素。
     expect(viewport.scrollTop).toBe(220)
-    await original.get('.work-detail').trigger('click')
-    await wrapper.get('.run-back').trigger('click')
+    await original.get('.work-select').trigger('click')
+    expect(state.selectWork).toHaveBeenCalledWith(expect.objectContaining({ key: 'run:run-a' }))
     expect(viewport.scrollTop).toBe(220)
-    expect(original.get('button[aria-expanded]').attributes('aria-expanded')).toBe('true')
-    expect(document.activeElement).toBe(original.get('.work-detail').element)
+    expect(wrapper.get('.run-details-panel').isVisible()).toBe(true)
     wrapper.unmount()
   })
 
-  it('keeps long results and errors intact in separate on-demand disclosure', async () => {
+  it('keeps complete accepted results and uses a persistent disclosure for full run errors', async () => {
     const state = createRunsPageState()
     const result = '完整业务结果\n'.repeat(100)
     const diagnostic = 'provider_error 原始诊断\n'.repeat(100)
-    state.runResultText.mockReturnValue(result)
+    state.acceptedResult.value = result
+    state.activeWorkView.value = 'results'
     state.selectedRun.value = {
       ...state.selectedRun.value,
       status: 'failed',
@@ -413,55 +413,222 @@ describe('RunsPage details', () => {
     mocks.useRunsPage.mockReturnValue(state)
     const wrapper = mount(RunsPage, { attachTo: document.body })
     await flushPromises()
-    expect(wrapper.get('.run-business-summary details').attributes('open')).toBeUndefined()
-    expect(wrapper.get('.error-banner').attributes('open')).toBeUndefined()
-    expect(wrapper.get('.run-result-content').element.textContent).toBe(result)
+
+    expect(wrapper.find('.work-results details').exists()).toBe(false)
+    expect(wrapper.get('.work-result-content').element.textContent).toBe(result)
+    expect(wrapper.find('.error-banner').exists()).toBe(false)
+    const disclosure = wrapper.get<HTMLDetailsElement>('.run-error-disclosure')
+    expect(disclosure.element.open).toBe(false)
+    expect(disclosure.get('summary').text()).toBe('运行错误 · provider_error')
+
+    state.activeWorkView.value = 'execution'
+    await flushPromises()
+    await disclosure.get('summary').trigger('click')
+    expect(disclosure.element.open).toBe(true)
+    expect(wrapper.get('.error-msg').isVisible()).toBe(true)
     expect(wrapper.get('.error-msg').element.textContent).toBe(diagnostic)
-    expect(wrapper.get('.error-banner summary').text()).toContain('provider_error')
+
+    state.selectedRun.value = {
+      ...state.selectedRun.value,
+      error_type: null,
+    } as never
+    await flushPromises()
+    expect(wrapper.get('.run-error-disclosure').element).toBe(disclosure.element)
+    expect(disclosure.element.open).toBe(true)
+    expect(disclosure.get('summary').text()).toBe('运行错误 · 未知类型')
+    expect(wrapper.get('.error-msg').element.textContent).toBe(diagnostic)
+    expect(wrapper.find('.run-business-summary').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('以连续工作节点展示接受结果和来源，工具过程可按需展开', async () => {
+  it('左栏只选择工作，右栏汇集接受结果并提供两级稳定页签', async () => {
     const state = createRunsPageState()
+    const fullTitle = '验证管理端会话隔离，并核对跨角色访问边界与较长工作描述'
+    state.workTitle.mockReturnValue(fullTitle)
     mocks.useRunsPage.mockReturnValue(state)
     const wrapper = mount(RunsPage, { attachTo: document.body })
     await flushPromises()
 
     const node = wrapper.get('.work-node')
-    expect(node.get('.work-heading').text()).toContain('验证管理端会话隔离')
-    expect(node.get('.work-results').text()).toContain('证据已接受')
-    expect(node.get('.work-result-source button').attributes('title')).toBe('run-a')
-    expect(node.find('.row-diagnostic').exists()).toBe(false)
-    const tools = node.get('button[aria-expanded]')
-    expect(tools.attributes('aria-expanded')).toBe('false')
-    await tools.trigger('click')
-    expect(tools.attributes('aria-expanded')).toBe('true')
-    expect(node.find('.work-tools').exists()).toBe(true)
-    expect(wrapper.get('.run-business-summary').text()).toContain(
-      '未发现跨角色会话复用，证据已接受',
-    )
+    expect(node.get('.work-title').text()).toBe(fullTitle)
+    expect(node.get('.work-title').attributes('title')).toBe(fullTitle)
+    expect(wrapper.get('.reader-heading h2').text()).toBe(fullTitle)
+    expect(node.findAll('.work-select > *')).toHaveLength(2)
+    expect(node.findAll('.work-meta > *')).toHaveLength(2)
+    expect(node.get('.work-status').text()).toBe('成功')
+    expect(node.get('.work-meta time').text()).toBe('刚刚')
+    expect(node.find('.work-results').exists()).toBe(false)
+    expect(node.find('.work-tools').exists()).toBe(false)
+    expect(node.find('details').exists()).toBe(false)
+    for (const label of ['证据已接受', '已有结果', '结果未确认', '已有部分产出']) {
+      expect(node.text()).not.toContain(label)
+    }
+    expect(wrapper.get('.work-result-content').element.textContent).toBe(state.acceptedResult.value)
+    expect(wrapper.get('.work-result-source button').attributes('title')).toBe('run-a')
     expect(
       [...document.body.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent?.trim()),
-    ).toEqual(['运行日志', '命令审计', '关联资产'])
+    ).toEqual(['结果', '执行记录', '输出', '工具', '命令', '文件'])
     wrapper.unmount()
   })
 
-  it('shows a linked Intent outcome once in detail without copying it onto the run card', async () => {
+  it('lists every real run without inventing retry links or overwriting an old failure', async () => {
+    const state = createRunsPageState()
+    const current = {
+      ...state.filteredRuns.value[0]!,
+      intent_id: 'shared-intent',
+      status: 'succeeded',
+    }
+    const failed = {
+      ...state.filteredRuns.value[0]!,
+      id: 'run-old',
+      intent_id: 'shared-intent',
+      status: 'failed',
+      started_at: '2026-08-19T10:00:00.000Z',
+      error_type: 'provider_error',
+      error_message: '旧 Run 的原始失败',
+    }
+    state.filteredRuns.value = [current, failed]
+    mocks.useRunsPage.mockReturnValue(state)
+    const wrapper = mount(RunsPage, { attachTo: document.body })
+    await flushPromises()
+
+    const selects = wrapper.findAllComponents({ name: 'UiSelect' })
+    const options = selects[1]!.props('options') as Array<{ value: string; label: string }>
+    expect(options.map((option) => option.value)).toEqual(['run-a', 'run-old'])
+    expect(options[0]!.label).toContain('succeeded')
+    expect(options[0]!.label).toContain('1分30秒')
+    expect(options[1]!.label).toContain('failed')
+    expect(wrapper.text()).not.toContain('自动重试')
+    expect(wrapper.text()).not.toContain('恢复链')
+
+    state.selectedRunId.value = 'run-old'
+    state.selectedRun.value = failed as never
+    await flushPromises()
+    expect(wrapper.get('.run-selector').attributes('aria-label')).toBe('选择执行记录')
+    const disclosure = wrapper.get<HTMLDetailsElement>('.run-error-disclosure')
+    expect(disclosure.element.open).toBe(false)
+    await disclosure.get('summary').trigger('click')
+    expect(disclosure.element.open).toBe(true)
+    expect(wrapper.get('.error-msg').element.textContent).toBe('旧 Run 的原始失败')
+    expect(wrapper.text()).not.toContain('旧 Run 已恢复')
+    wrapper.unmount()
+  })
+
+  it('expands authoritative tool fields and complete input and response bodies', async () => {
+    const state = createRunsPageState()
+    const command = `printf '${'完整命令'.repeat(100)}'`
+    const input = { file_path: '/tmp/input', content: '输入正文'.repeat(100) }
+    const response = { output: '响应正文'.repeat(100) }
+    state.toolCalls.mockReturnValue([
+      {
+        key: 'call-a',
+        runId: 'run-a',
+        name: 'Bash',
+        startedAt: '2026-08-20T10:00:00.000Z',
+        endedAt: '2026-08-20T10:00:02.000Z',
+        status: '已完成',
+        active: false,
+        durationMs: 2000,
+        phase: 'execute',
+        sessionId: 'session-a',
+        operationId: 'operation-a',
+        artifactId: 'artifact-a',
+        command,
+        filePath: '/tmp/input',
+        query: '完整查询',
+        url: 'https://example.invalid/path',
+        summary: '工具摘要',
+        exitCode: 0,
+        toolInput: input,
+        toolResponse: response,
+      },
+    ])
+    state.hookReads.value = {
+      'run-a': { events: [], loaded: true, loading: false, failure: null, readAgain: false },
+    } as never
+    mocks.useRunsPage.mockReturnValue(state)
+    const wrapper = mount(RunsPage, { attachTo: document.body })
+    selectTab('工具')
+    await flushPromises()
+    await wrapper.get('.tool-call summary').trigger('click')
+
+    expect(wrapper.get('.tool-call-fields').text()).toContain(command)
+    expect(wrapper.get('.tool-call-fields').text()).toContain('/tmp/input')
+    expect(wrapper.get('.tool-call-fields').text()).toContain('完整查询')
+    expect(wrapper.get('.tool-call-fields').text()).toContain('https://example.invalid/path')
+    expect(wrapper.get('.tool-call-fields').text()).toContain('退出码')
+    const bodies = wrapper.findAll('.tool-body')
+    expect(bodies).toHaveLength(2)
+    expect(bodies[0]!.text()).toContain(JSON.stringify(input, null, 2))
+    expect(bodies[1]!.text()).toContain(JSON.stringify(response, null, 2))
+    expect(wrapper.find('.tool-body-missing').exists()).toBe(false)
+    await wrapper.get('.tool-call-detail button').trigger('click')
+    expect(state.previewArtifact).toHaveBeenCalledWith('artifact-a')
+    wrapper.unmount()
+  })
+
+  it('states the pi body limitation instead of rendering empty objects', async () => {
+    const state = createRunsPageState()
+    state.toolCalls.mockReturnValue([
+      {
+        key: 'pi-call',
+        runId: 'run-a',
+        name: 'read',
+        startedAt: null,
+        endedAt: '2026-08-20T10:00:02.000Z',
+        status: '已完成',
+        active: false,
+        durationMs: null,
+        phase: 'execute',
+        sessionId: 'session-a',
+        operationId: 'pi-operation',
+        artifactId: null,
+        command: null,
+        filePath: null,
+        query: null,
+        url: null,
+        summary: null,
+        exitCode: null,
+        toolInput: null,
+        toolResponse: null,
+      },
+    ])
+    state.hookReads.value = {
+      'run-a': { events: [], loaded: true, loading: false, failure: null, readAgain: false },
+    } as never
+    mocks.useRunsPage.mockReturnValue(state)
+    const wrapper = mount(RunsPage, { attachTo: document.body })
+    selectTab('工具')
+    await flushPromises()
+    await wrapper.get('.tool-call summary').trigger('click')
+
+    expect(wrapper.get('.tool-body-missing').text()).toBe('该来源未记录工具输入／响应正文')
+    expect(wrapper.findAll('.tool-body')).toHaveLength(0)
+    expect(wrapper.get('.tool-call-detail').text()).not.toContain('{}')
+    expect(wrapper.get('.tool-time').text()).toBe('12:00:00')
+    wrapper.unmount()
+  })
+
+  it('shows a linked Intent outcome once in the reader without copying it onto the work row', async () => {
     const state = createRunsPageState()
     state.linkedIntentOutcomeText.mockReturnValue('结果未接受：证据不足')
     mocks.useRunsPage.mockReturnValue(state)
     const wrapper = mount(RunsPage, { attachTo: document.body })
     await flushPromises()
 
-    expect(wrapper.get('.work-attempts').text()).toContain('成功')
+    expect(wrapper.get('.work-node').text()).not.toContain('结果未接受：证据不足')
     expect(wrapper.find('.row-diagnostic').exists()).toBe(false)
-    expect(wrapper.get('.intent-outcome-banner').text()).toContain('关联 Intent 最终结论')
-    expect(wrapper.get('.intent-outcome-banner').text()).toContain('结果未接受：证据不足')
+    const outcome = wrapper.get('[aria-label="工作结论"]')
+    expect(outcome.text()).toBe('结果未接受：证据不足')
+    expect(outcome.text()).not.toContain('工作结论')
+    expect(outcome.classes()).toContain('intent-outcome-state')
+    expect(outcome.classes()).not.toContain('ui-alert')
+    expect(outcome.find('svg').exists()).toBe(true)
     expect(wrapper.find('[aria-label="运行错误"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
-  it('keeps long diagnostics in a compact row with access to the unchanged detail original', async () => {
+  it('keeps long diagnostics out of the work index and intact in the selected run', async () => {
     const state = createRunsPageState()
     const diagnostic = '结果未知：等待确认\n' + '诊断原文 '.repeat(100)
     state.selectedRun.value = {
@@ -471,16 +638,16 @@ describe('RunsPage details', () => {
       error_message: diagnostic,
     } as never
     state.filteredRuns.value[0]!.status = 'failed'
-    state.runCardDiagnostic.mockReturnValue(diagnostic)
     mocks.useRunsPage.mockReturnValue(state)
     const wrapper = mount(RunsPage, { attachTo: document.body })
     await flushPromises()
 
     expect(wrapper.get('.work-node').text()).not.toContain(diagnostic)
-    expect(wrapper.get('.work-attempts').text()).toContain('失败')
-    expect(wrapper.get('.work-status').text()).toContain('未完成')
-    await wrapper.get('.work-detail').trigger('click')
-    expect(state.selectRun).toHaveBeenCalledWith('run-a')
+    expect(wrapper.get('.work-status').text()).toBe('失败')
+    await wrapper.get('.work-select').trigger('click')
+    expect(state.selectWork).toHaveBeenCalledWith(expect.objectContaining({ key: 'run:run-a' }))
+    await wrapper.get('.run-error-summary').trigger('click')
+    expect(wrapper.get<HTMLDetailsElement>('.run-error-disclosure').element.open).toBe(true)
     expect(wrapper.get('.error-msg').element.textContent).toBe(diagnostic)
     wrapper.unmount()
   })
@@ -493,19 +660,20 @@ describe('RunsPage details', () => {
       error_type: 'provider_error',
       error_message: 'provider temporarily unavailable',
     } as never
-    state.runCardDiagnostic.mockReturnValue('provider temporarily unavailable')
     state.linkedIntentOutcomeText.mockReturnValue('结果未接受：provider_error')
     mocks.useRunsPage.mockReturnValue(state)
     const wrapper = mount(RunsPage, { attachTo: document.body })
     await flushPromises()
 
     expect(wrapper.get('.work-node').text()).not.toContain('provider temporarily unavailable')
-    expect(wrapper.get('[aria-label="运行错误"]').text()).toContain(
+    const disclosure = wrapper.get<HTMLDetailsElement>('[aria-label="运行错误"]')
+    await disclosure.get('summary').trigger('click')
+    expect(disclosure.element.open).toBe(true)
+    expect(disclosure.get('.error-msg').element.textContent).toBe(
       'provider temporarily unavailable',
     )
-    expect(wrapper.get('[aria-label="关联 Intent 最终结论"]').text()).toContain(
-      '结果未接受：provider_error',
-    )
+    expect(disclosure.text()).not.toContain('结果未接受：provider_error')
+    expect(wrapper.get('[aria-label="工作结论"]').text()).toBe('结果未接受：provider_error')
     wrapper.unmount()
   })
 
@@ -513,8 +681,9 @@ describe('RunsPage details', () => {
     const wrapper = mount(RunsPage, { attachTo: document.body })
     await flushPromises()
 
-    expect(document.body.querySelectorAll('[role="tab"]')).toHaveLength(3)
-    expect(tabByName('运行日志').getAttribute('aria-selected')).toBe('true')
+    expect(document.body.querySelectorAll('[role="tab"]')).toHaveLength(6)
+    expect(tabByName('执行记录').getAttribute('aria-selected')).toBe('true')
+    expect(tabByName('输出').getAttribute('aria-selected')).toBe('true')
     expect(document.body.textContent).toContain('completed output')
 
     const diagnosticButton = [...document.body.querySelectorAll<HTMLButtonElement>('button')].find(
@@ -525,7 +694,7 @@ describe('RunsPage details', () => {
     await flushPromises()
 
     expect(mocks.selectTerminalOutput).toHaveBeenCalledWith('output-b')
-    expect(tabByName('运行日志').getAttribute('aria-selected')).toBe('true')
+    expect(tabByName('输出').getAttribute('aria-selected')).toBe('true')
     wrapper.unmount()
   })
 
@@ -533,20 +702,20 @@ describe('RunsPage details', () => {
     const wrapper = mount(RunsPage, { attachTo: document.body })
     await flushPromises()
 
-    const terminalTab = tabByName('运行日志')
+    const terminalTab = tabByName('输出')
     terminalTab.focus()
     terminalTab.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
     await flushPromises()
 
-    expect(document.activeElement).toBe(tabByName('命令审计'))
-    expect(tabByName('运行日志').getAttribute('aria-selected')).toBe('true')
+    expect(document.activeElement).toBe(tabByName('工具'))
+    expect(tabByName('输出').getAttribute('aria-selected')).toBe('true')
 
     document.activeElement?.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
     )
     await flushPromises()
 
-    expect(tabByName('命令审计').getAttribute('aria-selected')).toBe('true')
+    expect(tabByName('工具').getAttribute('aria-selected')).toBe('true')
     wrapper.unmount()
   })
 
@@ -576,7 +745,7 @@ describe('RunsPage details', () => {
     const wrapper = mount(RunsPage, { attachTo: document.body })
     await flushPromises()
 
-    selectTab('命令审计')
+    selectTab('命令')
     await flushPromises()
     expect(document.body.textContent).toContain('explore_execute')
     expect(document.body.textContent).toContain('shell')
@@ -604,7 +773,7 @@ describe('RunsPage details', () => {
         badge.textContent?.includes(text),
       )
 
-    selectTab('命令审计')
+    selectTab('命令')
     await flushPromises()
     expect(badgeByText('failed')?.classList).toContain('ui-badge--danger')
     expect(badgeByText('timed_out')?.classList).toContain('ui-badge--warning')
@@ -641,14 +810,14 @@ describe('RunsPage details', () => {
     const wrapper = mount(RunsPage, { attachTo: document.body })
     await flushPromises()
 
-    const title = wrapper.get('.work-heading')
+    const title = wrapper.get('.reader-heading')
     const tabs = wrapper.get('.runs-detail-tabs').element
     state.isFetchingRuns.value = true
     await flushPromises()
 
     expect(title.find('[role="status"]').exists()).toBe(false)
-    expect(wrapper.find('.run-detail-state').exists()).toBe(false)
-    expect(tabs.previousElementSibling?.classList.contains('run-business-summary')).toBe(true)
+    expect(wrapper.find('[aria-label="本次运行流量状态"]').exists()).toBe(false)
+    expect(tabs.previousElementSibling?.classList.contains('run-context')).toBe(true)
     expect(wrapper.get('.terminal-content').text()).toContain('completed output')
 
     state.isLoadingRunDetails.value = true
@@ -656,8 +825,8 @@ describe('RunsPage details', () => {
     expect(wrapper.get('.run-detail-loading [role="status"]').attributes('aria-label')).toBe(
       '正在载入运行详情',
     )
-    expect(wrapper.find('.run-detail-state').exists()).toBe(false)
-    expect(tabs.previousElementSibling?.classList.contains('run-business-summary')).toBe(true)
+    expect(wrapper.find('[aria-label="本次运行流量状态"]').exists()).toBe(false)
+    expect(tabs.previousElementSibling?.classList.contains('run-context')).toBe(true)
     wrapper.unmount()
   })
 
@@ -721,7 +890,7 @@ describe('RunsPage details', () => {
     state.artifactsError.value = ''
     await flushPromises()
     expect(wrapper.text()).toContain('暂无 Shell 命令')
-    expect(wrapper.text()).toContain('本轮运行中没有写入')
+    expect(wrapper.text()).toContain('暂无文件')
     state.commandEvents.value = [commandEvent('retained-command', {})]
     state.commandsError.value = '读取命令审计失败：HTTP 503'
     await flushPromises()
@@ -785,7 +954,7 @@ describe('RunsPage details', () => {
     state.runsStaleError.value = true
     await flushPromises()
     expect(document.body.textContent).toContain('刷新失败，保留上次运行列表')
-    expect(wrapper.get('.work-node').text()).toContain('run-a')
+    expect(wrapper.get('.work-node').text()).toContain('验证管理端会话隔离')
     wrapper.unmount()
   })
 

@@ -1,20 +1,34 @@
-"""将实际 HTTP 观察写入 scope 私有 spool；执行来源只从该实例的运行时绑定读取。"""
+"""将实际 HTTP 观察写入 scope 私有 spool；执行来源只从该实例的运行时绑定读取。
+
+heartbeat 由独立 OS 线程按固定周期推进，与 mitmproxy 事件循环解耦：大响应体
+落盘占满事件循环（采集仍在推进）不再等同于 collector 死亡；heartbeat 过期只
+表示进程停止或彻底卡死（线程随进程终止）。采集进展与写延迟由 save/chunk 路径
+写入 spool 诊断文件，供现场区分「I/O 慢」与「进程卡死」两种来源。
+"""
 
 from __future__ import annotations
 
-import asyncio
 import base64
 from functools import wraps
 import time
 import json
 import os
 from pathlib import Path
+import threading
 from typing import BinaryIO
 
 from mitmproxy import http, version
 
 
 ROOT = Path("/capture")
+# body 侧每累计 BODY_FSYNC_THRESHOLD 字节执行一次 flush+fsync 并保存记录，
+# 而不是每个 chunk 都做全量重序列化与两段 fsync。
+BODY_FSYNC_THRESHOLD = 1024 * 1024
+# 单次 chunk 落盘耗时超过该值记入延迟诊断（毫秒）；正常 page cache 写远低于此。
+SLOW_WRITE_MILLISECONDS = 25
+# heartbeat 推进周期；须显著小于宿主 HEALTH_SECONDS（3s），并保留进程死亡
+# 后看门狗在 3 秒级取消的裕量。
+HEARTBEAT_PERIOD_SECONDS = 0.25
 
 
 def encoded(value: bytes) -> str:
@@ -37,24 +51,56 @@ class Capture:
         self.records: dict[str, dict] = {}
         self.bodies: dict[tuple[str, str], BinaryIO] = {}
         self.binding = json.loads(Path("/run/cairn-traffic/scope.json").read_text())
+        # 每个 flow 侧自上次阶段化 fsync 以来的累计字节数。
+        self._pending_bytes: dict[tuple[str, str], int] = {}
+        self._slow_writes = 0
+        self._last_write_milliseconds = 0.0
+        self._last_save_at = None
+        self._heartbeat_stop = threading.Event()
+
+    def _write_heartbeat(self) -> None:
+        # 写失败即进程失去 spool 访问，须退出（线程内由 beat 捕获 OSError）。
+        with (ROOT / "heartbeat.tmp").open("w") as output:
+            output.write(str(time.time()))
+            output.flush()
+            os.fsync(output.fileno())
+        (ROOT / "heartbeat.tmp").replace(ROOT / "heartbeat")
+
+    def _write_diagnostics(self) -> None:
+        # 崩溃前的最后状态也要可读；诊断文件本身容忍写入失败（非权威事实）。
+        try:
+            (ROOT / "capture-diagnostics.json").write_text(json.dumps({
+                "written_at": time.time(),
+                "last_save_at": self._last_save_at,
+                "slow_writes": self._slow_writes,
+                "last_write_milliseconds": round(self._last_write_milliseconds, 2),
+            }), encoding="ascii")
+        except OSError:
+            pass
+
+    def _start_heartbeat_thread(self) -> None:
+        # 独立 OS 线程推进 heartbeat：事件循环饿死不影响它，进程死亡线程随之
+        # 消失，两种失效仍都收敛为 heartbeat 过期（3 秒级看门狗语义保留）。
+        def beat() -> None:
+            while not self._heartbeat_stop.wait(HEARTBEAT_PERIOD_SECONDS):
+                try:
+                    self._write_heartbeat()
+                except OSError:
+                    # 落盘失败必须使观察点退出，采集不得在失去 spool 后继续。
+                    os._exit(74)
+
+        self._heartbeat_thread = threading.Thread(
+            target=beat, name="cairn-heartbeat", daemon=True)
+        self._heartbeat_thread.start()
 
     @durable_hook
     def running(self) -> None:
         (ROOT / "flows").mkdir(mode=0o700, exist_ok=True)
         (ROOT / "ready").touch()
-        asyncio.create_task(self.heartbeat())
-
-    async def heartbeat(self) -> None:
-        while True:
-            try:
-                with (ROOT / "heartbeat.tmp").open("w") as output:
-                    output.write(str(time.time()))
-                    output.flush()
-                    os.fsync(output.fileno())
-                (ROOT / "heartbeat.tmp").replace(ROOT / "heartbeat")
-            except OSError:
-                os._exit(74)
-            await asyncio.sleep(0.25)
+        self._write_heartbeat()
+        self._write_diagnostics()
+        # heartbeat 周期推进移入独立线程；事件循环与采集 I/O 不再参与心跳计时。
+        self._start_heartbeat_thread()
 
     @durable_hook
     def save(self, record: dict) -> None:
@@ -71,6 +117,8 @@ class Capture:
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+        self._last_save_at = time.time()
+        self._write_diagnostics()
 
     @durable_hook
     def requestheaders(self, flow: http.HTTPFlow) -> None:
@@ -126,21 +174,36 @@ class Capture:
         path = ROOT / "flows" / flow.id / f"{side}.body"
         output = path.open("xb")
         self.bodies[flow.id, side] = output
+        self._pending_bytes[flow.id, side] = 0
         record[side]["body_file"] = path.name
 
         @durable_hook
         def stream(chunk: bytes) -> bytes:
             if chunk:
+                # 缓冲写为主：单次慢写只记入诊断，不逐 chunk fsync；
+                # 每 BODY_FSYNC_THRESHOLD 字节做一次 flush+fsync+记录保存。
+                started = time.monotonic()
                 output.write(chunk)
-                output.flush()
-                os.fsync(output.fileno())
+                self._last_write_milliseconds = (time.monotonic() - started) * 1000
+                if self._last_write_milliseconds >= SLOW_WRITE_MILLISECONDS:
+                    self._slow_writes += 1
+                self._pending_bytes[flow.id, side] += len(chunk)
                 record[side]["body_bytes"] += len(chunk)
-                self.save(record)
+                if self._pending_bytes[flow.id, side] >= BODY_FSYNC_THRESHOLD:
+                    self._checkpoint_body(flow.id, side, record)
             return chunk
 
         message = flow.request if side == "request" else flow.response
         assert message is not None
         message.stream = stream
+
+    def _checkpoint_body(self, flow_id: str, side: str, record: dict) -> None:
+        # 阶段化持久点：flush+fsync body 后重存记录，宿主上传按已确认前缀推进。
+        output = self.bodies[flow_id, side]
+        output.flush()
+        os.fsync(output.fileno())
+        self._pending_bytes[flow_id, side] = 0
+        self.save(record)
 
     @durable_hook
     def end_body(self, flow: http.HTTPFlow, side: str, complete: bool) -> None:
@@ -149,6 +212,7 @@ class Capture:
             output.flush()
             os.fsync(output.fileno())
             output.close()
+            self._pending_bytes.pop((flow.id, side), None)
             record = self.records[flow.id]
             record[side]["body_complete"] = complete
             # 封存版本只随采集事实产生，后续上传重试不改变该身份。
