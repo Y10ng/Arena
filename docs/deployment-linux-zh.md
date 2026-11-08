@@ -75,7 +75,7 @@ WORKER_DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-worker-download.XXXXXX")" &&
   unzip "$WORKER_DOWNLOAD_DIR/$WORKER_ASSET" -d "$WORKER_UNPACK_DIR" &&
   docker pull 'yong29/arena-worker@sha256:b4babe19a719acf73733b3d6e093c490a2a741b95562682fd16b5c227df57d06' &&
   docker build --pull=false --network=none -t arena-worker:0.2.3 "$WORKER_UNPACK_DIR/arena-0.2.3-worker-application" &&
-  docker pull 'yong29/arena-traffic-gateway@sha256:GATEWAY_DIGEST_PLACEHOLDER'
+  docker pull 'yong29/arena-traffic-gateway@sha256:1578d5015ca2cc64bc26642be85b8a2eb27d72337c7deba91dc7dca9d482cd30'
 ```
 
 本版没有新的 Docker Hub Worker tag；`arena-worker:0.2.3` 是上方在本机构建的结果，不能用 `docker pull arena-worker:0.2.3` 代替。也可导入可信分发方已按本版应用层准备的镜像 tar（`docker load --input /绝对路径/配套镜像.tar`），但未经更新的 v0.2.1 Worker tar 不适用；导入最终镜像不等于拥有多阶段构建缓存。
@@ -85,7 +85,7 @@ WORKER_DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-worker-download.XXXXXX")" &&
 ```yaml
 container:
   image: "arena-worker:0.2.3"
-  traffic_gateway_image: "yong29/arena-traffic-gateway@sha256:GATEWAY_DIGEST_PLACEHOLDER"
+  traffic_gateway_image: "yong29/arena-traffic-gateway@sha256:1578d5015ca2cc64bc26642be85b8a2eb27d72337c7deba91dc7dca9d482cd30"
 ```
 
 上面的 YAML 对应应用层构建结果和按 digest 拉取的网关。使用 `docker load` 时改填实际导入的 tag；不要假定 tar 保留 registry digest 引用。不要保留默认 `:local` 配置：缺少默认引用会触发构建，包更新器即使已有默认镜像也会带缓存运行完整配方，缓存缺失可能重新下载工具。采用上方自定义版本 tag 与网关 digest 时，启动／更新只检查已准备镜像，不自动 pull 或切换新版；已有显式 `images`／profiles／允许镜像列表也需对应实际选图，见后面的按需说明。
@@ -324,7 +324,7 @@ cairn/.venv/bin/cairn materials save --project '实际项目ID' --container '完
 
 ### 部署包更新
 
-**从 v0.2.4 更新到 v0.2.5：** 下载上方应用 ZIP 及校验文件，解压到旧安装之外的新空目录，不在新目录运行 `install.sh` 或 `start.sh`。本次无新增数据库迁移或 Worker 变化，但 **gateway 镜像有实质修复**：须准备新网关镜像（`yong29/arena-traffic-gateway:git-f6df095fb4f8` 或按 Release 说明的 digest），并更新 `runtime/dispatch.yaml` 的 `container.traffic_gateway_image`；`arena-worker:0.2.3` 可保留。在旧任务退出后的维护窗口操作，运行中的采集任务不因替换配置受影响，但下一次任务开始即使用新网关。
+**从 v0.2.4 更新到 v0.2.5：** 下载上方应用 ZIP 及校验文件，解压到旧安装之外的新空目录，不在新目录运行 `install.sh` 或 `start.sh`。本次无新增数据库迁移或 Worker 变化，但 **gateway 镜像有实质修复**：须准备新网关镜像（`yong29/arena-traffic-gateway:git-f6df095fb4f8`，digest `sha256:1578d5015ca2cc64bc26642be85b8a2eb27d72337c7deba91dc7dca9d482cd30`），并更新 `runtime/dispatch.yaml` 的 `container.traffic_gateway_image`；`arena-worker:0.2.3` 可保留。在旧任务退出后的维护窗口操作，运行中的采集任务不因替换配置受影响，但下一次任务开始即使用新网关。
 
 **从 v0.2.1／v0.2.2／v0.2.3 更新到 v0.2.5：** 同时准备 v0.2.5 应用包、v0.2.3 Worker 应用层与新网关镜像，不能直接保留未经更新的旧 Worker 与旧网关。先确认真实执行已退出，保留数据库、`runtime`、资料和外置路径的一致备份，再按路径 A 准备 Worker 与网关，在停应用后修改原配置并运行新包更新器。默认 `:local` 仍按现有更新器逻辑运行完整配方的缓存构建，不用 `--server-only` 绕过。
 

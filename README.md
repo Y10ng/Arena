@@ -44,7 +44,7 @@ WORKER_DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-worker-download.XXXXXX")" &&
   unzip "$WORKER_DOWNLOAD_DIR/$WORKER_ASSET" -d "$WORKER_UNPACK_DIR" &&
   docker pull 'yong29/arena-worker@sha256:b4babe19a719acf73733b3d6e093c490a2a741b95562682fd16b5c227df57d06' &&
   docker build --pull=false --network=none -t arena-worker:0.2.3 "$WORKER_UNPACK_DIR/arena-0.2.3-worker-application" &&
-  docker pull 'yong29/arena-traffic-gateway@sha256:GATEWAY_DIGEST_PLACEHOLDER'
+  docker pull 'yong29/arena-traffic-gateway@sha256:1578d5015ca2cc64bc26642be85b8a2eb27d72337c7deba91dc7dca9d482cd30'
 ```
 
 编辑 `runtime/dispatch.yaml`，只修改 `container` 下的两个字段，保留其他配置：
@@ -52,7 +52,7 @@ WORKER_DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-worker-download.XXXXXX")" &&
 ```yaml
 container:
   image: "arena-worker:0.2.3"
-  traffic_gateway_image: "yong29/arena-traffic-gateway@sha256:GATEWAY_DIGEST_PLACEHOLDER"
+  traffic_gateway_image: "yong29/arena-traffic-gateway@sha256:1578d5015ca2cc64bc26642be85b8a2eb27d72337c7deba91dc7dca9d482cd30"
 ```
 
 公开基础镜像无需登录，Docker 复用已存在的相同层；小应用层构建不下载工具或 npm 依赖。不要保留默认 `:local` 引用，否则更新器仍可能触发完整配方的缓存构建。已有显式镜像映射也须更新实际引用；详见[完整安装指南](docs/deployment-linux-zh.md#路径-a使用已有-worker-镜像)和[代理排障](docs/deployment-linux-zh.md#排障)。
