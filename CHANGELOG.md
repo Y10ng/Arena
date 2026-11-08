@@ -2,6 +2,14 @@
 
 记录源码的主要用户可见变化；“未发布”不表示已推送或发布 Release。Arena 从当前工作区建立全新历史，不将原项目的测试次数、候选镜像或发布记录冒充为本项目验收。
 
+## 0.2.5 · 运行日志阅读器改版与采集事件循环饿死修复（2026-11-08）
+
+- 运行日志页改为常驻左工作索引＋右执行阅读器：左侧为等宽等高标签卡片，标题单行省略、完整标题保留在右侧阅读器；右侧收敛为“结果／执行记录”两个视图，执行记录固定“输出／工具／命令／文件”页签，工具调用可展开查看命令、路径、输入与响应等已记录字段。`?runId=` 深链精确定位同一 Run，结果来源、结果搜索、轮询竞态保护与原件下载行为保留。
+- 运行错误改为默认收起、按需展开的完整原文（不再 240 字符／300px 二次裁断）；流量“同步完成”正常终态不再占位渲染，失败、重试与读取错误仍内联可见；工作结论改为单行内联状态，不再套用 Alert 卡片。删除无用途的常驻说明文字。
+- 修复 traffic-gateway collector 的事件循环饿死：heartbeat 由独立 OS 线程推进，大响应体／并发下载占满 mitmproxy 事件循环不再触发宿主 `traffic_capture_stalled` 误取消；body 落盘改为缓冲写＋每 1MB 阶段化 checkpoint，持久化不变式（持久 flow.json 的 `body_bytes` 不大于已 fsync 字节）与封存身份协议不变，看门狗与重试预算行为未改动。新增 `/capture/capture-diagnostics.json` 记录 `last_save_at`、慢写计数与延迟，区分「I/O 慢」与「进程卡死」。
+- **gateway 镜像有实质变化：**从本版起须重建或更新 `arena-traffic-gateway`（新 tag `git-f6df095fb4f8`）；Worker 研究镜像与数据库无变化，继续复用 v0.2.3 Worker 应用层。宿主侧 `traffic.py`／`traffic_execution.py`／`traffic_sync.py` 零改动。collector 修复已完成合成与真实镜像内 64MB 流式验证；真实项目（批量 bundle＋并发加载、kill 对照、上传链路端到端）待部署后验收。
+- 定向验证：RunsPage 组件测试 42 项、runTimelineModel 单元 4 项、`test_traffic_capture_retry.py` 9 项（需 `CAIRN_TEST_LOCAL_PG=1`）全部通过；`build:server` 通过且产物 hash 复现。`tests/test_traffic_sync_handoff.py` 的 `_control_lock` AttributeError 与 `test_synthetic_scope_upload_costs` 的 PostgreSQL fixture 失败为修复前已存在、与本版无关。
+
 ## 0.2.4 · 证据接受与采集取消稳定性修复（2026-11-07）
 
 - 普通 goal-driven 探索不再因当前 Run 的合法 `source=manual` Artifact 被 Dispatcher 的 legacy capture-only 门槛提前判为 `evidence_insufficient`；Server 继续核验 Artifact、项目、TaskRun 和 HTTP flow 的真实归属，不改写来源或自动确认漏洞。legacy coverage-cell、独立复测及既有证据协议保持不变。
