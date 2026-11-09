@@ -354,7 +354,18 @@ cairn/.venv/bin/cairn materials save --project '实际项目ID' --container '完
 
 失败时按输出检查，修复后**重新运行新包的完整 `update.sh --target ...` 命令并保留原参数**，不要直接 start 而漏掉两镜像的刷新准备。迁移阻断按原错误处理，不删除项目、报告、归档材料或改 SQL 绕过。旧程序临时备份只覆盖程序文件，不含数据库 / runtime，也不保证依赖、配置、镜像或数据库整体回滚；install 可能已改变依赖或 legacy 私有配置，start 可能已执行迁移。升级前按需备份数据库、数据目录、私有配置、完整 keyring（含历史版本）和 token，外置文件一起保留。
 
-如需自行生成部署包，在完整源码根目录安装好依赖并完成 `build:server` 后执行 `python3 deploy/package_release.py`，默认产物为 `dist/arena-<version>-linux-code-only.zip`。这是可选分发操作，不是使用已有包的前置步骤，也不包含 Worker 镜像。当前仓库没有随 push 自动打包、发布镜像的 workflow；更新器也不从 GitHub 下载新版本，不存在默认跟随 `main` 的远端 ref。
+如需自行生成部署包，在完整源码根目录安装好依赖并完成 `build:server` 后执行 `python3 deploy/package_release.py --gateway-image-ref yong29/arena-traffic-gateway:latest --gateway-digest sha256:…`，默认产物为 `dist/arena-<version>-linux-code-only.zip` 与 `dist/release.json`。这是可选分发操作，不是使用已有包的前置步骤，也不包含 Worker 镜像。当前仓库没有随 push 自动打包、发布镜像的 workflow；更新器也不从 GitHub 下载新版本，不存在默认跟随 `main` 的远端 ref。
+
+### 系统一键更新（从下一版开始）
+
+管理端「设置 → 系统更新」提供检查更新、下载校验与一键应用功能。该功能仅对 ZIP 安装类型开放；git 源码安装仍须使用 `git pull` 与 `deploy/update.sh`。
+
+- 更新渠道：默认读取 `https://github.com/Y10ng/Arena/releases/latest/download/release.json`，可通过环境变量 `CAIRN_UPDATE_CHANNEL_URL` 覆盖为自建地址；`CAIRN_UPDATE_PROXY` 可选设置代理，不默认任何地址。
+- `release.json` 约定（`arena-release-channel/v1`）：包含 `version`、`notes_url`、`app.asset/sha256/size`、`worker.reuse_version`、`images.traffic_gateway.image/digest`。从下一版 Release 开始随包发布，v0.2.5 及更早版本无此附件，检查更新会提示「渠道暂无信息」。
+- 镜像 tag：网关统一使用 `yong29/arena-traffic-gateway:latest` 推送，digest 在 `release.json` 中记录并用于校验。已发布的历史 revision tag 保留不动。
+- 一键更新流程：检查版本 → 下载 ZIP 并校验 SHA256 → 安全解压 → manifest 门槛验证 → 拉取网关镜像并比对 digest → 改写 `runtime/dispatch.yaml` 网关引用 → 停服替换 → 重启。应用期间运行中的任务会被停止。
+- 状态恢复：若更新器进程死亡超过 30 秒，状态自动标记为 failed；服务重启导致 preparing 中断时标记为 interrupted，可重新执行检查更新。
+- 失败排查：更新日志位于 `runtime/logs/update-apply.log`；apply 失败后可按日志手动执行 `deploy/update.sh --target /现有应用根目录` 恢复。
 
 ### 增量下载的实际边界
 

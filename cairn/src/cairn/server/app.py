@@ -42,6 +42,7 @@ from cairn.server.routers import (
     reports,
     scenarios,
     settings,
+    system_update,
     tenant_workers,
     traffic,
     vulnerabilities,
@@ -122,6 +123,7 @@ app.include_router(vulnerabilities.router)
 app.include_router(audit.router)
 app.include_router(traffic.router)
 app.include_router(monitoring.router)
+app.include_router(system_update.router)
 app.include_router(export.router)
 
 # SPA 的 hash 路由由静态前端接管，后端只负责根页面和 /static 资源。

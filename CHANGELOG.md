@@ -2,6 +2,21 @@
 
 记录源码的主要用户可见变化；“未发布”不表示已推送或发布 Release。Arena 从当前工作区建立全新历史，不将原项目的测试次数、候选镜像或发布记录冒充为本项目验收。
 
+## 未发布 · 系统一键更新与 latest 镜像 tag
+
+- 新增管理端「系统更新」页面（`/console/update`），支持检查更新、下载校验、一键应用并重启。仅 ZIP 安装类型支持一键更新；git 源码安装显示手动更新指引。apply 采用 detached 更新器交接，避免 Server 在替换自身时中断。
+- 新增 `release.json` 更新渠道文档（`arena-release-channel/v1`），由 `deploy/package_release.py` 生成，包含版本、ZIP 摘要、Worker 复用声明与网关镜像 digest。从下一版 Release 开始随包发布，不回填 v0.2.5。
+- 网关镜像统一使用 `latest` tag 推送，不再每次更换 revision tag；digest 记录在 `release.json` 中用于校验。已发布的历史 tag 保留不动。本机 `runtime/dispatch.yaml` 已切换至 `yong29/arena-traffic-gateway:latest`。
+- 新增环境变量 `CAIRN_UPDATE_CHANNEL_URL`（默认指向 GitHub 最新 Release 的 `release.json`）与 `CAIRN_UPDATE_PROXY`（可选代理，不默认任何地址）。
+- 后端新增 `/system/update/*` 端点（super-admin），覆盖状态查询、检查、准备、取消与 apply；状态机支持死亡更新器自动恢复、interrupted 标记与运行中任务数警告。
+- 测试：`test_system_update.py` 20 项通过，相关部署／发布测试 138 项通过；前端组件测试 10 项通过，`typecheck` 与 `build:server` 通过。
+
+## 未发布 · 流量执行许可与重试预算修复（proj_013 成批取消根因）
+
+- 流量执行许可（traffic-ready gate）刷新与健康判定解耦：Dispatcher `check_scope` 现在在进入容器状态与 heartbeat 判定之前先刷新许可，gate 只表达「宿主存活且在看管」。宿主侧检查延迟（Docker API 慢、命令收尾负载拉长看门狗周期）不再把许可拖到过期，执行器自杀保护不再成批误杀运行中的执行器——此前另一实例 proj_013 约 12 小时内 29 个 run 成批 `traffic_executor_stopped` 取消的根因。容器真死、heartbeat 真停的取消码与检测时序不变，看门狗未被弱化。
+- Dispatcher 记录的 `traffic_*` 基础设施取消族（executor/collector/egress 停止、capture stalled/unavailable、health unavailable）纳入既有有界重试预算与 5/10 秒退避：第三次同类取消后项目以 `execution_retry_exhausted` 停止，不再无界重发（proj_013 的 29 个取消由此堆积）。人工暂停与通用取消仍不获得重试预算；历史 run 不回填不改写。
+- **部署要求：**实例须加载 v0.2.5+ 网关镜像（`git-f6df095fb4f8`/`latest`）；加载后 `traffic_capture_stalled` 只应对应 collector 真死，验收以 `/capture/capture-diagnostics.json` 为据。
+
 ## 0.2.5 · 运行日志阅读器改版与采集事件循环饿死修复（2026-11-08）
 
 - 运行日志页改为常驻左工作索引＋右执行阅读器：左侧为等宽等高标签卡片，标题单行省略、完整标题保留在右侧阅读器；右侧收敛为“结果／执行记录”两个视图，执行记录固定“输出／工具／命令／文件”页签，工具调用可展开查看命令、路径、输入与响应等已记录字段。`?runId=` 深链精确定位同一 Run，结果来源、结果搜索、轮询竞态保护与原件下载行为保留。

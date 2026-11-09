@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -17,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXED_ZIP_TIME = (2020, 1, 1, 0, 0, 0)
 EXPECTED_CAIRN_AGENT_VERSION = "1.0.0"
 EXPECTED_PI_SDK_VERSION = "0.73.0"
+GITHUB_REPO = "Y10ng/Arena"
+CHANNEL_DOC_FORMAT = "arena-release-channel/v1"
 ROOT_FILES = ("README.md", "CHANGELOG.md", "CLAUDE.md", "AGENT.md")
 TREE_ROOTS = (
     Path("cairn/src/cairn"),
@@ -242,9 +245,43 @@ def build_release(output_dir: Path | None = None) -> tuple[Path, Path]:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="构建 Arena 代码发布包与更新渠道文档")
+    parser.add_argument("--gateway-image-ref", default=None,
+                        help="本版配套网关镜像引用（含 tag），写入 release.json")
+    parser.add_argument("--gateway-digest", default=None,
+                        help="本版配套网关镜像远端 manifest digest（sha256:…），写入 release.json")
+    parser.add_argument("--worker-reuse-version", action="store_true", default=True,
+                        help="声明本版继续复用已发布的 Worker 应用层（当前默认）")
+    args = parser.parse_args()
     archive, sidecar = build_release()
+    version = project_version()
+    notes_tag = f"v{version}"
+    channel: dict[str, object] = {
+        "format": CHANNEL_DOC_FORMAT,
+        "version": version,
+        "notes_url": f"https://github.com/{GITHUB_REPO}/releases/tag/{notes_tag}",
+        "app": {
+            "asset": archive.name,
+            "sha256": sidecar.read_text(encoding="utf-8").strip().split()[0],
+            "size": archive.stat().st_size,
+        },
+        "worker": {"reuse_version": bool(args.worker_reuse_version)},
+    }
+    if args.gateway_image_ref and args.gateway_digest:
+        channel["images"] = {
+            "traffic_gateway": {
+                "image": args.gateway_image_ref,
+                "digest": args.gateway_digest,
+            },
+        }
+    channel_path = archive.parent / "release.json"
+    channel_path.write_text(
+        json.dumps(channel, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     print(archive)
     print(sidecar)
+    print(channel_path)
     return 0
 
 

@@ -32,6 +32,7 @@ export const productionRouteNames = [
   'ConsolePrompts',
   'ConsoleKnowledge',
   'ConsoleReportTemplates',
+  'ConsoleUpdate',
   'Forbidden',
   'NotFound',
 ] as const
@@ -56,6 +57,7 @@ export type NavigationIcon =
   | 'status'
   | 'auth'
   | 'schedules'
+  | 'update'
 
 export type NavigationRole = 'authenticated' | 'super-admin'
 export type SidebarPlacement = 'primary' | 'results' | 'support' | 'system'
@@ -388,6 +390,15 @@ export const navigationRegistry = [
       subtitle: '创建不可变报告模板版本并管理模板归档',
       badge: 'Report Templates',
       keywords: ['report', 'template', 'markdown', '报告模板'],
+    },
+  }),
+  record({
+    routeName: 'ConsoleUpdate', label: '系统更新', icon: 'update', role: 'super-admin',
+    breadcrumbParent: 'console-root',
+    sidebar: { placement: 'system', order: 55 },
+    command: {
+      kindLabel: '系统管理', title: '系统更新', subtitle: '检查并安装新版本',
+      badge: 'Update', keywords: ['update', 'upgrade', 'release', '更新', '升级'],
     },
   }),
   record({ routeName: 'Forbidden', label: '无权访问', icon: 'status', role: 'authenticated' }),

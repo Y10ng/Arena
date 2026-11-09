@@ -14,6 +14,7 @@ const ScenariosConsole = () => import('@/features/console/ScenariosConsole.vue')
 const PromptGroupsConsole = () => import('@/features/console/PromptGroupsConsole.vue')
 const KnowledgeConsole = () => import('@/features/console/KnowledgeConsole.vue')
 const ReportTemplatesConsole = () => import('@/features/console/ReportTemplatesConsole.vue')
+const SystemUpdateConsole = () => import('@/features/console/SystemUpdateConsole.vue')
 
 const routes = [
   {
@@ -150,6 +151,12 @@ const routes = [
             path: 'report-templates',
             name: 'ConsoleReportTemplates',
             component: ReportTemplatesConsole,
+            meta: { superAdmin: true },
+          },
+          {
+            path: 'update',
+            name: 'ConsoleUpdate',
+            component: SystemUpdateConsole,
             meta: { superAdmin: true },
           },
         ],

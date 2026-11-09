@@ -101,6 +101,7 @@ import {
   Layers3,
   Lightbulb,
   RadioTower,
+  RefreshCw,
   ScrollText,
   Search,
   Settings,
@@ -154,6 +155,7 @@ const iconMap: Record<NavigationIcon, LucideIcon> = {
   status: ShieldAlert,
   auth: KeyRound,
   schedules: CalendarDays,
+  update: RefreshCw,
 }
 function isActive(name: ProductionRouteName) {
   if (name === 'ProjectSchedules')
