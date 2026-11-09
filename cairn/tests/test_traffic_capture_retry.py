@@ -98,9 +98,17 @@ def _project(conn):
 
 
 @pytest.mark.parametrize("task_type", ["bootstrap", "explore"])
-def test_capture_cancellation_uses_persistent_bounded_retry_budget(retry_conn, task_type):
+@pytest.mark.parametrize("code", [
+    "traffic_executor_stopped",
+    "traffic_collector_stopped",
+    "traffic_egress_stopped",
+    "traffic_capture_stalled",
+    "traffic_capture_unavailable",
+    "traffic_health_unavailable",
+])
+def test_capture_cancellation_uses_persistent_bounded_retry_budget(retry_conn, task_type, code):
     conn = retry_conn
-    _append_cancellation(conn, 1, task_type=task_type)
+    _append_cancellation(conn, 1, task_type=task_type, code=code)
     decision = assessment_attempts.execution_retry_eligibility(
         conn, _project(conn), task_type, intent_id="intent",
         now="2026-01-01T00:00:02Z",
@@ -110,7 +118,7 @@ def test_capture_cancellation_uses_persistent_bounded_retry_budget(retry_conn, t
         "retry_at": "2026-01-01T00:00:06Z",
     }
 
-    _append_cancellation(conn, 2, task_type=task_type)
+    _append_cancellation(conn, 2, task_type=task_type, code=code)
     decision = assessment_attempts.execution_retry_eligibility(
         conn, _project(conn), task_type, intent_id="intent",
         now="2026-01-01T00:00:03Z",
@@ -124,7 +132,7 @@ def test_capture_cancellation_uses_persistent_bounded_retry_budget(retry_conn, t
         ignore_cooldown=True,
     )["allowed"] is True
 
-    _append_cancellation(conn, 3, task_type=task_type)
+    _append_cancellation(conn, 3, task_type=task_type, code=code)
     assert assessment_attempts.execution_retry_eligibility(
         conn, _project(conn), task_type, intent_id="intent", ignore_cooldown=True,
     )["reason"] == "execution_retry_exhausted"
@@ -164,6 +172,9 @@ def test_capture_cancellation_uses_persistent_bounded_retry_budget(retry_conn, t
     ("traffic_capture_stalled", "dispatcher_process", True, False),
     ("traffic_capture_stalled", "dispatcher_process", False, True),
     ("traffic_capture_stalled", "pi_request", False, False),
+    ("traffic_executor_stopped", "pi_request", False, False),
+    ("traffic_scope_closed", "dispatcher_process", False, False),
+    ("traffic_termination_unconfirmed", "dispatcher_process", False, False),
 ])
 def test_other_cancellations_never_consume_retry_budget(
     retry_conn, code, origin, pause_requested, pause_interrupted,

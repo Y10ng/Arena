@@ -948,8 +948,23 @@ def attempt_has_accepted_result(conn, project_id: str, attempt_id: str) -> bool:
     return False
 
 
-def _traffic_capture_stalled_cancellation(run, context: dict) -> bool:
-    """只识别 Dispatcher 明确记录的采集停滞，人工暂停和通用取消不得获得重试预算。"""
+# Dispatcher 记录的流量基础设施取消族：容器角色死亡（executor/collector/egress）、
+# 采集 heartbeat 读取失败或停滞、宿主健康检查自身异常。这类取消由确定性看门狗产出，
+# 与 provider/业务结果无关，按同一有界预算计入持久失败链。
+# 不入族：traffic_scope_closed（主动关闭语义，不是基础设施故障）；
+# traffic_termination_unconfirmed（终止未确认的安全语义，不得用重试掩盖）。
+TRAFFIC_INFRASTRUCTURE_CANCELLATION_CODES = frozenset({
+    "traffic_executor_stopped",
+    "traffic_collector_stopped",
+    "traffic_egress_stopped",
+    "traffic_capture_stalled",
+    "traffic_capture_unavailable",
+    "traffic_health_unavailable",
+})
+
+
+def _traffic_infrastructure_cancellation(run, context: dict) -> bool:
+    """只识别 Dispatcher 明确记录的流量基础设施取消，人工暂停和通用取消不得获得重试预算。"""
     failure = context.get("worker_failure")
     return bool(
         run["status"] == "cancelled"
@@ -958,7 +973,7 @@ def _traffic_capture_stalled_cancellation(run, context: dict) -> bool:
         and not row_value(run, "pause_interrupted")
         and isinstance(failure, dict)
         and failure.get("origin") == "dispatcher_process"
-        and failure.get("code") == "traffic_capture_stalled"
+        and failure.get("code") in TRAFFIC_INFRASTRUCTURE_CANCELLATION_CODES
     )
 
 
@@ -1035,7 +1050,7 @@ def execution_retry_eligibility(
     delivery_chain = False
     for run in runs:
         context = parse_scenario_snapshot(run["runtime_context_json"])
-        capture_stalled = _traffic_capture_stalled_cancellation(run, context)
+        capture_stalled = _traffic_infrastructure_cancellation(run, context)
         if (
             (run["status"] not in {"failed", "timed_out"} and not capture_stalled)
             or (run["error_type"] == "cancelled" and not capture_stalled)

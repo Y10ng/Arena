@@ -526,6 +526,11 @@ class ProjectTrafficRuntime:
         state = self.manifest["scopes"][scope_id]
         if state["entry_closed"]:
             return "traffic_scope_closed"
+        # 执行许可只表达「宿主存活且在看管」：先于容器状态与 heartbeat 判定刷新，
+        # 宿主侧检查慢不再把许可拖到过期。健康判定失败走下方取消码并经取消路径
+        # 中断执行，而不是停止刷新、等执行器自杀保护过期。entry_closed 防御保留
+        # 在 refresh_gate 自身的 _gate_lock 写入边界内。
+        self.refresh_gate(scope_id)
         roles = ['collector', 'executor']
         if f'egress:{scope_id}' in self.manifest['resources']:
             roles.append('egress')
@@ -540,10 +545,6 @@ class ProjectTrafficRuntime:
             return "traffic_capture_unavailable"
         if not 0 <= time.time() - observed <= HEALTH_SECONDS:
             return "traffic_capture_stalled"
-        with self._gate_lock:
-            if state["entry_closed"]:
-                return "traffic_scope_closed"
-            self.refresh_gate(scope_id)
         return None
 
     def hot_control(self, paused: bool) -> list[dict[str, str]]:
