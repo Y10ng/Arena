@@ -11,8 +11,8 @@ usage() {
 
 从当前已解压的部署包更新一个没有 Git 的既有安装。脚本只替换部署程序文件，保留
 runtime、数据库 volume、cairn/.venv、Artifact 和项目上传资料。
-这不是源码同步工具，不更新前端源码或测试。默认本地 Worker 会带缓存重新构建；
-自定义镜像保留并提示自行配套更新。--server-only 明确跳过 Worker 准备。
+这不是源码同步工具，不更新前端源码或测试。停服前准备发布包指定的配套镜像，
+官方引用自动切换，定制镜像保留并提前验收。--server-only 明确跳过镜像更新。
 
 示例:
   ${SOURCE_ROOT}/deploy/update.sh --target /opt/arena
@@ -79,6 +79,7 @@ required_files=(
   "deploy/postgres.compose.yaml"
   "deploy/postgres.env.example"
   "deploy/verify_deployment.py"
+  "deploy/prepare_release_images.py"
   "cairn/pyproject.toml"
   "cairn/uv.lock"
   "cairn/src/cairn/server/static/index.html"
@@ -115,20 +116,27 @@ done
   exit 1
 }
 
-if [[ -f "${SOURCE_ROOT}/RELEASE-MANIFEST.json" ]]; then
-  if ! python3 "${SOURCE_ROOT}/deploy/verify_deployment.py" \
-      --root "${SOURCE_ROOT}" --manifest-only >/dev/null; then
-    echo "警告：新版本 RELEASE-MANIFEST.json 校验未通过；将按目录结构继续更新。" >&2
-  fi
-else
-  echo "提示：新版本未包含 RELEASE-MANIFEST.json，将按目录结构更新。" >&2
-fi
+# 发布完整性失败必须在停服前中止，不能继续安装半套内容。
+python3 -I "${SOURCE_ROOT}/deploy/verify_deployment.py" \
+  --root "${SOURCE_ROOT}" --manifest-only >/dev/null
+
+expected_state="running"
+for (( argument_index=0; argument_index<${#START_ARGS[@]}; argument_index++ )); do
+  case "${START_ARGS[argument_index]}" in
+    --server-only) expected_state="server-only" ;;
+    --host|--port) argument_index=$((argument_index + 1)) ;;
+  esac
+done
 
 stage_root=""
 backup_root=""
 preserve_backup=0
+image_plan=""
 cleanup_temporary_dirs() {
   local candidate
+  if [[ -n "${image_plan}" ]]; then
+    rm -f -- "${image_plan}"
+  fi
   if [[ -n "${stage_root}" && "${stage_root}" == "${TARGET_ROOT}"/.arena-update-* ]]; then
     rm -rf -- "${stage_root}"
   fi
@@ -208,6 +216,78 @@ print(stage)
 PY
 )"
 
+# 外置目录不属于整目录替换范围；只补资源，明确发布的 index.html 最后切换。
+sync_external_static() {
+  python3 -I - "$1" "${SOURCE_ROOT}" "${TARGET_ROOT}" "${external_static_dir}" <<'PY'
+from pathlib import Path
+import os
+import shutil
+import sys
+import tempfile
+
+mode, source_root, target_root, configured = sys.argv[1:]
+if not configured:
+    raise SystemExit(0)
+source = Path(source_root) / "cairn/src/cairn/server/static"
+target = Path(target_root)
+external = Path(configured)
+if not external.is_absolute():
+    external = target / external
+external = external.resolve()
+if external == target / "cairn/src/cairn/server/static":
+    raise SystemExit(0)
+# 被整体替换的目录不能兼作外置静态目录，否则预检后仍会丢失原内容。
+for managed in ("cairn/src/cairn", "datas/cairn/knowledge", "deploy", "container"):
+    path = target / managed
+    if external == path or path in external.parents:
+        raise SystemExit(f"CAIRN_STATIC_DIR 位于待替换的程序目录中: {external}")
+if external == Path(source_root) or Path(source_root) in external.parents:
+    raise SystemExit("CAIRN_STATIC_DIR 不能位于新版本部署包中")
+entries = sorted(source.rglob("*"))
+for src in entries:
+    relative = src.relative_to(source)
+    dst = external / relative
+    # 根目录允许显式配置的目录链接，目录内部不能经链接写入用户其他内容。
+    for path in (dst, *dst.parents):
+        if path.is_symlink():
+            raise SystemExit(f"外置静态资源路径不允许 symlink: {path}")
+        if path != dst and path.exists() and not path.is_dir():
+            raise SystemExit(f"外置静态资源目录冲突: {path}")
+    if not dst.exists():
+        continue
+    if src.is_dir() and dst.is_dir():
+        continue
+    if src.is_file() and dst.is_file():
+        if relative == Path("index.html") or dst.read_bytes() == src.read_bytes():
+            continue
+    raise SystemExit(f"外置静态资源冲突，保留用户内容并中止更新: {dst}")
+
+if mode == "check":
+    raise SystemExit(0)
+external.mkdir(parents=True, exist_ok=True)
+for src in entries:
+    relative = src.relative_to(source)
+    dst = external / relative
+    if relative == Path("index.html"):
+        continue
+    if src.is_dir():
+        dst.mkdir(exist_ok=True)
+    elif not dst.exists():
+        # 排他创建，绝不覆盖预检之后新增的同名用户文件。
+        with src.open("rb") as reader, dst.open("xb") as writer:
+            shutil.copyfileobj(reader, writer)
+        shutil.copystat(src, dst)
+# 同目录原子替换入口，失败时旧入口和全部历史 hash 资源仍可用。
+fd, temporary = tempfile.mkstemp(prefix=".arena-index-", dir=external)
+os.close(fd)
+try:
+    shutil.copy2(source / "index.html", temporary)
+    os.replace(temporary, external / "index.html")
+finally:
+    Path(temporary).unlink(missing_ok=True)
+PY
+}
+
 # 使用旧版本 lifecycle 函数取得操作锁，并把同一把锁持有到最终状态检查结束。
 unset ARENA_OPERATION_LOCK_INHERITED
 # shellcheck source=/dev/null
@@ -215,10 +295,29 @@ source "${TARGET_ROOT}/deploy/common.sh"
 ensure_runtime_dirs
 acquire_operation_lock
 export ARENA_OPERATION_LOCK_INHERITED=1
+# 沿用 start.sh 的环境加载规则，但不让 env 改写当前更新 shell 的生命周期变量。
+external_static_dir="$(
+  set -e
+  load_runtime_env
+  printf '%s' "${CAIRN_STATIC_DIR:-}"
+)"
+sync_external_static check
+if [[ "${expected_state}" != "server-only" ]]; then
+  # 使用旧安装的依赖运行新包检查器；首次从旧 Web 引导也能在停服前准备两镜像。
+  image_plan="$(mktemp "${TARGET_ROOT}/runtime/.update-images.XXXXXX")"
+  "${TARGET_ROOT}/cairn/.venv/bin/python" -I "${SOURCE_ROOT}/deploy/prepare_release_images.py" prepare \
+    --source "${SOURCE_ROOT}" --target "${TARGET_ROOT}" --plan "${image_plan}"
+  "${TARGET_ROOT}/cairn/.venv/bin/python" -I "${SOURCE_ROOT}/deploy/prepare_release_images.py" check \
+    --source "${SOURCE_ROOT}" --target "${TARGET_ROOT}" --plan "${image_plan}"
+fi
 stop_managed_dispatcher "${PID_DIR}/dispatcher.pid" "${DISPATCH_CONFIG}"
 rm -f "${PID_DIR}/dispatcher.token.sha256"
 stop_pid_file "${PID_DIR}/server.pid" "Server"
 rm -f "${SERVER_ENDPOINT_FILE}"
+if [[ "${expected_state}" != "server-only" ]]; then
+  "${TARGET_ROOT}/cairn/.venv/bin/python" -I "${SOURCE_ROOT}/deploy/prepare_release_images.py" apply \
+    --source "${SOURCE_ROOT}" --target "${TARGET_ROOT}" --plan "${image_plan}"
+fi
 
 backup_root="$(python3 - "${stage_root}" "${TARGET_ROOT}" <<'PY'
 from pathlib import Path
@@ -300,14 +399,6 @@ PY
 stage_root=""
 preserve_backup=1
 
-expected_state="running"
-for (( argument_index=0; argument_index<${#START_ARGS[@]}; argument_index++ )); do
-  case "${START_ARGS[argument_index]}" in
-    --server-only) expected_state="server-only" ;;
-    # 与 start.sh 一致，host / port 的值不作为独立开关解释。
-    --host|--port) argument_index=$((argument_index + 1)) ;;
-  esac
-done
 # 重试仍走完整更新入口，并保留空格等 shell 参数边界，不引导绕过 Worker 准备。
 printf -v retry_command '%q ' "${SOURCE_ROOT}/deploy/update.sh" --target "${TARGET_ROOT}" -- "${START_ARGS[@]}"
 
@@ -316,8 +407,9 @@ if "${TARGET_ROOT}/deploy/install.sh"; then
 else
   install_status=$?
   cat >&2 <<EOF
-更新后的依赖安装失败，服务保持停止；尚未进入 Worker 准备和数据库启动迁移。
-依赖或 legacy 私有配置可能已变化。旧程序备份不包含 runtime 或数据库，不是整体回滚保障。
+更新后的依赖安装失败，服务保持停止；尚未进入数据库启动迁移。
+非 --server-only 更新已准备镜像并应用镜像配置；依赖或 legacy 私有配置也可能已变化。
+旧程序备份不包含 runtime 或数据库，不是整体回滚保障。
 旧程序文件保留在：${backup_root}
 修复后重新执行完整更新：
   ${retry_command}
@@ -337,9 +429,9 @@ elif bash -c '
   load_runtime_env
   cd "${ROOT_DIR}"
   require_docker_daemon
-  ensure_dispatch_worker_image refresh
+  ensure_dispatch_worker_image missing
 ' arena-update-worker "${TARGET_ROOT}"; then
-  echo "研究与采集镜像准备完成；自定义引用未自动更新，已有项目容器不受替换。"
+  echo "研究与采集镜像准备完成，官方引用已按发布包配套更新；自定义引用保留，已有项目容器不受替换。"
 else
   worker_status=$?
   cat >&2 <<EOF
@@ -349,6 +441,16 @@ Worker 准备失败，服务保持停止；未进入 start.sh 或数据库启动
   ${retry_command}
 EOF
   exit "${worker_status}"
+fi
+
+# 安装和镜像准备成功后才发布入口；再次核对外置内容，避免覆盖停服期间的定制。
+if sync_external_static apply; then
+  :
+else
+  static_status=$?
+  printf '外置静态资源更新失败，服务保持停止；旧程序文件保留在：%s\n' "${backup_root}" >&2
+  printf '修复后重新执行完整更新：\n  %s\n' "${retry_command}" >&2
+  exit "${static_status}"
 fi
 
 if "${TARGET_ROOT}/deploy/start.sh" "${START_ARGS[@]}"; then

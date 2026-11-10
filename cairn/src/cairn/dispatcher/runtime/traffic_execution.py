@@ -36,6 +36,7 @@ class TaskTrafficExecution:
         self.cancellation = cancellation
         self.process = None
         self.failure: str | None = None
+        self.health_error: str | None = None
         self.stopping = threading.Event()
         self._stop_lock = threading.Lock()
         self._cancel_lock = threading.Lock()
@@ -288,8 +289,17 @@ class TrafficExecutionBridge:
                     continue
                 try:
                     code = execution.runtime.check_scope(execution.scope_id)
-                except (DockerException, RequestException, OSError, RuntimeError):
+                except (DockerException, RequestException, OSError):
+                    # 查询失败不是容器退出。保留执行并公开观测未知，下一轮恢复查询；
+                    # 用户停止、任务截止和所有者断连都不依赖这次查询成功。
+                    if execution.health_error is None:
+                        LOG.warning("traffic health observation unavailable scope=%s", execution.scope_id)
+                    execution.health_error = "traffic_health_unavailable"
+                    continue
+                except RuntimeError:
+                    # 资源归属核验等确定性错误不能按暂时的观测故障放行。
                     code = "traffic_health_unavailable"
+                execution.health_error = None
                 if code and not execution.stopping.is_set():
                     execution.failure = code
                     execution.cancellation.cancel(code)
@@ -345,6 +355,8 @@ class TrafficExecutionBridge:
             state, code = "retrying", sync_status["code"]
         elif failure and not stopped:
             state, code = ("stopping" if stopping else "blocked"), failure
+        elif not stopped and not stopping and execution is not None and execution.health_error:
+            state, code = "retrying", execution.health_error
         return {
             "state": state, "code": code, "failure_code": failure,
             # Server 读取时以已接受的同 generation lifecycle 证明提升此观测。

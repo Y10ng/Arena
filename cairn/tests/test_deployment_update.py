@@ -17,7 +17,7 @@ WORKER_STEPS = [
     "worker:initialized",
     "worker:env:target-runtime",
     "worker:docker",
-    "worker:image:refresh",
+    "worker:image:missing",
     "worker:python:new:target-runtime",
 ]
 INHERITED_LOCK_CHECK = '''[[ "${ARENA_OPERATION_LOCK_INHERITED:-0}" == "1" ]]
@@ -117,7 +117,7 @@ require_docker_daemon() {{
   echo "worker:docker" >> "${{ROOT_DIR}}/lifecycle.log"
 }}
 ensure_dispatch_worker_image() {{
-  [[ "$#" == "1" && "$1" == "refresh" ]]
+  [[ "$#" == "1" && "$1" == "missing" ]]
   echo "worker:image:$1" >> "${{ROOT_DIR}}/lifecycle.log"
   "${{PYTHON_BIN}}" "$@"
 }}
@@ -128,7 +128,7 @@ ensure_dispatch_worker_image() {{
         source / "deploy/worker-python",
         f'''ROOT="$(cd "$(dirname "$0")/../../.." && pwd -P)"
 [[ "$PWD" == "${{ROOT}}" ]]
-[[ "$#" == "1" && "$1" == "refresh" ]]
+[[ "$#" == "1" && "$1" == "missing" ]]
 [[ "${{ARENA_TEST_RUNTIME}}" == "target-runtime" ]]
 echo "worker:python:new:${{ARENA_TEST_RUNTIME}}" >> "${{ROOT}}/lifecycle.log"
 exit {worker_exit}''',
@@ -140,7 +140,9 @@ exit {worker_exit}''',
     _write(source / "deploy/migrate_worker_config.py", "# migration helper\n")
     _write(source / "deploy/postgres.compose.yaml", "services: {}\n")
     _write(source / "deploy/postgres.env.example", "POSTGRES_ENV=example\n")
-    _write(source / "deploy/verify_deployment.py", "raise SystemExit(1)\n")
+    shutil.copy2(ROOT / "deploy/verify_deployment.py", source / "deploy/verify_deployment.py")
+    _write(source / "RELEASE-MANIFEST.json", '{"files": []}\n')
+    _write(source / "deploy/prepare_release_images.py", "# lifecycle fixture\n")
     _write_script(source / "deploy/verify.sh", "exit 0")
     _write(source / "cairn/src/cairn/new.py", "NEW = True\n")
     _write(source / "cairn/src/cairn/server/static/index.html", "new-index\n")
@@ -173,7 +175,11 @@ acquire_operation_lock() {{
   flock -n 9
 }}
 ensure_application_initialized() {{ return 72; }}
-load_runtime_env() {{ return 72; }}
+load_runtime_env() {{
+  set -a
+  source "${{RUNTIME_DIR}}/arena.env"
+  set +a
+}}
 require_docker_daemon() {{ return 72; }}
 ensure_dispatch_worker_image() {{ return 72; }}
 stop_managed_dispatcher() {{
@@ -211,7 +217,8 @@ exit {stop_exit}''',
         path.chmod(0o600)
     _write(target / "runtime/data/artifacts/existing.bin", "artifact-data\n")
     _write(target / "cairn/.venv/marker", "venv-data\n")
-    _write_script(target / "cairn/.venv/bin/python", "exit 74")
+    _write_script(target / "cairn/.venv/bin/python", '''[[ "$1" == "-I" && "$2" == */deploy/prepare_release_images.py ]]
+case "$3" in prepare|check|apply) exit 0;; *) exit 74;; esac''')
     _write(target / "datas/cairn/project-resources/project/file.bin", "project-data\n")
     _write(target / "datas/cairn/advisory-library-content/note.txt", "advisory-data\n")
     _write(target / "local-notes.txt", "local-data\n")
@@ -224,6 +231,27 @@ def _run(source: Path, target: Path, *start_args: str) -> subprocess.CompletedPr
     return subprocess.run(
         command, cwd=source.parent, text=True, capture_output=True, check=False
     )
+
+
+@pytest.mark.parametrize("prepare_exit", [0, 37])
+def test_new_package_prepares_before_old_server_stops(tmp_path, prepare_exit):
+    source, target = tmp_path / "new-release", tmp_path / "installed"
+    _managed_source(source)
+    _installed_target(target)
+    _write_script(target / "cairn/.venv/bin/python", f'''ROOT={shlex.quote(str(target))}
+[[ "$1" == "-I" && "$2" == */deploy/prepare_release_images.py ]]
+printf 'images:%s\\n' "$3" >> "$ROOT/lifecycle.log"
+if [[ "$3" == prepare ]]; then exit {prepare_exit}; fi''')
+    result = _run(source, target)
+    steps = (target / "lifecycle.log").read_text().splitlines()
+    if prepare_exit:
+        assert result.returncode == prepare_exit
+        assert steps == ["images:prepare"]
+        assert (target / "cairn/src/cairn/old.py").exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert steps[:4] == ["images:prepare", "images:check", "stop:old", "images:apply"]
+    assert not list((target / "runtime").glob(".update-images.*"))
 
 
 @pytest.mark.parametrize("external_knowledge", [False, True])
@@ -372,7 +400,7 @@ def test_update_replaces_managed_code_and_preserves_data(
     assert (target / "cairn/src/cairn/server/static/assets/new-hash.js").is_file()
     assert not (target / "deploy/old-deploy-file").exists()
     assert not (target / "datas/cairn/knowledge/old.txt").exists()
-    assert not (target / "RELEASE-MANIFEST.json").exists()
+    assert (target / "RELEASE-MANIFEST.json").read_bytes() == (source / "RELEASE-MANIFEST.json").read_bytes()
     for path, (content, mode) in before.items():
         assert path.read_bytes() == content, path
         assert stat.S_IMODE(path.stat().st_mode) == mode, path
@@ -381,19 +409,153 @@ def test_update_replaces_managed_code_and_preserves_data(
     assert not list(target.glob(".arena-update-*"))
 
 
-def test_update_without_manifest_is_supported(tmp_path: Path) -> None:
+@pytest.mark.parametrize("location", ["absolute", "relative", "symlink", "inherited"])
+def test_update_syncs_external_static_without_removing_old_or_custom_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str
+) -> None:
+    source, target = tmp_path / "new-release", tmp_path / "installed"
+    _managed_source(source)
+    _installed_target(target)
+    external = target / "runtime/static files 'custom'"
+    _write(external / "index.html", "stale-external-index\n")
+    _write(external / "assets/old-hash.js", "old-static\n")
+    _write(external / "assets/new-hash.js", "new-static\n")
+    _write(external / "custom/local.css", "user-style\n")
+    (external / "custom/link.css").symlink_to("local.css")
+    _write(source / "cairn/src/cairn/server/static/assets/nested/new.css", "new-style\n")
+    configured = str(external)
+    if location == "relative":
+        configured = str(external.relative_to(target))
+    elif location == "symlink":
+        (target / "static-link").symlink_to(external, target_is_directory=True)
+        configured = str(target / "static-link")
+    if location == "inherited":
+        monkeypatch.setenv("CAIRN_STATIC_DIR", configured)
+    else:
+        # runtime 配置覆盖继承值；含空格和引号的路径沿用 shell 加载规则。
+        monkeypatch.setenv("CAIRN_STATIC_DIR", str(tmp_path / "wrong-static"))
+        env = target / "runtime/arena.env"
+        _write(env, env.read_text() + f"CAIRN_STATIC_DIR={shlex.quote(configured)}\n")
+    before = {path: path.read_bytes() for path in external.rglob("*") if path.is_file()}
+    install = source / "deploy/install.sh"
+    _write_script(
+        install,
+        install.read_text()
+        + f'\n[[ "$(<{shlex.quote(str(external / "index.html"))})" == stale-external-index ]]',
+    )
+    start = source / "deploy/start.sh"
+    _write_script(start, f'''[[ "$(<{shlex.quote(str(external / "index.html"))})" == new-index ]]
+[[ -f {shlex.quote(str(external / "assets/nested/new.css"))} ]]
+''' + start.read_text())
+
+    start_args = ("--server-only",) if location == "relative" else ()
+    result = _run(source, target, *start_args)
+
+    assert result.returncode == 0, result.stderr
+    assert (external / "index.html").read_text() == "new-index\n"
+    assert (external / "assets/nested/new.css").read_text() == "new-style\n"
+    for path, content in before.items():
+        if path.name != "index.html":
+            assert path.read_bytes() == content
+    assert (external / "custom/link.css").is_symlink()
+    assert not (tmp_path / "wrong-static").exists()
+    assert not list(external.glob(".arena-index-*"))
+    assert not list(target.glob(".arena-update-*"))
+
+
+@pytest.mark.parametrize(
+    "conflict", ["asset", "asset-directory", "asset-symlink", "index-directory", "root-file"]
+)
+def test_external_static_conflict_stops_before_service_changes(tmp_path: Path, conflict: str) -> None:
+    source, target = tmp_path / "new-release", tmp_path / "installed"
+    _managed_source(source)
+    _installed_target(target)
+    external = tmp_path / "external-static"
+    if conflict == "root-file":
+        _write(external, "user-file\n")
+    else:
+        _write(external / "index.html", "stale-external-index\n")
+        if conflict == "asset":
+            _write(external / "assets/new-hash.js", "custom-conflict\n")
+        elif conflict == "asset-directory":
+            (external / "assets/new-hash.js").mkdir(parents=True)
+        elif conflict == "asset-symlink":
+            outside = tmp_path / "custom-assets"
+            _write(outside / "new-hash.js", "new-static\n")
+            (external / "assets").symlink_to(outside, target_is_directory=True)
+        else:
+            (external / "index.html").unlink()
+            (external / "index.html").mkdir()
+    env = target / "runtime/arena.env"
+    _write(env, env.read_text() + f"CAIRN_STATIC_DIR={shlex.quote(str(external))}\n")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+
+    result = _run(source, target)
+
+    assert result.returncode != 0
+    assert "外置静态资源" in result.stderr
+    assert not (target / "lifecycle.log").exists()
+    assert not list(target.glob(".arena-update-*"))
+    for path, content in before.items():
+        assert path.read_bytes() == content
+
+
+def test_external_static_env_load_failure_stops_before_service_changes(tmp_path: Path) -> None:
+    source, target = tmp_path / "new-release", tmp_path / "installed"
+    _managed_source(source)
+    _installed_target(target)
+    (target / "runtime/arena.env").unlink()
+
+    result = _run(source, target)
+
+    assert result.returncode != 0
+    assert not (target / "lifecycle.log").exists()
+    assert (target / "cairn/src/cairn/old.py").exists()
+    assert not list(target.glob(".arena-update-*"))
+
+
+def test_external_static_rechecks_before_publishing_index(tmp_path: Path) -> None:
+    source, target = tmp_path / "new-release", tmp_path / "installed"
+    _managed_source(source)
+    _installed_target(target)
+    external = tmp_path / "external-static"
+    _write(external / "index.html", "stale-external-index\n")
+    _write(external / "assets/old-hash.js", "old-static\n")
+    env = target / "runtime/arena.env"
+    _write(env, env.read_text() + f"CAIRN_STATIC_DIR={shlex.quote(str(external))}\n")
+    install = source / "deploy/install.sh"
+    _write_script(
+        install,
+        install.read_text()
+        + f"\nprintf custom-after-preflight > {shlex.quote(str(external / 'assets/new-hash.js'))}",
+    )
+
+    result = _run(source, target, "--server-only")
+
+    assert result.returncode != 0
+    assert "外置静态资源冲突" in result.stderr
+    assert (external / "index.html").read_text() == "stale-external-index\n"
+    assert (external / "assets/new-hash.js").read_text() == "custom-after-preflight"
+    assert (external / "assets/old-hash.js").read_text() == "old-static\n"
+    assert (target / "lifecycle.log").read_text().splitlines() == ["stop:old", "install"]
+    assert len(list(target.glob(".arena-update-backup-*"))) == 1
+
+
+def test_update_without_manifest_stops_before_service_changes(tmp_path: Path) -> None:
     source = tmp_path / "new-release"
     target = tmp_path / "installed"
     _managed_source(source)
     _installed_target(target)
+    (source / "RELEASE-MANIFEST.json").unlink()
 
     result = _run(source, target)
 
-    assert result.returncode == 0, result.stderr
-    assert "未包含 RELEASE-MANIFEST.json" in result.stderr
+    assert result.returncode != 0
+    assert not (target / "lifecycle.log").exists()
+    assert (target / "cairn/src/cairn/old.py").exists()
 
 
-def test_invalid_manifest_warns_without_blocking_update(tmp_path: Path) -> None:
+def test_invalid_manifest_blocks_before_stopping(tmp_path: Path) -> None:
     source = tmp_path / "new-release"
     target = tmp_path / "installed"
     _managed_source(source)
@@ -403,9 +565,9 @@ def test_invalid_manifest_warns_without_blocking_update(tmp_path: Path) -> None:
 
     result = _run(source, target)
 
-    assert result.returncode == 0, result.stderr
-    assert "校验未通过" in result.stderr
-    assert (target / "RELEASE-MANIFEST.json").read_text(encoding="utf-8") == "{}\n"
+    assert result.returncode != 0
+    assert not (target / "lifecycle.log").exists()
+    assert (target / "cairn/src/cairn/old.py").exists()
 
 
 def test_preflight_rejects_same_nested_and_incomplete_sources(tmp_path: Path) -> None:

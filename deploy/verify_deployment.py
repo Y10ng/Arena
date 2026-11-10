@@ -131,11 +131,12 @@ def verify_image(image: str, expected_version: str, expected_sdk_version: str) -
          "import runpy, shutil; "
          "service = runpy.run_path('/opt/cairn/task-executor/server.py'); "
          "assert callable(service['Handler']) and callable(service['Server']); "
+         "assert service.get('OWNER_PROTOCOL') == 'cairn-execution-owner-v1'; "
          "assert shutil.which('certutil')"],
         timeout=30,
     )
     if executor.returncode != 0:
-        raise RuntimeError("研究镜像缺少可用 executor 服务或 certutil；请提供配套研究镜像")
+        raise RuntimeError("研究镜像缺少所有者连接协议的 executor 服务或 certutil；请重建配套 Worker 应用层，不能沿用旧执行器")
     return {"id": parts[0], "os": parts[1], "architecture": parts[2], "agent_version": expected_output}
 
 

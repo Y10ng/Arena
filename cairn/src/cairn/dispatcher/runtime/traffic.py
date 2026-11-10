@@ -26,7 +26,7 @@ WORKSPACE = "/home/kali/workspace"
 EXECUTION_DIRECTORY = "/run/cairn-exec"
 COLLECTOR_UID = 21001
 EGRESS_UID = 21002
-HEALTH_SECONDS = 3
+OWNER_PROTOCOL = "cairn-execution-owner-v1"
 
 
 @dataclass(frozen=True)
@@ -77,7 +77,8 @@ class ProjectTrafficRuntime:
         self.upstream_ca = self.capture / "upstream-ca.pem"
         self.collector_arguments: list[str] = []
         self._lock = threading.RLock()
-        self._gate_lock = threading.RLock()
+        self._entry_lock = threading.RLock()
+        self._owners: dict[str, socket.socket] = {}
         self._control_lock = threading.RLock()
         self.pause_clock = pause_clock or PauseClock()
         self._cancelled = cancelled or (lambda: False)
@@ -108,7 +109,7 @@ class ProjectTrafficRuntime:
         self._load_scopes()
 
     def _save(self) -> None:
-        with self._gate_lock:
+        with self._entry_lock:
             _save_receipt(self.manifest_path, self.manifest)
 
     def _start_container(self, container: Container, scope_id: str | None = None) -> None:
@@ -117,7 +118,7 @@ class ProjectTrafficRuntime:
 
         def start():
             # 仅启动边界与关闭入口互斥，CA、HTTP、网络与 readiness 等待均在锁外。
-            with self._gate_lock:
+            with self._entry_lock:
                 if cancelled():
                     return None
                 container.start()
@@ -417,7 +418,6 @@ class ProjectTrafficRuntime:
         if proxied:
             commands = self._egress_rules(test_egress, proxy_addresses, address)
         self._initialize_network(container, ["sh", "-ec", "\n".join(shlex.join(command) for command in commands)])
-        self.refresh_gate(scope.id)
         deadline = self.pause_clock.now() + 20
         while not (sockets / "execute.sock").exists() or self.pause_clock.paused:
             # readiness 不持控制锁，也不能把正常冻结误判为启动失败并清理原现场。
@@ -428,18 +428,25 @@ class ProjectTrafficRuntime:
             if container.status not in {"running", "paused"} or self.pause_clock.now() >= deadline:
                 raise RuntimeError("test_execution_start_failed")
             time.sleep(0.1)
+        self._admit_scope(scope.id)
         return scope
 
     def _start_egress(self, scope: TrafficScope, config: dict) -> tuple[list[str], dict]:
-        try:
-            addresses = sorted({entry[4][0] for entry in socket.getaddrinfo(
-                config['host'], config['port'], family=socket.AF_INET, type=socket.SOCK_STREAM)})
-        except socket.gaierror:
-            raise RuntimeError('traffic_proxy_dns_or_address_failed') from None
+        # 代理地址是稳定配置事实，解析只是定位手段；瞬时 DNS 抖动不应使 scope 准备失败。
+        # direct 模式不经此路径；不加缓存层、不加常驻线程。
+        for attempt in range(3):
+            try:
+                addresses = sorted({entry[4][0] for entry in socket.getaddrinfo(
+                    config['host'], config['port'], family=socket.AF_INET, type=socket.SOCK_STREAM)})
+                break
+            except socket.gaierror as exc:
+                if exc.errno != socket.EAI_AGAIN or attempt == 2:
+                    raise RuntimeError('traffic_proxy_dns_or_address_failed') from None
+                time.sleep(2)
         if not addresses or any(ipaddress.ip_address(value).is_loopback for value in addresses):
             raise RuntimeError('traffic_proxy_address_unavailable')
         directory = self.root / 'egress' / scope.id
-        directory.mkdir(mode=0o700, parents=True)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chown(directory, EGRESS_UID, EGRESS_UID)
         names = directory / 'names'
         names.mkdir(mode=0o755)
@@ -509,28 +516,61 @@ class ProjectTrafficRuntime:
                   ['ip6tables', '-A', 'OUTPUT', '-j', 'REJECT']]
         return rules
 
-    def refresh_gate(self, scope_id: str) -> None:
-        # 执行端拒绝过期许可，Dispatcher 崩溃后不会凭启动标记无限放行。
-        # 健康检查、准备和恢复共用同一写入边界，不能争用固定临时路径后误判采集故障。
-        with self._gate_lock:
-            if self.manifest["scopes"][scope_id]["entry_closed"]:
-                return
-            path = self.execution / scope_id / "traffic-ready"
-            temporary = path.with_suffix(".tmp")
-            temporary.write_text(str(time.time()))
-            temporary.chmod(0o444)
-            temporary.replace(path)
+    def _admit_scope(self, scope_id: str) -> None:
+        # 仅在 collector 和网络规则准备完整后建立一次所有者连接。存续不需要任何
+        # 线程续租或持锁 I/O；宿主死亡由内核关闭 fd，显式取消也关闭同一条连接。
+        owner = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        state = self.manifest["scopes"][scope_id]
+        try:
+            with self._entry_lock:
+                if state["entry_closed"] or self._cancelled():
+                    raise RuntimeError("traffic_task_cancelled")
+                if scope_id in self._owners:
+                    raise RuntimeError("traffic_owner_already_connected")
+                self._owners[scope_id] = owner
+            owner.settimeout(20)
+            directory_fd = os.open(self.execution / scope_id, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                # 正式材料目录含完整实例身份，超过 AF_UNIX 限长；沿用工作区的目录 FD 连接方式。
+                owner.connect(f"/proc/self/fd/{directory_fd}/execute.sock")
+            finally:
+                os.close(directory_fd)
+            owner.sendall(("POST /owner HTTP/1.0\r\nX-Cairn-Owner-Protocol: "
+                           + OWNER_PROTOCOL + "\r\nContent-Length: 0\r\n\r\n").encode("ascii"))
+            owner.settimeout(0.2)
+            response = b""
+            deadline = self.pause_clock.now() + 20
+            while b"\r\n\r\n" not in response:
+                # 准备期间的热暂停不计握手预算；等待不持入口锁，取消可以立即断连。
+                self.pause_clock.wait(lambda: self._cancelled() or state["entry_closed"])
+                if self._cancelled() or state["entry_closed"]:
+                    raise RuntimeError("traffic_task_cancelled")
+                if self.pause_clock.now() >= deadline:
+                    raise RuntimeError("traffic_owner_start_timeout")
+                try:
+                    chunk = owner.recv(4096)
+                except socket.timeout:
+                    continue
+                if not chunk or len(response) + len(chunk) > 8192:
+                    raise RuntimeError("traffic_owner_protocol_mismatch")
+                response += chunk
+            if (not response.startswith(b"HTTP/1.0 204 ")
+                    or f"\r\nX-Cairn-Owner-Protocol: {OWNER_PROTOCOL}\r\n".encode("ascii") not in response):
+                raise RuntimeError("traffic_owner_protocol_mismatch")
+            owner.settimeout(None)
+        except BaseException:
+            with self._entry_lock:
+                if self._owners.get(scope_id) is owner:
+                    self._owners.pop(scope_id)
+            owner.close()
+            raise
 
     def check_scope(self, scope_id: str) -> str | None:
-        # 不持有项目创建锁：另一个 scope 启动期间仍须持续刷新现有执行许可。
+        # 心跳年龄与观测耗时不能证明进程死亡。只按 Docker 的真实容器状态处理故障；
+        # collector 落盘失败仍由其 durable_hook 退出，网络规则也不会绕过观察点。
         state = self.manifest["scopes"][scope_id]
         if state["entry_closed"]:
             return "traffic_scope_closed"
-        # 执行许可只表达「宿主存活且在看管」：先于容器状态与 heartbeat 判定刷新，
-        # 宿主侧检查慢不再把许可拖到过期。健康判定失败走下方取消码并经取消路径
-        # 中断执行，而不是停止刷新、等执行器自杀保护过期。entry_closed 防御保留
-        # 在 refresh_gate 自身的 _gate_lock 写入边界内。
-        self.refresh_gate(scope_id)
         roles = ['collector', 'executor']
         if f'egress:{scope_id}' in self.manifest['resources']:
             roles.append('egress')
@@ -539,12 +579,6 @@ class ProjectTrafficRuntime:
             expected = {"running", "paused"} if role == "executor" and state.get("hot_paused") else {"running"}
             if resource is None or resource.status not in expected:
                 return f"traffic_{role}_stopped"
-        try:
-            observed = float((self.capture / scope_id / "heartbeat").read_text())
-        except (OSError, ValueError):
-            return "traffic_capture_unavailable"
-        if not 0 <= time.time() - observed <= HEALTH_SECONDS:
-            return "traffic_capture_stalled"
         return None
 
     def hot_control(self, paused: bool) -> list[dict[str, str]]:
@@ -587,8 +621,7 @@ class ProjectTrafficRuntime:
                     if container.status == "running":
                         container.pause()
                 else:
-                    # 先刷新许可与虚拟时钟，再解冻，避免 watchdog/deadline 在首个调度片内误杀。
-                    self.refresh_gate(scope_id)
+                    # 所有者连接跨暂停保留；只更新虚拟时钟，避免命令预算计入冻结时间。
                     if state.get("hot_paused"):
                         total = state.get("paused_seconds", 0.0) + time.monotonic() - state["pause_started"]
                         path = self.execution / scope_id / "paused-seconds"
@@ -633,13 +666,21 @@ class ProjectTrafficRuntime:
 
     def stop_scope(self, scope_id: str, reason: str = "task_finished") -> dict:
         state = self.manifest["scopes"][scope_id]
-        with self._gate_lock:
+        with self._entry_lock:
             # 历史采集故障跨重启保留，后续正常关闭原因只更新当前状态。
             failure = state.get("code") if str(state.get("code", "")).startswith("traffic_") else reason
             if str(failure).startswith("traffic_"):
                 state.setdefault("failure_code", failure)
             state.update(entry_closed=True, code=reason)
-            (self.execution / scope_id / "traffic-ready").unlink(missing_ok=True)
+            owner = self._owners.pop(scope_id, None)
+            if owner is not None:
+                try:
+                    owner.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    # 对端可能已退出；真正停止仍由下方 Docker 状态核验，不能据此报成功。
+                    pass
+                finally:
+                    owner.close()
         with self._control_lock:
             self._save()
             roles = [('executor', 'test_stopped'), ('collector', 'collector_stopped')]

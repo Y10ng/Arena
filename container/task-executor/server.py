@@ -17,6 +17,7 @@ import time
 
 SOCKET_PATH = "/run/cairn-exec/execute.sock"
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
+OWNER_PROTOCOL = "cairn-execution-owner-v1"
 
 
 def execution_now() -> float:
@@ -28,25 +29,6 @@ def execution_now() -> float:
     return time.monotonic() - paused
 
 
-def capture_ready() -> bool:
-    try:
-        timestamp = float(Path("/run/cairn-exec/traffic-ready").read_text())
-        return 0 <= time.time() - timestamp <= 3
-    except (OSError, ValueError):
-        return False
-
-
-def watch_capture() -> None:
-    admitted = False
-    while True:
-        ready = capture_ready()
-        if admitted and not ready:
-            # 主进程退出使 Docker 结束整个测试容器，包括脱离命令进程组的浏览器/后台任务。
-            os._exit(75)
-        admitted = admitted or ready
-        time.sleep(0.25)
-
-
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         # 工具参数、请求正文和输出只走私有执行通道，不进入服务日志。
@@ -56,7 +38,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path != "/health":
             self.send_error(404)
             return
-        if not capture_ready():
+        if not self.server.owner_connected.is_set():
             self.send_error(503, "traffic_not_ready")
             return
         self.send_response(200)
@@ -64,10 +46,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b"ready\n")
 
     def do_POST(self) -> None:
+        if self.path == "/owner":
+            self.hold_owner()
+            return
         if self.path != "/execute":
             self.send_error(404)
             return
-        if not capture_ready():
+        if not self.server.owner_connected.is_set():
             self.send_error(503, "traffic_not_ready")
             return
         try:
@@ -149,6 +134,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     if stream is not None:
                         stream.close()
 
+    def hold_owner(self) -> None:
+        if self.headers.get("X-Cairn-Owner-Protocol") != OWNER_PROTOCOL:
+            self.send_error(409, "execution_owner_protocol_mismatch")
+            return
+        with self.server.owner_lock:
+            if self.server.owner_connected.is_set():
+                self.send_error(409, "execution_owner_already_connected")
+                return
+            self.server.owner_connected.set()
+        try:
+            self.send_response(204)
+            self.send_header("X-Cairn-Owner-Protocol", OWNER_PROTOCOL)
+            self.end_headers()
+            self.wfile.flush()
+            # 这条连接只归宿主所有，保持静默即可；EOF 不依赖续租、磁盘或系统时钟。
+            # 正常命令使用另外的连接，模型思考和热暂停不会解除所有权。
+            self.rfile.read(1)
+        except OSError:
+            pass
+        finally:
+            # 不允许重新接管旧执行。主进程退出后 Docker 终止容器内全部后代，
+            # 包括 setsid 后台进程；宿主仍须独立核验停止，不能把 EOF 当停机回执。
+            os._exit(75)
+
     def emit(self, value: dict) -> None:
         self.wfile.write(json.dumps(value, separators=(",", ":")).encode() + b"\n")
         self.wfile.flush()
@@ -165,6 +174,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
 
+    def __init__(self, *args, **kwargs):
+        self.owner_lock = threading.Lock()
+        self.owner_connected = threading.Event()
+        super().__init__(*args, **kwargs)
+
 
 if __name__ == "__main__":
     # Chromium 使用 NSS trust store，不读取 curl/Node 的 CA 环境变量。
@@ -179,5 +193,4 @@ if __name__ == "__main__":
     # 每个执行代次使用新目录；不删除未知来源的旧 socket 来掩盖双启动。
     with Server(SOCKET_PATH, Handler) as server:
         os.chmod(SOCKET_PATH, 0o600)
-        threading.Thread(target=watch_capture, daemon=True).start()
         server.serve_forever()

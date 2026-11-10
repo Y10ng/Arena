@@ -53,7 +53,7 @@ start.sh 会先准备并离线检查研究镜像（Worker 与 executor 共用）
 再启动默认 DB-only PostgreSQL、同步本地数据库密码，初始化并启动 Server、UI 和 Dispatcher。
 直接运行 install.sh 只用于安装锁定依赖和迁移配置，不启动服务。
 源码安装或更新需先在 cairn/frontend 执行 npm ci 和 npm run build:server；部署 ZIP 已带静态资源。
-install.sh 不构建前端或镜像；update.sh 统一用缓存构建默认本地镜像，离线检查通过才提升 tag。
+install.sh 不构建前端或镜像；发布包 update.sh 在停服前按固定 digest 准备配套镜像，复用已有层，离线检查后切换官方引用。
 自定义镜像不自动构建或覆盖，需自行提供包含执行服务的配套研究镜像及采集镜像。
 
 首次启动会自动创建 Model keyring、Dispatcher machine credential 和超级管理员。

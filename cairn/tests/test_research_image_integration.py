@@ -168,3 +168,91 @@ def test_shared_research_image_capture_and_cancellation():
                 resource.remove(force=True)
             runtime.close()
             client.close()
+
+
+@pytest.mark.skipif(os.environ.get('CAIRN_TRAFFIC_INTEGRATION') != '1', reason='需显式启用本地隔离 Docker 验收')
+def test_owner_connection_pause_capture_and_orphan_cleanup(monkeypatch):
+    """真实镜像、网络采集、热暂停与脱离进程组的后台任务，无模型或业务数据库。"""
+    client = docker.from_env()
+    image = client.images.get(os.environ['CAIRN_TEST_BROWSER_IMAGE']).id
+    gateway = client.images.get('arena-traffic-gateway:local').id
+    with tempfile.TemporaryDirectory(prefix='owner-docker-') as temporary:
+        root = Path(temporary)
+        site = root / 'site'
+        site.mkdir()
+        ca = certificate(site)
+        (site / 'server.py').write_text(SITE)
+        runtime = ProjectTrafficRuntime(
+            client, project_id='synthetic-owner', root=root / ('dispatcher-traffic-v1-' + 'a' * 64) / 'project',
+            gateway_image=gateway, executor_image=image, isolated=True,
+        )
+        target = None
+        command_thread = None
+        try:
+            runtime.prepare(upstream_ca=site / 'ca.pem')
+            target = client.containers.run(
+                gateway, ['sh', '-c', 'while ! test -f /site/server.key; do sleep .1; done; exec python /site/server.py'],
+                entrypoint=[], detach=True, network=runtime.egress.name,
+                volumes={str(site): {'bind': '/site', 'mode': 'ro'}},
+            )
+            target.reload()
+            address = target.attrs['NetworkSettings']['Networks'][runtime.egress.name]['IPAddress']
+            certificate(site, issuer=ca, address=address)
+            wait_for(lambda: target.exec_run(['python', '-c',
+                "import socket; socket.create_connection(('127.0.0.1',8989),1).close()"]).exit_code == 0)
+            monkeypatch.setattr(runtime, '_start_egress', Mock(side_effect=AssertionError('direct 不应解析代理 DNS')))
+            scope = runtime.prepare_scope('synthetic-owner-run', 0, test_egress={'mode': 'direct'})
+            owner = runtime._owners[scope.id]
+            assert not owner.get_inheritable()
+            executor = client.containers.get(scope.container_id)
+            assert execute(scope, f"curl -fsS --max-time 5 http://{address}:8989/owner-before")[0] == 0
+
+            outcomes = []
+            command_thread = threading.Thread(target=lambda: outcomes.append(execute(
+                scope, 'touch command-started; sleep 2; printf resumed-original-command',
+            )))
+            command_thread.start()
+            wait_for(lambda: (runtime.workspace / 'command-started').exists())
+            runtime.hot_control(True)
+            executor.reload()
+            assert executor.status == 'paused'
+            time.sleep(11)
+            assert runtime._owners[scope.id] is owner
+            runtime.hot_control(False)
+            runtime.hot_resume_completed()
+            runtime.pause_clock.resume()
+            command_thread.join(10)
+            assert outcomes == [(0, 'resumed-original-command')]
+            assert runtime._owners[scope.id] is owner
+            assert execute(scope, f"curl -fsS --max-time 5 http://{address}:8989/owner-after")[0] == 0
+
+            def captured_paths():
+                return {base64.b64decode(record['request']['target_base64']).decode()
+                        for path in (runtime.capture / scope.id).glob('flows/*/flow.json')
+                        if (record := json.loads(path.read_text()))['state'] == 'complete'}
+
+            wait_for(lambda: {'/owner-before', '/owner-after'} <= captured_paths())
+            # 命令已返回但其 setsid 后代仍运行；仅断开 owner，不借助 Docker stop 证明清理。
+            script = "import subprocess; subprocess.Popen(['sh','-c','while :; do printf x >> orphan-ticks; sleep .1; done'], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
+            assert execute(scope, 'python3 -c ' + shlex.quote(script))[0] == 0
+            marker = runtime.workspace / 'orphan-ticks'
+            wait_for(marker.exists)
+            runtime._owners.pop(scope.id).close()
+
+            def exited():
+                executor.reload()
+                return executor.status == 'exited'
+
+            wait_for(exited)
+            assert executor.attrs['State']['ExitCode'] == 75
+            size = marker.stat().st_size
+            time.sleep(.3)
+            assert marker.stat().st_size == size
+            assert runtime.check_scope(scope.id) == 'traffic_executor_stopped'
+        finally:
+            if target is not None:
+                target.remove(force=True)
+            runtime.destroy()
+            if command_thread is not None:
+                command_thread.join(5)
+            client.close()

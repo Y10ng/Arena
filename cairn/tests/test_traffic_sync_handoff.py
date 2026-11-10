@@ -89,11 +89,10 @@ def test_exited_sync_persistence_failure_overrides_nonempty_scope_snapshot(tmp_p
 def test_scope_failure_survives_normal_close_and_bridge_restart(tmp_path, monkeypatch):
     from cairn.dispatcher.runtime import traffic
 
-    runtime = traffic.ProjectTrafficRuntime.__new__(traffic.ProjectTrafficRuntime)
+    runtime = traffic.ProjectTrafficRuntime(
+        None, project_id="synthetic", root=tmp_path, gateway_image="gateway", executor_image="executor",
+    )
     runtime.manifest = {"scopes": {"scope": {"test_stopped": False, "collector_stopped": False}}, "resources": {}}
-    runtime._gate_lock = threading.Lock()
-    runtime._lock = threading.Lock()
-    runtime.execution = tmp_path
     saved = []
     runtime._save = lambda: saved.append(json.loads(json.dumps(runtime.manifest)))
     runtime._stop_container = lambda _: True

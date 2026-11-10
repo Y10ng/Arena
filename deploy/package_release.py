@@ -194,8 +194,11 @@ def validate_static(files: dict[str, bytes]) -> None:
         raise RuntimeError("前端静态资源引用缺失: " + ", ".join(sorted(missing)))
 
 
-def manifest(version: str, files: dict[str, bytes]) -> dict[str, object]:
+def manifest(
+    version: str, files: dict[str, bytes], *, images: dict[str, dict[str, str]] | None = None,
+) -> dict[str, object]:
     return {
+        **({"images": images} if images is not None else {}),
         "format": "arena-code-release/v1",
         "version": version,
         "expected_cairn_agent_version": EXPECTED_CAIRN_AGENT_VERSION,
@@ -222,11 +225,13 @@ def zip_info(name: str, executable: bool) -> zipfile.ZipInfo:
     return info
 
 
-def build_release(output_dir: Path | None = None) -> tuple[Path, Path]:
+def build_release(
+    output_dir: Path | None = None, *, images: dict[str, dict[str, str]] | None = None,
+) -> tuple[Path, Path]:
     version = project_version()
     files = collect_files()
     validate_static(files)
-    manifest_data = json.dumps(manifest(version, files), ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    manifest_data = json.dumps(manifest(version, files, images=images), ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
     output = output_dir or (ROOT / "dist")
     output.mkdir(parents=True, exist_ok=True)
     (output / "RELEASE-MANIFEST.json").write_bytes(manifest_data)
@@ -244,16 +249,44 @@ def build_release(output_dir: Path | None = None) -> tuple[Path, Path]:
     return archive_path, sidecar
 
 
+def _release_image(image: str, digest: str) -> dict[str, str]:
+    if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest):
+        raise ValueError("镜像 digest 必须为 sha256: 后接 64 位十六进制字符")
+    digest = digest.lower()
+    repository, separator, embedded_digest = image.partition("@")
+    if separator and embedded_digest.lower() != digest:
+        raise ValueError("镜像引用中的 digest 与指定 digest 不一致")
+    if ":" in repository.rsplit("/", 1)[-1]:
+        repository, tag = repository.rsplit(":", 1)
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}", tag):
+            raise ValueError("镜像 tag 格式无效")
+    component = r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*"
+    if not re.fullmatch(rf"(?:[A-Za-z0-9.-]+(?::[0-9]+)?/)?{component}(?:/{component})*", repository):
+        raise ValueError("镜像引用必须包含有效的 repository，不接受 URL 或空值")
+    return {"image": f"{repository}@{digest}", "digest": digest}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="构建 Arena 代码发布包与更新渠道文档")
-    parser.add_argument("--gateway-image-ref", default=None,
-                        help="本版配套网关镜像引用（含 tag），写入 release.json")
-    parser.add_argument("--gateway-digest", default=None,
-                        help="本版配套网关镜像远端 manifest digest（sha256:…），写入 release.json")
-    parser.add_argument("--worker-reuse-version", action="store_true", default=True,
-                        help="声明本版继续复用已发布的 Worker 应用层（当前默认）")
+    parser.add_argument("--worker-image-ref", required=True,
+                        help="本版配套 Worker 镜像引用，写入渠道文档和包内 manifest")
+    parser.add_argument("--worker-digest", required=True,
+                        help="本版配套 Worker 镜像远端 manifest digest（sha256:…）")
+    parser.add_argument("--gateway-image-ref", required=True,
+                        help="本版配套网关镜像引用，写入渠道文档和包内 manifest")
+    parser.add_argument("--gateway-digest", required=True,
+                        help="本版配套网关镜像远端 manifest digest（sha256:…）")
+    parser.add_argument("--worker-reuse-version", action="store_true", default=False,
+                        help="仅声明 Worker 协议与应用层未变；仍必须提供配套镜像来源")
     args = parser.parse_args()
-    archive, sidecar = build_release()
+    try:
+        images = {
+            "worker": _release_image(args.worker_image_ref, args.worker_digest),
+            "traffic_gateway": _release_image(args.gateway_image_ref, args.gateway_digest),
+        }
+    except ValueError as exc:
+        parser.error(str(exc))
+    archive, sidecar = build_release(images=images)
     version = project_version()
     notes_tag = f"v{version}"
     channel: dict[str, object] = {
@@ -266,14 +299,8 @@ def main() -> int:
             "size": archive.stat().st_size,
         },
         "worker": {"reuse_version": bool(args.worker_reuse_version)},
+        "images": images,
     }
-    if args.gateway_image_ref and args.gateway_digest:
-        channel["images"] = {
-            "traffic_gateway": {
-                "image": args.gateway_image_ref,
-                "digest": args.gateway_digest,
-            },
-        }
     channel_path = archive.parent / "release.json"
     channel_path.write_text(
         json.dumps(channel, ensure_ascii=False, indent=2, sort_keys=True) + "\n",

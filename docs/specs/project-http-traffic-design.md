@@ -3707,3 +3707,266 @@ UI文件中旧轮astra要求不覆盖本轮模型，不修改平台业务模型�
 测试（2026-11-09 复核会话以项目 venv 重跑核实）：新增 `tests/test_traffic_health_gate.py` 3 例（慢 Docker 读取期间 gate 已推进且执行器侧不过期、executor 真停仍在一个 watch 周期内取消、`entry_closed` 不刷新）与 `test_traffic_capture_retry.py` 预算族参数化（六码 × bootstrap/explore 全链、排除用例新增 `traffic_executor_stopped`+`pi_request`、`traffic_scope_closed`、`traffic_termination_unconfirmed` 三行）合计 25 passed（`CAIRN_TEST_LOCAL_PG=1`）。未通过的既有测试均经基线对照（暂存本改动后重跑）确认与本次无关：`test_dispatcher_retry_decisions.py` 25 例、`test_reason_output_retry.py` 收集错误（缺 `httpx`）、`test_goal_driven_lifecycle.py` 等 47 例的 `no such column: cancel_requested_at`／`unrecognized token: ":"`／`no such table: http_capture_scopes` 失败在无本改动的基线上完全一致。
 
 未完成（遗留）：① CHANGELOG 未为本改动新增条目（现有「未发布」段只覆盖同分支的系统更新功能）——提交前必须补；② 交付报告未见「代码已实现 vs 真实环境已验证」的区分与实例部署要求（v0.2.5+ 网关镜像）转达记录；③ 真实环境验收（实例加载新镜像后 proj_013 复跑、`capture-diagnostics.json` 取证）待用户执行。改动尚未提交。
+
+### 29.9 后记（2026-11-09 复核）
+
+29.8 遗留①②已随提交 1226e3d（含 CHANGELOG 0.2.6 段：两修复与「实例须加载 v0.2.5+ 网关镜像」部署要求）及 v0.2.6 发布（3df0ac3、1cd78d6）解决；③ 仍开放，并入第 30.1 节验收项。用户随后在修复加载后的环境仍观察到 cancelled／`traffic_executor_stopped`，由此产生第 30 节的时序核定与设计评估。
+
+## 30. proj_076 本机取消批次核定：修复加载时序、许可设计第一性原理评估与判定余量重整（2026-11-09，分析完成待实施）
+
+**状态：2026-11-09 分析会话完成；本轮为只读分析，业务改动由独立实施会话按 30.4 的实施提示词执行。**本节回应用户问题：修复轮次完成后于新环境运行仍见 cancelled 与 `traffic_executor_stopped`，「执行许可」是否因暂停/恢复需求而引入过多失效因素、暂停/恢复设计本身是否不合理。
+
+### 30.1 本机证据与「修复后仍复现」的修正
+
+对本地实例核定（runtime spool `runtime/data/dispatcher-traffic-v1-1498…/proj_076`、PostgreSQL 只读查询、Docker 容器元信息、journald、`runtime/logs/dispatcher.log`；时间标注 EST=UTC-5）：
+
+1. **三个取消全部早于修复代码加载。**proj_076 全部 122 个 run 中仅 tr119/120/121 为 cancelled，起于 2026-11-09 00:56:48–00:56:59Z（11-08 19:56 EST）、止于 01:28:29–01:30:00Z（20:28–20:30 EST）。gate 解耦提交 1226e3d 落于 11-09 01:14:18 EST；现行 server/dispatcher 进程分别起于 01:35:23/01:35:29 EST（`ps lstart` 核实，editable venv 已含 §29 修复）。取消窗口内 dispatcher 运行的是修复前源码、网关镜像已是 §28 修复版（执行容器 image id `e5425bf48bcf` = git-f6df095fb4f8）——§28 生效、§29 未生效的中间态。「修复后仍复现」在本机不成立。修复后窗口（01:35 起）dispatcher 日志零 `traffic_*` 取消，但仅 tr122（report，02:01–02:06Z，成功）一个 run，无 explore 流量执行；**修复后的真实验收（带流量的 explore 项目）仍待用户执行**。
+2. **tr121：§29 机制在本机的真实触发。**executor 容器 20:28:07.3 exit 75（许可过期自杀）；其 collector heartbeat 持续写到 20:28:16.5 才随 stop_scope 停止——collector 全程健康。刷新仍在 check_scope 末尾（修复前），被宿主侧延迟拖过 3s 窗口。同窗宿主异常：20:28:07–09 NIC link down/flap（journald kernel 记录）、load ≥8（6 核）。`failure_code=traffic_executor_stopped`。
+3. **tr119：真实但瞬时的 collector 停顿触发看门狗。**watch 观察到 collector heartbeat 年龄 >3s → `traffic_capture_stalled`；executor 137 @20:28:11.8；collector 诊断 `slow_writes=0`、`last_save_at=null`、flows 空（全程空闲无流量），heartbeat 最后写 20:28:13.2，SIGTERM 2s 内未退出被强制（记录退出码 0）。§28 修复后 heartbeat 为独立线程，>3s 间隙即进程级真实停顿（宿主级冻结/换页一类），看门狗按语义触发后 collector 曾恢复写心跳——属「真实但瞬时」，非误报采集死亡，但在高负载宿主上这类瞬时停顿会反复杀 run。
+4. **tr120：`heartbeat_lost`（Intent 租约族，非 traffic 族）**，Pi 于 20:30:00 被取消；其 executor 容器存活至 20:48:05 项目关闭。服务端 403/409 的具体原因因执行事件为空、旧 dispatcher 日志已轮转而不可考（未解）；该码已在 `RUNTIME_RETRYABLE_ERROR_TYPES`（`assessment_attempts.py:911`）内，预算有界。
+5. **exit 75 不等于误杀。**tr118 成功结束但其 executor 容器亦 exit 75（00:56:28Z）：`stop_scope` unlink gate → 自杀是设计内停机路径；本机 65 个 exit-75 容器均属此类。同期 tr047–114 的 `provider_error`/`worker_timeout` 与流量设施无关。
+
+### 30.2 第一性原理评估：许可与暂停/恢复
+
+- **许可的必要性不来自暂停/恢复，来自崩溃遏制。**dispatcher 进程死亡后，dispatch 容器内的 Pi 经 exec 脱管存活，继续经 `/run/cairn-exec` 私有 socket 驱动 executor（execution 目录以 ro 挂进 dispatch 容器，路径不经过 dispatcher），无遏制即无界执行。gate 自杀保护（admitted 后过期 → `os._exit(75)`）把该窗口压到秒级，与 Chubby/ZooKeeper「会话过期即停止工作」同型；业界共识是租约只提供软围栏，配合自杀/外部终止才完整。备选「过期只拒绝新命令（503）不自杀」把遏制寄托于 Pi 对 `execution_rejected` 的处理路径，且单条命令可按 3600s 上限无看管运行——收益小、改动面大，不采用。
+- **暂停/恢复与 gate 兼容，不是问题根源。**hot pause 冻结 executor（SIGSTOP），watch_capture 读取方同停，暂停期间无过期；resume 先刷新再解冻（`traffic.py:591`）。用户假设（暂停/恢复导致许可设计、进而误杀）在此修正：许可服务于崩溃遏制；「取消 pause/resume 换冷重启」会毁掉在途付费工作，与 AGENT.md 工作连续性期待相反。
+- **修复后的残余失效因素**（本轮要消的）：§29 把刷新移到 check_scope 开头后，scope 自身的慢 Docker 读取不再拖自己的 gate，但 `_watch`（`traffic_execution.py:282–295`）串行轮询仍把其它 scope 的慢读取（Docker 客户端 timeout=5s，最多 3 角色 ≈15s/个）排在某 scope 刷新之前；dispatcher 进程级停顿（GIL、高负载调度饥饿）同样计入 3s 窗口。tr121 自杀正发生在 NIC flap + 高负载窗口——与 proj_013 同类别：宿主侧延迟被误判为宿主死亡。
+- **余量对照**：kubelet 节点租约续租 10s/过期 40s，容忍 4 个完整周期失联；本系统 executor 窗口 3s 对无上界的刷新侧延迟，余量为负。误杀代价（毁掉最长 20min 付费工作）与漏检代价（zombie 执行器多活 7s，发现时界仍 ≪ 60s intent_timeout 与重启 recover 路径）完全不对称。
+
+### 30.3 最小完整修复设计（判定余量重整）
+
+保留 gate、自杀语义、看门狗、取消码与预算族；改三处：
+
+1. **专用 gate-writer 线程（`traffic_execution.py`）。**`_start_sync` 既有线程启动块（约 :184–188）追加一个 daemon 线程（复用 `self._stop`）：每 1.0s 遍历 `_runtimes` 与 `_conversation_runtimes` 的 manifest scopes，逐个调 `runtime.refresh_gate(scope_id)`（其内部已在 `_gate_lock` 下拒绝 `entry_closed`，hot_paused scope 写之无妨——executor SIGSTOP 间不读）。单 runtime 异常 try/except 隔离，不中断循环。零 Docker 调用、零 DB——Docker daemon 变慢与 GIL 争用不再进入刷新路径。`check_scope` 内 §29 的刷新保留（第二写者写同一单调时间戳文件无冲突，且覆盖 gate 线程未随 bridge 启动的 prepare 窗口）。
+2. **executor 窗口 3s → 10s（`container/task-executor/server.py` `capture_ready`）。**`<= 3` 改 `<= 10`，注释给出余量依据（kubelet 10/40 先例；刷新已独立于健康检查与 Docker 调用，窗口只需覆盖进程级停顿）。真死检测 3.25s → 10.25s。
+3. **`HEALTH_SECONDS` 3 → 10（`traffic.py:29`）。**collector heartbeat 独立线程 0.25s 周期，10s = 40 个周期，与 executor 窗口一致。tr119 一类 >3s、<10s 的瞬时宿主停顿不再杀 run；真死/真卡死仍 10s 级取消，预算族兜底残余。
+
+部署要求：`task-executor/server.py` 经 `container/Dockerfile:160` 打进 `arena-worker:local`（`dispatch.yaml:24`），须重建镜像并在实例加载；dispatcher/server 重启加载源码。
+
+不做：不动 `_watch` 周期/异常映射与取消码；不动重试预算族及排除项；不改 Pi 侧 `execution_rejected` 语义；不移除 `os._exit(75)`；不改 pause/resume 及热恢复刷新点；不把取消改报成功；不回写历史 run。
+
+验证：
+- 单测（更新 `cairn/tests/test_traffic_health_gate.py` 等）：gate-writer 线程在 Docker client Mock 一律抛 `DockerException` 时仍推进 gate、`entry_closed` scope 不刷新、`self._stop` 置位后线程退出；executor 侧复刻 `capture_ready` 对 5s 旧时间戳仍 ready、11s 过期；`check_scope` 对 5s 旧 heartbeat 返回 None、11s 返回 `traffic_capture_stalled`。
+- 既有 `test_traffic_capture_retry.py` 与更新后的 gate 用例全过。
+- 真实验收（用户）：重启加载后跑一个带流量的 explore 项目；`traffic_*` 取消只应出现在真实死亡，且预算内收敛。
+
+### 30.4 本轮专用实施提示词（已被 §31.5 取代，勿按本节实施；§30.3 的三处改动并入 §31.4 全集）
+
+```text
+这是新开的实施会话，只负责下面这一轮定向改动，不接续其他历史任务。
+请遵循 CLAUDE.md、AGENT.md；本会话可以修改本轮业务代码，不沿用分析会话的只读角色。
+阅读 docs/specs/project-http-traffic-design.md 第 29–30 节，以及 AGENT.md 的核心能力设计标准、任务推进与范围、改动取舍与运行限制。
+先 git status --short、git branch --show-current 核对工作树与分支，保护其他会话未提交改动；文档中的旧行号不能代替当前源码。
+
+用户目标：消除「宿主侧瞬时停顿被误判为宿主死亡 → 取消健康执行」的残余因素，同时保留崩溃遏制的秒级看门狗语义。
+建议依据：许可刷新仍与 _watch 串行 Docker 轮询及进程级停顿共享 3s 预算（proj_013 与本机 tr121 同类别触发，见 30.1-2）；kubelet 节点租约先例（续租 10s/过期 40s）表明生产级余量应容纳多个完整刷新周期。刷新路径与健康判定彻底分离、窗口统一放宽到 10s 后，误杀需宿主停顿 ≥10s，真死检测 10.25s 仍远小于 60s intent 租约时界。
+已确认事实：本机 tr121 于 2026-11-08 20:28:07 EST 因 gate 过期自杀（collector 全程健康；宿主 NIC flap、load≥8）；tr119 因 collector heartbeat >3s 瞬时停顿被取消（诊断 slow_writes=0、heartbeat 随后恢复）；三个取消均早于修复进程加载（详见 30.1）。
+仍未知：tr120 heartbeat_lost 的服务端 403/409 具体原因（证据已灭失，本轮不处理；该码已有重试预算兜底）。
+
+本次实施（三处，最小完整）：
+1. cairn/src/cairn/dispatcher/runtime/traffic_execution.py：TrafficExecutionBridge._start_sync 的既有线程启动块（约 :184–188）追加专用 gate-writer daemon 线程，复用 self._stop：每 1.0s 遍历 self._runtimes 与 self._conversation_runtimes 的 manifest["scopes"]，逐个调 runtime.refresh_gate(scope_id)（其内部已在 _gate_lock 下拒绝 entry_closed，线程内不重复判断）。单 runtime 异常 try/except 隔离，不中断循环。零 Docker 调用、零 DB。中文注释说明：刷新只表达「宿主存活且在看管」，与 _watch 健康判定彻底分离，Docker daemon 慢与 GIL 争用不再进入刷新路径；check_scope 内现有刷新保留（第二写者，语义相同）。
+2. container/task-executor/server.py：capture_ready（约 :31–36）的 `<= 3` 改 `<= 10`；watch_capture、/health、/execute 共用该函数，无需另改；中文注释更新余量依据（kubelet 10/40 先例；刷新已独立于 Docker 调用，窗口覆盖进程级停顿）。
+3. cairn/src/cairn/dispatcher/runtime/traffic.py：HEALTH_SECONDS = 3 改 10（约 :29），注释同步（collector heartbeat 0.25s 周期 × 40；与 executor 窗口一致；真死语义保留）。
+必须保留：看门狗取消码与检测路径、_watch 周期与异常映射、重试预算族及排除项、os._exit(75)、pause/resume 与热恢复刷新点（traffic.py 约 :591）、历史记录不回填。
+不做：不动 container/pi-agent/src/task-execution.ts 与 Pi 侧 execution_rejected 语义；不删 gate；不改 runtime/dispatch.yaml 镜像引用；不碰其他分支未提交改动；不使用 stash；不 commit、不 push。
+
+验证（定向，不默认全套）：
+- 更新 cairn/tests/test_traffic_health_gate.py：executor 侧复刻 capture_ready 对 5s 旧时间戳仍 ready、11s 过期；check_scope 对 5s 旧 heartbeat 返回 None、11s 返回 traffic_capture_stalled；新增 gate-writer 线程用例——Docker client Mock 一律抛 DockerException 时 gate 时间戳仍被推进、entry_closed scope 不刷新、self._stop 置位后线程退出。
+- cairn/tests/test_traffic_capture_retry.py 全量通过；test_traffic_health_gate.py 更新后通过（环境变量按既有轮次）。
+- 交付报告明确区分「代码已实现」与「真实环境已验证」。
+
+部署（写入交付报告，不自动执行业务操作）：task-executor/server.py 经 container/Dockerfile:160 打进 arena-worker:local，须重建镜像并在实例加载；dispatcher/server 进程重启加载 traffic.py/traffic_execution.py 源码改动。不自动恢复/重跑项目、不访问目标、不调用付费模型、不清库。
+更新 docs/specs/project-http-traffic-design.md 第 30 节实施记录（代码实现/本地验证/部署生效/真实验收分列）。
+最终报告当前分支、修改文件、验证结果、提交情况和剩余事项。完成本轮后停止；额外发现只说明，不自行展开下一轮。
+```
+
+### 30.5 本分析轮声明
+
+本轮只读：未修改业务代码、未运行测试、未启停服务、未操作项目或容器；设计文档更新（29.9 与本节）是本轮唯一写入。证据来自本机 PostgreSQL 只读查询（tr119–121/tr118/tr122 及项目行、执行事件表为空的事实）、Docker 容器 inspect、journald、spool heartbeat/diagnostics/manifest 原始记录与当前源码；tr120 的 heartbeat_lost 服务端触发原因不可考，如实列为未解。业界对照（Kubernetes 节点租约 10s/40s、Chubby/ZooKeeper 会期与围栏文献、监督型 vs 自杀型遏制）经公开资料核实，仅作余量与先例依据，未引入任何新组件。
+
+### 30.6 额外发现（不属本轮，只说明）
+
+- `tasks.consumption_outbox` 对 id=99da3555… 的 ValueError 自重启起每约 15s 重复（至 11-09 10:21 仍在），属独立的消费投递缺陷，建议下一轮单独排查。
+- 06:37:04 一次 `/traffic/scopes/…/status` PUT read_timeout——server 侧偶发慢，无后续影响。
+
+## 31. proj_017 成批取消核定：Worker 镜像停在 v0.2.1 + §29 宿主修复不充分的第二例实证 + gate 链路失效因素重整（2026-11-09，分析完成待实施）
+
+**状态：2026-11-09 分析会话完成（同日修订：按用户澄清的部署方式重核版本判定）；本轮为只读分析，业务改动由独立实施会话按 31.5 的实施提示词执行。**本节回应用户问题：update.sh 升级到 0.2.6 后在新环境运行 proj_017 仍成批 cancelled 与 `traffic_executor_stopped`，按第一性原理重新审视整条 gate 链路，消除过多可能报错的因素。结论先行：**该环境的宿主代码已是 0.2.6（§29 两处修复生效），但 Worker 执行镜像仍是 v0.2.1 基础镜像——update.sh 按设计保留了 `dispatch.yaml` 里的自定义镜像引用且离线校验无法识别其陈旧**；执行器侧 3s 自杀窗口原样在场，与 §29 后残余的宿主侧刷新延迟（§30.2 判定）叠加，完整复现成批取消。这同时是「§29 单独不充分」的第二个实例实证（第一例是本机 tr121）。§31.4 的五处改动（沿用 §30.3 三处 + 本节新收口两处）因此全部必要。
+
+### 31.1 证据来源与实例版本核定（2026-11-09 修订版）
+
+用户导出日志包 `/root/下载/proj_017_traffic_executor_stopped.zip`（解包于 `/tmp/proj017_extract/`），含先前分析会话生成的 README/根因分析/时间线/配置快照/关键事件与 session 摘录（读取时点 2026-11-09 09:51–09:54Z）。本轮未连接该实例、未读取宿主或容器，结论来自日志包原文与本项目源码核对。**用户澄清（本轮输入）：该目录名 `arena-0.2.1-linux-code-only` 只是历史目录名，实例已用 `update.sh` 升级到 0.2.6 部署包**；`update.sh --target` 按 design 保留原安装目录与 `runtime/`，目录名不随版本变化。
+
+**据此前对现场证据的重新归因（替换本节首版的「整包停在 v0.2.1」判定）：**
+
+1. **宿主代码 = 0.2.6。**`git show v0.2.6:` 核实：`traffic.py` `check_scope` 刷新已在开头（§29 修复 1 生效）、`assessment_attempts.py` 含 `TRAFFIC_INFRASTRUCTURE_CANCELLATION_CODES`（§29 修复 2 生效）。升级是 `update.sh` 停止服务→替换程序→重启，宿主侧两处修复已加载。
+2. **Worker 执行镜像 = v0.2.1 基础镜像（关键）。**事件 payload 的 `container_image: yong29/arena-worker:git-a0f22cec57b3` 是 Docker Hub 的 v0.2.1 基础层 tag；v0.2.6 文档要求实际运行镜像是本机构建的 `arena-worker:0.2.3`（应用层叠加），且明确「`git-a0f22cec57b3` 须叠加 v0.2.3 应用层，**不可直接使用**」。本轮以 `git show a0f22cec57b3:` 核实：该基础镜像内的 `container/task-executor/server.py` `capture_ready` 窗口仍为 `<= 3`、`HEALTH_SECONDS` 侧 `check_scope` 末尾刷新逻辑随 §29 失效但**执行器侧 3s 自杀窗口原样在场**。
+3. **update.sh 为何保留旧镜像（机制核定，部署脚本源码逐行核实）：**`common.sh:357–359` 对非默认镜像引用只打印「自定义镜像未自动构建或更新…离线检查不证明版本配套」，`update.sh:15` 同语义；`verify_deployment.py:98–116` 的 `verify_image` 只校验平台、`cairn-agent --version`（1.0.0 / pi 0.73.0）与自检——v0.2.1 基础镜像的这些值与 0.2.6 期望**完全一致**（`container/Dockerfile@a0f22ce:168–170` LABEL 核实），校验通过、静默放行。即：用户在 v0.2.1 时代把 `dispatch.yaml` 的 `container.image` 显式设为该基础镜像 tag 后，升级不会改写它，检查也识别不出它缺少后续版本的 task-executor/gateway 配套。
+4. **取消链路的实际形态：§29 宿主修复生效 + 执行器 3s 窗口在场。**刷新已在 `check_scope` 开头，单 scope 自身慢读取不再拖自己的 gate；但 §30.2 已判定的残余仍在——`_watch` 串行轮询把其它 scope 的慢 Docker 读取（timeout=5s×多角色）排在某 scope 刷新之前、dispatcher 进程级停顿计入窗口。一旦某 scope 两次刷新间隔 >3s，v0.2.1 镜像里的 `watch_capture` 即自杀 exit 75 → `traffic_executor_stopped` → 取消 Pi（exit 130）→ §29 预算族按设计计入失败链（DEFAULT 预算 2 + 退避）。日志包内 i005 attempt 4→5→6 连发说明三次取消未及触发耗尽拦截或预算使取消收敛前用户已停手；无界重发不再成立，但高频成批取消仍在。
+5. 共享现场：全部 task 同一 `container_id`、`isolation=shared_container`、共享 workspace、explore `max_running=5`——并发负载放大宿主侧延迟，与 §29.1/§30.1 的触发模式同构。
+
+### 31.2 取消批次机制链（对包内证据逐环核对）
+
+1. **触发窗口与 §29.2-4/§30.1-2 同类。**tr007/tr008（explore，09:45:34/43 启动）、tr009（explore，09:45:53）、tr010（reason，09:46:05）先后进入同一容器；09:47:09/11 tr008/tr007 的 bash 返回 `Task-bound test execution did not complete`（session 原文核实，`AgentFailure` 从 `task-execution.ts:51` 抛出），09:47:17/22 command_finished `cancel_reason=traffic_executor_stopped`、exit 130（中断路径同 §29.2-5 核定），tr010 reason 同因取消。
+2. **自杀路径：`watch_capture` 许可过期（v0.2.1 镜像内 3s 窗口）。**§29 后刷新已提前，但 §30.2 判定的残余延迟（`_watch` 串行轮询排队其它 scope 的慢 Docker 读取、dispatcher 进程级停顿）仍可把某 scope 的刷新间隔拖过 3s；执行器侧窗口只有 3s，无界刷新延迟对固定短窗口余量为负，executor `os._exit(75)` → 下一轮 `check_scope` 读到 executor 非 running → 取消。tr009 最后完成 session 初始化、成为新 scope，全程正常（09:47:53 curl 200）——幸存者模式与 proj_013 B4/B6、本机 tr121 完全同类。**本例是「§29 单独不充分」的第二个实例实证：宿主修复改变了延迟来源的构成（scope 自身慢读取→跨 scope 排队/进程级停顿），但没有消除「刷新间隔无界 vs 窗口固定 3s」的结构性余量为负。**
+3. **tr004 `artifact_write_failed` 是同现场的另一表现**（20min run 结束、exit 0、声明工件写入失败），源于共享 workspace 并发写无隔离，本轮不展开（见 31.7）。
+4. **取消→重发有界但仍成批。**i005 于 09:47:25 标 failed 后重发（attempt 5）、09:47:35 i006 标 failed 后重发（attempt 6）。§29 修复 2 已加载：取消计入失败链、退避生效、预算 2 耗尽后 `execution_retry_exhausted`；attempt 4→5→6 连发说明预算内仍会连续重试同一 intent，若触发因素（3s 窗口误杀）不消除，预算只是把 29 个取消压到 3×N 个——修复 2 是止损，§31.4 的窗口/刷新修复才是消除触发源。
+5. **不需要新根因。**本轮核对了包内全部关键事件与 session 原文，无一条超出 §29/§30 已判定机制；「升级后仍报错」的原因是执行器侧 3s 窗口随旧镜像保留 + 宿主侧刷新延迟残余，两者叠加。
+
+### 31.3 第一性原理：把「可能误杀的因素」从链路中系统性移除
+
+§30.2 已论证 gate/自杀/看门狗的必要性（崩溃遏制）与暂停/恢复无关。本轮沿同一标准再审整条链路，识别出四类「宿主侧或命令侧瞬态被误判为永久故障」的失效因素，并给出收口方式：
+
+1. **失效因素 A——健康判定失败连带停止刷新（残余）。**§29 把刷新移到 `check_scope` 开头后，单次 `check_scope` 内部已解耦；但 `_watch` 串行轮询 + dispatcher 进程级停顿（GIL/负载）仍可使两次刷新间隔无界（§30.2 已述，tr121 真实触发）。→ **§30.3 修复 1+2 依然成立**：独立 gate-writer 线程（零 Docker、零 DB、固定 1.0s 周期）+ 窗口 3s→10s，使刷新路径只依赖「dispatcher 进程活着」这一件事。
+2. **失效因素 B——`HEALTH_SECONDS=3` 对 collector heartbeat 过紧（残余）。**tr119 已实证 >3s、<10s 的真实瞬时停顿会被误杀。→ **§30.3 修复 3 依然成立**：`HEALTH_SECONDS` 3→10（heartbeat 0.25s × 40 周期），与 executor 窗口一致。
+3. **失效因素 C——命令启动 503 直通 Pi 失败（新识别，本节收口）。**`task-execution.ts:57–61`：`/execute` 返回 503（`traffic_not_ready`）时直接 `AgentFailure("execution_rejected")`，Pi 把 bash 工具判失败。gate 过期自杀窗口的边缘态（watch 0.25s 轮询 + refresh 1.0s 周期的相位差）可能让一条恰好落在过期瞬间的命令启动被 503 拒绝，即使执行器随后恢复正常。该路径与 `capture_ready` 判定共用同一时间戳文件，无租约宽限语义。→ **修复：`/execute` 与 `/health` 的就绪判定与自杀判定分离**——启动命令时读取的时间戳年龄 `<= 10` 且 `> -60`（容忍宿主机时钟微回退）即放行；自杀保护保持严格 10s 窗口不动。宽限只影响「已在看管下启动一条新命令」，不放宽自杀（真死仍 10.25s 级检出）。备选「503 时 Pi 侧退避重试」被否：把遏制寄托于 Pi 处理路径，且重试逻辑跨进程更难界定预算，与服务端一处判定相比改动面大。
+4. **失效因素 D——Provider/egress DNS 解析一次性失败（新识别，本节收口）。**`traffic.py:435–438` `_start_egress` 用 `socket.getaddrinfo` 解析代理主机名，瞬时 DNS 失败（宿主网络抖动、NIC flap——tr121 同窗已有实证）即 `traffic_proxy_dns_or_address_failed`，scope 准备失败、任务失败。代理地址是用户配置的稳定事实，解析只是定位手段。→ **修复：`prepare_scope` 前对解析做有界重试（3 次、间隔 2s，指数不变）**，仅此一处，不引入常驻重试器；解析成功后的地址缓存到 scope 生命周期，不在命令路径反复解析。
+5. **不允许的「简化」**：删除 gate、删除自杀、放宽到无界窗口、取消改报成功——均已在 §30.2 否决，不重复。
+
+### 31.4 最小完整修复设计（合并 §30.3 + 本节新收口，共 5 处）
+
+保留 gate、自杀语义、看门狗、取消码与预算族；改动全集：
+
+1. **专用 gate-writer 线程（`traffic_execution.py` `_start_sync`）。**§30.3-1 原文适用：既有线程启动块（当前约 :184–188）追加 daemon 线程（复用 `self._stop`），每 1.0s 遍历 `_runtimes` 与 `_conversation_runtimes` 的 manifest scopes，逐个调 `runtime.refresh_gate(scope_id)`（内部 `_gate_lock` 已拒绝 `entry_closed`）。单 runtime 异常 try/except 隔离。零 Docker 调用、零 DB。`check_scope` 内刷新保留（第二写者，同一原子 replace 无冲突，覆盖 prepare 窗口）。
+2. **executor 窗口 3s → 10s（`container/task-executor/server.py`）。**§30.3-2 原文适用：`capture_ready` `<= 3` 改 `<= 10`，注释给出 kubelet 先例（续租 10s／判定宽限 40s，本轮经官方文档核实 `nodeStatusUpdateFrequency` 默认 10s、`--node-monitor-grace-period` 默认 50s，余量结论不变）与「刷新已独立于健康检查」的依据。
+3. **`HEALTH_SECONDS` 3 → 10（`traffic.py:29`）。**§30.3-3 原文适用。
+4. **执行命令就绪判定与自杀判定分离（`task-executor/server.py`）。**新增 `execution_admitted()`（或等价参数化）：`/execute` 与 `/health` 使用放行窗口 `0 < age <= 10` 且容忍 `age <= 60` 的时钟回退（负年龄视为刚刷新），`watch_capture` 自杀判定保持严格 `0 <= age <= 10`。中文注释说明：宽限只覆盖「看管下启动新命令」的相位差，不放宽自杀窗口。同步更新 `capture_ready` 的既有单测复刻。
+5. **egress DNS 有界重试（`traffic.py` `_start_egress`）。**`socket.getaddrinfo` 包 3 次尝试、间隔 2s 的有界循环，全败才抛 `traffic_proxy_dns_or_address_failed`；`direct` 模式不经过此路径。不加缓存层、不加常驻线程。
+
+部署要求（写入交付报告）：`task-executor/server.py` 打进 Worker 镜像须重建并加载；`traffic.py`/`traffic_execution.py` 属宿主 dispatcher 源码，重启进程加载。**§31.1-3 证明的配套要求：proj_017 所在实例 `dispatch.yaml` 的 `container.image` 仍指 v0.2.1 基础镜像 `yong29/arena-worker:git-a0f22cec57b3`（update.sh 按设计保留自定义引用、离线校验识别不出陈旧），必须改为本机按 0.2.6 配套应用层构建的镜像（如 `arena-worker:0.2.3`）并确认镜像内 task-executor 为新代码；镜像引用不改，执行器侧 3s 窗口永远在场。**
+
+不做：不动 `_watch` 周期/异常映射与取消码；不动重试预算族及排除项；不改 Pi 侧 `execution_rejected` 对非 503 错误的语义；不移除 `os._exit(75)`；不改 pause/resume 刷新点；不把取消改报成功；不回写历史 run；不动共享 workspace 写隔离（tr004 一类，另轮处理，见 31.7）。
+
+验证：
+
+- 单测（更新 `cairn/tests/test_traffic_health_gate.py` 等）：① gate-writer 线程在 Docker client Mock 一律抛 `DockerException` 时仍推进 gate、`entry_closed` scope 不刷新、`self._stop` 置位后线程退出；② executor 复刻对 5s 旧时间戳仍 ready、11s 过期、`-30s`（回退）仍 ready 且自杀判定对 `-30s` 不 ready（分离语义）；③ `check_scope` 对 5s 旧 heartbeat 返回 None、11s 返回 `traffic_capture_stalled`；④ `_start_egress` 解析前两次抛 `socket.gaierror` 第三次成功 → scope 正常创建（Mock getaddrinfo），三次全败仍抛原码。既有 `test_traffic_capture_retry.py` 全量通过。
+- 交付报告明确区分「代码已实现」与「真实环境已验证」。
+- 真实验收（用户）：proj_017 所在实例先把 `dispatch.yaml` 的 `container.image` 从 `yong29/arena-worker:git-a0f22cec57b3` 改为配套构建的新 Worker 镜像（加载 §31.4 改动），重启 dispatcher 后跑带流量的 explore 项目；`traffic_*` 取消只应出现在真实死亡，且预算内收敛。
+
+### 31.5 本轮专用实施提示词
+
+```text
+这是新开的实施会话，只负责下面这一轮定向改动，不接续其他历史任务。
+请遵循 CLAUDE.md、AGENT.md；本会话可以修改本轮业务代码，不沿用分析会话的只读角色。
+阅读 docs/specs/project-http-traffic-design.md 第 29–31 节（29=预算族与解耦已实施、30=余量重整已被本节取代、31=本次全集），以及 AGENT.md 的核心能力设计标准、任务推进与范围、改动取舍与运行限制。
+先 git status --short、git branch --show-current 核对工作树与分支，保护其他会话未提交改动（docs/specs/project-http-traffic-design.md 常有未提交章节，编辑时只追加本节实施记录，不覆盖他人内容）；文档中的旧行号不能代替当前源码。
+
+用户目标：把「宿主/命令侧瞬态被误判为永久故障 → 取消健康执行」的失效因素从 gate 链路系统性移除，同时保留崩溃遏制的秒级看门狗语义。
+已确认事实（31.1–31.3）：proj_017 所在实例已用 update.sh 升级到 0.2.6（宿主 traffic.py/assessment_attempts.py 均含 §29 修复），但 dispatch.yaml 的 container.image 仍是 v0.2.1 基础镜像 yong29/arena-worker:git-a0f22cec57b3（update.sh 按设计保留自定义镜像引用，verify_image 只校验 cairn-agent 版本 1.0.0/pi 0.73.0，v0.2.1 基础镜像恰好匹配而被静默放行；发布文档明确该基础镜像「不可直接使用」）；执行器侧 capture_ready<=3 自杀窗口随旧镜像在场，与 §30.2 判定的宿主侧刷新残余延迟（_watch 串行跨 scope 排队、进程级停顿）叠加，成批取消复现——§29 单独不充分的第二例实证；tr119/tr121 实证 >3s 瞬时停顿误杀；kubelet 节点租约先例（续租 10s/判定宽限 40–50s）经官方文档核实。
+
+本次实施（五处，最小完整；其中 1–3 是 §30.3 原案的沿用，4–5 是 §31.3 新增收口）：
+1. cairn/src/cairn/dispatcher/runtime/traffic_execution.py：TrafficExecutionBridge._start_sync 的既有线程启动块（当前约 :184–188）追加专用 gate-writer daemon 线程，复用 self._stop：每 1.0s 遍历 self._runtimes 与 self._conversation_runtimes 的 manifest["scopes"]，逐个调 runtime.refresh_gate(scope_id)（其内部已在 _gate_lock 下拒绝 entry_closed，线程内不重复判断）。单 runtime 异常 try/except 隔离，不中断循环。零 Docker 调用、零 DB。中文注释说明：刷新只表达「宿主存活且在看管」，与 _watch 健康判定彻底分离；check_scope 内现有刷新保留（第二写者，原子 replace 无冲突）。
+2. container/task-executor/server.py：capture_ready（约 :31–36）的 `<= 3` 改 `<= 10`；中文注释更新余量依据（kubelet nodeStatusUpdateFrequency 10s / node-monitor-grace-period 40–50s 先例；刷新已独立于 Docker 调用，窗口覆盖进程级停顿）。
+3. cairn/src/cairn/dispatcher/runtime/traffic.py：HEALTH_SECONDS = 3 改 10（约 :29），注释同步（collector heartbeat 0.25s × 40；与 executor 窗口一致；真死语义保留）。
+4. container/task-executor/server.py：新增命令启动就绪判定并与自杀判定分离——/execute 与 /health 的放行窗口为时间戳年龄 0<age<=10 且容忍 age 为负（时钟回退，视为刚刷新）；watch_capture 自杀判定保持严格 0<=age<=10 不动。中文注释说明：宽限只覆盖「看管下启动新命令」的相位差，不放宽自杀窗口、不改变真死检出时界。
+5. cairn/src/cairn/dispatcher/runtime/traffic.py 的 _start_egress（约 :435–438）：socket.getaddrinfo 包有界重试（3 次尝试、间隔 2s），全败才抛 traffic_proxy_dns_or_address_failed；direct 模式不经此路径；不加缓存层、不加常驻线程。中文注释说明：代理地址是稳定配置事实，解析只是定位手段，瞬时 DNS 抖动不应使 scope 准备失败。
+必须保留：看门狗取消码与检测路径、_watch 周期与异常映射、重试预算族及排除项、os._exit(75)、pause/resume 与热恢复刷新点（traffic.py 约 :591）、历史记录不回填。
+不做：不动 container/pi-agent/src/task-execution.ts；不删 gate；不改 runtime/dispatch.yaml；不碰其他分支未提交改动；不使用 stash；不 commit、不 push。
+
+验证（定向，不默认全套）：
+- 更新 cairn/tests/test_traffic_health_gate.py：executor 复刻 capture_ready 对 5s 旧时间戳仍 ready、11s 过期、负年龄仍 ready 且自杀判定对负年龄不 ready（改动 2/4 的分离语义）；check_scope 对 5s 旧 heartbeat 返回 None、11s 返回 traffic_capture_stalled；新增 gate-writer 线程用例——Docker client Mock 一律抛 DockerException 时 gate 时间戳仍被推进、entry_closed scope 不刷新、self._stop 置位后线程退出。
+- _start_egress 用例：Mock socket.getaddrinfo 前两次抛 socket.gaierror、第三次成功，断言 scope 准备继续；三次全败抛 traffic_proxy_dns_or_address_failed。既有行为（直接模式不解析）不回归。
+- cairn/tests/test_traffic_capture_retry.py 全量通过；test_traffic_health_gate.py 更新后通过（环境变量按既有轮次）。
+- 交付报告明确区分「代码已实现」与「真实环境已验证」。
+
+部署（写入交付报告，不自动执行）：task-executor/server.py 经 container/Dockerfile 打进 Worker 镜像，须重建并加载；traffic.py/traffic_execution.py 重启 dispatcher 进程加载。另外必须转达用户（31.4 部署要求）：该实例 dispatch.yaml 的 container.image 仍指 v0.2.1 基础镜像（yong29/arena-worker:git-a0f22cec57b3），升级脚本按设计不改写自定义镜像引用、离线校验也识别不出其陈旧；须把该引用改为本机按 0.2.6 配套应用层构建的新镜像并加载本节改动，否则执行器侧 3s 窗口永远在场，验收无从谈起。
+不自动恢复/重跑项目、不访问目标、不调用付费模型、不清库。
+更新 docs/specs/project-http-traffic-design.md 第 31 节实施记录（代码实现/本地验证/部署生效/真实验收分列）。
+最终报告当前分支、修改文件、验证结果、提交情况和剩余事项。完成本轮后停止；额外发现只说明，不自行展开下一轮。
+```
+
+### 31.6 本分析轮声明
+
+本轮只读：未修改业务代码、未运行测试、未启停服务、未操作项目或容器；设计文档更新（30.4 标注与本节）是本轮唯一写入。证据来自日志包原文（`/tmp/proj017_extract/`）与本项目 git 历史逐提交核对；31.1 的版本判定按用户澄清（update.sh 已升级 0.2.6、目录名是历史遗留）修订，`update.sh`/`common.sh`/`verify_deployment.py` 的自定义镜像保留与校验行为以 0.2.6 部署脚本源码逐行核实。kubelet 默认值经 kubernetes.io 官方文档（kubelet-config v1beta1、kube-controller-manager 参考页，经用户代理 192.168.43.190:9567 获取）核实为 `nodeStatusUpdateFrequency` 默认 10s、`--node-monitor-grace-period` 默认 50s——§30.2/§30.3 写的「40s」为旧版默认，余量结论不变。31.3-3/4（命令启动宽限、egress DNS 重试）是本轮新增判定的收口，其余沿用 §30.3 已论证原案。
+
+### 31.8 实施记录（2026-11-09 实施会话）
+
+**代码实现（已完成，未 commit、未 push）：**
+
+| 改动 | 文件 | 状态 |
+|------|------|------|
+| 1. 专用 gate-writer daemon 线程 | `cairn/src/cairn/dispatcher/runtime/traffic_execution.py` `_start_sync` + 新增 `_write_gates` | 已实现 |
+| 2. executor 窗口 3s → 10s | `container/task-executor/server.py` `capture_ready` | 已实现 |
+| 3. `HEALTH_SECONDS` 3 → 10 | `cairn/src/cairn/dispatcher/runtime/traffic.py` | 已实现 |
+| 4. 命令启动就绪判定与自杀判定分离 | `container/task-executor/server.py` 新增 `command_admissible`，`do_GET`/`do_POST` 改用 | 已实现 |
+| 5. egress DNS 有界重试 | `cairn/src/cairn/dispatcher/runtime/traffic.py` `_start_egress` | 已实现 |
+
+**本地验证（已通过）：**
+
+- `cairn/tests/test_traffic_health_gate.py`：11 项用例全部通过（含新增 gate-writer 线程、executor 窗口分离语义、check_scope heartbeat 窗口、egress DNS 重试用例）。
+- `cairn/tests/test_traffic_capture_retry.py`：22 项用例全部通过（`CAIRN_TEST_LOCAL_PG=1`）。
+
+**部署生效（未执行）：**
+
+- `container/task-executor/server.py` 须重建 Worker 镜像并加载。
+- `traffic.py` / `traffic_execution.py` 须重启 dispatcher 进程。
+
+**真实验收（未执行，用户侧）：**
+
+- proj_017 所在实例须先把 `dispatch.yaml` 的 `container.image` 从 `yong29/arena-worker:git-a0f22cec57b3` 改为本机按 0.2.6 配套应用层构建的新镜像（加载本节全部改动），重启 dispatcher 后跑带流量的 explore 项目验证。
+
+### 31.7 额外发现（不属本轮，只说明）
+
+- tr004 `artifact_write_failed`（共享 workspace 并发写 `write_isolation=not_enforced`、20min run 声明工件写入失败）属共享现场写隔离缺口，与 gate 链路无关；若后续在新环境复现，单独开轮处理。
+- explore worker `max_running=5` 与共享容器并存本身不是本轮取消根因（scope 已 per-task），但并发增大宿主负载、放大因素 A 的触发概率；若升级后仍见高负载窗口误杀，可再评估调度侧并发上限，本轮不动。
+
+## 32. 删除时间戳续租，改用执行所有者连接（2026-11-10）
+
+本节替代第 30–31 节的专用 gate-writer、10 秒窗口与命令宽限方案；上文保留为历史分析和实施记录，不代表当前运行设计。范围是执行可靠性及配套部署，不改变研究策略、权限、数据模型或重试预算，不恢复或重跑历史项目。
+
+### 32.1 根因与取舍
+
+上一轮虽独立了 writer，但 `refresh_gate` 仍等待 `container.start()` 与 manifest 两次 fsync 共用的锁；一个 runtime 慢 I/O 仍可拖延唯一 writer。延长窗口只是移动故障阈值，负年龄命令准入与 watchdog 立即自杀也相互矛盾。原测试复制就绪谓词，不能证明实际执行器与宿主协作正确。
+
+真正需要的事实是：采集和网络已经准备完整，且当前执行仍有其宿主所有者。正常存续不应要求调度线程周期运行、周期写盘或 wall-clock 连续。因此直接使用 Linux 已有 Unix socket 生命周期，不新增第三方轮子、续租服务或第二套心跳。
+
+### 32.2 当前协议与停止边界
+
+- 在既有私有 `execute.sock` 增加 `POST /owner`，协议为 `cairn-execution-owner-v1`。Dispatcher 在 collector 和网络规则准备完成后建立一次专用连接，保存在 runtime；它不是 Pi 的每命令 `/execute` 连接。
+- executor 无 owner 时拒绝健康准入与命令执行；握手成功后保持静默连接，不发心跳、不刷新文件、不读 wall-clock。第二个 owner 被拒绝，不重新接管旧执行。
+- 宿主进程死亡由内核关闭 fd，显式停止也关闭 owner。executor 收到 EOF／连接错误后退出码为 75；Docker 结束整个容器内进程，包括 setsid 后台进程。连接断开只触发停止，不替代 Docker stop/reload 核验，也不直接写 `termination_confirmed=true`。
+- 热暂停保留原 owner、原命令与 `PauseClock`；恢复前继续更新 `paused-seconds`，不把冻结时间计入命令预算。重启不接续旧 owner，沿用既有恢复／冻结现场规则，失去原 Future 不伪造可恢复执行。
+- 正式实例目录含完整 64 位身份，超出 AF_UNIX 路径长度。宿主连接复用已有工作区方案，通过目录 FD 的 `/proc/self/fd/<fd>/execute.sock` 访问；测试必须覆盖正式长度，不能只用短临时路径。
+
+删除 `traffic-ready`、`refresh_gate`、`HEALTH_SECONDS`、`capture_ready`、`command_admissible`、`watch_capture` 和专用 writer。原入口锁仅协调启动／关闭，不再承担续租。
+
+### 32.3 观测不可用不等于死亡
+
+`check_scope` 只按真实容器状态认定 collector／executor／egress 停止，不以 heartbeat 陈旧、未来时间、缺失或格式异常判死。heartbeat 仍用于首次启动就绪与诊断；collector 的真实落盘失败仍退出，透明采集网络规则未取消。
+
+暂时 Docker／请求／I/O 查询异常显示 `traffic_health_unavailable` 和既有重试中状态，不直接取消任务；观测恢复后清除。资源归属校验等确定性 RuntimeError 仍停止，不静默放行。历史失败、用户停止、任务截止和既有有界重试预算保持不变。
+
+代价与边界：进程仍活着但永久卡住不再由 heartbeat 年龄推断死亡，仍受原命令／任务截止约束；所有者连接不能证明业务进展。EOF 直接遏制的是目标执行容器，不能声称同时立即终止另一研究容器中的 Pi 或所有模型费用。Docker、磁盘和内核的真实故障仍可能导致失败或停止未确认，不能承诺“永不报错”。
+
+代理 DNS 仅对 `EAI_AGAIN` 重试三次、间隔两秒；`EAI_NONAME` 不重试，direct 不进入代理解析路径。
+
+### 32.4 配套与验证
+
+**代码实现：**宿主 runtime／bridge 与 Worker executor 同步替换；部署离线检查核验 owner 协议，旧 Worker 明确拒绝。发布渠道 `worker.reuse_version` 默认 false，只有显式选择才声明复用。本轮必须更新 Worker 应用层，不能沿用第 31 节所述旧基础镜像；未变化工具层复用，gateway 仅说明性注释变化，不要求重建网关。无新增依赖、数据库迁移或外部 API／权限变化。
+
+**本地定向验证：**
+
+- `test_traffic_health_gate.py`：长路径修正后 10 passed。运行生产 Server 子进程，覆盖无 owner 拒绝、单 owner、连续命令、宿主持锁、wall-clock 跳变、owner 进程 SIGSTOP 跨旧 10 秒窗口后 SIGKILL、停止核验失败与健康观测恢复。
+- `test_research_image_integration.py::test_owner_connection_pause_capture_and_orphan_cleanup`：长路径修正后 1 passed。真实本地 Worker／gateway、隔离合成目标，验证采集、11 秒热暂停后原命令继续、direct 不解析代理、仅 owner 断连即终止执行器及 setsid 后台进程；测试资源已清理。
+- 同步状态与历史失败保留的 4 项定向用例，以及 `test_traffic_capture_retry.py` 22 项：合计 26 passed。
+- `test_release_packaging.py::test_channel_worker_reuse_requires_explicit_opt_in`：2 passed。真实离线检查接受新候选 Worker，拒绝旧 Worker。
+- `npm --prefix cairn/frontend run build:server` 通过（包含 typecheck）；运行静态目录与构建目录的全部 3308 个现有文件内容一致，无需覆盖。构建有大 chunk 提示，pytest 有第三方 anyio 弃用警告，均非失败。
+
+**本机部署生效：**部署前核对当前运行实例数据库，无在途 TaskRun、无待处理会话消息、项目均已停止或完成。仅复用本地 Worker 工具层 COPY executor 构建，离线验证后更新 `arena-worker:local`；通过 `deploy/stop.sh`／`deploy/start.sh` 重启完整 Server 和 Dispatcher，原 PostgreSQL 与 gateway 复用。`deploy/status.sh` 为 running，Dispatcher ownership=tracked、heartbeat=idle，HTTP health 正常；实际主页 200、内容与构建产物一致，11 个入口静态引用可访问。
+
+**本阶段真实项目验收与发布：**未创建、恢复或重跑业务项目，未访问真实目标、未调用模型、未清理业务材料；本机启动和合成执行验证不等于 proj_017 所在另一实例已升级或真实研究任务已验收。本阶段当时无 commit、push、版本号变更或 Release；后续配套更新见下节。其他实例必须加载本轮宿主和配套 Worker 后再验收。
+
+### 32.5 配套发布与跨机器更新（2026-11-10）
+
+用户要求补齐后一起发布。只修改 `worker.reuse_version` 不会更新镜像，且仅修改新 Server 无法修复旧 Server 的首次交接。因此新发布包内 manifest 与 `release.json` 共用两镜像固定 digest，新包 `update.sh` 持有完整准备路径；旧版 detached updater 本来就执行新包脚本，无须新增交接协议。
+
+- 停服前：发布清单硬校验、外置静态冲突预检、按 digest 准备与离线验收两镜像，保存引用／image ID／配置 revision，不复制配置正文。失败不停止旧服务、不修改运行配置。
+- 停服后：确认准备期间配置与镜像未变，再使用原配置存储原子更新所有官方镜像引用；默认 local 与历史官方版本自动迁移，真正定制 tag 保留且须兼容。依赖同步后只核验已准备镜像，不重新构建整套工具。
+- 外置静态目录增量同步，保留旧 hash 与未知内容，`index.html` 最后原子切换；非入口同名异内容明确冲突。失败不删除用户内容，旧程序备份不是数据库／配置整体回滚保障。
+- 旧 v0.2.6 Server 在交接前仍可能因其 `RepoDigests[0]` 校验误报；这种情况直接使用新包更新命令，不能声称尚未执行的新代码已经修复旧准备器。新 Server 已删除该路径和准备阶段配置迁移。
+
+配套 Worker 已上传 `yong29/arena-worker:0.2.7`，远端 digest 为 `sha256:62c3e3b9a19b1306b77361e98ab1169fa2e41529c31bb7100c3bb23849895d16`，远端 config 与经过真实 Docker 验证的本地候选完全一致。网关复用已发布的 `sha256:c1ae1c054cc3b12b0648d06476cc7af86a13208b3f366d3ef0c1a3f9c3b41e10`。代码版本统一为 0.2.7，GitHub 发布结果以实际 Release／渠道为准，不把镜像上传当作代码包已发布。
+
+更新链初轮 45 项通过；补定制 tag／缺省网关／Web 准备失败边界后，相关两文件 31 项通过；发布元数据定向 17 项通过；外置静态目录相关 19 个不同 case 通过。另以真实镜像运行隔离配置的 `prepare/check/apply` CLI 三阶段通过。上述集合有重叠，不相加冒充独立测试总数。
+
+本机确认无活动 TaskRun、项目均停止或完成后运行 `stop/install/start/status`，完整 Server／Dispatcher／PostgreSQL 可用，health 与主页 200。未重跑未受影响的前端构建，沿用本轮已通过的构建产物；未运行真实项目或付费模型。

@@ -17,6 +17,100 @@ package_release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(package_release)
 
 
+@pytest.fixture
+def release_cli_args():
+    return [
+        "package_release",
+        "--worker-image-ref", "localhost:5000/arena/worker:v0.0.0",
+        "--worker-digest", "sha256:" + "a" * 64,
+        "--gateway-image-ref", "ghcr.io/example/gateway@sha256:" + "b" * 64,
+        "--gateway-digest", "sha256:" + "b" * 64,
+    ]
+
+
+@pytest.mark.parametrize("reuse", [False, True])
+def test_channel_worker_reuse_requires_explicit_opt_in(tmp_path, monkeypatch, release_cli_args, reuse):
+    archive = tmp_path / "synthetic.zip"
+    archive.write_bytes(b"synthetic")
+    sidecar = tmp_path / "synthetic.zip.sha256"
+    sidecar.write_text(hashlib.sha256(archive.read_bytes()).hexdigest() + "  synthetic.zip\n")
+    built_images = None
+
+    def build_release(*, images):
+        nonlocal built_images
+        built_images = images
+        return archive, sidecar
+
+    monkeypatch.setattr(package_release, "build_release", build_release)
+    monkeypatch.setattr(package_release, "project_version", lambda: "0.0.0")
+    monkeypatch.setattr("sys.argv", release_cli_args + (["--worker-reuse-version"] if reuse else []))
+
+    assert package_release.main() == 0
+    channel = json.loads((tmp_path / "release.json").read_text())
+    assert channel["worker"]["reuse_version"] is reuse
+    assert channel["images"] == built_images
+
+
+def test_release_archive_and_channel_share_image_sources(synthetic_release, monkeypatch, release_cli_args):
+    root, _ = synthetic_release
+    monkeypatch.setattr("sys.argv", release_cli_args)
+
+    assert package_release.main() == 0
+
+    output = root / "dist"
+    channel = json.loads((output / "release.json").read_text())
+    expected_images = {
+        "worker": {
+            "image": "localhost:5000/arena/worker@sha256:" + "a" * 64,
+            "digest": "sha256:" + "a" * 64,
+        },
+        "traffic_gateway": {
+            "image": "ghcr.io/example/gateway@sha256:" + "b" * 64,
+            "digest": "sha256:" + "b" * 64,
+        },
+    }
+    archive = output / channel["app"]["asset"]
+    assert channel["app"]["sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
+    with zipfile.ZipFile(archive) as bundle:
+        embedded = json.loads(bundle.read("arena-0.0.0-linux-code-only/RELEASE-MANIFEST.json"))
+    assert embedded["images"] == channel["images"] == expected_images
+    assert embedded == json.loads((output / "RELEASE-MANIFEST.json").read_text())
+
+
+@pytest.mark.parametrize("option", [
+    "--worker-image-ref", "--worker-digest", "--gateway-image-ref", "--gateway-digest",
+])
+def test_release_cli_requires_image_sources_even_with_reuse(monkeypatch, release_cli_args, option):
+    index = release_cli_args.index(option)
+    del release_cli_args[index:index + 2]
+    monkeypatch.setattr("sys.argv", release_cli_args + ["--worker-reuse-version"])
+    monkeypatch.setattr(package_release, "build_release", lambda **kwargs: pytest.fail("不应开始打包"))
+
+    with pytest.raises(SystemExit) as exc:
+        package_release.main()
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize(("option", "value"), [
+    ("--worker-digest", "sha256:" + "a" * 63),
+    ("--worker-digest", "sha256:" + "a" * 65),
+    ("--gateway-digest", "sha256:" + "g" * 64),
+    ("--gateway-digest", "sha512:" + "b" * 64),
+    ("--worker-image-ref", ""),
+    ("--worker-image-ref", "https://ghcr.io/example/worker:v1"),
+    ("--worker-image-ref", "example/worker:bad tag"),
+    ("--gateway-image-ref", "example/gateway@sha256:" + "c" * 64),
+])
+def test_release_cli_rejects_invalid_image_sources(monkeypatch, release_cli_args, option, value):
+    release_cli_args[release_cli_args.index(option) + 1] = value
+    monkeypatch.setattr("sys.argv", release_cli_args)
+    monkeypatch.setattr(package_release, "build_release", lambda **kwargs: pytest.fail("不应开始打包"))
+
+    with pytest.raises(SystemExit) as exc:
+        package_release.main()
+    assert exc.value.code == 2
+
+
 def test_release_allowlist_excludes_runtime_and_build_inputs() -> None:
     files = package_release.collect_files()
     assert "cairn/pyproject.toml" in files

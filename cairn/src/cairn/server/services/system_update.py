@@ -25,7 +25,6 @@ from typing import Any
 import requests
 
 from cairn import __version__
-from cairn.server.services.dispatcher_config_store import DispatcherConfigStore
 from cairn.server.services.time_utils import utcnow
 
 
@@ -298,77 +297,12 @@ def _verify_staged(staged: Path) -> None:
     if not script.is_file():
         raise UpdateError("staged 包缺少 deploy/verify_deployment.py")
     result = subprocess.run(
-        ["python3", str(script), "--root", str(staged), "--manifest-only"],
+        ["python3", "-I", str(script), "--root", str(staged), "--manifest-only"],
         capture_output=True, text=True, timeout=300,
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip().splitlines()
         raise UpdateError(f"发布包完整性验收失败: {detail[-1] if detail else result.returncode}")
-
-
-def _repository(ref: str) -> str:
-    """取镜像引用的 repository 部分（含 registry 主机），去掉 tag/digest。"""
-    ref = ref.strip()
-    if "@" in ref:
-        ref = ref.split("@", 1)[0]
-    if ":" in ref.rsplit("/", 1)[-1]:
-        ref = ref.rsplit(":", 1)[0]
-    return ref
-
-
-def verify_gateway_image(image: str) -> None:
-    """网关镜像离线检查（entrypoint + 脚本编译），与部署验收同源。"""
-    script = install_root() / "deploy" / "verify_deployment.py"
-    code = (
-        "import sys; sys.path.insert(0, sys.argv[1]); "
-        "from verify_deployment import verify_gateway_image; "
-        "verify_gateway_image(sys.argv[2]); print('ok')"
-    )
-    result = subprocess.run(
-        ["python3", "-c", code, str(script.parent), image],
-        capture_output=True, text=True, timeout=120,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()
-        raise UpdateError(f"网关镜像离线检查失败: {detail[-1] if detail else result.returncode}")
-
-
-def _remote_digest(image: str) -> str:
-    result = subprocess.run(
-        ["docker", "image", "inspect", image, "--format", "{{index .RepoDigests 0}}"],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0:
-        raise UpdateError("无法读取拉取镜像的远端 digest")
-    value = result.stdout.strip()
-    return value.split("@", 1)[1] if "@" in value else value
-
-
-def _migrate_gateway_ref(channel_gateway_image: str) -> str | None:
-    """把 dispatch.yaml 的同仓库网关引用切换为渠道 ref；返回旧值或 None。
-
-    仅当现有 ref 的 repository 与渠道镜像一致时改写；第三方自定义引用不动。
-    """
-    raw_path = os.environ.get("CAIRN_DISPATCH_CONFIG", "").strip()
-    if not raw_path:
-        return None
-    store = DispatcherConfigStore(Path(raw_path))
-    try:
-        config, _content, _revision = store.read()
-    except Exception:
-        return None
-    container = config.get("container")
-    if not isinstance(container, dict):
-        return None
-    current = container.get("traffic_gateway_image")
-    if not isinstance(current, str) or _repository(current) != _repository(channel_gateway_image):
-        return None
-    if current == channel_gateway_image:
-        return current
-    container["traffic_gateway_image"] = channel_gateway_image
-    # expected_revision=None：后台一次性迁移不做乐观锁；flock 已串行化写入。
-    store.write_config(config, expected_revision=None)
-    return current
 
 
 def _prepare_worker(channel_doc: dict[str, Any], channel_doc_url: str) -> None:
@@ -415,27 +349,25 @@ def _prepare_worker(channel_doc: dict[str, Any], channel_doc_url: str) -> None:
 
         if _PREPARE_CANCEL.is_set():
             raise UpdateError("已取消")
-        _write_state(prepare_progress=f"拉取网关镜像 {gateway['image']}")
-        pull = subprocess.Popen(
-            ["docker", "pull", gateway["image"]],
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-        )
+        _write_state(prepare_progress="准备配套 Worker 与网关镜像，运行配置保持不变")
+        # 新包持有配套清单与唯一准备逻辑；旧 Web 引导也由 update.sh 调用同一入口。
+        plan_path = staging / "image-plan.json"
         try:
-            _return = pull.wait(timeout=1800)
+            prepared = subprocess.run(
+                [str(install_root() / "cairn/.venv/bin/python"), "-I",
+                 str(staged / "deploy/prepare_release_images.py"), "prepare",
+                 "--source", str(staged), "--target", str(install_root()), "--plan", str(plan_path)],
+                capture_output=True, text=True, timeout=3900,
+            )
         except subprocess.TimeoutExpired:
-            pull.terminate()
-            raise UpdateError("docker pull 超时") from None
-        _stderr = pull.stderr.read().decode("utf-8", "replace") if pull.stderr else ""
-        if _return != 0:
-            detail = _stderr.strip().splitlines()
-            raise UpdateError(f"docker pull 失败: {detail[-1] if detail else _return}")
-        digest = _remote_digest(gateway["image"])
-        if digest != gateway["digest"]:
-            raise UpdateError(
-                f"网关镜像 digest 不匹配：期望 {gateway['digest']}，实际 {digest}")
-        verify_gateway_image(gateway["image"])
-
-        previous_ref = _migrate_gateway_ref(gateway["image"])
+            raise UpdateError("配套镜像准备超时，旧服务和配置未切换") from None
+        finally:
+            plan_path.unlink(missing_ok=True)
+        if prepared.returncode != 0:
+            detail = (prepared.stderr or prepared.stdout).strip().splitlines()
+            raise UpdateError(f"配套镜像准备失败: {detail[-1] if detail else prepared.returncode}")
+        if _PREPARE_CANCEL.is_set():
+            raise UpdateError("已取消")
         _write_state(
             phase=PHASE_READY,
             prepare_progress="准备完成",
@@ -443,7 +375,6 @@ def _prepare_worker(channel_doc: dict[str, Any], channel_doc_url: str) -> None:
             staged_dir=str(staged),
             gateway_image=gateway["image"],
             gateway_digest=gateway["digest"],
-            previous_gateway_ref=previous_ref,
             error=None,
         )
     except UpdateError as exc:

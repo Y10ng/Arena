@@ -36,7 +36,11 @@ def execute(scope, command):
                        'command': command, 'cwd': WORKSPACE, 'timeout_seconds': 25}).encode()
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(30)
-        connection.connect(str(scope.socket_directory / 'execute.sock'))
+        directory_fd = os.open(scope.socket_directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            connection.connect(f'/proc/self/fd/{directory_fd}/execute.sock')
+        finally:
+            os.close(directory_fd)
         connection.sendall(b'POST /execute HTTP/1.0\r\nContent-Length: ' + str(len(body)).encode() + b'\r\n\r\n' + body)
         response = b''
         while chunk := connection.recv(65536):

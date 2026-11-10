@@ -1,9 +1,8 @@
 """将实际 HTTP 观察写入 scope 私有 spool；执行来源只从该实例的运行时绑定读取。
 
-heartbeat 由独立 OS 线程按固定周期推进，与 mitmproxy 事件循环解耦：大响应体
-落盘占满事件循环（采集仍在推进）不再等同于 collector 死亡；heartbeat 过期只
-表示进程停止或彻底卡死（线程随进程终止）。采集进展与写延迟由 save/chunk 路径
-写入 spool 诊断文件，供现场区分「I/O 慢」与「进程卡死」两种来源。
+heartbeat 由独立 OS 线程推进，用于启动就绪与现场诊断；陈旧心跳不能证明
+进程死亡，宿主不再据其年龄取消任务。采集进展与写延迟由 save/chunk 路径
+写入 spool 诊断文件；真实落盘失败仍终止观察点，不能无记录地继续转发。
 """
 
 from __future__ import annotations
@@ -26,8 +25,7 @@ ROOT = Path("/capture")
 BODY_FSYNC_THRESHOLD = 1024 * 1024
 # 单次 chunk 落盘耗时超过该值记入延迟诊断（毫秒）；正常 page cache 写远低于此。
 SLOW_WRITE_MILLISECONDS = 25
-# heartbeat 推进周期；须显著小于宿主 HEALTH_SECONDS（3s），并保留进程死亡
-# 后看门狗在 3 秒级取消的裕量。
+# 保留既有诊断采样周期，不承担执行授权或死亡判定。
 HEARTBEAT_PERIOD_SECONDS = 0.25
 
 
@@ -79,8 +77,7 @@ class Capture:
             pass
 
     def _start_heartbeat_thread(self) -> None:
-        # 独立 OS 线程推进 heartbeat：事件循环饿死不影响它，进程死亡线程随之
-        # 消失，两种失效仍都收敛为 heartbeat 过期（3 秒级看门狗语义保留）。
+        # 心跳与采集事件循环分离，便于诊断调度/I/O 停顿；不据此推导进程死亡。
         def beat() -> None:
             while not self._heartbeat_stop.wait(HEARTBEAT_PERIOD_SECONDS):
                 try:

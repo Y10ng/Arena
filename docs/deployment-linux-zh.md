@@ -4,27 +4,26 @@
 
 | 安装路径 | 适合情况 | 需要准备 |
 | --- | --- | --- |
-| [部署包与预构建镜像（推荐）](#路径-a使用已有-worker-镜像) | 安装已发布版本，省去前端和工具层构建 | 应用 ZIP、Worker 应用层 ZIP、两个公开基础镜像；仍需安装宿主 Python 依赖并构建小应用层 |
+| [部署包与预构建镜像（推荐）](#路径-a使用已有-worker-镜像) | 安装已发布版本，省去前端和工具层构建 | 应用 ZIP、按固定 digest 拉取的 Worker 与网关镜像；仍需安装宿主 Python 依赖 |
 | [从源码完整安装](#路径-b从源码完整安装) | 需要自行修改、构建，或没有适配主机架构的发布镜像 | Git、Node.js/npm，以及构建时的网络和资源 |
 
-当前是**宿主机 Server / Dispatcher + Docker Worker**，Server 同时提供 API 和正式前端；Compose 只负责 PostgreSQL，不是全栈 Docker 部署。新安装推荐下面的 `v0.2.6` 宿主部署包、`v0.2.3` Worker 最小应用层包与本版更新的流量采集镜像：研究镜像继续复用 v0.2.1 公开工具层，离线复制配套编译产物生成；网关修复了大响应体采集导致的事件循环饿死，须使用 `v0.2.5+` 配套镜像。宿主机无需 npm，不重装工具层。
+当前是**宿主机 Server / Dispatcher + Docker Worker**，Server 同时提供 API 和正式前端；Compose 只负责 PostgreSQL，不是全栈 Docker 部署。本指南对应 **0.2.7** 配套部署，实际发布版本以 Release 和渠道文档为准。配套 `yong29/arena-worker:0.2.7` 已上传，网关复用既有镜像，两者均按固定 digest 拉取；不再要求 v0.2.3 Worker 最小应用层包或本地小应用层构建。宿主机无需 npm，Docker 复用未变化的镜像层。
 
 默认端口、镜像名、数据库和安装位置只是起点，可按需要选择；常见调整见 [修改端口和常用配置](#修改端口和常用配置)。
 
 ## 已发布版本与下载
 
-[GitHub Release v0.2.6](https://github.com/Y10ng/Arena/releases/tag/v0.2.6) 新增管理端「系统更新」页面（仅 ZIP 安装支持一键更新），并发布首个 `release.json` 更新渠道文档；同时修复流量执行许可刷新与健康判定解耦、`traffic_*` 基础设施取消纳入有界重试预算。应用源码以该版 Git 标签为准，完整 revision、附件大小及 SHA256 见 Release 说明和校验文件。**v0.2.5 安装无更新功能，需手动升级到 v0.2.6。**
+已发布的 [v0.2.6](https://github.com/Y10ng/Arena/releases/tag/v0.2.6) 提供 ZIP 管理端「系统更新」页面与 `release.json` 更新渠道。安装本指南对应的 **0.2.7** 时，先在 [最新 Release 页面](https://github.com/Y10ng/Arena/releases/latest) 或渠道检查版本为 **0.2.7**，再使用下面的包名；当前 latest 若仍是旧版，不能视作本版已经发布。完整 revision、附件大小及 SHA256 以实际发布说明和校验文件为准。
 
 | 资产 | 下载或版本引用 |
 | --- | --- |
-| v0.2.6 应用部署包 | [arena-0.2.6-linux-code-only.zip](https://github.com/Y10ng/Arena/releases/download/v0.2.6/arena-0.2.6-linux-code-only.zip) |
-| 更新渠道文档 | [release.json](https://github.com/Y10ng/Arena/releases/download/v0.2.6/release.json) |
-| 配套 Worker 最小应用层包（v0.2.3） | [arena-0.2.3-worker-application.zip](https://github.com/Y10ng/Arena/releases/download/v0.2.3/arena-0.2.3-worker-application.zip) |
-| ZIP 校验文件 | 对应 Release 中各自的 `.zip.sha256` |
-| 研究镜像基础（v0.2.1） | [yong29/arena-worker](https://hub.docker.com/r/yong29/arena-worker)：`git-a0f22cec57b3`，须叠加 v0.2.3 应用层，不可直接使用 |
-| 流量采集镜像 | [yong29/arena-traffic-gateway](https://hub.docker.com/r/yong29/arena-traffic-gateway)：`latest`，digest `sha256:c1ae1c054cc3b12b0648d06476cc7af86a13208b3f366d3ef0c1a3f9c3b41e10` |
+| 0.2.7 应用部署包 | [最新 Release 页面](https://github.com/Y10ng/Arena/releases/latest)，选择 `arena-0.2.7-linux-code-only.zip` |
+| 更新渠道文档 | [release.json](https://github.com/Y10ng/Arena/releases/latest/download/release.json)，检查 `version` 为 `0.2.7` |
+| ZIP 校验文件 | 同一 Release 中对应的 `.zip.sha256` |
+| 配套预构建 Worker（已上传） | [yong29/arena-worker](https://hub.docker.com/r/yong29/arena-worker)：`0.2.7`，manifest digest `sha256:62c3e3b9a19b1306b77361e98ab1169fa2e41529c31bb7100c3bb23849895d16` |
+| 复用的流量采集镜像 | [yong29/arena-traffic-gateway](https://hub.docker.com/r/yong29/arena-traffic-gateway)：digest `sha256:c1ae1c054cc3b12b0648d06476cc7af86a13208b3f366d3ef0c1a3f9c3b41e10` |
 
-相对 v0.2.5 无新增数据库迁移或 Worker 变化；网关继续使用 `latest` tag（与 v0.2.5 的 `git-f6df095fb4f8` 为同一镜像，digest 相同）。**v0.2.5 及更早版本无 `release.json` 附件，无法一键更新，需手动升级到 v0.2.6。** 此后 ZIP 安装即可通过管理端一键更新。Worker 研究镜像继续使用 v0.2.3 应用层。该包包含 Dockerfile、编译后的 `artifacts.js` 及记录源码 revision、基础 digest、文件摘要的清单，不含工具、依赖或 Docker 镜像；在固定基础上仅复制该文件并离线自检。**仅支持 `linux/amd64`**，公开镜像无需登录。不得把新应用直接配到未经更新的旧 Worker，也不与任意更新后的 `main` 混用。
+本次更新 Worker，无新增数据库迁移；Worker 远端 config 已核对对应本地通过 Docker 集成验证的 candidate，但这不等于已验收所有存量项目恢复或正式模型流程。网关复用上述 digest。**v0.2.6 ZIP 安装可检查 → 准备 → 应用；v0.2.5 及以前直接使用新包 `update.sh` 升级，不必先升到 v0.2.6。** 两镜像仅支持 `linux/amd64`，公开镜像无需登录。不要沿用未经更新的旧 Worker，也不要将本版镜像与任意更新后的 `main` 混用。
 
 已发布 ZIP 内的文档保留打包时内容，下载地址与镜像引用以本指南和 Release 说明为准；不会为了补充文档覆盖同版本 ZIP 或改变其校验值。v0.2.1 的原部署包、校验值和镜像保持不变，历史发布记录见 `CHANGELOG.md`。
 
@@ -44,18 +43,18 @@
 
 **1. 下载、校验并解压应用部署包，安装 Python 依赖。** 使用 Release 附件中的 code-only ZIP，不是 GitHub 自动生成的 Source code ZIP。它包含服务端、正式前端静态资源、部署脚本及镜像构建输入，不含已安装依赖、完整前端源码、运行数据或 Docker 镜像。
 
-以下命令下载 `v0.2.6`，校验成功后才解压到新空目录并安装；任一步失败即停止后续步骤。包内顶层为 `arena-0.2.6-linux-code-only/`：
+确认最新 Release 已发布 **0.2.7** 后执行以下命令，校验成功后才解压到新空目录并安装；任一步失败即停止后续步骤。包内顶层为 `arena-0.2.7-linux-code-only/`：
 
 ```bash
-RELEASE_URL='https://github.com/Y10ng/Arena/releases/download/v0.2.6'
-ASSET='arena-0.2.6-linux-code-only.zip'
+RELEASE_URL='https://github.com/Y10ng/Arena/releases/latest/download'
+ASSET='arena-0.2.7-linux-code-only.zip'
 DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-download.XXXXXX")" &&
   curl -fL "$RELEASE_URL/$ASSET" -o "$DOWNLOAD_DIR/$ASSET" &&
   curl -fL "$RELEASE_URL/$ASSET.sha256" -o "$DOWNLOAD_DIR/$ASSET.sha256" &&
   (cd "$DOWNLOAD_DIR" && sha256sum -c "$ASSET.sha256") &&
   UNPACK_DIR="$(mktemp -d "$HOME/arena-install.XXXXXX")" &&
   unzip "$DOWNLOAD_DIR/$ASSET" -d "$UNPACK_DIR" &&
-  cd "$UNPACK_DIR/arena-0.2.6-linux-code-only" &&
+  cd "$UNPACK_DIR/arena-0.2.7-linux-code-only" &&
   ./deploy/install.sh
 ```
 
@@ -63,42 +62,33 @@ DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-download.XXXXXX")" &&
 
 **2. 准备本版研究镜像与配套网关。** Worker 和 executor 共用研究镜像；网关、collector 和网络 helper 使用独立采集镜像。运行容器、挂载和任务停止边界不合并。
 
-从 v0.2.3 Release 下载配套 Worker 最小应用层包并校验，在固定 v0.2.1 基础上离线构建。仅增加配套 `artifacts.js`，不重新安装工具、Node 或 npm 依赖；基础不在本机时仍须先下载其现有层。v0.2.6 未修改 Worker，任一步失败时先处理，不继续启动：
+直接按固定远端 manifest digest 拉取两张预构建镜像；不再下载旧 Worker 应用层包，也不执行小应用层构建。Docker 复用本机已有相同层；任一步失败时先处理，不继续启动：
 
 ```bash
-WORKER_RELEASE_URL='https://github.com/Y10ng/Arena/releases/download/v0.2.3'
-WORKER_ASSET='arena-0.2.3-worker-application.zip'
-WORKER_DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-worker-download.XXXXXX")" &&
-  curl -fL "$WORKER_RELEASE_URL/$WORKER_ASSET" -o "$WORKER_DOWNLOAD_DIR/$WORKER_ASSET" &&
-  curl -fL "$WORKER_RELEASE_URL/$WORKER_ASSET.sha256" -o "$WORKER_DOWNLOAD_DIR/$WORKER_ASSET.sha256" &&
-  (cd "$WORKER_DOWNLOAD_DIR" && sha256sum -c "$WORKER_ASSET.sha256") &&
-  WORKER_UNPACK_DIR="$(mktemp -d "$HOME/arena-worker-app.XXXXXX")" &&
-  unzip "$WORKER_DOWNLOAD_DIR/$WORKER_ASSET" -d "$WORKER_UNPACK_DIR" &&
-  docker pull 'yong29/arena-worker@sha256:b4babe19a719acf73733b3d6e093c490a2a741b95562682fd16b5c227df57d06' &&
-  docker build --pull=false --network=none -t arena-worker:0.2.3 "$WORKER_UNPACK_DIR/arena-0.2.3-worker-application" &&
-  docker pull 'yong29/arena-traffic-gateway@sha256:1578d5015ca2cc64bc26642be85b8a2eb27d72337c7deba91dc7dca9d482cd30'
+docker pull 'yong29/arena-worker@sha256:62c3e3b9a19b1306b77361e98ab1169fa2e41529c31bb7100c3bb23849895d16' &&
+  docker pull 'yong29/arena-traffic-gateway@sha256:c1ae1c054cc3b12b0648d06476cc7af86a13208b3f366d3ef0c1a3f9c3b41e10'
 ```
 
-本版没有新的 Docker Hub Worker tag；`arena-worker:0.2.3` 是上方在本机构建的结果，不能用 `docker pull arena-worker:0.2.3` 代替。也可导入可信分发方已按本版应用层准备的镜像 tar（`docker load --input /绝对路径/配套镜像.tar`），但未经更新的 v0.2.1 Worker tar 不适用；导入最终镜像不等于拥有多阶段构建缓存。
+Worker 的公开 tag 为 `yong29/arena-worker:0.2.7`，安装固定上述 digest，避免浮动 tag 改变实际内容。也可导入可信分发方准备的配套镜像 tar（`docker load --input /绝对路径/配套镜像.tar`），但旧 Worker tar 不适用；导入后须核对实际镜像引用，不假定 tar 保留 registry digest。导入最终镜像不等于拥有多阶段构建缓存。
 
 **3. 在 `runtime/dispatch.yaml` 中设置实际镜像名。** 默认 `images: []` 自动注册主 Worker，不必再填一套映射。网关不是 pi Worker，不要把它加入 Worker 注册列表。以下只展示待修改字段，不要覆盖完整文件：
 
 ```yaml
 container:
-  image: "arena-worker:0.2.3"
-  traffic_gateway_image: "yong29/arena-traffic-gateway@sha256:1578d5015ca2cc64bc26642be85b8a2eb27d72337c7deba91dc7dca9d482cd30"
+  image: "yong29/arena-worker@sha256:62c3e3b9a19b1306b77361e98ab1169fa2e41529c31bb7100c3bb23849895d16"
+  traffic_gateway_image: "yong29/arena-traffic-gateway@sha256:c1ae1c054cc3b12b0648d06476cc7af86a13208b3f366d3ef0c1a3f9c3b41e10"
 ```
 
-上面的 YAML 对应应用层构建结果和按 digest 拉取的网关。使用 `docker load` 时改填实际导入的 tag；不要假定 tar 保留 registry digest 引用。不要保留默认 `:local` 配置：缺少默认引用会触发构建，包更新器即使已有默认镜像也会带缓存运行完整配方，缓存缺失可能重新下载工具。采用上方自定义版本 tag 与网关 digest 时，启动／更新只检查已准备镜像，不自动 pull 或切换新版；已有显式 `images`／profiles／允许镜像列表也需对应实际选图，见后面的按需说明。
+上面的 YAML 对应按 digest 拉取的配套两镜像。使用 `docker load` 时改填实际导入的 tag，并自行保证版本配套。新安装不要保留缺失的默认 `:local` 引用，以免启动时触发源码构建。`start.sh` 不负责拉取新版；新包 `update.sh` 则会准备发布 manifest 指定的镜像，并统一迁移官方引用（包括本地 `:local` 与版本 tag）。已有显式 `images`／profiles／允许镜像列表也需对应实际选图，见后面的按需说明。
 
-完成后进入 [修改端口和常用配置](#修改端口和常用配置)，默认值合适时直接 [启动并登录](#启动并登录)。如果只有源码而没有部署包，按路径 B 准备应用与前端，Worker 构建这一步可改用上面的已有镜像。
+完成后进入 [修改端口和常用配置](#修改端口和常用配置)，默认值合适时直接 [启动并登录](#启动并登录)。如果只有源码而没有部署包，按路径 B 准备应用与前端；仅在源码 revision 与发布镜像确实配套时，才可用预构建镜像代替源码构建。
 
 ### 路径 B：从源码完整安装
 
-在准备存放源码的位置执行；`git clone` 使用新目录，不覆盖已有工作区。下面固定到 `v0.2.6`；按 tag 检出时处于 detached HEAD 是正常现象。开发者可另选分支并构建其配套镜像，不把新源码直接配到本次旧镜像：
+在准备存放源码的位置执行；`git clone` 使用新目录，不覆盖已有工作区。以下示例获取 `main` 并完整构建该 revision 的镜像；如需固定发布版，可在构建前检出 Release 页面实际存在的 tag。按 tag 检出时处于 detached HEAD 是正常现象，不把任意源码直接配到上方发布镜像：
 
 ```bash
-git clone --branch v0.2.6 --single-branch https://github.com/Y10ng/Arena.git
+git clone --branch main --single-branch https://github.com/Y10ng/Arena.git
 cd Arena
 ./deploy/install.sh
 npm --prefix cairn/frontend ci
@@ -325,48 +315,56 @@ cairn/.venv/bin/cairn materials save --project '实际项目ID' --container '完
 
 ### 部署包更新
 
-**从 v0.2.5 更新到 v0.2.6：** 下载上方应用 ZIP 及校验文件，解压到旧安装之外的新空目录，不在新目录运行 `install.sh` 或 `start.sh`。本次无新增数据库迁移或 Worker 变化；网关继续使用 `latest` tag（与 v0.2.5 的 `git-f6df095fb4f8` 为同一镜像），`runtime/dispatch.yaml` 的 `container.traffic_gateway_image` 若已指向 `latest` 则无需修改，否则改为 `yong29/arena-traffic-gateway:latest`；`arena-worker:0.2.3` 可保留。**v0.2.5 无一键更新功能，须手动升级到 v0.2.6；此后 ZIP 安装即可使用管理端一键更新。** 在旧任务退出后的维护窗口操作。
+**升级目标为 0.2.7，操作前确认 Release / 渠道版本。** 本次更新 Worker、复用固定 digest 的网关，无新增数据库迁移。**v0.2.6 ZIP 安装**可在管理端检查 → 准备 → 应用，也可采用下面的手动入口；**v0.2.5 及以前**直接运行新包 `update.sh`，不必先升到 v0.2.6。旧 v0.2.6 页面准备阶段不具备完整两镜像逻辑，其兼容边界及失败处理见[系统一键更新](#系统一键更新)。
 
-**从 v0.2.1／v0.2.2／v0.2.3／v0.2.4 更新到 v0.2.6：** 同时准备 v0.2.6 应用包、v0.2.3 Worker 应用层与网关镜像（`latest`，digest `sha256:c1ae1c054cc3b12b0648d06476cc7af86a13208b3f366d3ef0c1a3f9c3b41e10`），不能直接保留未经更新的旧 Worker 与旧网关。先确认真实执行已退出，保留数据库、`runtime`、资料和外置路径的一致备份，再按路径 A 准备 Worker 与网关，在停应用后修改原配置并运行新包更新器。默认 `:local` 仍按现有更新器逻辑运行完整配方的缓存构建，不用 `--server-only` 绕过。
+更新前先暂停或结束任务，确认真实执行已退出，在维护窗口保留数据库、`runtime`、完整 keyring / token、资料和外置路径的一致备份。不用 `--server-only` 绕过执行环境准备；不把“没有新增数据库迁移”理解为历史迁移阻断已经解除。
 
 **存量项目限制：** 更新镜像 tag 或宿主应用不会自动替换已有容器、批量补齐所有旧工作区或重跑任务。公共研究准备会在符合原容器复用条件时准备输入；材料增补改变 bundle digest 时仍可能触发既有签名不匹配。已有 `inputs/` 必须与本次来源清单完全一致才能复用；用户目录、修改或不完整副本均保留并报冲突，不删除业务材料自愈。不以已完成隔离验证宣称存量恢复和正式模型流程均已验收。
 
-**自定义静态目录：** 更新器不替换 `CAIRN_STATIC_DIR` 指向的外置内容。若不再需要外置部署，在旧应用停止后，将原安装 `runtime/arena.env` 中该变量改为 `/现有应用根目录/cairn/src/cairn/server/static` 的真实绝对路径，再运行更新器；不要指向临时新包目录。若必须保留外置目录，则将新包 `cairn/src/cairn/server/static/` 的缺失资源补齐，同名 hash 文件须内容一致，最后原子替换 `index.html`，不删除旧 hash。仅更新源码静态目录不表示外置入口已修复。
+**自定义静态目录：** 新包 `update.sh` 沿用原安装的环境加载规则读取 `CAIRN_STATIC_DIR`，自动同步外置静态内容，不改写配置路径。支持绝对路径、相对原安装根目录的路径，以及显式配置的根目录 symlink；待同步路径内部的 symlink 会拒绝，不沿链接覆盖其他用户内容。停服前先预检冲突，安装与镜像准备完成后再次检查并增量补齐新资源，最后原子替换 `index.html`。**旧 hash 与未知文件保留；除 `index.html` 外，任何同名异内容（包括无 hash 的定制资源）都会阻止升级**，不覆盖或清空用户目录。外置路径不能指向临时新包目录或其他待整体替换的程序目录。若不再需要外置部署，可在维护窗口停服后改为原安装的 `cairn/src/cairn/server/static` 真实绝对路径；无论哪种路径，同步成功仍需在更新后刷新浏览器检查实际入口。
 
-取得配套新包，像路径 A 一样解压到**原安装目录之外的新空目录**。先核对[跨版本升级条件](#本次跨版本升级注意)；有待迁移历史会话时，不要把包更新器当作文件／session 迁移入口。本地更新器会统一准备研究镜像与独立网关镜像，但不负责从远端获取新应用或发布镜像。新更新器在暂存和停服务前拒绝目标中的 `.git` 目录或 worktree 文件，请对 Git 安装使用源码路径。
+取得配套新包，校验后像路径 A 一样解压到**原安装目录之外的新空目录**，不在新目录运行 `install.sh` 或 `start.sh`。先核对[跨版本升级条件](#本次跨版本升级注意)；有待迁移历史会话时，不要把包更新器当作文件／session 迁移入口。新更新器拒绝目标中的 `.git` 目录或 worktree 文件，Git 安装必须走[源码更新](#源码更新)，不能调用 ZIP `update.sh` 覆盖工作区。
 
-- 使用预构建／自定义镜像：升级到 `v0.2.6` 时使用[上述配套部署包](#已发布版本与下载)。从 v0.2.5 更新无需更换网关镜像（`latest` 与 `git-f6df095fb4f8` 相同）；从更早版本更新须按路径 A 构建 v0.2.3 Worker 小应用层并准备网关，或导入已配套镜像。确认旧任务退出后停止原安装应用；需要更换镜像时，修改**原安装**的 `runtime/dispatch.yaml`，更新 `container.image`、`container.traffic_gateway_image` 及实际使用的显式映射／允许列表，再运行新包更新器。配置可能被运行中的 Dispatcher 重载，不要提前把仍工作的旧应用切到新执行镜像。仅发布或拉取新 tag 不会自动修改配置；从默认 `:local` 切换也须显式修改这两个字段。
-- 使用默认本地镜像：确认旧任务已退出后直接执行下方新包更新器，无需提前手工构建。更新器使用新版源码缓存构建两镜像，研究镜像检查 pi runner、执行服务与证书工具，网关单独检查采集依赖和入口；准备失败不启动新应用。
-
-准备完成后运行**新包中的**更新器，替换下例两个绝对路径：
+确认任务退出、备份和维护窗口后运行**新包中的**更新器，替换下例两个绝对路径；不必预先手工停止宿主应用，也不必手工迁移官方镜像引用：
 
 ```bash
-/新包解压目录/arena-0.2.6-linux-code-only/deploy/update.sh --target /现有应用根目录
+/新包解压目录/arena-0.2.7-linux-code-only/deploy/update.sh --target /现有应用根目录
 ```
 
-一条入口依次完成：**停止宿主应用 → 替换受管程序和静态资源 → install 同步依赖 → 准备研究与网关镜像 → start（沿用现有 PostgreSQL 自动迁移）→ 检查服务状态**。两镜像准备使用原安装目录中的新版代码、Python 环境和运行配置；准备失败即中断，不继续 start 或迁移。无需另跑数据库迁移命令，也不升级 PostgreSQL 大版本。
+一条入口依次完成：**停服前校验发布 manifest → 准备并离线验收 Worker 与网关 → 核对配置 revision 与镜像身份 → 停止宿主应用 → 按 revision 原子迁移官方镜像引用 → 替换受管程序和静态资源 → install 同步依赖 → start → 检查服务状态**。镜像准备使用新包中的检查器和原安装的 Python 环境；缺少官方镜像时按包内固定 digest 拉取，不再为官方 `:local` 运行完整源码构建。manifest、镜像或配置检查失败时在停服前中止；配置变化不静默覆盖，须重新准备。沿用现有 PostgreSQL，本次无新增数据库迁移，也不升级 PostgreSQL 大版本。
 
-- 实际配置引用默认本地 `arena-worker:local`、`arena-traffic-gateway:local` 时，即使镜像已存在也分别带缓存构建新版候选，通过各自无网络检查后才更新对应 tag；构建或验收失败不提升该候选，不清理旧镜像或构建缓存。此准备不是两个 tag 的原子事务：后一个失败时前一个可能已准备完成，但不会继续启动，修复后重跑完整更新入口。
-- 自定义镜像名、远端 tag/digest 和显式映射保持不变，不自动覆盖。更新器逐项说明未自动更新，需自行准备与新应用配套的镜像；已有镜像的标签检查不证明版本配套。缺失镜像或无效配置明确失败，不回退默认值。
-- `-- --server-only` 明确跳过研究与网关镜像准备并仅启动 Server，不表示执行环境已更新；仅用于有意选择的维护模式，不是镜像构建失败后的绕过办法。
-- **首次完整下载和构建可以接受，后续更新应复用未变化的安装层。** 同一基础镜像 / 架构、安装输入不变且有效构建缓存仍在时，源码或 AGENTS 更新复用工具安装层，lock 不变时复用 `npm ci` 层；编译和应用自检仍可重跑。本次层重排、历史 timeout 改动、base 变化或缓存缺失可能重跑安装，不保证任意旧机器首次升级零下载。仅 `docker load` 的最终镜像不等于拥有完整多阶段缓存。
+- **官方引用统一迁移：** `yong29/arena-worker` / `yong29/arena-traffic-gateway` 的引用，以及本地默认名、`:local`、`:latest` 和版本 tag（如 `arena-worker:0.2.3`）切换到包内对应 digest。覆盖 `container.image`、`container.traffic_gateway_image`、`container.allowed_images` 和 `images[].image` 中的官方项；注册 ID、profile 绑定和其他配置保留，不只改基线镜像。准备阶段不写回新引用，停服后通过配置 revision 校验原子写入。
+- **真正自定义引用保留：** 如 `arena-worker:custom` 或私有仓库镜像，不自动覆盖、拉取或重建。升级前自行准备与新应用配套的镜像，新更新器在停服前离线验收；缺失或不兼容明确拒绝，不回退官方镜像，也不靠伪造标签绕过。离线通过仍不证明自定义能力的真实任务兼容。
+- `-- --server-only` 明确跳过研究与网关镜像准备和引用迁移，仅启动 Server，不表示执行环境已更新；仅用于有意选择的维护模式，不是准备失败后的绕过办法。
+- **复用未变化的镜像层：** Docker 按固定 digest 准备预构建镜像，已存在的相同层不重复下载，不清理旧镜像或工具缓存。源码安装继续使用其配套源码构建路径，缓存边界见[增量下载的实际边界](#增量下载的实际边界)。
 
 更新保留 `runtime`、完整 keyring / token、数据库卷、项目资料、Artifact、外置存储与 Python 环境位置，依赖仍会同步。tag 更新只影响后续新建容器，**不替换已有项目容器、不恢复或重跑任务**；宿主服务停止也不证明 Worker 已退出。更新前应结束或暂停相关任务并确认执行退出。它不是源码同步器，不用于需要保留开发源码或受管目录本地改动的 Git 工作区。临时监听参数可在末尾通过 `-- --host 0.0.0.0 --port 8080` 原样传入；持久配置仍修改原安装的 `runtime/arena.env`，已有外置静态资源路径不会被改写。
 
 失败时按输出检查，修复后**重新运行新包的完整 `update.sh --target ...` 命令并保留原参数**，不要直接 start 而漏掉两镜像的刷新准备。迁移阻断按原错误处理，不删除项目、报告、归档材料或改 SQL 绕过。旧程序临时备份只覆盖程序文件，不含数据库 / runtime，也不保证依赖、配置、镜像或数据库整体回滚；install 可能已改变依赖或 legacy 私有配置，start 可能已执行迁移。升级前按需备份数据库、数据目录、私有配置、完整 keyring（含历史版本）和 token，外置文件一起保留。
 
-如需自行生成部署包，在完整源码根目录安装好依赖并完成 `build:server` 后执行 `python3 deploy/package_release.py --gateway-image-ref yong29/arena-traffic-gateway:latest --gateway-digest sha256:…`，默认产物为 `dist/arena-<version>-linux-code-only.zip` 与 `dist/release.json`。这是可选分发操作，不是使用已有包的前置步骤，也不包含 Worker 镜像。当前仓库没有随 push 自动打包、发布镜像的 workflow；更新器也不从 GitHub 下载新版本，不存在默认跟随 `main` 的远端 ref。
+如需自行生成部署包，在完整源码根目录安装好依赖并完成 `build:server` 后执行；CLI 必须同时提供 **Worker ref + digest、gateway ref + digest 四参数**，例如本次配套镜像：
+
+```bash
+python3 deploy/package_release.py \
+  --worker-image-ref yong29/arena-worker:0.2.7 \
+  --worker-digest sha256:62c3e3b9a19b1306b77361e98ab1169fa2e41529c31bb7100c3bb23849895d16 \
+  --gateway-image-ref yong29/arena-traffic-gateway:latest \
+  --gateway-digest sha256:c1ae1c054cc3b12b0648d06476cc7af86a13208b3f366d3ef0c1a3f9c3b41e10
+```
+
+版本取自源码项目版本，打包前须确认与目标发布版本一致。默认产物为 `dist/arena-<version>-linux-code-only.zip`、校验文件与 `dist/release.json`；两镜像的固定来源同时写入包内 manifest 和渠道文档。ZIP 不包含 Docker 镜像；打包成功也不代表 Git tag / Release 已创建。这是可选分发操作，不是使用已有包的前置步骤。当前仓库没有随 push 自动打包、发布镜像的 workflow；本地 `update.sh` 不下载新应用包，也不默认跟随 `main`，缺少的官方配套镜像则会按 manifest 拉取。
 
 ### 系统一键更新
 
-管理端「设置 → 系统更新」提供检查更新、下载校验与一键应用功能。该功能仅对 ZIP 安装类型开放；git 源码安装仍须使用 `git pull` 与 `deploy/update.sh`。
+管理端「设置 → 系统更新」提供 **检查 → 准备 → 应用**，仅对 ZIP 安装开放。v0.2.6 ZIP 已有该入口；Git 源码安装使用[源码更新](#源码更新)的依赖、正式前端与镜像构建步骤，**不能用 `deploy/update.sh` 覆盖 Git 工作区**。v0.2.5 及以前无该管理入口，直接用新包 `update.sh`，不要求中转 v0.2.6。
 
-- 更新渠道：默认读取 `https://github.com/Y10ng/Arena/releases/latest/download/release.json`，可通过环境变量 `CAIRN_UPDATE_CHANNEL_URL` 覆盖为自建地址；`CAIRN_UPDATE_PROXY` 可选设置代理，不默认任何地址。
-- `release.json` 约定（`arena-release-channel/v1`）：包含 `version`、`notes_url`、`app.asset/sha256/size`、`worker.reuse_version`、`images.traffic_gateway.image/digest`。v0.2.6 起随包发布；v0.2.5 及更早版本无此附件，检查更新会提示「渠道暂无信息」。
-- 镜像 tag：网关统一使用 `yong29/arena-traffic-gateway:latest` 推送，digest 在 `release.json` 中记录并用于校验。已发布的历史 revision tag 保留不动。
-- 一键更新流程：检查版本 → 下载 ZIP 并校验 SHA256 → 安全解压 → manifest 门槛验证 → 拉取网关镜像并比对 digest → 改写 `runtime/dispatch.yaml` 网关引用 → 停服替换 → 重启。应用期间运行中的任务会被停止。
-- 状态恢复：若更新器进程死亡超过 30 秒，状态自动标记为 failed；服务重启导致 preparing 中断时标记为 interrupted，可重新执行检查更新。
-- 失败排查：更新日志位于 `runtime/logs/update-apply.log`；apply 失败后可按日志手动执行 `deploy/update.sh --target /现有应用根目录` 恢复。
+- 更新渠道：默认读取 `https://github.com/Y10ng/Arena/releases/latest/download/release.json`，可通过环境变量 `CAIRN_UPDATE_CHANNEL_URL` 覆盖为自建地址；`CAIRN_UPDATE_PROXY` 可选设置代理，不默认任何地址。升级前核对 `version` 为目标版本；渠道显示旧版时不能把旧包当作本版。
+- `release.json` 约定（`arena-release-channel/v1`）：包含 `version`、`notes_url`、`app.asset/sha256/size`、`worker.reuse_version`；新包还明确记录 `images.worker.image/digest` 和 `images.traffic_gateway.image/digest`，与包内 manifest 的两镜像来源一致。渠道附件自 v0.2.6 起提供；`worker.reuse_version` 不能代替 Worker 固定来源。
+- 新版流程：检查版本 → 下载 ZIP 并校验 SHA256 → 安全解压并验证 manifest → 按发布来源准备、离线验收两镜像（不改运行配置）→ 应用时调用**新包** `update.sh` 再做停服前检查 → 停服后按 revision 原子迁移官方镜像引用 → 替换并重启。真正自定义引用保留并提前验收。
+- **旧 v0.2.6 页面首次升级边界：** 旧 prepare 可能仍只拉取、校验网关，并提前改写同仓库网关引用；它使用 `RepoDigests[0]`，同一镜像已有多个 digest 时可能误报网关 digest 不匹配。新包无法修复尚未调用其更新器之前的旧 Server 行为，因此不保证所有旧页面首次准备都成功。若旧页面准备失败，按[部署包更新](#部署包更新)下载并校验新包，直接运行新包 `update.sh --target ...`；不要反复 pull、删镜像或清理缓存。旧页面准备成功也不代表新 Worker 已验收，完整新逻辑在新包 apply 阶段才执行。
+- 运行边界：先暂停或结束项目并确认执行已退出，再在维护窗口应用；宿主服务停止不等于所有 Worker 已退出。更新不替换已有容器，也不自动恢复或重跑项目。
+- 状态恢复：若更新器进程死亡超过 30 秒，状态自动标记为 failed；服务重启导致 preparing 中断时标记为 interrupted，可重新执行检查更新。状态恢复不代表业务或数据库回滚。
+- 失败排查：更新日志位于 `runtime/logs/update-apply.log`；apply 失败后按日志修复，再运行**新包中的**完整 `deploy/update.sh --target /现有应用根目录` 并保留原参数，不直接启动半套环境。
 
 ### 增量下载的实际边界
 
@@ -377,7 +375,7 @@ cairn/.venv/bin/cairn materials save --project '实际项目ID' --container '完
 
 ### 本次跨版本升级注意
 
-**v0.2.5 → v0.2.6 无新增数据库迁移，研究镜像不变，网关继续使用 `latest` tag（与 v0.2.5 的 `git-f6df095fb4f8` 为同一镜像）；v0.2.5 无一键更新功能，须手动升级到 v0.2.6，此后 ZIP 安装即可使用管理端一键更新。v0.2.1／v0.2.2／v0.2.3／v0.2.4 → v0.2.6 必须准备 v0.2.3 研究镜像应用层与网关镜像。** 下述 v76–v83 等要求针对更早版本进入 v0.2.1 的历史升级链，不表示本版又新增这些迁移；此前已遗留的迁移阻断不会自动解除。
+**升级到 0.2.7 无新增数据库迁移，须使用新版 Worker，网关复用上述固定 digest。v0.2.6 ZIP 可从管理端检查 → 准备 → 应用；v0.2.5 及以前直接用新包 `update.sh`，无需先升到 v0.2.6。** 新包会准备并离线验收两镜像，迁移官方配置引用，不会替换既有容器或自动恢复、重跑项目。下述 v76–v83 等要求针对更早版本进入 v0.2.1 的历史升级链，不表示本版又新增这些迁移；此前已遗留的迁移阻断不会自动解除。
 
 `install.sh` 会一次性转换旧标准 `container.task_executor_image: arena-task-executor:local`：删除旧字段，executor 改用实际选中的研究镜像；旧值已与 `container.image` 相同也可直接删除。其他自定义 executor 值会在写配置和凭据前明确阻断，不静默丢弃。应先将定制能力并入对应研究镜像（包含执行服务、证书工具与 pi runner），确认实际 `images/profile` 映射后移除旧字段，再重新安装；无需保留旧键作为 fallback。没有旧键的配置不需要转换。默认镜像重建只影响新建容器，旧项目的控制容器仍保留；镜像引用变化触发既有复用签名检查，不能以重打同名 tag 或重启应用宣称所有历史容器已升级。
 

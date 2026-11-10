@@ -238,10 +238,53 @@ def test_read_state_marks_interrupted_preparing(tmp_path: Path, monkeypatch: pyt
     su._STATE.clear()
 
 
-def test_repository_extraction() -> None:
-    assert su._repository("yong29/arena-traffic-gateway:latest") == "yong29/arena-traffic-gateway"
-    assert su._repository("yong29/arena-traffic-gateway@sha256:abc") == "yong29/arena-traffic-gateway"
-    assert su._repository("registry.local:5000/arena-gw:1") == "registry.local:5000/arena-gw"
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_prepare_uses_staged_image_helper_without_switching_config(tmp_path, monkeypatch, exit_code):
+    import hashlib
+    import shutil
+
+    package = tmp_path / "fixture.zip"
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("arena-test/deploy/update.sh", "#!/bin/bash\n")
+        archive.writestr("arena-test/deploy/prepare_release_images.py", "# fixture\n")
+    digest = hashlib.sha256(package.read_bytes()).hexdigest()
+    target = tmp_path / "target"
+    (target / "runtime").mkdir(parents=True)
+    config = target / "runtime/dispatch.yaml"
+    config.write_text("fixture: unchanged\n")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    monkeypatch.setattr(su, "STAGING_ROOT", staging)
+    monkeypatch.setattr(su, "install_root", lambda: target)
+    monkeypatch.setattr(su, "_state_path", lambda: tmp_path / "state.json")
+    monkeypatch.setattr(su, "_verify_staged", lambda path: None)
+    monkeypatch.setattr(su, "_STATE", {})
+    su._PREPARE_CANCEL.clear()
+
+    def download(url, destination, proxies):
+        if url.endswith(".sha256"):
+            destination.write_text(digest + "  fixture.zip\n")
+        else:
+            shutil.copyfile(package, destination)
+
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        assert command[:2] == [str(target / "cairn/.venv/bin/python"), "-I"]
+        assert Path(command[2]).is_relative_to(staging)
+        assert command[3] == "prepare"
+        Path(command[-1]).write_text("temporary plan")
+        return subprocess.CompletedProcess(command, exit_code, "", "incompatible" if exit_code else "")
+
+    monkeypatch.setattr(su, "_download", download)
+    monkeypatch.setattr(su.subprocess, "run", run)
+    doc = {"version": "0.2.7", "app": {"asset": "fixture.zip", "sha256": digest},
+           "images": {"traffic_gateway": {"image": "gateway", "digest": "sha256:" + "b" * 64}}}
+    su._prepare_worker(doc, "https://example.test/release.json")
+    assert len(calls) == 1
+    assert config.read_text() == "fixture: unchanged\n"
+    assert su._STATE["phase"] == (su.PHASE_READY if exit_code == 0 else su.PHASE_FAILED)
+    assert not list(staging.rglob("image-plan.json"))
 
 
 # ---------------------------------------------------------------------------
