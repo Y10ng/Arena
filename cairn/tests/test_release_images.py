@@ -4,6 +4,8 @@ import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
+import sysconfig
 from unittest.mock import Mock
 
 import pytest
@@ -13,6 +15,32 @@ ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("release_images", ROOT / "deploy/prepare_release_images.py")
 images = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(images)
+
+
+@pytest.mark.parametrize("stale_install", [False, True])
+def test_cli_loads_release_source_without_editable_install(tmp_path, stale_install):
+    # -S 禁止执行 site-packages 中的 editable .pth，只提供已有第三方依赖。
+    # 同时覆盖旧包仍可见但不能被新更新器误用的情况。
+    old_source = tmp_path / "old-source"
+    if stale_install:
+        (old_source / "cairn").mkdir(parents=True)
+        (old_source / "cairn/__init__.py").write_text("raise AssertionError('loaded old package')\n")
+    bootstrap = """
+import importlib.util, runpy, sys
+sys.path.insert(0, sys.argv[1])
+assert importlib.util.find_spec('cairn') is None
+sys.path.insert(0, sys.argv[2])
+script = sys.argv[3]
+sys.argv = [script, '--help']
+runpy.run_path(script, run_name='__main__')
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", bootstrap, sysconfig.get_path("purelib"),
+         str(old_source), str(ROOT / "deploy/prepare_release_images.py")],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "prepare,check,apply" in result.stdout
 
 
 @pytest.fixture

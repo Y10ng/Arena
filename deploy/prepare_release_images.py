@@ -12,11 +12,15 @@ import re
 import subprocess
 import sys
 
+# 旧安装可能迁过目录，editable 安装路径不一定有效；只复用其第三方依赖，
+# 配置模型与存储代码明确来自同一份已校验的新包，不依赖 cwd、PYTHONPATH 或 .pth。
+RELEASE_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(RELEASE_ROOT / "cairn" / "src"))
+sys.path.insert(0, str(RELEASE_ROOT / "deploy"))
+
 from cairn.dispatcher.config import ContainerConfig
 from cairn.server.services.dispatcher_config_store import DispatcherConfigStore
 
-# -I 不加载脚本目录；仅引入同一份已校验发布包中的验收器。
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from verify_deployment import EXPECTED_CAIRN_AGENT_VERSION, EXPECTED_PI_SDK_VERSION, verify_gateway_image, verify_image
 
 OFFICIAL = {
