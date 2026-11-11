@@ -97,6 +97,8 @@ class ExecutionControlObserver:
         resources = []
         state = {"pause": "paused", "resume": "running", "finish": "stopped"}[action]
         error = None
+        scene_loss_reason = "physical_scene_unverified"
+        scene_loss_run_id = None
         try:
             if action == "resume" and project.authorization_expires_at is not None and datetime.now(timezone.utc) >= datetime.fromisoformat(project.authorization_expires_at.replace("Z", "+00:00")):
                 raise RuntimeError("project_authorization_expired")
@@ -124,6 +126,7 @@ class ExecutionControlObserver:
                 has_retained_run = True
                 if action == "resume":
                     if run.get("execution_generation") != project.execution_generation:
+                        scene_loss_reason, scene_loss_run_id = "run_generation_mismatch", run.get("id")
                         raise ExecutionSceneLost("原执行代次与当前项目不一致")
                     # 终止证明与环境清理是两件事；只有仍在途的每个 Run 需要自己的宿主连接。
                     if not terminated and not any(
@@ -131,6 +134,7 @@ class ExecutionControlObserver:
                         and task.execution_generation == run.get("execution_generation")
                         for task in tasks
                     ):
+                        scene_loss_reason, scene_loss_run_id = "run_connection_missing", run.get("id")
                         raise ExecutionSceneLost("原 Dispatcher 执行连接不在本进程中，不能伪造原地恢复")
                 ids.update(identity for identity in context.get("execution_container_ids", []) if identity and identity != "unknown")
                 delivery = context.get("execution_delivery") or {}
@@ -139,13 +143,26 @@ class ExecutionControlObserver:
             if action == "resume":
                 # 聚合 resources 可能属于其他 owner 或前次观测；只用本 owner 的原始现场身份。
                 ids.update(item["container_id"] for item in self._scenes.get(project_id, []) if item.get("kind") == "research")
-                if (ids or has_retained_run) and (not activation or activation.get("state") == "stopped" or activation.get("container_id") not in ids):
-                    raise ExecutionSceneLost("原研究容器的登记身份不可确认")
+                if ids or has_retained_run:
+                    if not activation:
+                        scene_loss_reason = "activation_missing"
+                        raise ExecutionSceneLost("原研究容器的登记身份不可确认")
+                    if activation.get("state") == "stopped":
+                        scene_loss_reason = "activation_stopped"
+                        raise ExecutionSceneLost("原研究容器已登记停止")
+                    if activation.get("container_id") not in ids:
+                        scene_loss_reason = "activation_identity_mismatch"
+                        raise ExecutionSceneLost("原研究容器的登记身份不可确认")
                 if activation and activation.get("state") != "stopped":
-                    if (activation.get("dispatcher_id") != self.loop.dispatcher_id
-                        or activation.get("activation_generation") != project.execution_generation
-                        or activation.get("docker_daemon_id") != manager.docker_daemon_id()):
-                        raise ExecutionSceneLost("原研究容器的 owner、代次或 Docker daemon 已改变")
+                    if activation.get("dispatcher_id") != self.loop.dispatcher_id:
+                        scene_loss_reason = "activation_owner_mismatch"
+                        raise ExecutionSceneLost("原研究容器的 owner 已改变")
+                    if activation.get("activation_generation") != project.execution_generation:
+                        scene_loss_reason = "activation_generation_mismatch"
+                        raise ExecutionSceneLost("原研究容器的代次已改变")
+                    if activation.get("docker_daemon_id") != manager.docker_daemon_id():
+                        scene_loss_reason = "docker_daemon_mismatch"
+                        raise ExecutionSceneLost("原研究容器的 Docker daemon 已改变")
             elif action == "finish":
                 for task in tasks:
                     task.cancellation.cancel(project.coverage_stop_reason or "user_stopped")
@@ -181,11 +198,18 @@ class ExecutionControlObserver:
                             raise RuntimeError("pause_timeout_run_settlement_deferred")
         except ExecutionSceneLost:
             state, error = "lost", "execution_scene_lost"
+            # 只记录固定检查码与关联 ID；原异常可能包含私有控制路径或凭据。
+            LOG.warning(
+                "execution control scene lost project=%s request=%s action=%s reason=%s task_run=%s",
+                project_id, control["request_id"], action, scene_loss_reason, scene_loss_run_id or "-",
+            )
         except Exception:
             state, error = "failed", "execution_control_failed"
             LOG.warning("execution control physical state unconfirmed project=%s action=%s", project_id, action)
         response = self.loop.client.confirm_execution_control(
             project_id, request_id=control["request_id"], state=state, resources=resources, error=error,
+            scene_loss_reason=scene_loss_reason if state == "lost" else None,
+            task_run_id=scene_loss_run_id if state == "lost" else None,
         )
         if response.ok and state != "failed":
             self._acknowledged[project_id] = control["request_id"]

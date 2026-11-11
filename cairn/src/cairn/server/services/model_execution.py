@@ -75,8 +75,30 @@ def resolve_model_execution_binding(conn, *, tenant_id, model_id) -> TenantModel
                 "display_name":row["display_name"],"protocol":row["protocol"],"pricing":json.loads(row["pricing_json"])}
     conn.execute("INSERT INTO model_consumption_rates(tenant_id,model_id,revision,model_json) VALUES (?,?,?,?) ON CONFLICT DO NOTHING",
                  (tenant_id,model_id,int(row["revision"]),json.dumps(snapshot)))
+    return _model_execution_binding(row, credential, api_key)
+
+
+def model_execution_provenance(conn, *, tenant_id, model_id) -> dict | None:
+    """只读恢复判定只读取版本元数据，不解密凭据或写入消费快照。"""
+    if not model_availability(conn, tenant_id=tenant_id, model_id=model_id)["available"]:
+        return None
+    row = conn.execute(
+        "SELECT * FROM tenant_models WHERE tenant_id = ? AND id = ?", (tenant_id, model_id),
+    ).fetchone()
+    credential = conn.execute(
+        "SELECT v.id AS credential_version_id, v.version_number, v.credential_fingerprint "
+        "FROM model_credentials c JOIN model_credential_versions v ON v.id = c.active_version_id "
+        "WHERE c.tenant_id = ? AND c.model_id = ? AND v.tenant_id = ?",
+        (tenant_id, model_id, tenant_id),
+    ).fetchone()
+    if row is None or credential is None:
+        return None
+    return _model_execution_binding(row, credential, "").execution_provenance()
+
+
+def _model_execution_binding(row, credential, api_key) -> TenantModelExecutionBinding:
     return TenantModelExecutionBinding(
-        model_id=model_id,
+        model_id=row["id"],
         model_revision=int(row["revision"]),
         model_display_name=row["display_name"],
         pricing=json.loads(row["pricing_json"]),

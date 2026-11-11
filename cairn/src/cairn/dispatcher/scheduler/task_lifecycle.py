@@ -49,6 +49,10 @@ class TaskLifecycleMixin(TaskRunFinishMixin, DispatchDecisionsMixin):
                 "cleanup_pending" if reason == "assessment_execution_not_quiescent" else "execution_delivery_unavailable")
             self._observe_decision(project_id, code, task_type=task_type, retry_at=route.get("retry_at"))
             return None
+        if route.get("retry_worker_ids"):
+            # 认证修复是受限的新执行，不是原 session 的续交付，也不绑定旧 Dispatcher。
+            workers = [worker for worker in workers if str(getattr(worker, "id", "")) in route["retry_worker_ids"]]
+            return DeliveryWorkerRoute(workers=workers, mode="fresh")
         if route.get("dispatcher_id") != self.dispatcher_id:
             self._observe_decision(project_id, "execution_delivery_unavailable", task_type=task_type)
             return None

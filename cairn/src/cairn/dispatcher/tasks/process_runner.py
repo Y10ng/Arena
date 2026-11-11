@@ -20,7 +20,7 @@ from .candidate_intake import CandidateIntakeSummary, intake_worker_candidates
 from .checkpoint_intake import intake_worker_checkpoints
 from .command_events import record_command_finished, record_command_started
 from .hook_records import PiToolEventRecorder, record_pi_tool_events
-from cairn.dispatcher.worker_result_gateway import WorkerResultFailure, decode_pi_result, worker_failure_error_type
+from cairn.dispatcher.worker_result_gateway import WorkerResultFailure, decode_pi_terminal, worker_failure_error_type
 from .validation_records import record_validation_result
 from .payload_records import (
     payload_recorder_env,
@@ -295,8 +295,8 @@ def worker_process_failure(
         return process_failure("transport", "transport_failed")
     if result.candidate_capture_integrity_error is not None and result.returncode != 0:
         return process_failure("process", "process_exit_nonzero")
-    outcome = decode_pi_result(
-        result.read_stdout(), phase=phase, validator=lambda payload: ("ignored", None),
+    outcome = decode_pi_terminal(
+        result.read_stdout(), phase=phase,
         project_id=project_id, task_run_id=task_run_id, session=session,
     )
     if outcome.failure is not None:

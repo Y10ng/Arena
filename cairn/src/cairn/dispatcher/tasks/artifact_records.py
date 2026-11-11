@@ -340,6 +340,39 @@ def _process_artifact_streams(
     return streams
 
 
+def _record_artifact_upload_failure(
+    client: CairnClient, project_id: str, task_run_id: str, *,
+    phase: str, artifact: DeclaredArtifact, response: ApiResult, missing_id: bool = False,
+) -> None:
+    """项目材料保留上传失败定位信息；响应正文和底层异常不进入模型可读事件。"""
+    payload = {
+        "phase": phase, "status": "invalid", "outcome": "artifact_write_failed",
+        "code": ("artifact_upload_missing_id" if missing_id else
+                 "artifact_upload_transport_failed" if response.status_code == 0 else
+                 "artifact_upload_http_failed"),
+        "http_status": response.status_code or None,
+        "artifact": {
+            "handle": artifact.handle, "source_path": artifact.source_path,
+            "sha256": artifact.sha256, "size_bytes": artifact.size_bytes,
+        },
+    }
+    detail = response.data.get("detail") if isinstance(response.data, dict) else None
+    if isinstance(detail, str) and detail in {
+        "artifact_reserved_metadata", "artifact_content_size_mismatch", "registered_content_version_mismatch",
+    }:
+        payload["server_error_code"] = detail
+    try:
+        event = client.create_agent_event(
+            project_id, task_run_id=task_run_id, kind="validation_result", payload=payload,
+        )
+        if event.ok:
+            return
+    except Exception:
+        # 诊断链路失败不能覆盖原失败，也不能阻止继续保存其他已声明成果。
+        pass
+    LOG.warning("artifact upload diagnostic unavailable project=%s task_run=%s phase=%s", project_id, task_run_id, phase)
+
+
 def record_declared_artifacts(
     client: CairnClient,
     container_manager: ContainerManager,
@@ -425,6 +458,9 @@ def record_declared_artifacts(
             )
             write_failed = True
             collect_failed = True
+            _record_artifact_upload_failure(
+                client, project_id, task_run_id, phase=phase, artifact=artifact, response=response,
+            )
             continue
         artifact_id = _artifact_id_from_response(response.data)
         if artifact_id is None:
@@ -437,6 +473,9 @@ def record_declared_artifacts(
             )
             write_failed = True
             collect_failed = True
+            _record_artifact_upload_failure(
+                client, project_id, task_run_id, phase=phase, artifact=artifact, response=response, missing_id=True,
+            )
             continue
         refs.append(EvidenceRef(artifact_id=artifact_id, pointer=artifact.handle))
         artifact_ids_by_handle[artifact.handle] = artifact_id

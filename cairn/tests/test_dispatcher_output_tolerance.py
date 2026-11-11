@@ -141,8 +141,9 @@ def test_artifact_handle_evidence_refs_are_extracted_without_aliases() -> None:
 
 
 def test_missing_declared_artifact_is_collect_failure_not_write_failure() -> None:
+    client = FakeClient()
     record = record_declared_artifacts(
-        FakeClient(),
+        client,
         MissingFileContainer(),
         "worker-container",
         "proj_015",
@@ -155,6 +156,69 @@ def test_missing_declared_artifact_is_collect_failure_not_write_failure() -> Non
     assert record.refs == []
     assert record.write_failed is False
     assert record.collect_failed is True
+    assert client.events == []  # 读取失败不是 HTTP 上传失败，不能制造状态码。
+
+
+@pytest.mark.parametrize("status,data,code,server_error", [
+    (503, {"detail": "private-response-body"}, "artifact_upload_http_failed", None),
+    (422, {"detail": "registered_content_version_mismatch"}, "artifact_upload_http_failed", "registered_content_version_mismatch"),
+    (422, {"detail": [{"input": "private-response-body"}]}, "artifact_upload_http_failed", None),
+    (0, None, "artifact_upload_transport_failed", None),
+    (201, {}, "artifact_upload_missing_id", None),
+])
+def test_declared_upload_failure_is_exportable_without_response_body(status, data, code, server_error):
+    from cairn.server.models import CreateAgentEventRequest
+
+    class UploadClient(FakeClient):
+        def create_artifact(self, project_id, **kwargs):
+            assert kwargs["content"].read()
+            self.artifacts.append(kwargs)
+            return ApiResult(status, data=data, text="private-response-body") if len(self.artifacts) == 1 else ApiResult(201, data={"id": "a002"})
+
+    artifacts = []
+    for name in ("notes.md", "snapshot.html"):
+        path = f"/workspace/{name}"
+        content = f"evidence from {path}".encode()
+        artifacts.append(DeclaredArtifact(handle=name, kind="file", path=path, source_path=path,
+                                          sha256=sha256(content).hexdigest(), size_bytes=len(content)))
+    client = UploadClient()
+    record = record_declared_artifacts(client, ReadableFileContainer(), "worker", "proj_015", "tr027",
+                                       phase="bootstrap_execute", artifacts=artifacts)
+    assert record.write_failed is True and record.collect_failed is True
+    assert record.artifact_ids_by_handle == {"snapshot.html": "a002"}
+    assert len(client.artifacts) == 2 and len(client.events) == 1
+    event = client.events[0]
+    CreateAgentEventRequest.model_validate(event)
+    assert event["kind"] == "validation_result" and event["task_run_id"] == "tr027"
+    payload = event["payload"]
+    assert payload["outcome"] == "artifact_write_failed" and payload["code"] == code
+    assert payload["http_status"] == (status or None)
+    assert payload["artifact"] == {"handle": "notes.md", "source_path": "/workspace/notes.md",
+                                    "sha256": artifacts[0].sha256, "size_bytes": artifacts[0].size_bytes}
+    assert payload.get("server_error_code") == server_error
+    assert "private-response-body" not in json.dumps(event)
+
+
+@pytest.mark.parametrize("event_failure", ["rejected", "exception"])
+def test_declared_upload_diagnostic_failure_does_not_replace_primary_failure(event_failure, caplog):
+    class UnavailableClient(FakeClient):
+        def create_artifact(self, project_id, **kwargs):
+            return ApiResult(503)
+
+        def create_agent_event(self, project_id, **kwargs):
+            if event_failure == "exception":
+                raise RuntimeError("private-diagnostic-exception")
+            return ApiResult(503)
+
+    path = "/workspace/notes.md"
+    content = f"evidence from {path}".encode()
+    record = record_declared_artifacts(UnavailableClient(), ReadableFileContainer(), "worker", "proj_015", "tr027",
+                                       phase="bootstrap_execute", artifacts=[DeclaredArtifact(
+                                           handle="notes", kind="file", path=path, source_path=path,
+                                           sha256=sha256(content).hexdigest(), size_bytes=len(content))])
+    assert record.write_failed is True and record.collect_failed is True and record.refs == []
+    assert "artifact upload diagnostic unavailable" in caplog.text
+    assert "private-diagnostic-exception" not in caplog.text
 
 
 def test_successful_declared_artifact_records_ordered_aliases() -> None:

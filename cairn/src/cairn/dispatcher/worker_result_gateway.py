@@ -162,17 +162,15 @@ _PI_FIELDS = {
 }
 
 
-def decode_pi_result(
+def decode_pi_terminal(
     stdout: str,
     *,
     phase: str,
-    validator: ResultValidator,
     project_id: str | None = None,
     task_run_id: str | None = None,
     session: str | None = None,
-    assessment_protocol: str | None = None,
 ) -> WorkerResultOutcome:
-    """只接收一个程序生成的终态信封；进程取消/失败还必须由调用方拦截。"""
+    """只校验进程终态与身份，不在缺少项目协议的通用诊断中验收业务数据。"""
     def invalid(code: str, message: str, failure_class: str = "protocol") -> WorkerResultOutcome:
         return WorkerResultOutcome(failure=_failure(
             failure_class=failure_class, code=code, phase=phase, message=message, payload=None,
@@ -248,6 +246,35 @@ def decode_pi_result(
         data = result.get("data")
         if not isinstance(data, dict):
             return invalid("result_data_invalid", "pi result data must be an object")
+    return WorkerResultOutcome(payload=result)
+
+
+def decode_pi_result(
+    stdout: str,
+    *,
+    phase: str,
+    validator: ResultValidator,
+    project_id: str | None = None,
+    task_run_id: str | None = None,
+    session: str | None = None,
+    assessment_protocol: str | None = None,
+) -> WorkerResultOutcome:
+    """终态通过后，按调用方的项目协议验收阶段数据与业务规则。"""
+    terminal = decode_pi_terminal(
+        stdout, phase=phase, project_id=project_id, task_run_id=task_run_id, session=session,
+    )
+    if terminal.failure is not None:
+        return terminal
+    result = terminal.payload
+    assert result is not None
+
+    def invalid(code: str, message: str, failure_class: str) -> WorkerResultOutcome:
+        return WorkerResultOutcome(failure=_failure(
+            failure_class=failure_class, code=code, phase=phase, message=message, payload=None,
+        ))
+
+    if result.get("accepted") is True:
+        data = result["data"]
         try:
             validate_phase_data(
                 phase,

@@ -10,6 +10,7 @@ from unittest.mock import Mock
 
 from cairn.dispatcher.protocol.client import ApiResult
 from cairn.dispatcher.runtime.cancellation import TaskCancellation
+from cairn.dispatcher.runtime.pause_clock import ExecutionSceneLost
 from cairn.dispatcher.scheduler.execution_control import ExecutionControlObserver
 
 
@@ -83,10 +84,24 @@ def test_resume_terminated_run_retains_original_environment_without_future(runti
         observer._pool.shutdown(wait=True)
 
 
-@pytest.mark.parametrize("fault", ["missing_future", "unrelated_future", "wrong_future_generation",
-                                  "missing_container", "container_owner", "activation_owner", "daemon", "generation",
-                                  "missing_identity", "missing_identity_and_container", "container_name"])
-def test_resume_retained_scene_rejects_missing_connection_or_identity(runtime, fault):
+@pytest.mark.parametrize("fault,reason,task_run_id", [
+    ("missing_future", "run_connection_missing", "tr001"),
+    ("unrelated_future", "run_connection_missing", "tr001"),
+    ("wrong_future_generation", "run_connection_missing", "tr001"),
+    ("missing_container", "physical_scene_unverified", "-"),
+    ("container_owner", None, "-"),
+    ("activation_owner", "activation_owner_mismatch", "-"),
+    ("activation_generation", "activation_generation_mismatch", "-"),
+    ("activation_stopped", "activation_stopped", "-"),
+    ("activation_missing_identity", "activation_identity_mismatch", "-"),
+    ("daemon", "docker_daemon_mismatch", "-"),
+    ("generation", "run_connection_missing", "tr001"),
+    ("run_generation", "run_generation_mismatch", "tr001"),
+    ("missing_identity", "activation_missing", "-"),
+    ("missing_identity_and_container", "activation_missing", "-"),
+    ("container_name", "physical_scene_unverified", "-"),
+])
+def test_resume_retained_scene_rejects_missing_connection_or_identity(runtime, caplog, fault, reason, task_run_id):
     manager, docker = runtime
     container = owned_container(manager, docker, project="p1", state="paused")
     observer, control, run, activation = retained_scene_observer(manager, container)
@@ -103,9 +118,18 @@ def test_resume_retained_scene_rejects_missing_connection_or_identity(runtime, f
         container.attrs["Config"]["Labels"]["cairn.pi.instance_id"] = "other-owner"
     elif fault == "activation_owner":
         activation["dispatcher_id"] = "other-owner"
+    elif fault == "activation_generation":
+        activation["activation_generation"] = 6
+    elif fault == "activation_stopped":
+        activation["state"] = "stopped"
+    elif fault == "activation_missing_identity":
+        activation["container_id"] = None
     elif fault == "daemon":
         activation["docker_daemon_id"] = "other-daemon"
     elif fault == "generation":
+        run["runtime_context"]["execution_lifecycle"]["generation"] = 6
+    elif fault == "run_generation":
+        run["execution_generation"] = 6
         run["runtime_context"]["execution_lifecycle"]["generation"] = 6
     elif fault in {"missing_identity", "missing_identity_and_container"}:
         activation.clear()
@@ -117,7 +141,39 @@ def test_resume_retained_scene_rejects_missing_connection_or_identity(runtime, f
         run["runtime_context"].update(container_id=container.name, execution_container_ids=[container.name])
     try:
         observer.apply("p1", control)
-        assert observer.loop.client.confirm_execution_control.call_args.kwargs["state"] in {"lost", "failed"}
+        receipt = observer.loop.client.confirm_execution_control.call_args.kwargs
+        assert receipt["state"] == ("lost" if reason else "failed")
+        assert receipt["error"] == ("execution_scene_lost" if reason else "execution_control_failed")
+        assert receipt["resources"] == []
+        assert receipt["scene_loss_reason"] == reason
+        assert receipt["task_run_id"] == (None if task_run_id == "-" else task_run_id)
+        assert container.actions == [] and docker.runs == []
+        if reason:
+            assert (
+                f"project=p1 request=resume-2 action=resume reason={reason} task_run={task_run_id}"
+            ) in caplog.text
+    finally:
+        observer._pool.shutdown(wait=True)
+
+
+def test_scene_loss_log_excludes_private_exception_and_runtime_context(runtime, caplog, monkeypatch):
+    manager, docker = runtime
+    container = owned_container(manager, docker, project="p1", state="paused")
+    observer, control, run, activation = retained_scene_observer(manager, container)
+    private_value = "private-control-token-do-not-log"
+    activation["activation_token"] = private_value
+    run["runtime_context"]["private_path"] = f"/private/{private_value}"
+    monkeypatch.setattr(manager, "hot_control", Mock(side_effect=ExecutionSceneLost(f"/private/{private_value}")))
+    try:
+        observer.apply("p1", control)
+        receipt = observer.loop.client.confirm_execution_control.call_args.kwargs
+        assert receipt == {
+            "request_id": "resume-2", "state": "lost", "resources": [], "error": "execution_scene_lost",
+            "scene_loss_reason": "physical_scene_unverified", "task_run_id": None,
+        }
+        assert "reason=physical_scene_unverified task_run=-" in caplog.text
+        assert private_value not in caplog.text and private_value not in repr(receipt)
+        assert all(record.exc_info is None for record in caplog.records)
         assert container.actions == [] and docker.runs == []
     finally:
         observer._pool.shutdown(wait=True)

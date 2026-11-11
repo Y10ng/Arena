@@ -768,6 +768,10 @@ def project_lifecycle_action(project_id: str, action: str, *, legacy: bool = Fal
         eligibility = project_lifecycle_actions(conn, row)[action]
         if not eligibility["allowed"]:
             raise HTTPException(409, eligibility["reason"])
+        if action == "resume" and not legacy:
+            from .assessment_attempts import recover_provider_auth_attempts
+
+            recover_provider_auth_attempts(conn, row)
         target_status = {"pause": "paused", "resume": "active", "finish": "stopped"}[action]
         if row["status"] == target_status and (
             action == "resume" or control.get("action") == action

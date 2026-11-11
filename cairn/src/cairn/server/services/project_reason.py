@@ -52,7 +52,7 @@ def claim_project_reason_record(project_id: str, body: ReasonClaimRequest) -> Pr
             row = get_project_or_404(conn, project_id)
             from .assessment_attempts import require_execution_retry_eligible
 
-            require_execution_retry_eligible(conn, row, "reason")
+            require_execution_retry_eligible(conn, row, "reason", worker_name=body.worker)
             # release 可能早于异步结果写回；已有执行终态落库前不能重新开始同一 Reason。
             if conn.execute(
                 "SELECT 1 FROM task_runs WHERE project_id = ? AND execution_generation = ? AND task_type = 'reason' AND status IN ('queued', 'running') LIMIT 1",

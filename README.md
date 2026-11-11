@@ -6,24 +6,24 @@ Arena 是面向本地和内部使用的自主安全探索平台：用 **Origin**
 
 ## 安装
 
-本指南对应 **0.2.8** 配套部署。从 [最新 Release 页面](https://github.com/Y10ng/Arena/releases/latest) 确认版本为 **0.2.8** 再下载部署包；尚未出现该版本时不要把旧包当作本版安装。配套 Worker `yong29/arena-worker:0.2.7` 已上传，下面按固定 digest 使用预构建 Worker 与复用的网关镜像，不再下载 v0.2.3 Worker 应用层包或本地构建小应用层；无需本机构建前端、安装 npm 或重装工具层。当前配套镜像仅支持 **Linux x86_64（amd64）**。
+本指南对应 **0.2.9** 配套部署。从 [最新 Release 页面](https://github.com/Y10ng/Arena/releases/latest) 确认版本为 **0.2.9** 再下载部署包；尚未出现该版本时不要把旧包当作本版安装。配套 Worker `yong29/arena-worker:0.2.7` 已上传，下面按固定 digest 使用预构建 Worker 与复用的网关镜像，不再下载 v0.2.3 Worker 应用层包或本地构建小应用层；无需本机构建前端、安装 npm 或重装工具层。当前配套镜像仅支持 **Linux x86_64（amd64）**。
 
 先安装 **Python 3.11+、[uv](https://docs.astral.sh/uv/getting-started/installation/)、[Docker 与 Compose v2](https://docs.docker.com/engine/install/)**，并确保 `curl`、`unzip`、`sha256sum`、`flock` 可用。默认 PostgreSQL 由启动脚本准备。
 
 ### 1. 下载并安装应用
 
-确认最新 Release 已发布 0.2.8 后执行以下命令，在新目录下载、校验、解压；任一步失败就停止后续步骤。使用 Release 附件中的部署 ZIP，不是 GitHub 自动生成的 Source code ZIP。
+确认最新 Release 已发布 0.2.9 后执行以下命令，在新目录下载、校验、解压；任一步失败就停止后续步骤。使用 Release 附件中的部署 ZIP，不是 GitHub 自动生成的 Source code ZIP。
 
 ```bash
 RELEASE_URL='https://github.com/Y10ng/Arena/releases/latest/download'
-ASSET='arena-0.2.8-linux-code-only.zip'
+ASSET='arena-0.2.9-linux-code-only.zip'
 DOWNLOAD_DIR="$(mktemp -d "$HOME/arena-download.XXXXXX")" &&
   curl -fL "$RELEASE_URL/$ASSET" -o "$DOWNLOAD_DIR/$ASSET" &&
   curl -fL "$RELEASE_URL/$ASSET.sha256" -o "$DOWNLOAD_DIR/$ASSET.sha256" &&
   (cd "$DOWNLOAD_DIR" && sha256sum -c "$ASSET.sha256") &&
   UNPACK_DIR="$(mktemp -d "$HOME/arena-install.XXXXXX")" &&
   unzip "$DOWNLOAD_DIR/$ASSET" -d "$UNPACK_DIR" &&
-  cd "$UNPACK_DIR/arena-0.2.8-linux-code-only" &&
+  cd "$UNPACK_DIR/arena-0.2.9-linux-code-only" &&
   ./deploy/install.sh
 ```
 
@@ -65,14 +65,15 @@ container:
 
 ### 部署包安装的更新
 
-**升级目标为 0.2.8，操作前确认 Release / 渠道版本。** 本次修复安装目录改名后更新器的 `cairn` 导入失败，复用 0.2.7 的 Worker 与上述网关，无新增数据库迁移。无需改回目录名；运行配置中显式填写的其他绝对路径仍须指向实际位置。所有更新都须在旧任务退出后的维护窗口进行；已有工作区冲突和材料签名不匹配须保留现场处理。
+**升级目标为 0.2.9，操作前确认 Release / 渠道版本。** 本次修复有效更正模型配置后的认证重试阻断、Bootstrap 新协议结果误报，并补齐现场核验与材料上传的可导出诊断。只更新宿主 Server／Dispatcher，复用 0.2.7 的 Worker 与上述网关，无新增数据库迁移、依赖或前端变化，也保留 0.2.8 的安装目录改名修复。所有更新都须在旧任务退出后的维护窗口进行；更新不自动恢复或重跑项目，诊断增强不表示历史现场丢失、上传和启动故障均已解决。已有工作区冲突和材料签名不匹配须保留现场处理。
 
+- **v0.2.7／v0.2.8 ZIP 安装：** 管理端「设置 → 系统更新」按 **检查 → 准备 → 应用** 更新，确认目标为 **0.2.9**；也可使用下面的新包手动更新入口。
 - **v0.2.6 ZIP 安装：** 管理端「设置 → 系统更新」可按 **检查 → 准备 → 应用** 更新。旧版准备阶段可能仍只准备网关并提前改写同仓库网关引用；完整两镜像准备与配置迁移由新包的 `update.sh` 在应用阶段执行，不能把旧页面“准备完成”当作新 Worker 已验收。旧页面在同镜像存在多个 digest 时可能误报网关 digest 不匹配；若准备失败，直接改用下面的新包手动更新入口，不反复 pull 或删镜像，不保证所有旧页面首次升级都成功。
-- **v0.2.5 及以前的 ZIP 安装：** 直接使用 0.2.8 新包的 `update.sh`，不必先升到 v0.2.6；v0.2.6 也可采用此手动路径。
+- **v0.2.5 及以前的 ZIP 安装：** 直接使用 0.2.9 新包的 `update.sh`，不必先升到 v0.2.6；v0.2.6 也可采用此手动路径。
 
 手动更新步骤：
 
-1. 从 [最新 Release 页面](https://github.com/Y10ng/Arena/releases/latest) 确认 **0.2.8**，下载应用 ZIP 及校验文件，校验后解压到**旧安装之外的新空目录**；不在新目录另行安装或启动实例。
+1. 从 [最新 Release 页面](https://github.com/Y10ng/Arena/releases/latest) 确认 **0.2.9**，下载应用 ZIP 及校验文件，校验后解压到**旧安装之外的新空目录**；不在新目录另行安装或启动实例。
 2. 在界面暂停或结束任务并确认执行已退出，备份数据库、`runtime`、完整 keyring / token、资料与外置存储。先查看[迁移限制](docs/deployment-linux-zh.md#本次跨版本升级注意)：有历史会话待迁移的安装不能直接套用更新器。新更新器自动同步外置 `CAIRN_STATIC_DIR`，停服前预检冲突，保留旧 hash 和未知文件，最后原子切换 `index.html`；非入口同名异内容会阻止升级，参见[部署包更新](docs/deployment-linux-zh.md#部署包更新)。
 3. 用**新包中的更新器**更新旧目录，无需预先手工停止宿主应用或修改官方镜像引用：
 

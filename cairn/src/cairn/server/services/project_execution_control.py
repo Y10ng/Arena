@@ -17,6 +17,12 @@ from .time_utils import parse_utc_timestamp, utcnow
 
 _RESEARCH_TYPES = {"bootstrap", "reason", "explore"}
 _CONFIRMED = {"pause": "paused", "resume": "running", "finish": "stopped"}
+_SCENE_LOSS_REASONS = {
+    "run_generation_mismatch", "run_connection_missing",
+    "activation_missing", "activation_stopped", "activation_identity_mismatch",
+    "activation_owner_mismatch", "activation_generation_mismatch", "docker_daemon_mismatch",
+    "physical_scene_unverified",
+}
 
 
 def execution_control(project) -> dict:
@@ -237,6 +243,7 @@ def _validate_physical_resources(conn, project_id: str, dispatcher_id: str, stat
 def confirm_execution_control(
     project_id: str, dispatcher_id: str, *, request_id: str, state: str,
     resources: list[dict], error: str | None = None,
+    scene_loss_reason: str | None = None, task_run_id: str | None = None,
 ) -> dict:
     with get_conn() as conn:
         conn.execute("UPDATE projects SET id = id WHERE id = ?", (project_id,))
@@ -249,6 +256,20 @@ def confirm_execution_control(
         expected = _CONFIRMED[control["action"]]
         if state not in {expected, "failed", "lost"}:
             raise HTTPException(422, "execution_control_confirmation_invalid")
+        # 诊断不改变物理回执；只持久化固定原因与原 owner 在本项目中的研究 Run。
+        diagnostic = {}
+        if state == "lost" and scene_loss_reason in _SCENE_LOSS_REASONS:
+            diagnostic["scene_loss_reason"] = scene_loss_reason
+            if task_run_id is not None:
+                run = conn.execute(
+                    "SELECT id, task_type, runtime_context_json FROM task_runs WHERE project_id = ? AND id = ?",
+                    (project_id, task_run_id),
+                ).fetchone()
+                if run is None or run["task_type"] not in _RESEARCH_TYPES or parse_scenario_snapshot(
+                    run["runtime_context_json"]
+                ).get("dispatcher_id") != dispatcher_id:
+                    raise HTTPException(422, "execution_control_task_run_invalid")
+                diagnostic["task_run_id"] = run["id"]
         allowed = {"container_id", "container_name", "kind", "task_run_id", "exec_id", "scope_id", "state"}
         for resource in resources:
             if not isinstance(resource, dict) or set(resource) - allowed or not all(
@@ -295,6 +316,7 @@ def confirm_execution_control(
         now = utcnow()
         control.setdefault("receipts", {})[dispatcher_id] = {
             "state": state, "resources": resources, "error": error, "confirmed_at": now,
+            **diagnostic,
         }
         receipts = control["receipts"]
         # 当次逐 owner 回执留在 receipts；失败或部分回执不能抹掉上次完整资源观测。

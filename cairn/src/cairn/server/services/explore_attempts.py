@@ -136,10 +136,15 @@ def start_explore_attempt(
                 eligibility = execution_retry_eligibility(
                     conn, project, "explore", intent_id=intent_id, executions=runs,
                     max_runtime_retries=int(active_attempt["max_runtime_retries"]), now=now,
+                    worker_name=body.worker_name, execution_binding=body.runtime_context.get("execution_binding") or {},
                 )
                 retryable = eligibility["allowed"]
                 retry_reason = eligibility["reason"]
-                if retry_reason in {"execution_retry_cooldown", "execution_delivery_unavailable"}:
+                if retry_reason in {"execution_retry_cooldown", "execution_delivery_unavailable"} or (
+                    retry_reason == "execution_retry_blocked"
+                    and any(run["error_type"] == "provider_auth" for run in runs)
+                ):
+                    # 过时或错误的 Worker 绑定不能把用户刚恢复的逻辑义务再次关闭。
                     raise HTTPException(409, retry_reason)
             if retryable and not paused_execution and _is_delivery_execution(last_execution) and policy.structured:
                 # 交付模式沿用已裁决的原 binding；服务故障不能使它重新消费实时 Cell。

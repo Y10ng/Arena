@@ -1164,6 +1164,41 @@ def test_failed_worker_process_still_projects_pi_tool_audit(monkeypatch) -> None
     assert projected == [result]
 
 
+def test_goal_driven_bootstrap_does_not_emit_false_process_failure(monkeypatch):
+    from cairn.dispatcher.protocol.client import ApiResult
+    from cairn.dispatcher.tasks.artifact_records import record_process_artifacts
+
+    session = PiDriver().prepare_session()
+    stdout = json.dumps({
+        "protocol": "cairn-agent-result-v1", "engine": "pi", "project_id": "p", "task_run_id": "t",
+        "phase": "bootstrap_execute", "session": session, "status": "succeeded",
+        "result": {
+            "protocol": "cairn-assessment-v2", "accepted": True, "kind": "bootstrap_result",
+            "data": {"fact": {"description": "initial target context"}},
+        },
+        "submission_id": "a" * 64, "usage": {}, "error": None,
+    })
+    result = ProcessResult(0, stdout, "")
+    events, artifacts = [], []
+    client = SimpleNamespace(
+        create_agent_event=lambda *args, **kwargs: (events.append(kwargs) or ApiResult(201, {})),
+        create_artifact=lambda *args, **kwargs: (artifacts.append(kwargs) or ApiResult(201, {"id": "a1"})),
+    )
+    monkeypatch.setattr(process_runner, "record_pi_tool_events", lambda *args, **kwargs: None)
+    monkeypatch.setattr(process_runner, "record_payload_operations", lambda *args, **kwargs: None)
+
+    observed = process_runner.run_worker_process(
+        FakeManager(result), "fixture", worker(), ["cairn-agent", "--request", "/tmp/request.json"],
+        phase="bootstrap_execute", timeout_seconds=3, client=client, project_id="p", task_run_id="t",
+    )
+    assert observed is result
+    assert not [event for event in events if event["kind"] == "validation_result"]
+    recorded = record_process_artifacts(client, "p", "t", phase="bootstrap_execute", result=result)
+    assert not recorded.write_failed
+    assert [ref.artifact_id for ref in recorded.refs] == ["a1"]
+    assert artifacts[0]["content"] == stdout
+
+
 def healthcheck_envelope(session, **updates):
     value = {
         "protocol": "cairn-agent-result-v1", "engine": "pi", "project_id": "p", "task_run_id": "t",

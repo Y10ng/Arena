@@ -35,6 +35,8 @@ class ExecutionControlConfirmationRequest(BaseModel):
     state: Literal["paused", "running", "stopped", "failed", "lost"]
     resources: list[dict[str, str]] = Field(default_factory=list, max_length=1024)
     error: str | None = Field(default=None, max_length=128)
+    scene_loss_reason: str | None = Field(default=None, max_length=128)
+    task_run_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 @router.post("/{project_id}/execution-control/confirm")
@@ -45,6 +47,7 @@ def confirm_execution(
     return confirm_execution_control(
         project_id, principal.subject_id, request_id=body.request_id,
         state=body.state, resources=body.resources, error=body.error,
+        scene_loss_reason=body.scene_loss_reason, task_run_id=body.task_run_id,
     )
 
 

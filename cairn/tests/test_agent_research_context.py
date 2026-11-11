@@ -91,6 +91,51 @@ def test_research_parameter_validation():
 
 
 @pytest.mark.skipif(os.environ.get("CAIRN_TEST_POSTGRES_BOOTSTRAP") != "1", reason="仅使用显式启用的一次性 PostgreSQL")
+def test_artifact_upload_failure_survives_project_event_export(empty_postgres_url, tmp_path, monkeypatch):
+    from hashlib import sha256
+    from cairn.dispatcher.contracts import DeclaredArtifact
+    from cairn.dispatcher.protocol.client import ApiResult
+    from cairn.dispatcher.tasks.artifact_records import record_declared_artifacts
+    from cairn.server.models import CreateAgentEventRequest
+    from cairn.server.services.audit_events import create_agent_event_record
+
+    db.configure(database_url=empty_postgres_url, artifact_path=tmp_path / "artifacts")
+    # 本例只验证事件准入、持久化及只读导出；不创建或解密真实模型凭据。
+    monkeypatch.setattr(context, "_source_secrets", lambda *args: [b"synthetic-platform-key"])
+    with db.get_conn() as conn:
+        conn.execute("INSERT INTO projects(id, title, status, created_at) VALUES ('project', '合成上传诊断', 'active', '2026-11-11T00:00:00Z')")
+        conn.execute("INSERT INTO task_runs(id, project_id, task_type, worker_name, worker_type, status) "
+                     "VALUES ('r1', 'project', 'bootstrap', 'worker', 'pi', 'failed')")
+
+    class ExportClient:
+        def create_artifact(self, *args, **kwargs):
+            return ApiResult(503, data={"detail": "synthetic-platform-key"}, text="Authorization: Bearer synthetic-platform-key")
+
+        def create_agent_event(self, project_id, **kwargs):
+            event = create_agent_event_record(project_id, CreateAgentEventRequest(**kwargs))
+            return ApiResult(201, data=event.model_dump(mode="json"))
+
+    content = b"synthetic artifact"
+    artifact = DeclaredArtifact(handle="notes", kind="file", path="/workspace/notes.md", source_path="/workspace/notes.md",
+                                sha256=sha256(content).hexdigest(), size_bytes=len(content))
+    record = record_declared_artifacts(ExportClient(), SimpleNamespace(read_file=lambda *args: content),
+                                       "synthetic-container", "project", "r1", phase="bootstrap_execute", artifacts=[artifact])
+    assert record.write_failed and record.refs == []
+    with db.get_conn() as conn:
+        conn.execute("SET TRANSACTION READ ONLY")
+        index = context.read_research_context(conn, "project", {"source": "events", "task_run_id": "r1"})
+        assert len(index["items"]) == 1
+        event = context.read_research_context(conn, "project", {"source": "events", "item_id": index["items"][0]["id"]})
+        assert event["availability"] == "available"
+        payload = json.loads(event["content"])["payload"]
+        assert payload["code"] == "artifact_upload_http_failed" and payload["http_status"] == 503
+        assert payload["artifact"]["source_path"] == "/workspace/notes.md"
+        assert "synthetic-platform-key" not in event["content"] and "Authorization" not in event["content"]
+        assert conn.execute("SELECT COUNT(*) AS n FROM artifacts WHERE project_id='project'").fetchone()["n"] == 0
+        assert conn.execute("SELECT status FROM task_runs WHERE project_id='project' AND id='r1'").fetchone()["status"] == "failed"
+
+
+@pytest.mark.skipif(os.environ.get("CAIRN_TEST_POSTGRES_BOOTSTRAP") != "1", reason="仅使用显式启用的一次性 PostgreSQL")
 def test_research_queries_are_scoped_paginated_and_readonly(empty_postgres_url, tmp_path, monkeypatch):
     db.configure(database_url=empty_postgres_url, artifact_path=tmp_path / "artifacts")
     monkeypatch.setattr(context, "_source_secrets", lambda *args: [b"synthetic-platform-key"])

@@ -117,9 +117,11 @@ class CairnClient:
         return self._summary_adapter.validate_python(response.json())
 
     def confirm_execution_control(self, project_id: str, *, request_id: str, state: str,
-                                  resources: list[dict[str, str]], error: str | None = None) -> ApiResult:
+                                  resources: list[dict[str, str]], error: str | None = None,
+                                  scene_loss_reason: str | None = None, task_run_id: str | None = None) -> ApiResult:
         return self._request_json("POST", f"/projects/{project_id}/execution-control/confirm", json={
             "request_id": request_id, "state": state, "resources": resources, "error": error,
+            "scene_loss_reason": scene_loss_reason, "task_run_id": task_run_id,
         })
 
     def get_project(self, project_id: str) -> ProjectDetail:

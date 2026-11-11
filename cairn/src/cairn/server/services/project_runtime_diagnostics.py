@@ -70,7 +70,7 @@ DECISIONS = {
     "claim_conflict": ("waiting", "任务领取存在竞争，等待调度器重新确认"),
     "claim_denied": ("blocked", "任务领取被拒绝，请检查项目状态与执行授权"),
     "claim_failed": ("blocked", "任务领取失败，等待调度器重试或恢复连接"),
-    "execution_retry_blocked": ("blocked", "本代执行发生不可自动重试的错误，请修复后暂停并恢复"),
+    "execution_retry_blocked": ("blocked", "执行发生不可自动重试的错误，请核对失败任务与配置；暂停和恢复不会重置失败记录或重试预算"),
     "execution_retry_exhausted": ("blocked", "本代执行已用完自动重试额度，请检查失败记录"),
     "execution_retry_cooldown": ("waiting", "执行失败后暂缓重试，等待持久化退避窗口"),
     "execution_delivery_unavailable": ("blocked", "原会话或交付绑定不可用，不能重新探索替代交付"),

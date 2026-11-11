@@ -98,6 +98,258 @@ def confirm(request, owner="owner-a", state="paused", resources=None, error=None
                                              resources=resources, error=error)
 
 
+@pytest.fixture
+def auth_recovery_db(hot_db, monkeypatch):
+    from cairn.server.services import model_execution
+
+    principal = hot_db[0]
+    now = utcnow()
+    with db.get_conn() as conn:
+        conn.execute(
+            "INSERT INTO tenant_models (id, tenant_id, display_name, protocol, base_url, model_name, created_by, created_at, updated_at) "
+            "VALUES ('auth-model', ?, '合成认证模型', 'openai-responses', 'https://model.invalid', 'synthetic', ?, ?, ?)",
+            (principal.tenant_id, principal.subject_id, now, now),
+        )
+        conn.execute(
+            "INSERT INTO model_credentials (id, tenant_id, model_id, active_version_id, created_at, updated_at) "
+            "VALUES ('auth-credential', ?, 'auth-model', 'auth-v1', ?, ?)", (principal.tenant_id, now, now),
+        )
+        for version in range(1, 5):
+            conn.execute(
+                "INSERT INTO model_credential_versions (id, credential_id, tenant_id, version_number, algorithm, "
+                "key_version, nonce, ciphertext, credential_fingerprint, created_at) "
+                "VALUES (?, 'auth-credential', ?, ?, 'AES-256-GCM', 'synthetic', ?, ?, ?, ?)",
+                (f"auth-v{version}", principal.tenant_id, version, b"not-a-nonce", b"not-a-secret", f"fingerprint-{version}", now),
+            )
+        binding = model_execution.model_execution_provenance(conn, tenant_id=principal.tenant_id, model_id="auth-model")
+    monkeypatch.setattr(model_execution, "decrypt_active_credential", lambda *a, **kw: pytest.fail("恢复判定不得解密或调用模型"))
+    return binding
+
+
+def auth_binding(version=2):
+    from cairn.server.services.model_execution import model_execution_provenance
+
+    with db.get_conn() as conn:
+        conn.execute("UPDATE model_credentials SET active_version_id = ? WHERE id = 'auth-credential'", (f"auth-v{version}",))
+        return model_execution_provenance(conn, tenant_id=project()["tenant_id"], model_id="auth-model")
+
+
+def auth_failure(binding, task_type="reason", *, index=1):
+    intent_id = "auth-work" if task_type != "reason" else None
+    # 与实际 TaskCancellation 终态一致：进程已停，但项目容器仍保留。
+    context = {"dispatcher_id": "owner-a", "execution_binding": binding,
+               "execution_lifecycle": {"generation": 7, "process_started": True, "termination_confirmed": True, "cleanup_confirmed": False}}
+    with db.get_conn() as conn:
+        if index == 1:
+            tenant_id = conn.execute("SELECT tenant_id FROM projects WHERE id='p'").fetchone()["tenant_id"]
+            conn.execute(
+                "UPDATE tenant_workers SET id='auth-worker', model_id='auth-model' WHERE tenant_id=? AND task_types_json=?",
+                (tenant_id, json.dumps([task_type])),
+            )
+            conn.execute(
+                "INSERT INTO project_tenant_workers (project_id, tenant_id, tenant_worker_id, tenant_worker_revision, position, created_at) "
+                "VALUES ('p', ?, 'auth-worker', 1, 0, ?)", (tenant_id, utcnow()),
+            )
+        if intent_id and index == 1:
+            conn.execute(
+                "INSERT INTO intents (id, project_id, description, creator, created_at) VALUES (?, 'p', '合成工作', 'system', ?)",
+                (intent_id, utcnow()),
+            )
+            conn.execute("INSERT INTO intent_sources (intent_id, project_id, fact_id, source_order) VALUES (?, 'p', 'origin', 0)", (intent_id,))
+        if task_type == "explore" and index == 1:
+            conn.execute(
+                "INSERT INTO assessment_attempts (id, project_id, intent_id, status, charged, execution_count, max_runtime_retries, started_at, ended_at, outcome) "
+                "VALUES ('auth-attempt', 'p', ?, 'failed', 1, 1, 2, '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', 'provider_auth')", (intent_id,),
+            )
+            conn.execute("UPDATE projects SET explore_attempts_started = 1 WHERE id = 'p'")
+            conn.execute("UPDATE intents SET concluded_at = ?, conclusion = 'failed', conclusion_reason = 'provider_auth' WHERE project_id = 'p' AND id = ?", (utcnow(), intent_id))
+        conn.execute(
+            "INSERT INTO task_runs (id, project_id, intent_id, task_type, worker_name, worker_type, status, started_at, ended_at, error_type, "
+            "runtime_context_json, execution_generation, assessment_attempt_id) "
+            "VALUES (?, 'p', ?, ?, 'auth-worker', 'pi', 'failed', '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', 'provider_auth', ?, 7, ?)",
+            (f"auth-run-{index}", intent_id, task_type, json.dumps(context), "auth-attempt" if task_type == "explore" else None),
+        )
+    return context
+
+
+@pytest.mark.parametrize("task_type", ["reason", "bootstrap"])
+def test_provider_auth_binding_change_routes_and_admission(auth_recovery_db, task_type):
+    from types import SimpleNamespace
+    from cairn.dispatcher.protocol.client import ApiResult
+    from cairn.server.models import CreateTaskRunRequest
+    from cairn.server.schemas.projects import ReasonClaimRequest
+    from cairn.server.services import assessment_attempts, audit_task_runs
+    from test_dispatcher_multi_project_capacity import _loop
+
+    auth_failure(auth_recovery_db, task_type)
+    intent_id = "auth-work" if task_type == "bootstrap" else None
+    with db.get_conn() as conn:
+        assert assessment_attempts.execution_retry_eligibility(conn, project(), task_type, intent_id=intent_id)["reason"] == "execution_retry_blocked"
+        conn.execute("UPDATE tenant_models SET display_name = '仅改名字', revision = revision + 1 WHERE id = 'auth-model'")
+    assert audit_task_runs.list_task_run_records("p")[0].delivery_retry_route["allowed"] is False
+    with db.get_conn() as conn:
+        conn.execute("UPDATE model_credential_versions SET credential_fingerprint=? WHERE id='auth-v2'", (auth_recovery_db["credential_fingerprint"],))
+    auth_binding()
+    assert audit_task_runs.list_task_run_records("p")[0].delivery_retry_route["allowed"] is False
+    with db.get_conn() as conn:
+        conn.execute("UPDATE model_credential_versions SET credential_fingerprint='fingerprint-2' WHERE id='auth-v2'")
+    changed = auth_binding()
+    with db.get_conn() as conn:
+        conn.execute("SET TRANSACTION READ ONLY")
+        eligible = assessment_attempts.execution_retry_eligibility(conn, project(), task_type, intent_id=intent_id)
+        assert eligible["allowed"] is True and eligible["retry_worker_ids"] == ["auth-worker"]
+        assert conn.execute("SELECT COUNT(*) AS n FROM model_consumption_rates").fetchone()["n"] == 0
+    routes = audit_task_runs.list_task_run_records("p")
+    loop = _loop(max_workers=1, max_running_projects=1, worker_count=0)
+    loop.dispatcher_id = "new-dispatcher"
+    loop.client.list_task_runs = lambda _: ApiResult(status_code=200, data=[r.model_dump(mode="json") for r in routes])
+    workers = [SimpleNamespace(id=w) for w in ("auth-worker", "other-worker")]
+    route = loop._delivery_route_workers(SimpleNamespace(project=SimpleNamespace(id="p", tenant_workers=workers)), task_type, intent_id)
+    assert route.mode == "fresh" and [w.id for w in route.workers] == ["auth-worker"]
+    if task_type == "reason":
+        with pytest.raises(HTTPException) as denied:
+            project_reason.claim_project_reason_record("p", ReasonClaimRequest(worker="other-worker", trigger="test"))
+        assert denied.value.detail == "execution_retry_blocked"
+        project_reason.claim_project_reason_record("p", ReasonClaimRequest(worker="auth-worker", trigger="test"))
+    else:
+        intents.heartbeat("p", intent_id, HeartbeatRequest(worker="auth-worker"))
+    machine = RequestPrincipal("machine", "owner-a")
+    body = CreateTaskRunRequest(task_type=task_type, intent_id=intent_id, worker_name="auth-worker", worker_type="pi", status="running",
+                                expected_execution_generation=7, runtime_context={"dispatcher_id": "owner-a", "execution_binding": auth_recovery_db})
+    for stale_context in (
+        body.runtime_context, {"dispatcher_id": "owner-a", "execution_binding": None}, {"dispatcher_id": "owner-a"},
+    ):
+        with pytest.raises(HTTPException) as stale:
+            audit_task_runs.create_task_run_record("p", body.model_copy(update={"runtime_context": stale_context}), principal=machine)
+        assert stale.value.detail == "execution_retry_blocked"
+    admitted = audit_task_runs.create_task_run_record("p", body.model_copy(update={"runtime_context": {"dispatcher_id": "owner-a", "execution_binding": changed}}), principal=machine)
+    assert admitted.runtime_context["execution_binding"]["credential_version_id"] == "auth-v2"
+    assert project()["execution_generation"] == 7
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT status, error_type FROM task_runs WHERE id = 'auth-run-1' AND project_id = 'p'").fetchone() == {"status": "failed", "error_type": "provider_auth"}
+
+
+def test_provider_auth_changed_binding_keeps_failure_budget(auth_recovery_db):
+    from cairn.server.services.assessment_attempts import execution_retry_eligibility
+
+    binding = auth_recovery_db
+    for index in range(1, 4):
+        auth_failure(binding, index=index)
+        with db.get_conn() as conn:
+            assert execution_retry_eligibility(conn, project(), "reason")["reason"] == "execution_retry_blocked"
+        binding = auth_binding(index + 1)
+        with db.get_conn() as conn:
+            result = execution_retry_eligibility(conn, project(), "reason")
+            assert result["allowed"] is (index < 3)
+            if index == 3:
+                assert result["reason"] == "execution_retry_exhausted"
+        auth_binding(1)
+        with db.get_conn() as conn:
+            assert execution_retry_eligibility(conn, project(), "reason")["reason"] == "execution_retry_blocked"
+        auth_binding(index + 1)
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT COUNT(*) AS n FROM task_runs WHERE project_id='p'").fetchone()["n"] == 3
+    assert project()["execution_generation"] == 7
+
+
+def test_provider_auth_endpoint_repair_keeps_cooldown(auth_recovery_db):
+    from cairn.server.services.assessment_attempts import execution_retry_eligibility
+    from cairn.server.services.model_execution import model_execution_provenance
+
+    auth_failure(auth_recovery_db)
+    with db.get_conn() as conn:
+        conn.execute("UPDATE tenant_models SET inference_endpoint='https://repaired.invalid/v1/responses' WHERE id='auth-model'")
+        conn.execute("UPDATE task_runs SET ended_at='2026-11-10T12:00:00Z' WHERE project_id='p'")
+        current = conn.execute("SELECT * FROM projects WHERE id='p'").fetchone()
+        changed = model_execution_provenance(conn, tenant_id=current["tenant_id"], model_id="auth-model")
+        assert changed["credential_version_id"] == auth_recovery_db["credential_version_id"]
+        assert execution_retry_eligibility(conn, current, "reason", now="2026-11-10T12:00:01Z") == {
+            "allowed": False, "reason": "execution_retry_cooldown", "retry_at": "2026-11-10T12:00:05Z",
+        }
+        assert execution_retry_eligibility(
+            conn, current, "reason", now="2026-11-10T12:00:05Z", worker_name="auth-worker", execution_binding=changed,
+        )["allowed"] is True
+        assert execution_retry_eligibility(
+            conn, current, "reason", now="2026-11-10T12:00:05Z", worker_name="auth-worker", execution_binding=auth_recovery_db,
+        )["reason"] == "execution_retry_blocked"
+
+
+def test_provider_auth_resume_recovers_closed_explore_once(auth_recovery_db):
+    from cairn.server.models import CreateTaskRunRequest
+    from cairn.server.services import audit_task_runs
+    from cairn.server.services.explore_attempts import start_explore_attempt
+
+    before_context = auth_failure(auth_recovery_db, "explore")
+    project_records.project_lifecycle_action("p", "resume")
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT status FROM assessment_attempts WHERE project_id='p'").fetchone()["status"] == "failed"
+    changed = auth_binding()
+    audit_task_runs.list_task_run_records("p")
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT status FROM assessment_attempts WHERE project_id='p'").fetchone()["status"] == "failed"
+    project_records.project_lifecycle_action("p", "resume")
+    project_records.project_lifecycle_action("p", "resume")
+    with db.get_conn() as conn:
+        assert conn.execute("SELECT status, charged, execution_count FROM assessment_attempts WHERE project_id='p'").fetchone() == {"status": "active", "charged": 1, "execution_count": 1}
+        assert conn.execute("SELECT concluded_at FROM intents WHERE project_id='p' AND id='auth-work'").fetchone()["concluded_at"] is None
+        assert conn.execute("SELECT COUNT(*) AS n FROM agent_events WHERE project_id='p' AND kind='provider_auth_recovery'").fetchone()["n"] == 1
+        assert json.loads(conn.execute("SELECT runtime_context_json FROM task_runs WHERE project_id='p' AND id='auth-run-1'").fetchone()["runtime_context_json"]) == before_context
+    body = CreateTaskRunRequest(task_type="explore", intent_id="auth-work", worker_name="auth-worker", worker_type="pi", status="running",
+                                expected_execution_generation=7, runtime_context={"dispatcher_id": "owner-a", "execution_binding": auth_recovery_db})
+    machine = RequestPrincipal("machine", "owner-a")
+    for stale_context in (
+        body.runtime_context, {"dispatcher_id": "owner-a", "execution_binding": None}, {"dispatcher_id": "owner-a"},
+    ):
+        with pytest.raises(HTTPException) as stale:
+            with db.get_conn() as conn:
+                start_explore_attempt(conn, "p", "auth-work", body.model_copy(update={"runtime_context": stale_context}), principal=machine)
+        assert stale.value.detail == "execution_retry_blocked"
+    with db.get_conn() as conn:
+        run = start_explore_attempt(conn, "p", "auth-work", body.model_copy(update={"runtime_context": {"dispatcher_id": "owner-a", "execution_binding": changed}}), principal=machine)
+        assert run.assessment_attempt_id == "auth-attempt"
+        assert conn.execute("SELECT charged, execution_count FROM assessment_attempts WHERE project_id='p'").fetchone() == {"charged": 1, "execution_count": 2}
+    assert project()["execution_generation"] == 7 and project()["explore_attempts_started"] == 1
+
+
+@pytest.mark.parametrize("guard", ["missing_binding", "unconfirmed", "pause_requested", "accepted", "candidate", "generation", "budget", "completed", "stopped", "other_error"])
+def test_provider_auth_resume_never_revives_unsafe_work(auth_recovery_db, guard):
+    from cairn.server.services.assessment_attempts import recover_provider_auth_attempts
+
+    context = auth_failure(auth_recovery_db, "explore")
+    auth_binding()
+    with db.get_conn() as conn:
+        if guard == "missing_binding":
+            context.pop("execution_binding")
+        elif guard == "unconfirmed":
+            context["execution_lifecycle"]["termination_confirmed"] = False
+        elif guard == "pause_requested":
+            conn.execute("UPDATE task_runs SET pause_requested = 1 WHERE project_id='p'")
+        elif guard == "accepted":
+            context["accepted_result_digest"] = "accepted-before-error"
+        elif guard == "generation":
+            conn.execute("UPDATE projects SET execution_generation = 8 WHERE id='p'")
+        elif guard == "budget":
+            conn.execute("UPDATE assessment_attempts SET max_runtime_retries = 0 WHERE project_id='p'")
+        elif guard in {"completed", "stopped"}:
+            conn.execute("UPDATE projects SET status = ? WHERE id='p'", (guard,))
+        elif guard == "other_error":
+            conn.execute("UPDATE assessment_attempts SET outcome = 'contract_error' WHERE project_id='p'")
+        elif guard == "candidate":
+            conn.execute(
+                "INSERT INTO task_run_candidates (id, project_id, task_run_id, protocol, source_format, capture_id, producer_candidate_key, "
+                "assistant_turn, content_index, phase, session_id, binding_sha256, result_schema_sha256, delivery_sha256, artifact_identities_json, artifact_count, "
+                "raw_bytes, raw_size_bytes, raw_sha256, request_sha256, manifest_json, verified_dispatcher_id, execution_generation, generation_disposition, received_at) "
+                "VALUES ('auth-candidate', 'p', 'auth-run-1', 'cairn-candidate-frame-v1', 'pi-toolcall-delta-utf8-v1', 'capture', 'key', 1, 0, 'explore_execute', "
+                "'session', ?, ?, ?, '[]', 0, ?, 2, ?, ?, '{}', 'owner-a', 7, 'current_at_receipt', ?)",
+                ("a" * 64, "b" * 64, "c" * 64, b"{}", "d" * 64, "e" * 64, utcnow()),
+            )
+        conn.execute("UPDATE task_runs SET runtime_context_json = ? WHERE project_id='p'", (json.dumps(context),))
+        current = conn.execute("SELECT * FROM projects WHERE id='p'").fetchone()
+        assert recover_provider_auth_attempts(conn, current) == []
+        assert conn.execute("SELECT status FROM assessment_attempts WHERE project_id='p'").fetchone()["status"] == "failed"
+        assert conn.execute("SELECT COUNT(*) AS n FROM agent_events WHERE project_id='p' AND kind='provider_auth_recovery'").fetchone()["n"] == 0
+
+
 def test_failed_readiness_activation_absence_requires_original_owner_token_daemon(hot_db):
     owner, token = create_machine_principal("controlled-readiness-owner")
     _, other_token = create_machine_principal("controlled-readiness-other")
@@ -449,6 +701,118 @@ def test_confirm_auth_owner_stale_resource_and_secret_filter(hot_db):
     with pytest.raises(HTTPException) as legacy:
         project_container_pause.claim_container_pause("p", owner, 7, "controlled-daemon")
     assert legacy.value.detail == "project_hot_control_required"
+
+
+def test_scene_loss_diagnostic_survives_client_http_persistence_and_runtime_export(hot_db, monkeypatch):
+    from cairn.dispatcher.protocol.client import CairnClient
+    from cairn.server.auth import require_user_tenant_project
+
+    owner, token = create_machine_principal("scene-diagnostic-owner")
+    run("scene-run", "bootstrap", owner)
+    with db.get_conn() as conn:
+        conn.execute(
+            "INSERT INTO dispatcher_status (id, status, updated_at, runtime_json) "
+            "SELECT ?, status, updated_at, runtime_json FROM dispatcher_status WHERE id='owner-a'",
+            (owner,),
+        )
+        original_run = dict(conn.execute("SELECT * FROM task_runs WHERE project_id='p' AND id='scene-run'").fetchone())
+    paused = project_records.project_lifecycle_action("p", "pause").execution_control
+    pause_receipt = confirm(paused, owner)
+    request = project_records.project_lifecycle_action("p", "resume").execution_control
+    monkeypatch.setitem(app.dependency_overrides, require_user_tenant_project, lambda: hot_db[0])
+    http = TestClient(app, headers={"Authorization": "Bearer " + token})
+    machine = CairnClient("http://testserver", token=token)
+    monkeypatch.setattr(machine, "_session", lambda: http)
+    try:
+        for reason in (
+            "run_generation_mismatch", "run_connection_missing", "activation_missing", "activation_stopped",
+            "activation_identity_mismatch", "activation_owner_mismatch", "activation_generation_mismatch",
+            "docker_daemon_mismatch", "physical_scene_unverified",
+        ):
+            task_run_id = "scene-run" if reason.startswith("run_") else None
+            response = machine.confirm_execution_control(
+                "p", request_id=request["request_id"], state="lost", resources=[], error="execution_scene_lost",
+                scene_loss_reason=reason, task_run_id=task_run_id,
+            )
+            assert response.ok
+            saved = response.data
+            receipt = saved["receipts"][owner]
+            assert receipt["scene_loss_reason"] == reason
+            assert receipt.get("task_run_id") == task_run_id
+            assert receipt["state"] == "lost" and receipt["error"] == "execution_scene_lost" and receipt["resources"] == []
+            assert saved["resources"] == pause_receipt["resources"]
+            assert saved["resources_request_id"] == paused["request_id"]
+            assert saved["resources_observed_at"] == pause_receipt["resources_observed_at"]
+            persisted = json.loads(project()["execution_control_json"])
+            assert persisted == saved
+            exported = http.get("/projects/p/runtime?schema_version=2")
+            assert exported.status_code == 200
+            assert exported.json()["execution_control"] == saved
+            assert exported.json()["state"] == "blocked" and exported.json()["code"] == "execution_scene_lost"
+            with db.get_conn() as conn:
+                assert build_project_runtime(conn, project(), schema_version=2).model_dump(mode="json")["execution_control"] == saved
+                with pytest.raises(HTTPException, match="execution_control_pending"):
+                    projects.check_project_active(conn, "p")
+                assert dict(conn.execute("SELECT * FROM task_runs WHERE project_id='p' AND id='scene-run'").fetchone()) == original_run
+            assert project()["execution_generation"] == 7
+        resources = [{**item, "state": "running"} for item in pause_receipt["resources"]]
+        assert machine.confirm_execution_control(
+            "p", request_id=request["request_id"], state="running", resources=resources,
+        ).status_code == 409
+        retry = project_records.project_lifecycle_action("p", "resume").execution_control
+        assert retry["request_id"] != request["request_id"] and retry["receipts"] == {}
+        assert retry["resources"] == pause_receipt["resources"]
+        resumed = machine.confirm_execution_control(
+            "p", request_id=retry["request_id"], state="running", resources=resources,
+            scene_loss_reason="run_connection_missing", task_run_id="scene-run",
+        )
+        assert resumed.ok and resumed.data["state"] == "running"
+        assert "scene_loss_reason" not in resumed.data["receipts"][owner]
+        assert "task_run_id" not in resumed.data["receipts"][owner]
+    finally:
+        machine.close()
+        http.close()
+
+
+def test_scene_loss_diagnostic_rejects_foreign_runs_and_filters_untrusted_text(hot_db):
+    owner, token = create_machine_principal("scene-diagnostic-validation-owner")
+    run("scene-run", "bootstrap", owner)
+    run("report-run", "report", owner)
+    run("other-owner-run", "explore", "owner-b")
+    run("foreign-project-run", "bootstrap", owner)
+    with db.get_conn() as conn:
+        conn.execute("INSERT INTO projects (id, title, status, created_at, tenant_id) "
+                     "SELECT 'q', '另一合成项目', status, created_at, tenant_id FROM projects WHERE id='p'")
+        conn.execute("UPDATE task_runs SET project_id='q' WHERE project_id='p' AND id='foreign-project-run'")
+    request = project_records.project_lifecycle_action("p", "pause").execution_control
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer " + token}
+    path = "/projects/p/execution-control/confirm"
+    body = {"request_id": request["request_id"], "state": "lost", "resources": [], "error": "execution_scene_lost"}
+    for task_run_id in ("report-run", "other-owner-run", "foreign-project-run", "missing-run", "PRIVATE-CANARY"):
+        rejected = client.post(path, headers=headers, json={
+            **body, "scene_loss_reason": "run_connection_missing", "task_run_id": task_run_id,
+        })
+        assert rejected.status_code == 422 and rejected.json()["detail"] == "execution_control_task_run_invalid"
+        assert json.loads(project()["execution_control_json"]) == request
+    for state in ("failed", "lost"):
+        filtered = client.post(path, headers=headers, json={
+            **body, "state": state, "error": "PRIVATE-CANARY",
+            "scene_loss_reason": "PRIVATE-CANARY", "task_run_id": "PRIVATE-CANARY",
+        })
+        assert filtered.status_code == 200 and "PRIVATE-CANARY" not in filtered.text
+        receipt = filtered.json()["receipts"][owner]
+        assert receipt["error"] == ("execution_scene_lost" if state == "lost" else "execution_control_failed")
+        assert "scene_loss_reason" not in receipt and "task_run_id" not in receipt
+        assert "PRIVATE-CANARY" not in project()["execution_control_json"]
+    legacy = client.post(path, headers=headers, json=body)
+    assert legacy.status_code == 200 and legacy.json()["state"] == "lost"
+    assert "scene_loss_reason" not in legacy.json()["receipts"][owner]
+    assert "task_run_id" not in legacy.json()["receipts"][owner]
+    without_run = client.post(path, headers=headers, json={**body, "scene_loss_reason": "physical_scene_unverified"})
+    assert without_run.status_code == 200
+    assert without_run.json()["receipts"][owner]["scene_loss_reason"] == "physical_scene_unverified"
+    assert "task_run_id" not in without_run.json()["receipts"][owner]
 
 
 def test_confirmation_requires_all_owned_containers_and_research_test_scopes(hot_db):

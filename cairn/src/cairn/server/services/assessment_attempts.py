@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import timedelta
 
@@ -500,7 +501,8 @@ def delivery_retry_routes(conn, project, *, executions=None):
         if context.get("continuation") and source["status"] != "succeeded" and not delivery_retry and continuation_source is None:
             eligibility = {"allowed": False, "reason": "execution_continuation_unavailable", "retry_at": None}
         # 普通失败仍走 fresh；仅已证明启动前失败的 continuation 沿原来源重试。
-        if not delivery_retry and eligibility["allowed"] and continuation_source is None:
+        if (not delivery_retry and eligibility["allowed"] and continuation_source is None
+                and not eligibility.get("retry_worker_ids")):
             continue
         if delivery_retry and (source["status"] == "succeeded" or any(run["status"] in {"queued", "running"} for run in runs)):
             eligibility = {"allowed": False, "reason": "assessment_execution_not_quiescent", "retry_at": None}
@@ -977,11 +979,87 @@ def _traffic_infrastructure_cancellation(run, context: dict) -> bool:
     )
 
 
+# 展示名、费率、纯 revision 或原密钥重存不能冒充认证修复；只比较实际执行差异。
+_AUTH_BINDING_FIELDS = (
+    "model_name", "credential_fingerprint", "protocol",
+    "auth_header", "inference_endpoint", "custom_headers_sha256",
+)
+
+
+def _auth_binding_key(binding):
+    required = ("model_id", "credential_version_id", *_AUTH_BINDING_FIELDS)
+    if not isinstance(binding, dict) or any(
+        not isinstance(binding.get(field), str) or not binding[field] for field in required
+    ):
+        return None
+    return tuple(binding[field] for field in _AUTH_BINDING_FIELDS)
+
+
+def _provider_auth_retry_workers(conn, project, task_type, runs, *, worker_name=None, execution_binding=None):
+    """只为已失败 Worker 的真实新绑定开放 fresh 重试，不复活交付或未结算执行。"""
+    from .model_execution import model_execution_provenance
+
+    if task_type not in {"reason", "bootstrap", "explore"}:
+        return {}
+    failed_bindings = set()
+    failed_workers = set()
+    for run in runs:
+        context = parse_scenario_snapshot(run["runtime_context_json"])
+        lifecycle = context.get("execution_lifecycle", {})
+        if (
+            run["status"] not in {"failed", "timed_out", "cancelled"}
+            or run["pause_requested"]
+            or not isinstance(lifecycle, dict)
+            or lifecycle.get("generation") != project["execution_generation"]
+            or lifecycle.get("termination_confirmed") is not True
+            # 正常执行结束会保留容器现场；fresh 重试只需原执行已终止，不以清理容器为前提。
+            or context.get("continuation") or _is_delivery_execution(run)
+            or any(context.get(key) for key in ACCEPTED_RESULT_CONTEXT_FIELDS)
+            or conn.execute(
+                "SELECT 1 FROM facts WHERE project_id = ? AND task_run_id = ? LIMIT 1",
+                (project["id"], run["id"]),
+            ).fetchone() is not None
+            or conn.execute(
+                "SELECT 1 FROM task_run_candidates c WHERE c.project_id = ? AND c.task_run_id = ? "
+                "AND NOT EXISTS (SELECT 1 FROM task_run_candidate_outcomes o "
+                "WHERE o.project_id = c.project_id AND o.candidate_id = c.id) LIMIT 1",
+                (project["id"], run["id"]),
+            ).fetchone() is not None
+        ):
+            return {}
+        if run["error_type"] == "provider_auth":
+            key = _auth_binding_key(context.get("execution_binding"))
+            if key is None:
+                return {}
+            failed_bindings.add(key)
+            failed_workers.add(run["worker_name"])
+    workers = {}
+    for worker in conn.execute(
+        "SELECT w.* FROM project_tenant_workers b JOIN tenant_workers w "
+        "ON w.id = b.tenant_worker_id AND w.tenant_id = b.tenant_id "
+        "WHERE b.project_id = ? AND b.tenant_id = ? AND w.enabled = 1 "
+        "AND w.engine = 'pi' AND w.purpose = 'general'",
+        (project["id"], project["tenant_id"]),
+    ):
+        if (worker["id"] not in failed_workers or (worker_name is not None and worker["id"] != worker_name)
+                or task_type not in json.loads(worker["task_types_json"])):
+            continue
+        binding = model_execution_provenance(conn, tenant_id=worker["tenant_id"], model_id=worker["model_id"])
+        key = _auth_binding_key(binding)
+        if key is None or key in failed_bindings:
+            continue
+        if execution_binding is not None and _auth_binding_key(execution_binding) != key:
+            continue
+        workers[worker["id"]] = binding
+    return workers
+
+
 def execution_retry_eligibility(
     conn, project, task_type: str, *, intent_id: str | None = None,
     report_generation_token: str | None = None, now: str | None = None, executions=None,
     max_runtime_retries: int | None = None, ignore_cooldown: bool = False,
-    check_delivery_source: bool = True,
+    check_delivery_source: bool = True, worker_name: str | None = None,
+    execution_binding: dict | None = None,
 ) -> dict:
     """以同代持久失败统一裁决准入、路由和 Explore 收尾；收尾不受暂时冷却影响。"""
     runs = (_current_execution_chain(conn, project, task_type, executions) if executions is not None
@@ -1045,6 +1123,13 @@ def execution_retry_eligibility(
             for field in ("explore_deadline", "authorization_expires_at")
         ):
             return {"allowed": False, "reason": "execution_delivery_unavailable", "retry_at": None}
+    auth_workers = None
+    if any(run["status"] in {"failed", "timed_out"} and run["error_type"] == "provider_auth" for run in runs):
+        auth_workers = _provider_auth_retry_workers(
+            conn, project, task_type, runs, worker_name=worker_name, execution_binding=execution_binding,
+        )
+        if not auth_workers:
+            return {"allowed": False, "reason": "execution_retry_blocked", "retry_at": None}
     failures = []
     extended_only = task_type != "report"
     delivery_chain = False
@@ -1082,6 +1167,7 @@ def execution_retry_eligibility(
             extended_only = False
         elif (
             run["error_type"] not in retryable
+            and not (run["error_type"] == "provider_auth" and auth_workers)
             and not capture_stalled
             and _reason_output_failure(run) is None
         ):
@@ -1109,13 +1195,70 @@ def execution_retry_eligibility(
             )
         if retry_at and parse_utc_timestamp(now or utcnow()) < retry_at:
             return {"allowed": False, "reason": "execution_retry_cooldown", "retry_at": retry_at.strftime("%Y-%m-%dT%H:%M:%SZ")}
-    return {"allowed": True, "reason": None, "retry_at": None}
+    allowed = {"allowed": True, "reason": None, "retry_at": None}
+    if auth_workers:
+        allowed["retry_worker_ids"] = sorted(auth_workers)
+    return allowed
 
 
 def require_execution_retry_eligible(conn, project, task_type: str, **kwargs) -> None:
     eligibility = execution_retry_eligibility(conn, project, task_type, **kwargs)
     if not eligibility["allowed"]:
         raise HTTPException(409, eligibility["reason"])
+
+
+def recover_provider_auth_attempts(conn, project) -> list[str]:
+    """仅用户显式恢复可重开认证失败义务；原执行、计量和失败链均保留。"""
+    from .audit_events import insert_agent_event
+    from .project_authorization import require_project_authorization_current
+    from .project_execution_control import effective_explore_deadline
+
+    if project["status"] not in {"active", "paused"}:
+        return []
+    deadline = effective_explore_deadline(project, project["explore_deadline"])
+    if deadline and deadline <= utcnow():
+        return []
+    recovered = []
+    for attempt in conn.execute(
+        "SELECT a.* FROM assessment_attempts a JOIN intents i "
+        "ON i.project_id = a.project_id AND i.id = a.intent_id "
+        "WHERE a.project_id = ? AND a.status = 'failed' AND a.outcome = 'provider_auth' "
+        "AND i.conclusion = 'failed' AND i.conclusion_reason = 'provider_auth' "
+        "AND i.concluded_at IS NOT NULL AND i.to_fact_id IS NULL AND i.worker IS NULL",
+        (project["id"],),
+    ).fetchall():
+        runs = conn.execute(
+            "SELECT * FROM task_runs WHERE project_id = ? AND assessment_attempt_id = ? "
+            "ORDER BY COALESCE(started_at, ended_at), LENGTH(id), id",
+            (project["id"], attempt["id"]),
+        ).fetchall()
+        if (not runs or runs[-1]["error_type"] != "provider_auth"
+                or any(run["execution_generation"] != project["execution_generation"] or run["pause_interrupted"] for run in runs)
+                or attempt_has_accepted_result(conn, project["id"], attempt["id"])):
+            continue
+        eligibility = execution_retry_eligibility(
+            conn, project, "explore", intent_id=attempt["intent_id"], executions=runs,
+            max_runtime_retries=int(attempt["max_runtime_retries"]), ignore_cooldown=True,
+        )
+        if not eligibility["allowed"] or not eligibility.get("retry_worker_ids"):
+            continue
+        require_project_authorization_current(conn, project)
+        conn.execute(
+            "UPDATE assessment_attempts SET status = 'active', ended_at = NULL, outcome = NULL "
+            "WHERE project_id = ? AND id = ? AND status = 'failed'",
+            (project["id"], attempt["id"]),
+        )
+        conn.execute(
+            "UPDATE intents SET concluded_at = NULL, conclusion = NULL, conclusion_reason = NULL "
+            "WHERE project_id = ? AND id = ?",
+            (project["id"], attempt["intent_id"]),
+        )
+        insert_agent_event(conn, project["id"], runs[-1]["id"], "provider_auth_recovery", {
+            "action": "resume", "assessment_attempt_id": attempt["id"],
+            "intent_id": attempt["intent_id"], "retry_worker_ids": eligibility["retry_worker_ids"],
+        }, task_row=runs[-1])
+        recovered.append(attempt["id"])
+    return recovered
 
 
 def close_assessment_attempt_for_task_run(
